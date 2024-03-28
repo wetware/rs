@@ -8,6 +8,9 @@ use rand::RngCore;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
+mod protocols;
+use protocols::echo;
+
 const ECHO_PROTOCOL: StreamProtocol = StreamProtocol::new("/echo");
 
 #[tokio::main]
@@ -35,7 +38,7 @@ async fn main() -> Result<()> {
 
     swarm.listen_on("/ip4/127.0.0.1/udp/0/quic-v1".parse()?)?;
 
-    let mut incoming_streams = swarm
+    let mut echo_streams = swarm
         .behaviour()
         .new_control()
         .accept(ECHO_PROTOCOL)
@@ -51,8 +54,8 @@ async fn main() -> Result<()> {
         // Be aware that this breaks backpressure though as spawning new tasks is equivalent to an unbounded buffer.
         // Each task needs memory meaning an aggressive remote peer may force you OOM this way.
 
-        while let Some((peer, stream)) = incoming_streams.next().await {
-            match echo(stream).await {
+        while let Some((peer, stream)) = echo_streams.next().await {
+            match echo::handler(stream).await {
                 Ok(n) => {
                     tracing::info!(%peer, "Echoed {n} bytes!");
                 }
@@ -114,22 +117,6 @@ async fn connection_handler(peer: PeerId, mut control: stream::Control) {
         }
 
         tracing::info!(%peer, "Echo complete!")
-    }
-}
-
-async fn echo(mut stream: Stream) -> io::Result<usize> {
-    let mut total = 0;
-
-    let mut buf = [0u8; 100];
-
-    loop {
-        let read = stream.read(&mut buf).await?;
-        if read == 0 {
-            return Ok(total);
-        }
-
-        total += read;
-        stream.write_all(&buf[..read]).await?;
     }
 }
 
