@@ -1,11 +1,8 @@
 use std::{io, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
-use libp2p::{
-    identity, mdns, multiaddr::Protocol, swarm::NetworkBehaviour, Multiaddr, PeerId, Stream,
-    StreamProtocol,
-};
+use libp2p::{identity, mdns, swarm::{NetworkBehaviour,SwarmEvent}, PeerId, Stream, StreamProtocol};
 use libp2p_stream as stream;
 use rand::RngCore;
 use tracing::level_filters::LevelFilter;
@@ -14,9 +11,32 @@ use tracing_subscriber::EnvFilter;
 const ECHO_PROTOCOL: StreamProtocol = StreamProtocol::new("/echo");
 
 #[derive(NetworkBehaviour)]
+#[behaviour(to_swarm = "BehaviourEvent")]
 struct Behaviour {
     mdns: mdns::tokio::Behaviour,
     stream: stream::Behaviour,
+}
+
+#[derive(Debug)]
+enum BehaviourEvent {
+    // Events emitted by the Mdns behaviour.
+    Mdns(mdns::Event),
+    // Events emitted by the Stream behaviour.
+    Stream(()),
+}
+
+impl From<mdns::Event> for BehaviourEvent {
+    fn from(event: mdns::Event) -> Self {
+        // TODO handle event
+        BehaviourEvent::Mdns(event)
+    }
+}
+
+impl From<()> for BehaviourEvent {
+    fn from(_: ()) -> Self {
+        // TODO handle event
+        BehaviourEvent::Stream(())
+    }
 }
 
 #[tokio::main]
@@ -29,7 +49,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Create an MDNS network behaviour.
+    // Create a MDNS network behaviour.
     let id_keys = identity::Keypair::generate_ed25519();
     let peer_id = PeerId::from(id_keys.public());
     let mdns_behaviour = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)?;
@@ -42,12 +62,6 @@ async fn main() -> Result<()> {
         mdns: mdns_behaviour,
         stream: stream_behaviour,
     };
-
-    let maybe_address = std::env::args()
-        .nth(1)
-        .map(|arg| arg.parse::<Multiaddr>())
-        .transpose()
-        .context("Failed to parse argument as `Multiaddr`")?;
 
     let mut swarm = libp2p::SwarmBuilder::with_new_identity()
         .with_tokio()
@@ -89,29 +103,39 @@ async fn main() -> Result<()> {
     });
 
     // In this demo application, the dialing peer initiates the protocol.
-    if let Some(address) = maybe_address {
-        let Some(Protocol::P2p(peer_id)) = address.iter().last() else {
-            anyhow::bail!("Provided address does not end in `/p2p`");
-        };
+    // if let Some(address) = maybe_address {
+    //     let Some(Protocol::P2p(peer_id)) = address.iter().last() else {
+    //         anyhow::bail!("Provided address does not end in `/p2p`");
+    //     };
 
-        swarm.dial(address)?;
+    //     swarm.dial(address)?;
 
-        tokio::spawn(connection_handler(
-            peer_id,
-            swarm.behaviour().stream.new_control(),
-        ));
-    }
+    //     tokio::spawn(connection_handler(
+    //         peer_id,
+    //         swarm.behaviour().stream.new_control(),
+    //     ));
+    // }
 
     // Poll the swarm to make progress.
     loop {
         let event = swarm.next().await.expect("never terminates");
 
         match event {
-            libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
+            SwarmEvent::NewListenAddr { address, .. } => {
                 let listen_address = address.with_p2p(*swarm.local_peer_id()).unwrap();
                 tracing::info!(%listen_address);
             }
-            event => tracing::trace!(?event),
+            SwarmEvent::Behaviour(BehaviourEvent::Mdns(event)) => {
+                // Handle mdns behaviour events.
+                tracing::trace!(?event);
+            }
+            SwarmEvent::Behaviour(BehaviourEvent::Stream(())) => {
+                // Handle stream behaviour events.
+                tracing::trace!(?event);
+            }
+            event => {
+             tracing::trace!(?event)}
+            }
         }
     }
 }
