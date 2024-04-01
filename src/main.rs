@@ -2,13 +2,22 @@ use std::{io, time::Duration};
 
 use anyhow::{Context, Result};
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt};
-use libp2p::{multiaddr::Protocol, Multiaddr, PeerId, Stream, StreamProtocol};
+use libp2p::{
+    identity, mdns, multiaddr::Protocol, swarm::NetworkBehaviour, Multiaddr, PeerId, Stream,
+    StreamProtocol,
+};
 use libp2p_stream as stream;
 use rand::RngCore;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
 const ECHO_PROTOCOL: StreamProtocol = StreamProtocol::new("/echo");
+
+#[derive(NetworkBehaviour)]
+struct Behaviour {
+    mdns: mdns::tokio::Behaviour,
+    stream: stream::Behaviour,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,6 +29,20 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Create an MDNS network behaviour.
+    let id_keys = identity::Keypair::generate_ed25519();
+    let peer_id = PeerId::from(id_keys.public());
+    let mdns_behaviour = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)?;
+
+    // Create Stream behaviour.
+    let stream_behaviour = stream::Behaviour::new();
+
+    // Combine behaviours.
+    let behaviour = Behaviour {
+        mdns: mdns_behaviour,
+        stream: stream_behaviour,
+    };
+
     let maybe_address = std::env::args()
         .nth(1)
         .map(|arg| arg.parse::<Multiaddr>())
@@ -29,7 +52,7 @@ async fn main() -> Result<()> {
     let mut swarm = libp2p::SwarmBuilder::with_new_identity()
         .with_tokio()
         .with_quic()
-        .with_behaviour(|_| stream::Behaviour::new())?
+        .with_behaviour(|_| behaviour)?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(10)))
         .build();
 
@@ -37,6 +60,7 @@ async fn main() -> Result<()> {
 
     let mut incoming_streams = swarm
         .behaviour()
+        .stream
         .new_control()
         .accept(ECHO_PROTOCOL)
         .unwrap();
@@ -72,7 +96,10 @@ async fn main() -> Result<()> {
 
         swarm.dial(address)?;
 
-        tokio::spawn(connection_handler(peer_id, swarm.behaviour().new_control()));
+        tokio::spawn(connection_handler(
+            peer_id,
+            swarm.behaviour().stream.new_control(),
+        ));
     }
 
     // Poll the swarm to make progress.
