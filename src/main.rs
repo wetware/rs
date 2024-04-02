@@ -9,6 +9,7 @@ use libp2p::{
 };
 use tracing_subscriber::EnvFilter;
 
+// Combine multiple behaviours into one.
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "BehaviourEvent")]
 struct Behaviour {
@@ -56,7 +57,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ping: ping_behaviour,
     };
 
-    let mut swarm = libp2p::SwarmBuilder::with_new_identity()
+    let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
         .with_tokio()
         .with_tcp(
             tcp::Config::default(),
@@ -75,22 +76,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         match swarm.select_next_some().await {
             SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {address:?}"),
             SwarmEvent::Behaviour(BehaviourEvent::Mdns(event)) => {
-                print!("mdns: ");
-                println!("{event:?}");
+                println!("mdns: {event:?}");
                 match event {
                     mdns::Event::Discovered(peers) => {
-                        for (_, addr) in peers {
-                            swarm.dial(addr)?;
+                        for (peer_id, addr) in peers {
+                            let result = swarm.dial(addr);
+                            match result {
+                                Ok(_) => println!("Dialed peer: {peer_id}"),
+                                Err(e) => println!("Failed to dial peer: {e}"),
+                            }
                         }
                     }
                     mdns::Event::Expired(_) => {}
                 }
             }
             SwarmEvent::Behaviour(BehaviourEvent::Ping(event)) => {
-                print!("ping: ");
-                println!("{event:?}")
+                println!("ping: {event:?}")
             }
-            _ => {}
+            event => {
+                println!("other: {event:?}")
+            }
         }
     }
 }
