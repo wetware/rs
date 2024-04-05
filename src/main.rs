@@ -3,39 +3,12 @@ use std::{error::Error, time::Duration};
 use anyhow::Result;
 use futures::StreamExt;
 use libp2p::{
-    identity, mdns, noise, ping,
-    swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, PeerId,
+    swarm::SwarmEvent,
+    identity, mdns, noise, ping, tcp, yamux, PeerId,
 };
 use tracing_subscriber::EnvFilter;
 
-// Combine multiple behaviours into one.
-#[derive(NetworkBehaviour)]
-#[behaviour(to_swarm = "BehaviourEvent")]
-struct DefaultBehaviour {
-    mdns: mdns::tokio::Behaviour,
-    ping: ping::Behaviour,
-}
-
-#[derive(Debug)]
-enum BehaviourEvent {
-    // Events emitted by the Mdns behaviour.
-    Mdns(mdns::Event),
-    // Events emitted by the Ping behaviour.
-    Ping(ping::Event),
-}
-
-impl From<mdns::Event> for BehaviourEvent {
-    fn from(event: mdns::Event) -> Self {
-        BehaviourEvent::Mdns(event)
-    }
-}
-
-impl From<ping::Event> for BehaviourEvent {
-    fn from(event: ping::Event) -> Self {
-        BehaviourEvent::Ping(event)
-    }
-}
+mod net;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -52,7 +25,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let ping_behaviour = ping::Behaviour::default();
 
     // Combine behaviours.
-    let behaviour = DefaultBehaviour {
+    let behaviour = net::DefaultBehaviour {
         mdns: mdns_behaviour,
         ping: ping_behaviour,
     };
@@ -75,7 +48,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         match swarm.select_next_some().await {
             SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {address:?}"),
-            SwarmEvent::Behaviour(BehaviourEvent::Mdns(event)) => {
+            SwarmEvent::Behaviour(net::DefaultBehaviourEvent::Mdns(event)) => {
                 println!("mdns: {event:?}");
                 match event {
                     mdns::Event::Discovered(peers) => {
@@ -90,7 +63,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     mdns::Event::Expired(_) => {}
                 }
             }
-            SwarmEvent::Behaviour(BehaviourEvent::Ping(event)) => {
+            SwarmEvent::Behaviour(net::DefaultBehaviourEvent::Ping(event)) => {
                 println!("ping: {event:?}")
             }
             event => {
