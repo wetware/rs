@@ -12,7 +12,7 @@ use tracing_subscriber::EnvFilter;
 // Combine multiple behaviours into one.
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "BehaviourEvent")]
-struct Behaviour {
+struct DefaultBehaviour {
     mdns: mdns::tokio::Behaviour,
     ping: ping::Behaviour,
 }
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let ping_behaviour = ping::Behaviour::default();
 
     // Combine behaviours.
-    let behaviour = Behaviour {
+    let behaviour = DefaultBehaviour {
         mdns: mdns_behaviour,
         ping: ping_behaviour,
     };
