@@ -12,9 +12,17 @@ mod net;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let _ = tracing_subscriber::fmt()
+    // Start configuring a `fmt` subscriber
+    let subscriber = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+        .compact()  // use abbreviated log format
+        // .with_file(true)
+        // .with_thread_ids(true)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    // Set the subscriber as global default
+    tracing::subscriber::set_global_default(subscriber).unwrap();
 
     // Create a MDNS network behaviour.
     let id_keys = identity::Keypair::generate_ed25519();
@@ -47,27 +55,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     loop {
         match swarm.select_next_some().await {
-            SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {address:?}"),
+            SwarmEvent::NewListenAddr { address, .. } => {
+                // TODO:  seal & sign a PeerRecord and announce it to the DHT,
+                // using our PeerID as the key.
+                tracing::info!("listening on {address:?}")
+            }
+
             SwarmEvent::Behaviour(net::DefaultBehaviourEvent::Mdns(event)) => {
-                println!("mdns: {event:?}");
                 match event {
                     mdns::Event::Discovered(peers) => {
                         for (peer_id, addr) in peers {
                             let result = swarm.dial(addr);
                             match result {
-                                Ok(_) => println!("Dialed peer: {peer_id}"),
-                                Err(e) => println!("Failed to dial peer: {e}"),
+                                Ok(_) => tracing::info!("dialed peer: {peer_id}"),
+                                Err(e) => tracing::debug!("failed to dial peer: {e}"),
                             }
                         }
                     }
-                    mdns::Event::Expired(_) => {}
+                    mdns::Event::Expired(_) => {}  // ignore
                 }
             }
             SwarmEvent::Behaviour(net::DefaultBehaviourEvent::Ping(event)) => {
-                println!("ping: {event:?}")
+                tracing::info!("got PING event: {event:?}");
             }
             event => {
-                println!("other: {event:?}")
+                tracing::info!("got PONG event: {event:?}");
             }
         }
     }
