@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 tracing::info!("got PING event: {event:?}");
             }
             event => {
-                tracing::info!("got PONG event: {event:?}");
+                tracing::info!("got event: {event:?}");
             }
         }
     }
