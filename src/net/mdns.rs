@@ -5,11 +5,10 @@ use libp2p::{
     swarm::{self, dial_opts::DialOpts},
     mdns, PeerId, Multiaddr,
 };
+
 pub trait Dialer {
     fn dial(&mut self, opts: DialOpts) -> Result<(), swarm::DialError>;
 }
-
-
 
 pub fn default_handler(d: &mut dyn Dialer, event: mdns::Event) {
     match event {
