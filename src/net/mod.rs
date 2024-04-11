@@ -1,8 +1,8 @@
 pub mod mdns;
 
-use libp2p;
+use libp2p::swarm;
 
-#[derive(libp2p::swarm::NetworkBehaviour)]
+#[derive(swarm::NetworkBehaviour)]
 #[behaviour(to_swarm = "DefaultBehaviourEvent")]
 pub struct DefaultBehaviour {
     pub mdns: libp2p::mdns::tokio::Behaviour,

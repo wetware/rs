@@ -3,8 +3,9 @@ use std::{error::Error, time::Duration};
 use anyhow::Result;
 use futures::StreamExt;
 use libp2p::{
-    swarm::SwarmEvent,
-    identity, mdns, noise, ping, tcp, yamux, PeerId,
+    PeerId,
+    swarm, identity, mdns, noise, ping, tcp, yamux,
+    swarm::dial_opts::DialOpts,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -55,32 +56,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     loop {
         match swarm.select_next_some().await {
-            SwarmEvent::NewListenAddr { address, .. } => {
+            swarm::SwarmEvent::NewListenAddr { address, .. } => {
                 // TODO:  seal & sign a PeerRecord and announce it to the DHT,
                 // using our PeerID as the key.
                 tracing::info!("listening on {address:?}")
             }
 
-            SwarmEvent::Behaviour(net::DefaultBehaviourEvent::Mdns(event)) => {
-                match event {
-                    mdns::Event::Discovered(peers) => {
-                        for (peer_id, addr) in peers {
-                            let result = swarm.dial(addr);
-                            match result {
-                                Ok(_) => tracing::info!("dialed peer: {peer_id}"),
-                                Err(e) => tracing::debug!("failed to dial peer: {e}"),
-                            }
-                        }
-                    }
-                    mdns::Event::Expired(_) => {}  // ignore
-                }
+            swarm::SwarmEvent::Behaviour(net::DefaultBehaviourEvent::Mdns(event)) => {
+                net::mdns::default_handler(&mut swarm, event);
             }
-            SwarmEvent::Behaviour(net::DefaultBehaviourEvent::Ping(event)) => {
+        
+            swarm::SwarmEvent::Behaviour(net::DefaultBehaviourEvent::Ping(event)) => {
                 tracing::info!("got PING event: {event:?}");
             }
             event => {
                 tracing::info!("got event: {event:?}");
             }
         }
+    }
+}
+
+impl net::mdns::Dialer for swarm::Swarm<net::DefaultBehaviour> {
+    fn dial(&mut self, opts: DialOpts) -> Result<(), swarm::DialError> {
+        return self.dial(opts);
     }
 }
