@@ -9,7 +9,7 @@ use libp2p::{
 };
 use tracing_subscriber::EnvFilter;
 
-mod net;
+use ww_net;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let ping_behaviour = ping::Behaviour::default();
 
     // Combine behaviours.
-    let behaviour = net::DefaultBehaviour {
+    let behaviour = ww_net::DefaultBehaviour {
         mdns: mdns_behaviour,
         ping: ping_behaviour,
     };
@@ -62,11 +62,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 tracing::info!("listening on {address:?}")
             }
 
-            swarm::SwarmEvent::Behaviour(net::DefaultBehaviourEvent::Mdns(event)) => {
-                net::mdns::default_handler(&mut swarm, event);
+            swarm::SwarmEvent::Behaviour(ww_net::DefaultBehaviourEvent::Mdns(event)) => {
+                ww_net::mdns::default_handler(&mut swarm, event);
             }
         
-            swarm::SwarmEvent::Behaviour(net::DefaultBehaviourEvent::Ping(event)) => {
+            swarm::SwarmEvent::Behaviour(ww_net::DefaultBehaviourEvent::Ping(event)) => {
                 tracing::info!("got PING event: {event:?}");
             }
             event => {
@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-impl net::mdns::Dialer for swarm::Swarm<net::DefaultBehaviour> {
+impl ww_net::mdns::Dialer for swarm::Swarm<ww_net::DefaultBehaviour> {
     fn dial(&mut self, opts: DialOpts) -> Result<(), swarm::DialError> {
         return self.dial(opts);
     }
