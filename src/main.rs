@@ -2,21 +2,34 @@ use std::{error::Error, time::Duration};
 
 use anyhow::Result;
 use futures::StreamExt;
-use libp2p::{
-    PeerId,
-    swarm, identity, mdns, noise, ping, tcp, yamux,
-    swarm::dial_opts::DialOpts,
-};
+use libp2p::{identity, mdns, noise, ping, swarm, swarm::dial_opts::DialOpts, tcp, yamux, PeerId};
+use std::ops::{Deref, DerefMut};
 use tracing_subscriber::EnvFilter;
 
 use ww_net;
+
+struct DefaultSwarm(swarm::Swarm<ww_net::DefaultBehaviour>);
+
+impl Deref for DefaultSwarm {
+    type Target = swarm::Swarm<ww_net::DefaultBehaviour>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for DefaultSwarm {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Start configuring a `fmt` subscriber
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
-        .compact()  // use abbreviated log format
+        .compact() // use abbreviated log format
         // .with_file(true)
         // .with_thread_ids(true)
         .with_max_level(tracing::Level::INFO)
@@ -39,7 +52,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ping: ping_behaviour,
     };
 
-    let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
+    let raw_swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
         .with_tokio()
         .with_tcp(
             tcp::Config::default(),
@@ -49,6 +62,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_behaviour(|_| behaviour)?
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(u64::MAX)))
         .build();
+
+    let mut swarm = DefaultSwarm(raw_swarm);
 
     // Tell the swarm to listen on all interfaces and a random, OS-assigned
     // port.
@@ -65,7 +80,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             swarm::SwarmEvent::Behaviour(ww_net::DefaultBehaviourEvent::Mdns(event)) => {
                 ww_net::mdns::default_handler(&mut swarm, event);
             }
-        
+
             swarm::SwarmEvent::Behaviour(ww_net::DefaultBehaviourEvent::Ping(event)) => {
                 tracing::info!("got PING event: {event:?}");
             }
@@ -76,7 +91,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-impl ww_net::mdns::Dialer for swarm::Swarm<ww_net::DefaultBehaviour> {
+impl ww_net::mdns::Dialer for DefaultSwarm {
     fn dial(&mut self, opts: DialOpts) -> Result<(), swarm::DialError> {
         return self.dial(opts);
     }
