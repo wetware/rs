@@ -1,9 +1,12 @@
-use std::{error::Error, time::Duration};
+use std::{env, error::Error, time::Duration};
 
 use anyhow::Result;
+use core::ops::{Deref, DerefMut};
 use futures::StreamExt;
-use libp2p::{identity, mdns, noise, ping, swarm, swarm::dial_opts::DialOpts, tcp, yamux, PeerId};
-use std::ops::{Deref, DerefMut};
+use libp2p::{
+    identify, identity, kad, mdns, noise, ping, swarm, swarm::dial_opts::DialOpts, tcp, yamux,
+    PeerId,
+};
 use tracing_subscriber::EnvFilter;
 
 use ww_net;
@@ -22,6 +25,11 @@ impl DerefMut for DefaultSwarm {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
+}
+
+fn is_kad_client() -> bool {
+    let args: Vec<String> = env::args().collect();
+    return args.iter().any(|arg| arg == "--kad-client");
 }
 
 #[tokio::main]
@@ -46,10 +54,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Create Stream behaviour.
     let ping_behaviour = ping::Behaviour::default();
 
+    // Create Kademlia behaviour.
+    let kad_cfg = kad::Config::default();
+    let store = kad::store::MemoryStore::new(id_keys.public().to_peer_id());
+    let kad_behaviour = kad::Behaviour::with_config(id_keys.public().to_peer_id(), store, kad_cfg);
+    let identify_behaviour = identify::Behaviour::new(identify::Config::new(
+        "/test/1.0.0.".to_owned(),
+        id_keys.public(),
+    ));
+
     // Combine behaviours.
     let behaviour = ww_net::DefaultBehaviour {
         mdns: mdns_behaviour,
         ping: ping_behaviour,
+        kad: kad_behaviour,
+        identify: identify_behaviour,
     };
 
     let raw_swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
@@ -65,6 +84,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut swarm = DefaultSwarm(raw_swarm);
 
+    // Configure Kademlia mode, defaults to server.
+    let kad_mode = if is_kad_client() {
+        kad::Mode::Client
+    } else {
+        kad::Mode::Server
+    };
+    swarm.behaviour_mut().kad.set_mode(Some(kad_mode));
+
     // Tell the swarm to listen on all interfaces and a random, OS-assigned
     // port.
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
@@ -78,11 +105,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
 
             swarm::SwarmEvent::Behaviour(ww_net::DefaultBehaviourEvent::Mdns(event)) => {
-                ww_net::mdns::default_handler(&mut swarm, event);
+                ww_net::net::default_mdns_handler(&mut swarm, event);
             }
 
             swarm::SwarmEvent::Behaviour(ww_net::DefaultBehaviourEvent::Ping(event)) => {
                 tracing::info!("got PING event: {event:?}");
+            }
+            swarm::SwarmEvent::Behaviour(ww_net::DefaultBehaviourEvent::Kad(event)) => {
+                tracing::info!("got KAD event: {event:?}");
+            }
+            swarm::SwarmEvent::Behaviour(ww_net::DefaultBehaviourEvent::Identify(event)) => {
+                tracing::info!("got IDENTIFY event: {event:?}");
             }
             event => {
                 tracing::info!("got event: {event:?}");
@@ -91,7 +124,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-impl ww_net::mdns::Dialer for DefaultSwarm {
+impl ww_net::net::Dialer for DefaultSwarm {
     fn dial(&mut self, opts: DialOpts) -> Result<(), swarm::DialError> {
         self.0.dial(opts)
     }

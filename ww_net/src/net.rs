@@ -1,24 +1,25 @@
-use tracing;
 use std::collections::HashMap;
+use tracing;
 
 use libp2p::{
+    mdns,
     swarm::{self, dial_opts::DialOpts},
-    mdns, PeerId, Multiaddr,
+    Multiaddr, PeerId,
 };
 
 pub trait Dialer {
     fn dial(&mut self, opts: DialOpts) -> Result<(), swarm::DialError>;
 }
 
-pub fn default_handler(d: &mut dyn Dialer, event: mdns::Event) {
+pub fn default_mdns_handler(d: &mut dyn Dialer, event: mdns::Event) {
     match event {
         mdns::Event::Discovered(peers) => {
             handle_discovered(d, peers);
         }
-        
+
         mdns::Event::Expired(_) => {
             // ignore
-        }  
+        }
     }
 }
 
@@ -31,10 +32,8 @@ fn handle_discovered(d: &mut dyn Dialer, peers: Vec<(PeerId, Multiaddr)>) {
 
     // iterate through the hashmap and dial each peer
     for (peer, addrs) in peers_map {
-        let opts = DialOpts::peer_id(peer)
-            .addresses(addrs)
-            .build();
-            
+        let opts = DialOpts::peer_id(peer).addresses(addrs).build();
+
         let result = d.dial(opts);
         match result {
             Ok(_) => tracing::info!("Dialed peer: {peer}"),
