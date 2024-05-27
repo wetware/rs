@@ -93,6 +93,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 impl ww_net::mdns::Dialer for DefaultSwarm {
     fn dial(&mut self, opts: DialOpts) -> Result<(), swarm::DialError> {
-        return self.dial(opts);
+        self.0.dial(opts)
     }
 }
