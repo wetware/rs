@@ -1,6 +1,38 @@
 pub mod net;
 
-use libp2p::swarm;
+use core::ops::{Deref, DerefMut};
+
+use futures::stream::SelectNextSome;
+use futures::StreamExt;
+use libp2p::{swarm, Swarm};
+
+pub struct DefaultSwarm(pub swarm::Swarm<DefaultBehaviour>);
+
+impl Deref for DefaultSwarm {
+    type Target = swarm::Swarm<DefaultBehaviour>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for DefaultSwarm {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl net::Dialer for DefaultSwarm {
+    fn dial(&mut self, opts: swarm::dial_opts::DialOpts) -> Result<(), swarm::DialError> {
+        self.0.dial(opts)
+    }
+}
+
+impl DefaultSwarm {
+    pub fn select_next_some(&mut self) -> SelectNextSome<'_, Swarm<DefaultBehaviour>> {
+        self.0.select_next_some()
+    }
+}
 
 #[derive(swarm::NetworkBehaviour)]
 #[behaviour(to_swarm = "DefaultBehaviourEvent")]

@@ -1,31 +1,10 @@
 use std::{env, error::Error, time::Duration};
 
 use anyhow::Result;
-use core::ops::{Deref, DerefMut};
-use futures::StreamExt;
-use libp2p::{
-    identify, identity, kad, mdns, noise, ping, swarm, swarm::dial_opts::DialOpts, tcp, yamux,
-    PeerId,
-};
+use libp2p::{identify, identity, kad, mdns, noise, ping, swarm, tcp, yamux, PeerId};
 use tracing_subscriber::EnvFilter;
 
 use ww_net;
-
-struct DefaultSwarm(swarm::Swarm<ww_net::DefaultBehaviour>);
-
-impl Deref for DefaultSwarm {
-    type Target = swarm::Swarm<ww_net::DefaultBehaviour>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for DefaultSwarm {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
 
 fn is_kad_client() -> bool {
     let args: Vec<String> = env::args().collect();
@@ -82,7 +61,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(u64::MAX)))
         .build();
 
-    let mut swarm = DefaultSwarm(raw_swarm);
+    let mut swarm = ww_net::DefaultSwarm(raw_swarm);
 
     // Configure Kademlia mode, defaults to server.
     let kad_mode = if is_kad_client() {
@@ -121,11 +100,5 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 tracing::info!("got event: {event:?}");
             }
         }
-    }
-}
-
-impl ww_net::net::Dialer for DefaultSwarm {
-    fn dial(&mut self, opts: DialOpts) -> Result<(), swarm::DialError> {
-        self.0.dial(opts)
     }
 }
