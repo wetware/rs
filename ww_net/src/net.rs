@@ -7,10 +7,12 @@ use libp2p::{
     Multiaddr, PeerId,
 };
 
+// Defines the hability to dial another peer.
 pub trait Dialer {
     fn dial(&mut self, opts: DialOpts) -> Result<(), swarm::DialError>;
 }
 
+// Dials each newly discovered peer.
 pub fn default_mdns_handler(d: &mut dyn Dialer, event: mdns::Event) {
     match event {
         mdns::Event::Discovered(peers) => {

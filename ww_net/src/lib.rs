@@ -8,6 +8,14 @@ use libp2p::{swarm, Swarm};
 
 pub struct DefaultSwarm(pub swarm::Swarm<DefaultBehaviour>);
 
+impl DefaultSwarm {
+    // Forward tge call to the inner Swarm.
+    pub fn select_next_some(&mut self) -> SelectNextSome<'_, Swarm<DefaultBehaviour>> {
+        self.0.select_next_some()
+    }
+}
+
+// Required to use DefaultSwarm as Swarm in our modules.
 impl Deref for DefaultSwarm {
     type Target = swarm::Swarm<DefaultBehaviour>;
 
@@ -16,6 +24,7 @@ impl Deref for DefaultSwarm {
     }
 }
 
+// Required to use DefaultSwarm as Swarm in our modules.
 impl DerefMut for DefaultSwarm {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
@@ -23,14 +32,9 @@ impl DerefMut for DefaultSwarm {
 }
 
 impl net::Dialer for DefaultSwarm {
+    // Forward the call to the inner Swarm.
     fn dial(&mut self, opts: swarm::dial_opts::DialOpts) -> Result<(), swarm::DialError> {
         self.0.dial(opts)
-    }
-}
-
-impl DefaultSwarm {
-    pub fn select_next_some(&mut self) -> SelectNextSome<'_, Swarm<DefaultBehaviour>> {
-        self.0.select_next_some()
     }
 }
 
@@ -43,11 +47,10 @@ pub struct DefaultBehaviour {
     pub identify: libp2p::identify::Behaviour,
 }
 
+// Events explicitly managed or intercepted by the DefaultBehaviour.
 #[derive(Debug)]
 pub enum DefaultBehaviourEvent {
-    // Events emitted by the MDNS behaviour.
     Mdns(libp2p::mdns::Event),
-    // Events emitted by the Ping behaviour.
     Ping(libp2p::ping::Event),
     Kad(libp2p::kad::Event),
     Identify(libp2p::identify::Event),
