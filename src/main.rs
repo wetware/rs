@@ -1,6 +1,7 @@
 use std::{error::Error, time::Duration};
 
 use anyhow::Result;
+use ipfs_api_backend_hyper::{IpfsClient, TryFromUri};
 use libp2p::{identify, kad, mdns, noise, ping, swarm, tcp, yamux};
 use tracing_subscriber::EnvFilter;
 
@@ -67,7 +68,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.behaviour_mut().kad.set_mode(Some(config.kad_mode()));
 
     // Tell the swarm to listen on all interfaces and a random, OS-assigned port.
-    swarm.listen_on(config.listen_addr().parse()?)?;
+    swarm.listen_on(config.listen_addr())?;
+
+    // The IPFS library we are using, ferristseng/rust-ipfs-api, requires multiformats::Multiaddr.
+    let ipfs_client = IpfsClient::from_multiaddr(config.ipfs_addr().to_string().parse().unwrap());
+    assert!(ipfs_client.is_ok());
 
     loop {
         match swarm.select_next_some().await {

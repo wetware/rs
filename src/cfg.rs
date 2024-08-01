@@ -1,6 +1,6 @@
 use std::env;
 
-use libp2p::{identity, kad};
+use libp2p::{identity, kad, Multiaddr};
 
 // Configuration
 pub trait Cfg {
@@ -8,10 +8,12 @@ pub trait Cfg {
     fn id_keys(&self) -> identity::Keypair;
     // Name of the protocol used to identify the node through libpb Identify.
     fn identify_protocol(&self) -> String;
+    // Multiaddress of the IPFS node.
+    fn ipfs_addr(&self) -> Multiaddr;
     // Server or Client. Defaults to server.
     fn kad_mode(&self) -> kad::Mode;
     // Multiaddress the node listens on.
-    fn listen_addr(&self) -> String;
+    fn listen_addr(&self) -> Multiaddr;
     // Peer ID of the node. Derived from the public key in id_keys().
     fn peer_id(&self) -> identity::PeerId;
 }
@@ -20,7 +22,8 @@ pub trait Cfg {
 pub struct DefaultCfg {
     id_keys: identity::Keypair,
     identify_protocol: String,
-    listen_addr: String,
+    ipfs_addr: Multiaddr,
+    listen_addr: Multiaddr,
 }
 
 impl DefaultCfg {
@@ -29,7 +32,8 @@ impl DefaultCfg {
         Self {
             id_keys: identity::Keypair::generate_ed25519(),
             identify_protocol: "/ww/identify/0.0.1".to_owned(),
-            listen_addr: "/ip4/0.0.0.0/tcp/0".to_owned(),
+            ipfs_addr: "/ip4/127.0.0.1/tcp/5001".to_owned().parse().unwrap(),
+            listen_addr: "/ip4/0.0.0.0/tcp/0".to_owned().parse().unwrap(),
         }
     }
 
@@ -45,7 +49,11 @@ impl Cfg for DefaultCfg {
         self.identify_protocol.to_owned()
     }
 
-    fn listen_addr(&self) -> String {
+    fn ipfs_addr(&self) -> Multiaddr {
+        self.ipfs_addr.to_owned()
+    }
+
+    fn listen_addr(&self) -> Multiaddr {
         self.listen_addr.to_owned()
     }
 
