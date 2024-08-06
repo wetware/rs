@@ -1,9 +1,11 @@
 use std::{error::Error, time::Duration};
 
 use anyhow::Result;
-use ipfs_api_backend_hyper::{IpfsClient, TryFromUri};
+use futures::TryStreamExt;
+use ipfs_api_backend_hyper::{IpfsApi, IpfsClient, TryFromUri};
 use libp2p::{identify, kad, mdns, noise, ping, swarm, tcp, yamux};
 use tracing_subscriber::EnvFilter;
+use wasmer::{self, imports};
 
 use ww_net;
 
@@ -71,8 +73,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on(config.listen_addr())?;
 
     // The IPFS library we are using, ferristseng/rust-ipfs-api, requires multiformats::Multiaddr.
-    let ipfs_client = IpfsClient::from_multiaddr(config.ipfs_addr().to_string().parse().unwrap());
-    assert!(ipfs_client.is_ok());
+    let ipfs_client = IpfsClient::from_multiaddr_str(config.ipfs_addr().to_string().as_str())
+        .expect("error initializing IPFS client");
+
+    // Retrieve WASM file. // TODO: do in the background while initializing WASM.
+    let bytecode = ipfs_client
+        .cat(config.load().as_str())
+        .map_ok(|chunk| chunk.to_vec())
+        .try_concat()
+        .await
+        .map_err(|_| "error reading full file")?;
+
+    // Initialize WASM runtime.
+    let mut store = wasmer::Store::default();
+    let module = wasmer::Module::from_binary(&store, &bytecode).expect("couldn't load WASM module");
+    let import_object = imports! {};
+    let instance = wasmer::Instance::new(&mut store, &module, &import_object)?;
+    // TODO run instance, consider WASI.
 
     loop {
         match swarm.select_next_some().await {
