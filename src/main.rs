@@ -92,14 +92,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut store = wasmer::Store::default();
 
     tracing::info!("Initialize WASM module instance...");
-    let module = wasmer::Module::from_binary(&store, &bytecode).expect("couldn't load WASM module");
+    // Unchecked for now to disable magic number validation.
+    let module: wasmer::Module;
+    // TODO: solve issue and remove unsafe block.
+    unsafe {
+        // module = wasmer::Module::from_binary_unchecked(&store, &bytecode)
+        //     .expect("couldn't load WASM module");
+        module = wasmer::Module::deserialize_unchecked(&store, &bytecode)
+            .expect("couldn't load WASM module");
+    }
     let uuid = Uuid::new_v4();
     let mut wasi_env = WasiEnv::builder(uuid)
         // .args(&["arg1", "arg2"])
         // .env("KEY", "VALUE")
         .finalize(&mut store)?;
     let import_object = wasi_env.import_object(&mut store, &module)?;
-    let instance = wasmer::Instance::new(&mut store, &module, &import_object)?;
+    let instance = wasmer::Instance::new(&mut store, &module, &import_object)
+        .expect("couldn't instantiate module");
 
     // // Attach the memory export
     // let memory = instance.exports.get_memory("memory")?;
