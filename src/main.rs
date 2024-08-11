@@ -5,8 +5,9 @@ use futures::TryStreamExt;
 use ipfs_api_backend_hyper::{IpfsApi, IpfsClient, TryFromUri};
 use libp2p::{identify, kad, mdns, noise, ping, swarm, tcp, yamux};
 use tracing_subscriber::EnvFilter;
-use wasmer::{self, imports};
-
+use uuid::Uuid;
+use wasmer::{self};
+use wasmer_wasix::WasiEnv;
 use ww_net;
 
 pub mod cfg;
@@ -69,27 +70,48 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Set the Kademlia mode.
     swarm.behaviour_mut().kad.set_mode(Some(config.kad_mode()));
 
+    tracing::info!("Initialize sawm...");
     // Tell the swarm to listen on all interfaces and a random, OS-assigned port.
     swarm.listen_on(config.listen_addr())?;
 
+    tracing::info!("Initialize IPFS client...");
     // The IPFS library we are using, ferristseng/rust-ipfs-api, requires multiformats::Multiaddr.
     let ipfs_client = IpfsClient::from_multiaddr_str(config.ipfs_addr().to_string().as_str())
         .expect("error initializing IPFS client");
 
-    // Retrieve WASM file. // TODO: do in the background while initializing WASM.
+    tracing::info!("Fetch bytecode from {}...", config.load());
     let bytecode = ipfs_client
-        .cat(config.load().as_str())
+        .block_get(config.load().as_str())
         .map_ok(|chunk| chunk.to_vec())
         .try_concat()
         .await
-        .map_err(|_| "error reading full file")?;
+        .expect("error fetching bytecode");
 
     // Initialize WASM runtime.
+    tracing::info!("Initialize WASM runtime...");
     let mut store = wasmer::Store::default();
+
+    tracing::info!("Initialize WASM module instance...");
     let module = wasmer::Module::from_binary(&store, &bytecode).expect("couldn't load WASM module");
-    let import_object = imports! {};
+    let uuid = Uuid::new_v4();
+    let mut wasi_env = WasiEnv::builder(uuid)
+        // .args(&["arg1", "arg2"])
+        // .env("KEY", "VALUE")
+        .finalize(&mut store)?;
+    let import_object = wasi_env.import_object(&mut store, &module)?;
     let instance = wasmer::Instance::new(&mut store, &module, &import_object)?;
-    // TODO run instance, consider WASI.
+
+    // // Attach the memory export
+    // let memory = instance.exports.get_memory("memory")?;
+    // wasi_env.data_mut(&mut store).set_memory(memory.clone());
+
+    wasi_env.initialize(&mut store, instance.clone())?;
+
+    tracing::info!("Run WASM module instance...");
+    let start = instance.exports.get_function("_start")?;
+    start.call(&mut store, &[])?;
+
+    wasi_env.on_exit(&mut store, None);
 
     loop {
         match swarm.select_next_some().await {
