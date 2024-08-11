@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     tracing::info!("Fetch bytecode from {}...", config.load());
     let bytecode = ipfs_client
-        .block_get(config.load().as_str())
+        .cat(config.load().as_str())
         .map_ok(|chunk| chunk.to_vec())
         .try_concat()
         .await
@@ -95,12 +95,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Unchecked for now to disable magic number validation.
     let module: wasmer::Module;
     // TODO: solve issue and remove unsafe block.
-    unsafe {
-        // module = wasmer::Module::from_binary_unchecked(&store, &bytecode)
-        //     .expect("couldn't load WASM module");
-        module = wasmer::Module::deserialize_unchecked(&store, &bytecode)
-            .expect("couldn't load WASM module");
-    }
+    module = wasmer::Module::new(&store, bytecode).expect("couldn't load WASM module");
+    // unsafe {
+    //     wasmer::Module::
+    //     module = wasmer::Module::from_binary_unchecked(&store, &bytecode)
+    //         .expect("couldn't load WASM module");
+    // }
     let uuid = Uuid::new_v4();
     let mut wasi_env = WasiEnv::builder(uuid)
         // .args(&["arg1", "arg2"])

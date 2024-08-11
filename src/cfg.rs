@@ -5,7 +5,7 @@ use libp2p::{identity, kad, Multiaddr};
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// IPFS block path of the WASM module to run, e.g.
+    /// IPFS path of the WASM module to run, e.g.
     /// '/ipfs/Qm...YR/main.wasm'.
     #[arg(short, long)]
     load: String,
