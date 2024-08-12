@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [workspace]
-members = ["ww_net", "ww_proc"]
+members = ["ww_net", "ww_proc", "ww_rpc"]
 
 [dependencies]
 anyhow = "1"
@@ -18,11 +18,7 @@ rand = "0.8"
 tokio = { version = "1.36", features = ["full"] }
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1.10.0", features = [
-    "v4",                # Lets you generate random UUIDs
-    "fast-rng",          # Use a faster (but still sufficiently random) RNG
-    "macro-diagnostics", # Enable better diagnostics for compile-time UUIDs
-] }
 wasmer = "4.3.5"
 wasmer-wasix = "0.25.0"
 ww_net = { path = "ww_net" }
+ww_proc = { path = "ww_proc" }
