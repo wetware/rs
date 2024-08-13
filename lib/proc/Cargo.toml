@@ -1,5 +1,5 @@
 [package]
-name = "ww_proc"
+name = "proc"
 version = "0.1.0"
 edition = "2021"
 
@@ -11,6 +11,6 @@ uuid = { version = "1.10.0", features = [
     "fast-rng",          # Use a faster (but still sufficiently random) RNG
     "macro-diagnostics", # Enable better diagnostics for compile-time UUIDs
 ] }
-wasmer = "4.3.5"
-wasmer-wasix = "0.25.0"
+wasmer = { version = "4.x" }
+wasmer-wasix = { version = "0.24" }
 tracing = "0.1.37"

@@ -34,7 +34,7 @@ impl DerefMut for DefaultSwarm {
     }
 }
 
-impl net::Dialer for DefaultSwarm {
+impl netx::Dialer for DefaultSwarm {
     // Forward the call to the inner Swarm.
     fn dial(&mut self, opts: swarm::dial_opts::DialOpts) -> Result<(), swarm::DialError> {
         self.0.dial(opts)

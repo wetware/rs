@@ -1,5 +1,5 @@
 [package]
-name = "ww_rpc"
+name = "rpc"
 version = "0.1.0"
 edition = "2021"
 
@@ -12,11 +12,11 @@ capnpc = "0.19.0"
 
 [dependencies]
 anyhow = "1"
-wasmer = "4.2.8"
-wasmer-compiler-cranelift = "4.2.8"
-wasmer-middlewares = "4.2.8"
+wasmer = "4.x"
+# wasmer-compiler-cranelift = "4.2.8"
+# wasmer-middlewares = "4.2.8"
 futures = "0.3.0"
-tokio = { version = "1.0.0", features = ["net", "rt", "macros"] }
-tokio-util = { version = "0.7.4", features = ["compat"] }
+# tokio = { version = "1.36", features = ["net", "rt", "macros"] }
+# tokio-util = { version = "0.7.4", features = ["compat"] }
 capnp = "0.19.3"
 capnp-rpc = "0.19.0"

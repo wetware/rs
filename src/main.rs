@@ -3,9 +3,9 @@ use std::{error::Error, time::Duration};
 use anyhow::Result;
 use futures::TryStreamExt;
 use libp2p::{identify, kad, mdns, noise, ping, swarm, tcp, yamux};
+use net::{self, net, DefaultBehaviour, DefaultBehaviourEvent, DefaultSwarm, IpfsC};
+use proc::{self, WasmRuntime};
 use tracing_subscriber::EnvFilter;
-use ww_net::{self, net, DefaultBehaviour, DefaultBehaviourEvent, DefaultSwarm, IpfsC};
-use ww_proc::{self, WasmRuntime};
 
 pub mod cfg;
 
