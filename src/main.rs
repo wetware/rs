@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     tracing::info!("listening on {address:?}")
                 }
                 swarm::SwarmEvent::Behaviour(DefaultBehaviourEvent::Mdns(event)) => {
-                    net::net::default_mdns_handler(&mut swarm, event);
+                    net::dial::default_mdns_handler(&mut swarm, event);
                 }
                 swarm::SwarmEvent::Behaviour(DefaultBehaviourEvent::Ping(event)) => {
                     tracing::info!("got PING event: {event:?}");
