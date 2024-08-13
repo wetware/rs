@@ -18,5 +18,6 @@ wasmer = { version = "4.x", default-features = false, features = [
 
 wasmer-wasix = { version = "0.24", default-features = false, features = [
     "sys",
+    "sys-thread",
 ] }
 tracing = "0.1.37"
