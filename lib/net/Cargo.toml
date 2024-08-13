@@ -11,7 +11,7 @@ bytes = "1.7.1"
 futures = "0.3.29"
 ipfs-api-backend-hyper = "0.6.0"
 ipfs-api-prelude = "0.6.0"
-libp2p = { version = "0.53.2", features = ["full"] }
+libp2p = { version = "0.54.0", features = ["full"] }
 rand = "0.8"
 tokio = { version = "1.36", features = ["full"] }
 tracing = "0.1.37"
