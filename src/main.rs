@@ -3,7 +3,7 @@ use std::{error::Error, time::Duration};
 use anyhow::Result;
 use futures::TryStreamExt;
 use libp2p::{identify, kad, mdns, noise, ping, swarm, tcp, yamux};
-use net::{self, net, DefaultBehaviour, DefaultBehaviourEvent, DefaultSwarm, IpfsC};
+use net::{DefaultBehaviour, DefaultBehaviourEvent, DefaultSwarm};
 use proc::{self, WasmRuntime};
 use tracing_subscriber::EnvFilter;
 
@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     tracing::info!("listening on {address:?}")
                 }
                 swarm::SwarmEvent::Behaviour(DefaultBehaviourEvent::Mdns(event)) => {
-                    net::default_mdns_handler(&mut swarm, event);
+                    net::net::default_mdns_handler(&mut swarm, event);
                 }
                 swarm::SwarmEvent::Behaviour(DefaultBehaviourEvent::Ping(event)) => {
                     tracing::info!("got PING event: {event:?}");
@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     tracing::info!("Initialize IPFS client...");
     // The IPFS library we are using, ferristseng/rust-ipfs-api, requires multiformats::Multiaddr.
-    let ipfs_client = IpfsC::new(config.ipfs_addr());
+    let ipfs_client = net::ipfs::Client::new(config.ipfs_addr());
 
     tracing::info!("Fetch bytecode from {}...", config.load());
     let bytecode = ipfs_client

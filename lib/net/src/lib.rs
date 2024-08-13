@@ -1,13 +1,11 @@
-pub mod net;
+pub mod dial;
+pub mod ipfs;
 
-use bytes::Bytes;
 use core::ops::{Deref, DerefMut};
 
 use futures::stream::SelectNextSome;
 use futures::StreamExt;
-use ipfs_api_backend_hyper::{Error, IpfsApi, IpfsClient, TryFromUri};
-use ipfs_api_prelude::BoxStream;
-use libp2p::{swarm, Multiaddr, Swarm};
+use libp2p::{swarm, Swarm};
 
 pub struct DefaultSwarm(pub swarm::Swarm<DefaultBehaviour>);
 
@@ -34,7 +32,7 @@ impl DerefMut for DefaultSwarm {
     }
 }
 
-impl net::Dialer for DefaultSwarm {
+impl dial::Dialer for DefaultSwarm {
     // Forward the call to the inner Swarm.
     fn dial(&mut self, opts: swarm::dial_opts::DialOpts) -> Result<(), swarm::DialError> {
         self.0.dial(opts)
@@ -80,22 +78,5 @@ impl From<libp2p::kad::Event> for DefaultBehaviourEvent {
 impl From<libp2p::identify::Event> for DefaultBehaviourEvent {
     fn from(event: libp2p::identify::Event) -> Self {
         DefaultBehaviourEvent::Identify(event)
-    }
-}
-
-pub struct IpfsC {
-    client: IpfsClient,
-}
-
-impl IpfsC {
-    pub fn new(addr: Multiaddr) -> Self {
-        Self {
-            client: IpfsClient::from_multiaddr_str(addr.to_string().as_str())
-                .expect("error initializing IPFS client"),
-        }
-    }
-
-    pub fn get_file(&self, path: String) -> BoxStream<Bytes, Error> {
-        self.client.cat(path.as_str())
     }
 }

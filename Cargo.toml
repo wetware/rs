@@ -13,7 +13,7 @@ anyhow = "1"
 clap = { version = "4.5.13", features = ["derive"] }
 futures = "0.3.29"
 ipfs-api-backend-hyper = "0.6"
-libp2p = { version = "0.53.2", features = ["full"] }
+libp2p = { version = "0.54.0", features = ["full"] }
 rand = "0.8"
 tokio = { version = "1.x", features = ["full"] }
 tracing = "0.1.37"
