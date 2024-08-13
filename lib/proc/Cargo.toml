@@ -17,7 +17,13 @@ wasmer = { version = "4.x", default-features = false, features = [
 ] }
 
 wasmer-wasix = { version = "0.24", default-features = false, features = [
+    "chrono",
+    "compiler",
+    "journal",
+    "reqwest",
     "sys",
+    "sys-poll",
     "sys-thread",
+    "time",
 ] }
 tracing = "0.1.37"
