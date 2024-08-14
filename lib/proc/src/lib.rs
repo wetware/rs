@@ -56,11 +56,8 @@ impl WasmRuntime {
 
         wasi_env.initialize(&mut self.store, instance.clone())?;
 
-        let function = instance
-            .exports
-            .get_function("_start")
-            .map(|f| f.to_owned())?;
+        let function = instance.exports.get_function("_start")?;
 
-        Ok(WasmProcess::new(wasi_env, function))
+        Ok(WasmProcess::new(wasi_env, function.to_owned()))
     }
 }

@@ -11,10 +11,7 @@ uuid = { version = "1.10.0", features = [
     "fast-rng",          # Use a faster (but still sufficiently random) RNG
     "macro-diagnostics", # Enable better diagnostics for compile-time UUIDs
 ] }
-wasmer = { version = "4.x", default-features = false, features = [
-    "engine",
-    "sys-default",
-] }
+wasmer = { version = "4.x" }
 
 wasmer-wasix = { version = "0.24", default-features = false, features = [
     "chrono",
