@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let ping_behaviour = ping::Behaviour::default();
 
     // Create Kademlia and Identify behaviours.
-    let kad_cfg = kad::Config::default();
+    let kad_cfg = kad::Config::new(swarm::StreamProtocol::new("/ww")); // TODO custom protocol name, cfg
     let kad_store = kad::store::MemoryStore::new(config.id_keys().public().to_peer_id());
     let kad_behaviour =
         kad::Behaviour::with_config(config.id_keys().public().to_peer_id(), kad_store, kad_cfg);
