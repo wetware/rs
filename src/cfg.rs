@@ -1,6 +1,19 @@
-use std::env;
-
+use clap::Parser;
 use libp2p::{identity, kad, Multiaddr};
+
+/// Run a WASM program from IPFS.
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// IPFS path of the WASM module to run, e.g.
+    /// '/ipfs/Qm...YR/main.wasm'.
+    #[arg(short, long)]
+    load: String,
+
+    /// Kad client (true) or server (false) mode.
+    #[arg(short, long, default_value_t = false)]
+    kad_client: bool,
+}
 
 // Configuration
 pub trait Cfg {
@@ -14,12 +27,15 @@ pub trait Cfg {
     fn kad_mode(&self) -> kad::Mode;
     // Multiaddress the node listens on.
     fn listen_addr(&self) -> Multiaddr;
+    // IPFS path of the WASM program to run.
+    fn load(&self) -> String;
     // Peer ID of the node. Derived from the public key in id_keys().
     fn peer_id(&self) -> identity::PeerId;
 }
 
 // Default node configuration.
 pub struct DefaultCfg {
+    args: Args,
     id_keys: identity::Keypair,
     identify_protocol: String,
     ipfs_addr: Multiaddr,
@@ -30,6 +46,7 @@ impl DefaultCfg {
     // Default node configuration.
     pub fn new() -> Self {
         Self {
+            args: Args::parse(),
             id_keys: identity::Keypair::generate_ed25519(),
             identify_protocol: "/ww/identify/0.0.1".to_owned(),
             ipfs_addr: "/ip4/127.0.0.1/tcp/5001".to_owned().parse().unwrap(),
@@ -39,22 +56,21 @@ impl DefaultCfg {
 
     // Check if the node is a Kademlia client from the command-line arguments.
     fn is_kad_client(&self) -> bool {
-        let args: Vec<String> = env::args().collect();
-        return args.iter().any(|arg| arg == "--kad-client");
+        return self.args.kad_client;
     }
 }
 
 impl Cfg for DefaultCfg {
+    fn id_keys(&self) -> identity::Keypair {
+        self.id_keys.clone()
+    }
+
     fn identify_protocol(&self) -> String {
         self.identify_protocol.to_owned()
     }
 
     fn ipfs_addr(&self) -> Multiaddr {
         self.ipfs_addr.to_owned()
-    }
-
-    fn listen_addr(&self) -> Multiaddr {
-        self.listen_addr.to_owned()
     }
 
     fn kad_mode(&self) -> kad::Mode {
@@ -64,8 +80,12 @@ impl Cfg for DefaultCfg {
         kad::Mode::Server
     }
 
-    fn id_keys(&self) -> identity::Keypair {
-        self.id_keys.clone()
+    fn listen_addr(&self) -> Multiaddr {
+        self.listen_addr.to_owned()
+    }
+
+    fn load(&self) -> String {
+        self.args.load.to_owned()
     }
 
     fn peer_id(&self) -> identity::PeerId {

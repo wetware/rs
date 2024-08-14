@@ -1,4 +1,5 @@
-pub mod net;
+pub mod dial;
+pub mod ipfs;
 
 use core::ops::{Deref, DerefMut};
 
@@ -31,7 +32,7 @@ impl DerefMut for DefaultSwarm {
     }
 }
 
-impl net::Dialer for DefaultSwarm {
+impl dial::Dialer for DefaultSwarm {
     // Forward the call to the inner Swarm.
     fn dial(&mut self, opts: swarm::dial_opts::DialOpts) -> Result<(), swarm::DialError> {
         self.0.dial(opts)

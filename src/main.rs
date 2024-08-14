@@ -1,11 +1,11 @@
 use std::{error::Error, time::Duration};
 
 use anyhow::Result;
-use ipfs_api_backend_hyper::{IpfsClient, TryFromUri};
+use futures::TryStreamExt;
 use libp2p::{identify, kad, mdns, noise, ping, swarm, tcp, yamux};
+use net::{DefaultBehaviour, DefaultBehaviourEvent, DefaultSwarm};
+use proc::{self, WasmRuntime};
 use tracing_subscriber::EnvFilter;
-
-use ww_net;
 
 pub mod cfg;
 
@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let ping_behaviour = ping::Behaviour::default();
 
     // Create Kademlia and Identify behaviours.
-    let kad_cfg = kad::Config::default();
+    let kad_cfg = kad::Config::new(swarm::StreamProtocol::new("/ww")); // TODO custom protocol name, cfg
     let kad_store = kad::store::MemoryStore::new(config.id_keys().public().to_peer_id());
     let kad_behaviour =
         kad::Behaviour::with_config(config.id_keys().public().to_peer_id(), kad_store, kad_cfg);
@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ));
 
     // Combine behaviours.
-    let behaviour = ww_net::DefaultBehaviour {
+    let behaviour = DefaultBehaviour {
         mdns: mdns_behaviour,
         ping: ping_behaviour,
         kad: kad_behaviour,
@@ -62,40 +62,61 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .build();
 
     // Wrap the swarm in our custom type to overwrite its behaviour and event management.
-    let mut swarm = ww_net::DefaultSwarm(raw_swarm);
+    let mut swarm = DefaultSwarm(raw_swarm);
 
     // Set the Kademlia mode.
     swarm.behaviour_mut().kad.set_mode(Some(config.kad_mode()));
 
+    tracing::info!("Initialize swarm...");
     // Tell the swarm to listen on all interfaces and a random, OS-assigned port.
     swarm.listen_on(config.listen_addr())?;
 
-    // The IPFS library we are using, ferristseng/rust-ipfs-api, requires multiformats::Multiaddr.
-    let ipfs_client = IpfsClient::from_multiaddr(config.ipfs_addr().to_string().parse().unwrap());
-    assert!(ipfs_client.is_ok());
-
-    loop {
-        match swarm.select_next_some().await {
-            swarm::SwarmEvent::NewListenAddr { address, .. } => {
-                // TODO:  seal & sign a PeerRecord and announce it to the DHT,
-                // using our PeerID as the key.
-                tracing::info!("listening on {address:?}")
-            }
-            swarm::SwarmEvent::Behaviour(ww_net::DefaultBehaviourEvent::Mdns(event)) => {
-                ww_net::net::default_mdns_handler(&mut swarm, event);
-            }
-            swarm::SwarmEvent::Behaviour(ww_net::DefaultBehaviourEvent::Ping(event)) => {
-                tracing::info!("got PING event: {event:?}");
-            }
-            swarm::SwarmEvent::Behaviour(ww_net::DefaultBehaviourEvent::Kad(event)) => {
-                tracing::info!("got KAD event: {event:?}");
-            }
-            swarm::SwarmEvent::Behaviour(ww_net::DefaultBehaviourEvent::Identify(event)) => {
-                tracing::info!("got IDENTIFY event: {event:?}");
-            }
-            event => {
-                tracing::info!("got event: {event:?}");
+    // Run behaviour loop in the background.
+    tracing::info!("Spawn behaviour thread...");
+    tokio::spawn(async move {
+        loop {
+            match swarm.select_next_some().await {
+                swarm::SwarmEvent::NewListenAddr { address, .. } => {
+                    // TODO:  seal & sign a PeerRecord and announce it to the DHT,
+                    // using our PeerID as the key.
+                    tracing::info!("listening on {address:?}")
+                }
+                swarm::SwarmEvent::Behaviour(DefaultBehaviourEvent::Mdns(event)) => {
+                    net::dial::default_mdns_handler(&mut swarm, event);
+                }
+                swarm::SwarmEvent::Behaviour(DefaultBehaviourEvent::Ping(event)) => {
+                    tracing::info!("got PING event: {event:?}");
+                }
+                swarm::SwarmEvent::Behaviour(DefaultBehaviourEvent::Kad(event)) => {
+                    tracing::info!("got KAD event: {event:?}");
+                }
+                swarm::SwarmEvent::Behaviour(DefaultBehaviourEvent::Identify(event)) => {
+                    tracing::info!("got IDENTIFY event: {event:?}");
+                }
+                event => {
+                    tracing::info!("got event: {event:?}");
+                }
             }
         }
-    }
+    });
+
+    tracing::info!("Initialize IPFS client...");
+    // The IPFS library we are using, ferristseng/rust-ipfs-api, requires multiformats::Multiaddr.
+    let ipfs_client = net::ipfs::Client::new(config.ipfs_addr());
+
+    tracing::info!("Fetch bytecode from {}...", config.load());
+    let bytecode = ipfs_client
+        .get_file(config.load())
+        .map_ok(|chunk| chunk.to_vec())
+        .try_concat()
+        .await?;
+
+    // Initialize WASM runtime.
+    tracing::info!("Initialize WASM runtime...");
+    let mut wasm_runtime = WasmRuntime::new();
+
+    tracing::info!("Initialize WASM module instance...");
+    let mut wasm_process = wasm_runtime.build(bytecode)?;
+    wasm_process.run(wasm_runtime.store())?;
+    Ok(())
 }
