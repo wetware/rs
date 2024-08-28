@@ -117,6 +117,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     tracing::info!("Initialize WASM module instance...");
     let mut wasm_process = wasm_runtime.build(bytecode)?;
-    wasm_process.run(wasm_runtime.store())?;
+    wasm_process.run(wasm_runtime.store_mut())?;
     Ok(())
 }

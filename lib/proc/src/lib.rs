@@ -36,7 +36,7 @@ impl WasmRuntime {
         }
     }
 
-    pub fn store(&mut self) -> &mut wasmer::Store {
+    pub fn store_mut(&mut self) -> &mut wasmer::Store {
         &mut self.store
     }
 
@@ -46,9 +46,9 @@ impl WasmRuntime {
         let mut wasi_env = WasiEnv::builder(uuid)
             // .args(&["arg1", "arg2"])
             // .env("KEY", "VALUE")
-            .finalize(&mut self.store)?;
-        let import_object = wasi_env.import_object(&mut self.store, &module)?;
-        let instance = wasmer::Instance::new(&mut self.store, &module, &import_object)?;
+            .finalize(self.store_mut())?;
+        let import_object = wasi_env.import_object(self.store_mut(), &module)?;
+        let instance = wasmer::Instance::new(self.store_mut(), &module, &import_object)?;
 
         // // Attach the memory export
         // let memory = instance.exports.get_memory("memory")?;
