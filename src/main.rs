@@ -1,6 +1,7 @@
 use std::{error::Error, time::Duration};
 
 use anyhow::Result;
+use fs::IpfsFs;
 use futures::TryStreamExt;
 use libp2p::{identify, kad, mdns, noise, ping, swarm, tcp, yamux};
 use net::{DefaultBehaviour, DefaultBehaviourEvent, DefaultSwarm};
@@ -116,7 +117,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut wasm_runtime = WasmRuntime::new();
 
     tracing::info!("Initialize WASM module instance...");
-    let mut wasm_process = wasm_runtime.build(bytecode)?;
+    let ipfsFs = IpfsFs {};
+    let mut wasm_process = wasm_runtime.build(bytecode, ipfsFs)?;
     wasm_process.run(wasm_runtime.store_mut())?;
     Ok(())
 }
