@@ -1,6 +1,5 @@
 use futures::future::BoxFuture;
 use std::fmt;
-use std::fs::OpenOptions;
 use std::io::{self, SeekFrom};
 use std::marker::{Send, Sync};
 use std::path::{Path, PathBuf};
