@@ -107,7 +107,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     tracing::info!("Fetch bytecode from {}...", config.load());
     let bytecode = ipfs_client
-        .get_file(config.load())
+        .open_stream(config.load().as_str())
         .map_ok(|chunk| chunk.to_vec())
         .try_concat()
         .await?;

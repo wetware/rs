@@ -1,3 +1,4 @@
+use futures::executor::block_on;
 use futures::future::BoxFuture;
 use std::fmt;
 use std::io::{self, SeekFrom};
@@ -7,7 +8,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 
-use wasmer_wasix::virtual_fs;
+use wasmer_wasix::{virtual_fs, FsError};
 
 use net::ipfs::Client;
 
@@ -28,14 +29,24 @@ impl fmt::Debug for IpfsFs {
     }
 }
 
-// TODO we'll likely need to create a separate struct for opening files (1).
+// TODO: we'll likely need to create a separate struct for opening files (1).
+// TODO: use conf parameter.
 impl virtual_fs::FileOpener for IpfsFs {
     fn open(
         &self,
         path: &Path,
         conf: &virtual_fs::OpenOptionsConfig,
     ) -> virtual_fs::Result<Box<dyn virtual_fs::VirtualFile + Send + Sync + 'static>> {
-        Ok(Box::new(IpfsFile {}))
+        let path_str = path.to_str().ok_or(virtual_fs::FsError::EntryNotFound)?;
+        let bytes_future = self.client.get_file(path_str);
+
+        let bytes = block_on(bytes_future);
+
+        let ipfs_file = match bytes {
+            Ok(b) => IpfsFile::new(b),
+            Err(e) => return Err(FsError::IOError), // TODO: use a proper error.
+        };
+        Ok(Box::new(ipfs_file))
     }
 }
 
@@ -45,28 +56,29 @@ impl virtual_fs::FileSystem for IpfsFs {
     }
 
     fn read_dir(&self, path: &Path) -> virtual_fs::Result<virtual_fs::ReadDir> {
-        Err(virtual_fs::FsError::UnknownError)
+        Err(virtual_fs::FsError::Unsupported)
     }
 
     fn create_dir(&self, path: &Path) -> virtual_fs::Result<()> {
-        Ok(())
+        Err(virtual_fs::FsError::Unsupported)
     }
     fn remove_dir(&self, path: &Path) -> virtual_fs::Result<()> {
-        Ok(())
+        Err(virtual_fs::FsError::Unsupported)
     }
     fn rename<'a>(&'a self, from: &'a Path, to: &'a Path) -> BoxFuture<'a, virtual_fs::Result<()>> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async { Err(virtual_fs::FsError::Unsupported) })
     }
     fn metadata(&self, path: &Path) -> virtual_fs::Result<virtual_fs::Metadata> {
+        // TODO mikel: is there a way of getting file metadata through our IPFS API?
         Ok(virtual_fs::Metadata::default())
     }
 
     fn symlink_metadata(&self, path: &Path) -> virtual_fs::Result<virtual_fs::Metadata> {
-        Ok(virtual_fs::Metadata::default())
+        Err(virtual_fs::FsError::Unsupported)
     }
 
     fn remove_file(&self, path: &Path) -> virtual_fs::Result<()> {
-        Ok(())
+        Err(virtual_fs::FsError::Unsupported)
     }
 
     fn new_open_options(&self) -> virtual_fs::OpenOptions {
@@ -80,15 +92,24 @@ impl virtual_fs::FileSystem for IpfsFs {
         path: &Path,
         fs: Box<dyn virtual_fs::FileSystem + Send + Sync>,
     ) -> virtual_fs::Result<()> {
-        Ok(())
+        Err(virtual_fs::FsError::Unsupported)
     }
 }
 
-unsafe impl Send for IpfsFs {}
+// unsafe impl Send for IpfsFs {}
 
-unsafe impl Sync for IpfsFs {}
+// unsafe impl Sync for IpfsFs {}
 
-pub struct IpfsFile {}
+pub struct IpfsFile {
+    bytes: Vec<u8>,
+}
+
+impl IpfsFile {
+    pub fn new(bytes: Vec<u8>) -> IpfsFile {
+        // TODO mikel create a Cursor
+        IpfsFile { bytes: bytes }
+    }
+}
 
 impl fmt::Debug for IpfsFile {
     fn fmt(&self, _: &mut fmt::Formatter) -> fmt::Result {
@@ -134,9 +155,9 @@ impl AsyncWrite for IpfsFile {
     }
 }
 
-unsafe impl Send for IpfsFile {}
+// unsafe impl Send for IpfsFile {}
 
-impl Unpin for IpfsFile {}
+// impl Unpin for IpfsFile {}
 
 impl virtual_fs::VirtualFile for IpfsFile {
     fn last_accessed(&self) -> u64 {
