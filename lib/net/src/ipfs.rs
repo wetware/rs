@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use futures::TryStreamExt;
-use ipfs_api_backend_hyper::{Error, IpfsApi, IpfsClient, ObjectTemplate, TryFromUri};
+use ipfs_api_backend_hyper::{Error, IpfsApi, IpfsClient, TryFromUri};
 use ipfs_api_prelude::BoxStream;
 use libp2p::Multiaddr;
 

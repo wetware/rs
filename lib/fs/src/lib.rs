@@ -78,11 +78,12 @@ impl virtual_fs::FileSystem for IpfsFs {
         file_opener
     }
 
+    #[instrument(level = "trace", skip_all, fields(?_name, ?_path, ?_fs), ret)]
     fn mount(
         &self,
-        name: String,
-        path: &Path,
-        fs: Box<dyn virtual_fs::FileSystem + Send + Sync>,
+        _name: String,
+        _path: &Path,
+        _fs: Box<dyn virtual_fs::FileSystem + Send + Sync>,
     ) -> virtual_fs::Result<()> {
         Err(FsError::Unsupported)
     }
@@ -102,7 +103,7 @@ impl virtual_fs::FileOpener for IpfsFs {
 
         let ipfs_file = match bytes {
             Ok(b) => IpfsFile::new(path_str.to_owned(), b),
-            Err(e) => return Err(FsError::IOError), // TODO: use a proper error.
+            Err(_) => return Err(FsError::IOError), // TODO: use a proper error.
         };
         Ok(Box::new(ipfs_file))
     }
