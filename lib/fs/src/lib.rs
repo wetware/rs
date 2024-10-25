@@ -1,7 +1,7 @@
 use futures::executor::block_on;
 use futures::future::BoxFuture;
 use std::fmt;
-use std::io::{self, SeekFrom};
+use std::io::{self, Cursor, SeekFrom};
 use std::marker::{Send, Sync};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -29,61 +29,52 @@ impl fmt::Debug for IpfsFs {
     }
 }
 
-// TODO: we'll likely need to create a separate struct for opening files (1).
-// TODO: use conf parameter.
-impl virtual_fs::FileOpener for IpfsFs {
-    fn open(
-        &self,
-        path: &Path,
-        conf: &virtual_fs::OpenOptionsConfig,
-    ) -> virtual_fs::Result<Box<dyn virtual_fs::VirtualFile + Send + Sync + 'static>> {
-        let path_str = path.to_str().ok_or(virtual_fs::FsError::EntryNotFound)?;
-        let bytes_future = self.client.get_file(path_str);
-
-        let bytes = block_on(bytes_future);
-
-        let ipfs_file = match bytes {
-            Ok(b) => IpfsFile::new(b),
-            Err(e) => return Err(FsError::IOError), // TODO: use a proper error.
-        };
-        Ok(Box::new(ipfs_file))
-    }
-}
-
 impl virtual_fs::FileSystem for IpfsFs {
+    #[instrument(level = "trace", skip_all, fields(?path), ret)]
     fn readlink(&self, path: &Path) -> virtual_fs::Result<PathBuf> {
-        Ok(PathBuf::new())
+        Err(FsError::Unsupported)
     }
 
+    #[instrument(level = "trace", skip_all, fields(?path), ret)]
     fn read_dir(&self, path: &Path) -> virtual_fs::Result<virtual_fs::ReadDir> {
-        Err(virtual_fs::FsError::Unsupported)
+        Err(FsError::Unsupported)
     }
 
+    #[instrument(level = "trace", skip_all, fields(?path), ret)]
     fn create_dir(&self, path: &Path) -> virtual_fs::Result<()> {
-        Err(virtual_fs::FsError::Unsupported)
+        Err(FsError::Unsupported)
     }
+
+    #[instrument(level = "trace", skip_all, fields(?path), ret)]
     fn remove_dir(&self, path: &Path) -> virtual_fs::Result<()> {
-        Err(virtual_fs::FsError::Unsupported)
+        Err(FsError::Unsupported)
     }
+
+    #[instrument(level = "trace", skip_all, fields(?from, ?to), ret)]
     fn rename<'a>(&'a self, from: &'a Path, to: &'a Path) -> BoxFuture<'a, virtual_fs::Result<()>> {
-        Box::pin(async { Err(virtual_fs::FsError::Unsupported) })
+        Box::pin(async { Err(FsError::Unsupported) })
     }
+
+    #[instrument(level = "trace", skip_all, fields(?path), ret)]
     fn metadata(&self, path: &Path) -> virtual_fs::Result<virtual_fs::Metadata> {
-        // TODO mikel: is there a way of getting file metadata through our IPFS API?
         Ok(virtual_fs::Metadata::default())
     }
 
+    #[instrument(level = "trace", skip_all, fields(?path), ret)]
     fn symlink_metadata(&self, path: &Path) -> virtual_fs::Result<virtual_fs::Metadata> {
-        Err(virtual_fs::FsError::Unsupported)
+        Err(FsError::Unsupported)
     }
 
+    #[instrument(level = "trace", skip_all, fields(?path), ret)]
     fn remove_file(&self, path: &Path) -> virtual_fs::Result<()> {
-        Err(virtual_fs::FsError::Unsupported)
+        Err(FsError::Unsupported)
     }
 
+    #[instrument(level = "trace", skip_all, fields(), ret)]
     fn new_open_options(&self) -> virtual_fs::OpenOptions {
-        // TODO we'll likely need to create a separate struct for opening files (2).
-        virtual_fs::OpenOptions::new(self)
+        let mut file_opener = virtual_fs::OpenOptions::new(self);
+        file_opener.read(true);
+        file_opener
     }
 
     fn mount(
@@ -93,6 +84,23 @@ impl virtual_fs::FileSystem for IpfsFs {
         fs: Box<dyn virtual_fs::FileSystem + Send + Sync>,
     ) -> virtual_fs::Result<()> {
         Err(virtual_fs::FsError::Unsupported)
+impl virtual_fs::FileOpener for IpfsFs {
+    #[instrument(level = "trace", skip_all, fields(?path, ?conf), ret)]
+    fn open(
+        &self,
+        path: &Path,
+        conf: &virtual_fs::OpenOptionsConfig,
+    ) -> virtual_fs::Result<Box<dyn virtual_fs::VirtualFile + Send + Sync + 'static>> {
+        let path_str = path.to_str().ok_or(FsError::EntryNotFound)?;
+        let bytes_future = self.client.get_file(path_str);
+
+        let bytes = block_on(bytes_future);
+
+        let ipfs_file = match bytes {
+            Ok(b) => IpfsFile::new(path_str.to_owned(), b),
+            Err(e) => return Err(FsError::IOError), // TODO: use a proper error.
+        };
+        Ok(Box::new(ipfs_file))
     }
 }
 
