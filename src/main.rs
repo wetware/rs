@@ -15,13 +15,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Use the default configuration.
     let config: &dyn cfg::Cfg = &cfg::DefaultCfg::new();
 
+    std::env::set_var("RUST_LOG", "info,wasmer_wasix=trace,fs=trace");
+
     // Start configuring a `fmt` subscriber.
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .compact() // use abbreviated log format
         // .with_file(true)
         // .with_thread_ids(true)
-        .with_max_level(tracing::Level::TRACE)
+        // .with_max_level(tracing::Level::TRACE)
         .finish();
 
     // Set the subscriber as global default.
