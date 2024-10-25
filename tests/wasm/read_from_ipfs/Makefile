@@ -1,10 +1,10 @@
-TARGET_WASM := target/print_loop.wasm
+TARGET_WASM := target/read_from_ipfs.wasm
 
 all: build ipfs
 
 build:
 	mkdir -p target
-	rustc src/main.rs -o target/print_loop.wasm --target wasm32-wasi
+	rustc src/main.rs -o $(TARGET_WASM) --target wasm32-wasi
 
 hash:
 	@ipfs add --only-hash --quieter $(TARGET_WASM)
