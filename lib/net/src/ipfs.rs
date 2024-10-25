@@ -31,6 +31,6 @@ impl Client {
     }
 
     pub fn delete_me(&self) {
-        let some_unix_fs = self.client.object_new(Some(ObjectTemplate::UnixFsDir));
+        // let some_unix_fs = self.client.object_new(Some(ObjectTemplate::UnixFsDir));
     }
 }

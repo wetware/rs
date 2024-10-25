@@ -83,7 +83,8 @@ impl virtual_fs::FileSystem for IpfsFs {
         path: &Path,
         fs: Box<dyn virtual_fs::FileSystem + Send + Sync>,
     ) -> virtual_fs::Result<()> {
-        Err(virtual_fs::FsError::Unsupported)
+        Err(FsError::Unsupported)
+    }
 impl virtual_fs::FileOpener for IpfsFs {
     #[instrument(level = "trace", skip_all, fields(?path, ?conf), ret)]
     fn open(
@@ -151,15 +152,24 @@ impl AsyncWrite for IpfsFile {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
-        Poll::Ready(Ok(0))
+        Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            FsError::Unsupported,
+        )))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        Poll::Ready(Ok(()))
+        Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            FsError::Unsupported,
+        )))
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        Poll::Ready(Ok(()))
+        Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            FsError::Unsupported,
+        )))
     }
 }
 
@@ -182,19 +192,19 @@ impl virtual_fs::VirtualFile for IpfsFile {
 
     #[allow(unused_variables)]
     fn set_times(&mut self, atime: Option<u64>, mtime: Option<u64>) -> virtual_fs::Result<()> {
-        Ok(())
+        Err(FsError::Unsupported)
     }
 
     fn size(&self) -> u64 {
-        0
+        self.size as u64
     }
 
     fn set_len(&mut self, new_size: u64) -> virtual_fs::Result<()> {
-        Ok(())
+        Err(FsError::Unsupported)
     }
 
     fn unlink(&mut self) -> virtual_fs::Result<()> {
-        Ok(())
+        Err(FsError::Unsupported)
     }
 
     fn is_open(&self) -> bool {
