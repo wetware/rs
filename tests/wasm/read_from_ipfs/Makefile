@@ -4,7 +4,7 @@ all: build ipfs
 
 build:
 	mkdir -p target
-	rustc src/main.rs -o $(TARGET_WASM) --target wasm32-wasi
+	rustc src/main.rs -o $(TARGET_WASM) --target wasm32-wasip1
 
 hash:
 	@ipfs add --only-hash --quieter $(TARGET_WASM)
