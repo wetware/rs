@@ -42,6 +42,12 @@ pub struct DefaultCfg {
     listen_addr: Multiaddr,
 }
 
+impl Default for DefaultCfg {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DefaultCfg {
     // Default node configuration.
     pub fn new() -> Self {
@@ -56,7 +62,7 @@ impl DefaultCfg {
 
     // Check if the node is a Kademlia client from the command-line arguments.
     fn is_kad_client(&self) -> bool {
-        return self.args.kad_client;
+        self.args.kad_client
     }
 }
 

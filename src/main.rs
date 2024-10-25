@@ -1,10 +1,11 @@
 use std::{error::Error, time::Duration};
 
 use anyhow::Result;
+pub use fs::IpfsFs;
 use futures::TryStreamExt;
 use libp2p::{identify, kad, mdns, noise, ping, swarm, tcp, yamux};
-use net::{DefaultBehaviour, DefaultBehaviourEvent, DefaultSwarm};
-use proc::{self, WasmRuntime};
+pub use net::{DefaultBehaviour, DefaultBehaviourEvent, DefaultSwarm};
+pub use proc::{self, WasmRuntime};
 use tracing_subscriber::EnvFilter;
 
 pub mod cfg;
@@ -14,16 +15,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Use the default configuration.
     let config: &dyn cfg::Cfg = &cfg::DefaultCfg::new();
 
-    // Start configuring a `fmt` subscriber
+    std::env::set_var("RUST_LOG", "info,wasmer_wasix=trace,fs=trace");
+
+    // Start configuring a `fmt` subscriber.
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .compact() // use abbreviated log format
         // .with_file(true)
         // .with_thread_ids(true)
-        .with_max_level(tracing::Level::INFO)
+        // .with_max_level(tracing::Level::TRACE)
         .finish();
 
-    // Set the subscriber as global default
+    // Set the subscriber as global default.
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
     // Create a MDNS network behaviour.
@@ -106,7 +109,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     tracing::info!("Fetch bytecode from {}...", config.load());
     let bytecode = ipfs_client
-        .get_file(config.load())
+        .open_stream(config.load().as_str())
         .map_ok(|chunk| chunk.to_vec())
         .try_concat()
         .await?;
@@ -116,7 +119,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut wasm_runtime = WasmRuntime::new();
 
     tracing::info!("Initialize WASM module instance...");
-    let mut wasm_process = wasm_runtime.build(bytecode)?;
+    let ipfs_fs = IpfsFs::new(ipfs_client);
+    let mut wasm_process = wasm_runtime.build(bytecode, Box::new(ipfs_fs))?;
     wasm_process.run(wasm_runtime.store_mut())?;
     Ok(())
 }
