@@ -86,6 +86,8 @@ impl virtual_fs::FileSystem for IpfsFs {
     ) -> virtual_fs::Result<()> {
         Err(FsError::Unsupported)
     }
+}
+
 impl virtual_fs::FileOpener for IpfsFs {
     #[instrument(level = "trace", skip_all, fields(?path, ?conf), ret)]
     fn open(
@@ -111,13 +113,20 @@ impl virtual_fs::FileOpener for IpfsFs {
 // unsafe impl Sync for IpfsFs {}
 
 pub struct IpfsFile {
-    bytes: Vec<u8>,
+    // bytes: Vec<u8>,
+    path: String,
+    size: usize,
+    cursor: Cursor<Vec<u8>>,
 }
 
 impl IpfsFile {
-    pub fn new(bytes: Vec<u8>) -> IpfsFile {
-        // TODO mikel create a Cursor
-        IpfsFile { bytes: bytes }
+    #[instrument(level = "trace", skip_all, fields(?bytes), ret)]
+    pub fn new(path: String, bytes: Vec<u8>) -> IpfsFile {
+        IpfsFile {
+            path: path,
+            size: bytes.len(),
+            cursor: Cursor::new(bytes),
+        }
     }
 }
 
