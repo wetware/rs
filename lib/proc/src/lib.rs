@@ -1,6 +1,6 @@
 use uuid::Uuid;
 use wasmer::{self};
-use wasmer_wasix::{WasiEnv, WasiFunctionEnv};
+use wasmer_wasix::{virtual_fs, WasiEnv, WasiFunctionEnv};
 
 pub struct WasmProcess {
     function: wasmer::Function,
@@ -40,10 +40,18 @@ impl WasmRuntime {
         &mut self.store
     }
 
-    pub fn build(&mut self, bytecode: Vec<u8>) -> Result<WasmProcess, Box<dyn std::error::Error>> {
+    pub fn build(
+        &mut self,
+        bytecode: Vec<u8>,
+        fs: virtual_fs::TmpFileSystem,
+    ) -> Result<WasmProcess, Box<dyn std::error::Error>> {
         let module = wasmer::Module::new(&self.store, bytecode).expect("couldn't load WASM module");
         let uuid = Uuid::new_v4();
         let mut wasi_env = WasiEnv::builder(uuid)
+            .sandbox_fs(fs)
+            // .fs(fs)
+            // .preopen_build(|p| p.directory("/").read(true))?
+            // .preopen_build(|p| p.directory("./").read(true))?
             // .args(&["arg1", "arg2"])
             // .env("KEY", "VALUE")
             .finalize(self.store_mut())?;

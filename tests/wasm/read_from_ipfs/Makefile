@@ -1,4 +1,4 @@
-TARGET_WASM := target/print_loop.wasm
+TARGET_WASM := target/read_from_ipfs.wasm
 
 all: build ipfs
 

@@ -1,11 +1,14 @@
-use std::{error::Error, time::Duration};
+use std::{error::Error, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use futures::TryStreamExt;
 use libp2p::{identify, kad, mdns, noise, ping, swarm, tcp, yamux};
+use tracing_subscriber::EnvFilter;
+use wasmer_wasix::virtual_fs::{self, RootFileSystemBuilder};
+
+use fs::IpfsFs;
 use net::{DefaultBehaviour, DefaultBehaviourEvent, DefaultSwarm};
 use proc::{self, WasmRuntime};
-use tracing_subscriber::EnvFilter;
 
 pub mod cfg;
 
@@ -106,7 +109,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     tracing::info!("Fetch bytecode from {}...", config.load());
     let bytecode = ipfs_client
-        .get_file(config.load())
+        .get_file(config.load().as_str())
         .map_ok(|chunk| chunk.to_vec())
         .try_concat()
         .await?;
@@ -116,7 +119,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut wasm_runtime = WasmRuntime::new();
 
     tracing::info!("Initialize WASM module instance...");
-    let mut wasm_process = wasm_runtime.build(bytecode)?;
+    let ipfs_fs = IpfsFs::new(ipfs_client);
+    let ipfs_path = ipfs_fs.path();
+    let shared_ipfs_fs = Arc::new(ipfs_fs) as Arc<dyn virtual_fs::FileSystem + Send + Sync>;
+    let root_fs = RootFileSystemBuilder::new().build();
+    root_fs.mount(ipfs_path.clone(), &shared_ipfs_fs, ipfs_path)?;
+    let mut wasm_process = wasm_runtime.build(bytecode, root_fs)?;
     wasm_process.run(wasm_runtime.store_mut())?;
     Ok(())
 }

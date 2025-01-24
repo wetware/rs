@@ -6,17 +6,20 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [workspace]
-members = ["lib/net", "lib/proc"]
+members = ["lib/fs", "lib/net", "lib/proc"]
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4.5.13", features = ["derive"] }
-futures = "0.3.29"
+clap = { version = "4.5.27", features = ["derive"] }
+futures = "0.3.31"
 ipfs-api-backend-hyper = "0.6"
-libp2p = { version = "0.54.0", features = ["full"] }
+libp2p = { version = "0.55.0", features = ["full"] }
 rand = "0.8"
-tokio = { version = "1.x", features = ["full"] }
-tracing = "0.1.37"
+tokio = { version = "1.*", features = ["full"] }
+tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wasmer-wasix = { version = "0.35" }
+
+fs = { path = "lib/fs" }
 net = { path = "lib/net" }
 proc = { path = "lib/proc" }
