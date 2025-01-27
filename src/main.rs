@@ -128,3 +128,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
     wasm_process.run(wasm_runtime.store_mut())?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use virtual_fs::FileSystem;
+
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn read_file() {
+        let ipfs_fs = IpfsFs::new(net::ipfs::Client::new(
+            "/ip4/127.0.0.1/tcp/5001".parse().unwrap(),
+        ));
+        let ipfs_path = ipfs_fs.path();
+        let shared_ipfs_fs = Arc::new(ipfs_fs) as Arc<dyn virtual_fs::FileSystem + Send + Sync>;
+        let root_fs = RootFileSystemBuilder::new().build();
+        root_fs
+            .mount(ipfs_path.clone(), &shared_ipfs_fs, ipfs_path)
+            .unwrap();
+        let file_res = root_fs
+            .new_open_options()
+            .read(true)
+            .open("/ipfs/QmeeD4LBwMxMkboCNvsoJ2aDwJhtsjFyoS1B9iMXiDcEqH");
+        assert!(file_res.is_ok());
+        let file = file_res.unwrap();
+        assert_eq!(file.size(), 0);
+    }
+}
