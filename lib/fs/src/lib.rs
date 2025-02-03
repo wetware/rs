@@ -1,8 +1,9 @@
+use bytes::BufMut;
 use futures::executor::block_on;
 use futures::future::BoxFuture;
 use futures::TryStreamExt;
 use std::fmt;
-use std::io::{self, Cursor, SeekFrom};
+use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::marker::{Send, Sync};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -110,14 +111,6 @@ impl virtual_fs::FileSystem for IpfsFs {
     #[instrument(level = "trace", skip_all, fields(), ret)]
     fn new_open_options(&self) -> virtual_fs::OpenOptions {
         let mut open_options = virtual_fs::OpenOptions::new(self);
-        // let x = open_options.open("/ipfs/QmeeD4LBwMxMkboCNvsoJ2aDwJhtsjFyoS1B9iMXiDcEqH");
-        // match x {
-        //     Ok(y) => {
-        //         println!("Reading file");
-        //         println!("{}", y.size())
-        //     }
-        //     Err(z) => println!("err: {}", z),
-        // }
         open_options.read(true);
         open_options
     }
@@ -190,10 +183,13 @@ impl fmt::Debug for IpfsFile {
 impl AsyncRead for IpfsFile {
     #[instrument(level = "trace", skip_all, fields(?cx, ?buf), ret)]
     fn poll_read(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if usize::try_from(self.cursor.position()).unwrap() < self.size {
+            buf.put(self.cursor.get_mut().as_slice());
+        }
         Poll::Ready(Ok(()))
     }
 }
@@ -201,13 +197,17 @@ impl AsyncRead for IpfsFile {
 // TODO
 impl AsyncSeek for IpfsFile {
     #[instrument(level = "trace", skip_all, fields(?position), ret)]
-    fn start_seek(self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
-        Ok(())
+    fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
+        let res = self.cursor.seek(position);
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     #[instrument(level = "trace", skip_all, fields(?cx), ret)]
     fn poll_complete(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
-        Poll::Ready(Ok(0))
+        Poll::Ready(Ok(self.cursor.position()))
     }
 }
 
@@ -311,7 +311,11 @@ impl virtual_fs::VirtualFile for IpfsFile {
 
     #[instrument(level = "trace", skip_all, fields(?cx), ret)]
     fn poll_read_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
-        Poll::Ready(Ok(0))
+        if self.size == 0 && self.cursor.position() == 0 {
+            return Poll::Ready(Ok(0));
+        }
+        let left: usize = self.size - usize::try_from(self.cursor.position()).unwrap() - 1;
+        Poll::Ready(Ok(left))
     }
 
     #[instrument(level = "trace", skip_all, fields(?cx), ret)]

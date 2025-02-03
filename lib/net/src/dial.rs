@@ -38,7 +38,7 @@ fn handle_discovered(d: &mut dyn Dialer, peers: Vec<(PeerId, Multiaddr)>) {
 
         let result = d.dial(opts);
         match result {
-            Ok(_) => tracing::info!("Dialed peer: {peer}"),
+            Ok(_) => tracing::debug!("Dialed peer: {peer}"),
             Err(e) => tracing::debug!("Failed to dial peer: {e}"),
         }
     }

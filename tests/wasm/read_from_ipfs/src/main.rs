@@ -1,12 +1,9 @@
 use std::fs;
 
 fn main() {
-    loop {
-        let file_content =
-            fs::read_to_string("/ipfs/QmeeD4LBwMxMkboCNvsoJ2aDwJhtsjFyoS1B9iMXiDcEqH");
-        match file_content {
-            Ok(s) => println!("{}", s),
-            Err(e) => println!("Error reading from file: {}", e),
-        }
+    let file_content = fs::read_to_string("/ipfs/QmeeLUVdiSTTKQqhWqsffYDtNvvvcTfJdotkNyi1KDEJtQ");
+    match file_content {
+        Ok(s) => assert_eq!(s, String::from("Hello, world!")),
+        Err(e) => panic!("Error reading from file: {}", e),
     }
 }

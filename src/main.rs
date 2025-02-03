@@ -21,13 +21,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .compact() // use abbreviated log format
-        // .with_file(true)
-        // .with_thread_ids(true)
+        // .with_max_level(tracing::Level::TRACE)
         .with_max_level(tracing::Level::INFO)
         .finish();
 
     // Set the subscriber as global default
-    tracing::subscriber::set_global_default(subscriber).unwrap();
+    tracing::subscriber::set_global_default(subscriber)?;
 
     // Create a MDNS network behaviour.
     let mdns_behaviour = mdns::tokio::Behaviour::new(mdns::Config::default(), config.peer_id())?;
@@ -88,22 +87,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     net::dial::default_mdns_handler(&mut swarm, event);
                 }
                 swarm::SwarmEvent::Behaviour(DefaultBehaviourEvent::Ping(event)) => {
-                    tracing::info!("got PING event: {event:?}");
+                    tracing::debug!("got PING event: {event:?}");
                 }
                 swarm::SwarmEvent::Behaviour(DefaultBehaviourEvent::Kad(event)) => {
-                    tracing::info!("got KAD event: {event:?}");
+                    tracing::debug!("got KAD event: {event:?}");
                 }
                 swarm::SwarmEvent::Behaviour(DefaultBehaviourEvent::Identify(event)) => {
-                    tracing::info!("got IDENTIFY event: {event:?}");
+                    tracing::debug!("got IDENTIFY event: {event:?}");
                 }
                 event => {
-                    tracing::info!("got event: {event:?}");
+                    tracing::debug!("got event: {event:?}");
                 }
             }
         }
     });
 
-    tracing::info!("Initialize IPFS client...");
+    tracing::debug!("Initialize IPFS client...");
     // The IPFS library we are using, ferristseng/rust-ipfs-api, requires multiformats::Multiaddr.
     let ipfs_client = net::ipfs::Client::new(config.ipfs_addr());
 
@@ -121,37 +120,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tracing::info!("Initialize WASM module instance...");
     let ipfs_fs = IpfsFs::new(ipfs_client);
     let ipfs_path = ipfs_fs.path();
+    // TODO: now that we have everything we need, we can set up an RPC listener that can be invoked
+    // an arbitrary number of time and keep server/client functionality appart.
     let shared_ipfs_fs = Arc::new(ipfs_fs) as Arc<dyn virtual_fs::FileSystem + Send + Sync>;
     let root_fs = RootFileSystemBuilder::new().build();
     root_fs.mount(ipfs_path.clone(), &shared_ipfs_fs, ipfs_path)?;
     let mut wasm_process = wasm_runtime.build(bytecode, root_fs)?;
+    // let mut wasm_process = wasm_runtime.build(bytecode, Box::new(ipfs_fs))?;
     wasm_process.run(wasm_runtime.store_mut())?;
+    tracing::info!("WASM module executed successfully.");
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use virtual_fs::FileSystem;
-
-    use super::*;
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn read_file() {
-        let ipfs_fs = IpfsFs::new(net::ipfs::Client::new(
-            "/ip4/127.0.0.1/tcp/5001".parse().unwrap(),
-        ));
-        let ipfs_path = ipfs_fs.path();
-        let shared_ipfs_fs = Arc::new(ipfs_fs) as Arc<dyn virtual_fs::FileSystem + Send + Sync>;
-        let root_fs = RootFileSystemBuilder::new().build();
-        root_fs
-            .mount(ipfs_path.clone(), &shared_ipfs_fs, ipfs_path)
-            .unwrap();
-        let file_res = root_fs
-            .new_open_options()
-            .read(true)
-            .open("/ipfs/QmeeD4LBwMxMkboCNvsoJ2aDwJhtsjFyoS1B9iMXiDcEqH");
-        assert!(file_res.is_ok());
-        let file = file_res.unwrap();
-        assert_eq!(file.size(), 0);
-    }
 }

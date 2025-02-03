@@ -44,17 +44,16 @@ impl WasmRuntime {
         &mut self,
         bytecode: Vec<u8>,
         fs: virtual_fs::TmpFileSystem,
+        // fs: Box<dyn virtual_fs::FileSystem + Send + Sync>,
     ) -> Result<WasmProcess, Box<dyn std::error::Error>> {
         let module = wasmer::Module::new(&self.store, bytecode).expect("couldn't load WASM module");
         let uuid = Uuid::new_v4();
-        let mut wasi_env = WasiEnv::builder(uuid)
-            .sandbox_fs(fs)
-            // .fs(fs)
-            // .preopen_build(|p| p.directory("/").read(true))?
-            // .preopen_build(|p| p.directory("./").read(true))?
-            // .args(&["arg1", "arg2"])
-            // .env("KEY", "VALUE")
-            .finalize(self.store_mut())?;
+        let pre_opens: Vec<String> = ["/", "/ipfs"].iter().map(|&s| s.to_string()).collect();
+        let mut wasi_env_builder = WasiEnv::builder(uuid);
+        wasi_env_builder = wasi_env_builder.sandbox_fs(fs);
+        // wasi_env_builder = wasi_env_builder.fs(fs);
+        wasi_env_builder.preopen_vfs_dirs(pre_opens).unwrap();
+        let mut wasi_env = wasi_env_builder.finalize(self.store_mut())?;
         let import_object = wasi_env.import_object(self.store_mut(), &module)?;
         let instance = wasmer::Instance::new(self.store_mut(), &module, &import_object)?;
 
