@@ -1,10 +1,13 @@
-TARGET_WASM := target/echo.wasm
+TARGET_WASM := target/wasm32-wasip1/release/echo.wasm
 
-all: build ipfs
+all: clean build ipfs
 
 build:
 	mkdir -p target
-	rustc src/main.rs -o $(TARGET_WASM) --target wasm32-wasip1
+	cargo build --target "wasm32-wasip1" --release
+
+clean:
+	rm -rf target
 
 hash:
 	@ipfs add --only-hash --quieter $(TARGET_WASM)

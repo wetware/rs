@@ -1,6 +1,8 @@
 use std::io;
+use wasm_bindgen::prelude::*;
 
-fn echo() {
+#[wasm_bindgen]
+pub fn echo() {
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
     let res = io::copy(&mut stdin, &mut stdout);
@@ -11,5 +13,5 @@ fn echo() {
 }
 
 fn main() {
-    echo();
+    // echo();
 }
