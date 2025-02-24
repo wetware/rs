@@ -1,10 +1,11 @@
-TARGET_WASM := target/wasm32-wasip1/release/echo.wasm
+ARCH := wasm32-wasip1
+TARGET_WASM := target/$(ARCH)/release/echo.wasm
 
 all: clean build ipfs
 
 build:
 	mkdir -p target
-	cargo build --target "wasm32-wasip1" --release
+	cargo build --target $(ARCH) --release
 
 clean:
 	rm -rf target

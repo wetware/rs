@@ -1,0 +1,15 @@
+[package]
+name = "echo"
+edition = "2021"
+publish = false
+version = "0.0.0"
+
+[workspace]
+
+[build]
+target = "wasm32-wasip1"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]

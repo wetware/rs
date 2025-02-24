@@ -1,8 +1,11 @@
 use std::io;
-use wasm_bindgen::prelude::*;
 
-#[wasm_bindgen]
-pub fn echo() {
+#[no_mangle]
+pub extern "C" fn echo() {
+    _echo()
+}
+
+fn _echo() {
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
     let res = io::copy(&mut stdin, &mut stdout);
