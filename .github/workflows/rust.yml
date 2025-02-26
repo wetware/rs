@@ -2,21 +2,41 @@ name: Rust
 
 on:
   push:
-    branches: [ "master" ]
+    branches: ["master"]
   pull_request:
-    branches: [ "master" ]
+    branches: ["master"]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v3
+      - name: Build
+        run: cargo build --verbose
+      - name: Run tests
+        run: cargo test --verbose
+
+  deploy:
+    runs-on: ubuntu-latest
+
+    needs: build
+    if: github.ref == 'refs/heads/master'
+    env:
+      SSH_DIR: /home/runner/.ssh
+      SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+
+    steps:
+      - name: SSH Key Setup
+        run: |
+          mkdir -p $SSH_DIR
+          ssh-keyscan ${{ secrets.SSH_HOST }} -p ${{ secrets.SSH_PORT || 22 }} >> $SSH_DIR/known_hosts
+          ssh-agent -a $SSH_AUTH_SOCK > /dev/null
+          ssh-add - <<< "${{ secrets.RSA_PRIVATE_KEY }}"
+
+      - name: SSH, Pull, and Build Main and Examples
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} -p ${{ secrets.SSH_PORT || 22 }} "cd $HOME/ww-rs && make build examples"
