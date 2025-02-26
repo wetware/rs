@@ -39,4 +39,4 @@ jobs:
 
       - name: SSH, Pull, and Build Main and Examples
         run: |
-          ssh -tt ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} -p ${{ secrets.SSH_PORT || 22 }} "cd ~/ww-rs && git checkout master && git pull && make build examples"
+          ssh -tt ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} -p ${{ secrets.SSH_PORT || 22 }} "export PATH=$PATH:~/.cargo/bin && cd ~/ww-rs && git checkout master && git pull && make build examples"
