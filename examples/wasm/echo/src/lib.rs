@@ -14,7 +14,3 @@ fn _echo() {
         Err(e) => panic!("{}", e),
     }
 }
-
-fn main() {
-    // echo();
-}
