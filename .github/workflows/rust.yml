@@ -39,4 +39,4 @@ jobs:
 
       - name: SSH, Pull, and Build Main and Examples
         run: |
-          ssh -t ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} -p ${{ secrets.SSH_PORT || 22 }} "whoami && echo $HOME && cd ~/ww-rs && git checkout master && git pull && make build examples"
+          ssh -tt ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} -p ${{ secrets.SSH_PORT || 22 }} "cd ~/ww-rs && git checkout master && git pull && make build examples"
