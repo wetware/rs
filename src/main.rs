@@ -63,7 +63,7 @@ struct AppBehaviour {
 
 struct SwarmManager {
     swarm: Swarm<AppBehaviour>,
-    #[allow(dead_code)]  // TODO:  remove once we start using the peer_id
+    #[allow(dead_code)] // TODO:  remove once we start using the peer_id
     peer_id: PeerId,
 }
 
