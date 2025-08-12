@@ -3,6 +3,7 @@ use libp2p::{
     identity,
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
     Multiaddr, PeerId,
+    kad::{Event as KademliaEvent, QueryResult, RecordKey},
 };
 use serde_json::Value;
 use std::time::Duration;
@@ -19,7 +20,7 @@ struct Args {
 }
 
 /// Query a Kubo node to get its peer list
-async fn get_kubo_peers(kubo_url: &str) -> Result<Vec<Multiaddr>> {
+async fn get_kubo_peers(kubo_url: &str) -> Result<Vec<(PeerId, Multiaddr)>> {
     let client = reqwest::Client::new();
     let url = format!("{}/api/v0/swarm/peers", kubo_url);
     
@@ -34,10 +35,12 @@ async fn get_kubo_peers(kubo_url: &str) -> Result<Vec<Multiaddr>> {
     
     let mut peer_addrs = Vec::new();
     for peer in peers {
-        // The Kubo API returns "Addr" (singular) not "Addrs"
-        if let Some(addr_str) = peer["Addr"].as_str() {
-            if let Ok(multiaddr) = addr_str.parse::<Multiaddr>() {
-                peer_addrs.push(multiaddr);
+        // The Kubo API returns "Addr" (multiaddr) and "Peer" (peer ID) separately
+        if let (Some(addr_str), Some(peer_id_str)) = (peer["Addr"].as_str(), peer["Peer"].as_str()) {
+            if let (Ok(multiaddr), Ok(peer_id)) = (addr_str.parse::<Multiaddr>(), peer_id_str.parse::<PeerId>()) {
+                // Construct the full multiaddr with peer ID
+                let full_addr = multiaddr.with(libp2p::multiaddr::Protocol::P2p(peer_id));
+                peer_addrs.push((peer_id, full_addr));
             }
         }
     }
@@ -46,13 +49,140 @@ async fn get_kubo_peers(kubo_url: &str) -> Result<Vec<Multiaddr>> {
     Ok(peer_addrs)
 }
 
+#[derive(NetworkBehaviour)]
+struct AppBehaviour {
+    kad: libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>,
+}
+
+struct SwarmManager {
+    swarm: Swarm<AppBehaviour>,
+    peer_id: PeerId,
+}
+
+impl SwarmManager {
+    fn new(swarm: Swarm<AppBehaviour>, peer_id: PeerId) -> Self {
+        Self { swarm, peer_id }
+    }
+
+    async fn bootstrap_dht(&mut self, bootstrap_peers: Vec<(PeerId, Multiaddr)>) -> Result<()> {
+        println!("Bootstrapping DHT with {} peers...", bootstrap_peers.len());
+        
+        for (peer_id, peer_addr) in bootstrap_peers {
+            // Add the peer to Kademlia's routing table
+            self.swarm.behaviour_mut().kad.add_address(&peer_id, peer_addr.clone());
+            println!("Added bootstrap peer {} at {}", peer_id, peer_addr);
+            
+            // Start a bootstrap query to this peer
+            let _ = self.swarm.behaviour_mut().kad.bootstrap();
+        }
+        Ok(())
+    }
+
+    async fn announce_provider(&mut self, key: &str) -> Result<()> {
+        let record_key = RecordKey::new(&key.as_bytes());
+        let _ = self.swarm.behaviour_mut().kad.start_providing(record_key);
+        println!("Started providing key: {}", key);
+        Ok(())
+    }
+
+    async fn query_providers(&mut self, key: &str) -> Result<()> {
+        let record_key = RecordKey::new(&key.as_bytes());
+        self.swarm.behaviour_mut().kad.get_providers(record_key);
+        println!("Querying providers for key: {}", key);
+        Ok(())
+    }
+
+    async fn run_event_loop(&mut self) -> Result<()> {
+        println!("Starting DHT event loop...");
+        
+        loop {
+            match self.swarm.next().await {
+                Some(SwarmEvent::Behaviour(AppBehaviourEvent::Kad(event))) => {
+                    match event {
+                        KademliaEvent::OutboundQueryProgressed { result, .. } => {
+                            match result {
+                                QueryResult::GetProviders(Ok(providers_result)) => {
+                                    match providers_result {
+                                        libp2p::kad::GetProvidersOk::FoundProviders { providers, .. } => {
+                                            println!("Found {} providers:", providers.len());
+                                            for provider in providers {
+                                                println!("  Provider: {}", provider);
+                                            }
+                                        }
+                                        libp2p::kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. } => {
+                                            println!("Finished querying providers with no additional records");
+                                        }
+                                    }
+                                }
+                                QueryResult::GetProviders(Err(e)) => {
+                                    println!("Failed to get providers: {:?}", e);
+                                }
+                                QueryResult::StartProviding(Ok(_)) => {
+                                    println!("Successfully started providing key");
+                                }
+                                QueryResult::StartProviding(Err(e)) => {
+                                    println!("Failed to start providing: {:?}", e);
+                                }
+                                QueryResult::Bootstrap(Ok(_)) => {
+                                    println!("DHT bootstrap completed successfully!");
+                                }
+                                QueryResult::Bootstrap(Err(e)) => {
+                                    println!("DHT bootstrap failed: {:?}", e);
+                                }
+                                _ => {}
+                            }
+                        }
+                        KademliaEvent::InboundRequest { request, .. } => {
+                            match request {
+                                libp2p::kad::InboundRequest::GetProvider { .. } => {
+                                    println!("Received GetProvider request");
+                                }
+                                libp2p::kad::InboundRequest::GetRecord { .. } => {
+                                    println!("Received GetRecord request");
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Some(SwarmEvent::NewListenAddr { address, .. }) => {
+                    println!("Listening on: {}", address);
+                }
+                Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
+                    println!("Connected to peer: {}", peer_id);
+                }
+                Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
+                    println!("Disconnected from peer: {}", peer_id);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Build a simple libp2p host
-async fn build_host() -> Result<(identity::Keypair, PeerId, Vec<Multiaddr>, Swarm<impl NetworkBehaviour>)> {
+async fn build_host() -> Result<(identity::Keypair, PeerId, Vec<Multiaddr>, Swarm<AppBehaviour>)> {
     // Generate Ed25519 keypair
     let keypair = identity::Keypair::generate_ed25519();
     let peer_id = PeerId::from(keypair.public());
 
-    // Use SwarmBuilder to create a simple swarm
+    // Create Kademlia behaviour with MemoryStore
+    let mut kademlia_config = libp2p::kad::Config::new(libp2p::swarm::StreamProtocol::new("/ipfs/kad/1.0.0"));
+    kademlia_config.set_periodic_bootstrap_interval(Some(Duration::from_secs(30)));
+    
+    let mut kademlia = libp2p::kad::Behaviour::with_config(
+        peer_id,
+        libp2p::kad::store::MemoryStore::new(peer_id),
+        kademlia_config,
+    );
+    
+    // Set Kademlia to client mode (we're not a bootstrap node)
+    kademlia.set_mode(Some(libp2p::kad::Mode::Client));
+
+    let behaviour = AppBehaviour { kad: kademlia };
+
+    // Use SwarmBuilder to create a swarm with Kademlia
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone())
         .with_tokio()
         .with_tcp(
@@ -60,10 +190,7 @@ async fn build_host() -> Result<(identity::Keypair, PeerId, Vec<Multiaddr>, Swar
             libp2p::noise::Config::new,
             libp2p::yamux::Config::default,
         )?
-        .with_behaviour(|_| {
-            // Use a simple dummy behaviour for now
-            libp2p::swarm::dummy::Behaviour
-        })
+        .with_behaviour(|_| behaviour)
         .unwrap()
         .build();
 
@@ -103,13 +230,13 @@ async fn main() -> Result<()> {
         println!("Warning: No peers found from Kubo node");
     } else {
         println!("Found {} peers from Kubo node", kubo_peers.len());
-        for (i, peer) in kubo_peers.iter().enumerate() {
-            println!("  Peer {}: {}", i + 1, peer);
+        for (i, (peer_id, peer_addr)) in kubo_peers.iter().enumerate() {
+            println!("  Peer {}: {} (ID: {})", i + 1, peer_addr, peer_id);
         }
     }
 
     // 2. Build the host
-    let (_keypair, peer_id, listen_addrs, _swarm) = build_host().await?;
+    let (_keypair, peer_id, listen_addrs, swarm) = build_host().await?;
     
     println!("Local PeerId: {}", peer_id);
     if listen_addrs.is_empty() {
@@ -117,6 +244,22 @@ async fn main() -> Result<()> {
     } else {
         println!("Listening on: {:?}", listen_addrs);
     }
+
+    // 3. Create SwarmManager and bootstrap DHT
+    let mut swarm_manager = SwarmManager::new(swarm, peer_id);
+    
+    // Bootstrap DHT with peers from Kubo
+    swarm_manager.bootstrap_dht(kubo_peers).await?;
+    
+    // Announce ourselves as a provider of "ww"
+    swarm_manager.announce_provider("ww").await?;
+    
+    // Query for providers of "ww" to see if we can find ourselves
+    swarm_manager.query_providers("ww").await?;
+    
+    // 4. Run the DHT event loop
+    println!("Starting DHT event loop...");
+    swarm_manager.run_event_loop().await?;
 
     println!("Application ready! This is a basic working version.");
     println!("To add DHT functionality, we need to resolve the libp2p-kad feature issue.");
