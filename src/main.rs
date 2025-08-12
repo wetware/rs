@@ -11,8 +11,8 @@ use serde_json::Value;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "basic-p2p")]
-#[command(about = "A minimal Rust libp2p app that joins the IPFS DHT via a Kubo node")]
+#[command(name = "ww")]
+#[command(about = "P2P sandbox for Web3 applications that execute untrusted code on public networks.")]
 struct Args {
     /// Kubo node HTTP API endpoint (e.g., http://127.0.0.1:5001)
     #[arg(required = true)]
