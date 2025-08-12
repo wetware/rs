@@ -10,18 +10,12 @@ use serde_json::Value;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
+use crate::config::HostConfig;
+
 // IPFS protocol constants for DHT compatibility
 // These protocols ensure our node can communicate with the IPFS network
 const IPFS_KADEMLIA_PROTOCOL: &str = "/ipfs/kad/1.0.0"; // Standard IPFS DHT protocol
 const IPFS_IDENTIFY_PROTOCOL: &str = "/ipfs/id/1.0.0"; // Standard IPFS identify protocol
-
-// Default IPFS node URL
-const DEFAULT_IPFS_URL: &str = "http://localhost:5001";
-
-/// Get the IPFS node URL from environment variable or use default
-pub fn get_ipfs_url() -> String {
-    std::env::var("WW_IPFS").unwrap_or_else(|_| DEFAULT_IPFS_URL.to_string())
-}
 
 /// Query a Kubo node to get its peer list for DHT bootstrap
 /// This function retrieves the list of peers that our local Kubo node is connected to,
@@ -220,6 +214,7 @@ impl SwarmManager {
                     }
                     _ => {}
                 },
+
                 Some(SwarmEvent::NewListenAddr { address, .. }) => {
                     info!(address = %address, "Listening on address");
                 }
@@ -249,10 +244,11 @@ impl SwarmManager {
     }
 }
 
-/// Build a libp2p host with IPFS-compatible protocols
-/// This function creates a libp2p swarm configured to use standard IPFS protocols
-/// for Kademlia DHT and identify, ensuring compatibility with the IPFS network.
-pub async fn build_host() -> Result<(identity::Keypair, PeerId, Swarm<AppBehaviour>)> {
+/// Build a libp2p host with IPFS-compatible protocols and enhanced features
+pub async fn build_host(
+    config: Option<HostConfig>,
+) -> Result<(identity::Keypair, PeerId, Swarm<AppBehaviour>)> {
+    let config = config.unwrap_or_default();
     let span = tracing::info_span!("build_host");
     let _enter = span.enter();
 
@@ -263,11 +259,16 @@ pub async fn build_host() -> Result<(identity::Keypair, PeerId, Swarm<AppBehavio
     info!(peer_id = %peer_id, "Generated Ed25519 keypair");
 
     // Create Kademlia behaviour with IPFS-compatible protocol
-    // Using the standard IPFS DHT protocol ensures we can communicate with IPFS nodes
     let mut kademlia_config =
         libp2p::kad::Config::new(libp2p::swarm::StreamProtocol::new(IPFS_KADEMLIA_PROTOCOL));
-    // Don't set periodic bootstrap - we'll do it manually when ready
-    kademlia_config.set_periodic_bootstrap_interval(None);
+
+    if config.periodic_bootstrap {
+        kademlia_config.set_periodic_bootstrap_interval(Some(Duration::from_secs(60)));
+        info!("Enabled periodic DHT bootstrap (every 60 seconds)");
+    } else {
+        kademlia_config.set_periodic_bootstrap_interval(None);
+        info!("Disabled periodic DHT bootstrap (manual only)");
+    }
 
     info!("Created Kademlia configuration");
 
@@ -291,25 +292,26 @@ pub async fn build_host() -> Result<(identity::Keypair, PeerId, Swarm<AppBehavio
         ),
     };
 
-    // Use SwarmBuilder to create a swarm with Kademlia
-    let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone())
+    // Use SwarmBuilder to create a swarm with enhanced transport
+    let swarm_builder = libp2p::SwarmBuilder::with_existing_identity(keypair.clone())
         .with_tokio()
         .with_tcp(
             Default::default(),
             libp2p::noise::Config::new,
             libp2p::yamux::Config::default,
-        )?
-        .with_behaviour(|_| behaviour)
-        .unwrap()
-        .build();
+        )?;
 
-    info!("Built libp2p swarm");
+    // Build the swarm with the configured behaviour
+    let mut swarm = swarm_builder.with_behaviour(|_| behaviour).unwrap().build();
 
-    // Listen on all interfaces with random port
-    let listen_addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse()?;
-    swarm.listen_on(listen_addr.clone())?;
+    info!("Built libp2p swarm with enhanced features");
 
-    info!(listen_addr = %listen_addr, "Started listening on address");
+    // Listen on all interfaces with random port for TCP
+    let tcp_listen_addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse()?;
+    swarm.listen_on(tcp_listen_addr.clone())?;
+    info!(listen_addr = %tcp_listen_addr, "Started listening on TCP");
+
+    info!("Host setup completed with configuration: {:?}", config);
 
     Ok((keypair, peer_id, swarm))
 }

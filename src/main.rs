@@ -1,108 +1,30 @@
 use anyhow::Result;
-use clap::Parser;
 use tracing::{debug, info, warn};
 
 mod boot;
-use boot::{build_host, get_ipfs_url, get_kubo_peers, SwarmManager};
-
-/// Log level options
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LogLevel {
-    Trace,
-    Debug,
-    Info,
-    Warn,
-    Error,
-}
-
-impl std::str::FromStr for LogLevel {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "trace" => Ok(LogLevel::Trace),
-            "debug" => Ok(LogLevel::Debug),
-            "info" => Ok(LogLevel::Info),
-            "warn" => Ok(LogLevel::Warn),
-            "error" => Ok(LogLevel::Error),
-            _ => Err(format!(
-                "Invalid log level: {}. Must be one of: trace, debug, info, warn, error",
-                s
-            )),
-        }
-    }
-}
-
-impl std::fmt::Display for LogLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LogLevel::Trace => write!(f, "trace"),
-            LogLevel::Debug => write!(f, "debug"),
-            LogLevel::Info => write!(f, "info"),
-            LogLevel::Warn => write!(f, "warn"),
-            LogLevel::Error => write!(f, "error"),
-        }
-    }
-}
-
-/// Get the log level from environment variable or use default
-fn get_log_level() -> LogLevel {
-    std::env::var("WW_LOGLVL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| LogLevel::Info)
-}
-
-#[derive(Parser)]
-#[command(name = "ww")]
-#[command(
-    about = "P2P sandbox for Web3 applications that execute untrusted code on public networks."
-)]
-struct Args {
-    /// IPFS node HTTP API endpoint (e.g., http://127.0.0.1:5001)
-    /// If not provided, uses WW_IPFS environment variable or defaults to http://localhost:5001
-    #[arg(long)]
-    ipfs: Option<String>,
-
-    /// Log level (trace, debug, info, warn, error)
-    /// If not provided, uses WW_LOGLVL environment variable or defaults to info
-    #[arg(long, value_name = "LEVEL")]
-    loglvl: Option<LogLevel>,
-}
+mod config;
+use boot::{build_host, get_kubo_peers, SwarmManager};
+use clap::Parser;
+use config::{init_tracing, AppConfig, Args};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Get IPFS URL from command line argument, environment variable, or default
-    let ipfs_url = args.ipfs.unwrap_or_else(get_ipfs_url);
+    // Create application configuration from command line arguments and environment
+    let app_config = AppConfig::from_args_and_env(&args);
 
-    // Get log level from command line argument, environment variable, or default
-    let log_level = args.loglvl.unwrap_or_else(get_log_level);
-
-    // Initialize tracing subscriber with the determined log level
-    let env_filter = if let Some(cli_level) = args.loglvl {
-        // Command line flag takes precedence
-        format!("ww={},libp2p={}", cli_level, cli_level).into()
-    } else {
-        // Use environment variable or default
-        tracing_subscriber::EnvFilter::try_from_env("WW_LOGLVL")
-            .unwrap_or_else(|_| format!("ww={},libp2p={}", log_level, log_level).into())
-    };
-
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(true)
-        .with_thread_ids(true)
-        .with_thread_names(true)
-        .init();
+    // Initialize tracing with the determined log level
+    init_tracing(app_config.log_level, args.loglvl);
 
     info!("Starting basic-p2p application");
-    info!(ipfs_url = %ipfs_url, log_level = %log_level, "Bootstrap IPFS node");
+
+    // Log the configuration summary
+    app_config.log_summary();
 
     // 1. Query Kubo node to get its peers for DHT bootstrap
     let kubo_start = std::time::Instant::now();
-    let kubo_peers = get_kubo_peers(&ipfs_url).await?;
+    let kubo_peers = get_kubo_peers(&app_config.ipfs_url).await?;
     let kubo_duration = kubo_start.elapsed();
 
     if kubo_peers.is_empty() {
@@ -118,9 +40,10 @@ async fn main() -> Result<()> {
         "Kubo peer discovery completed"
     );
 
-    // 2. Build the host
+    // 2. Build the host with configuration
     let host_start = std::time::Instant::now();
-    let (_keypair, peer_id, swarm) = build_host().await?;
+
+    let (_keypair, peer_id, swarm) = build_host(Some(app_config.host_config)).await?;
     let host_duration = host_start.elapsed();
 
     info!(peer_id = %peer_id, "Local PeerId");
@@ -171,7 +94,9 @@ async fn main() -> Result<()> {
     );
 
     // 4. Run the DHT event loop
+    info!("Starting DHT event loop - press Ctrl+C to exit");
     swarm_manager.run_event_loop().await?;
 
+    info!("Application shutdown complete");
     Ok(())
 }
