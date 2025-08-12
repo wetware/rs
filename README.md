@@ -18,10 +18,13 @@ A minimal Rust libp2p application that connects to a local Kubo (IPFS) node and 
    kubo daemon
    ```
 
-2. **Rust toolchain**
+2. **Rust toolchain (nightly required)**
    ```bash
-   rustup install stable
+   rustup install nightly
+   rustup default nightly
    ```
+   
+   **Note**: This project requires Rust nightly due to dependencies that use `edition2024` features. The nightly toolchain provides access to these experimental features.
 
 ## Usage
 
@@ -51,6 +54,89 @@ A minimal Rust libp2p application that connects to a local Kubo (IPFS) node and 
    export WW_LOGLVL=debug
    cargo run
    ```
+
+## Docker Support
+
+The project includes a multi-stage Docker build for containerized deployment and distribution.
+
+### Building with Podman
+
+```bash
+# Build the container image
+make podman-build
+# or
+podman build -t wetware:latest .
+
+# Run the container
+make podman-run
+# or
+podman run --rm -it wetware:latest
+
+# Clean up container images
+make podman-clean
+```
+
+### Container Features
+
+- **Multi-stage build**: Optimizes image size by separating build and runtime stages
+- **Security**: Runs as non-root user (`wetware`)
+- **Efficient caching**: Leverages container layer caching for faster builds
+- **Minimal runtime**: Based on Debian Bookworm slim for smaller footprint
+
+### Podman Compose (Optional)
+
+Create a `docker-compose.yml` for easy development (works with both Docker and Podman):
+
+```yaml
+version: '3.8'
+services:
+  wetware:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - WW_IPFS=http://host.docker.internal:5001
+      - WW_LOGLVL=info
+    volumes:
+      - ./config:/app/config
+```
+
+## CI/CD Pipeline
+
+The project includes GitHub Actions workflows for automated testing, building, and publishing.
+
+### Workflow Features
+
+- **Automated Testing**: Runs on every push and pull request
+- **Code Quality**: Includes formatting checks and clippy linting
+- **Release Automation**: Automatically builds and publishes artifacts on releases
+- **Docker Integration**: Builds and pushes Docker images to registry
+- **Artifact Publishing**: Creates distributable binaries and archives
+
+### Triggering Releases
+
+1. **Create a GitHub release** with a semantic version tag (e.g., `v1.0.0`)
+2. **Workflow automatically**:
+   - Builds the Rust application
+   - Creates release artifacts (binary + tarball)
+   - Builds and pushes Docker images
+   - Uploads artifacts to GitHub releases
+
+### Required Secrets
+
+For Docker publishing, set these repository secrets:
+- `DOCKER_USERNAME`: Your Docker Hub username
+- `DOCKER_PASSWORD`: Your Docker Hub access token
+
+### Manual Workflow Triggers
+
+```bash
+# Test only
+gh workflow run rust.yml --ref main
+
+# Build Docker image (on main branch)
+gh workflow run rust.yml --ref main
+```
 
 ## Logging Configuration
 
