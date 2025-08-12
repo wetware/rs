@@ -1,0 +1,38 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+README.md
+docs/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Docker
+Dockerfile*
+.dockerignore
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
