@@ -19,9 +19,54 @@ const IPFS_IDENTIFY_PROTOCOL: &str = "/ipfs/id/1.0.0";    // Standard IPFS ident
 // Default IPFS node URL
 const DEFAULT_IPFS_URL: &str = "http://localhost:5001";
 
+/// Log level options
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl std::str::FromStr for LogLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "trace" => Ok(LogLevel::Trace),
+            "debug" => Ok(LogLevel::Debug),
+            "info" => Ok(LogLevel::Info),
+            "warn" => Ok(LogLevel::Warn),
+            "error" => Ok(LogLevel::Error),
+            _ => Err(format!("Invalid log level: {}. Must be one of: trace, debug, info, warn, error", s)),
+        }
+    }
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LogLevel::Trace => write!(f, "trace"),
+            LogLevel::Debug => write!(f, "debug"),
+            LogLevel::Info => write!(f, "info"),
+            LogLevel::Warn => write!(f, "warn"),
+            LogLevel::Error => write!(f, "error"),
+        }
+    }
+}
+
 /// Get the IPFS node URL from environment variable or use default
 fn get_ipfs_url() -> String {
     std::env::var("WW_IPFS").unwrap_or_else(|_| DEFAULT_IPFS_URL.to_string())
+}
+
+/// Get the log level from environment variable or use default
+fn get_log_level() -> LogLevel {
+    std::env::var("WW_LOGLVL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| LogLevel::Info)
 }
 
 #[derive(Parser)]
@@ -34,6 +79,11 @@ struct Args {
     /// If not provided, uses WW_IPFS environment variable or defaults to http://localhost:5001
     #[arg(long)]
     ipfs: Option<String>,
+
+    /// Log level (trace, debug, info, warn, error)
+    /// If not provided, uses WW_LOGLVL environment variable or defaults to info
+    #[arg(long, value_name = "LEVEL")]
+    loglvl: Option<LogLevel>,
 }
 
 /// Query a Kubo node to get its peer list for DHT bootstrap
@@ -322,9 +372,23 @@ async fn build_host() -> Result<(identity::Keypair, PeerId, Swarm<AppBehaviour>)
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing subscriber with better configuration
-    let env_filter = tracing_subscriber::EnvFilter::try_from_env("WW_LOGLVL")
-        .unwrap_or_else(|_| "ww=info,libp2p=debug".into());
+    let args = Args::parse();
+
+    // Get IPFS URL from command line argument, environment variable, or default
+    let ipfs_url = args.ipfs.unwrap_or_else(get_ipfs_url);
+
+    // Get log level from command line argument, environment variable, or default
+    let log_level = args.loglvl.unwrap_or_else(get_log_level);
+
+    // Initialize tracing subscriber with the determined log level
+    let env_filter = if let Some(cli_level) = args.loglvl {
+        // Command line flag takes precedence
+        format!("ww={},libp2p={}", cli_level, cli_level).into()
+    } else {
+        // Use environment variable or default
+        tracing_subscriber::EnvFilter::try_from_env("WW_LOGLVL")
+            .unwrap_or_else(|_| format!("ww={},libp2p={}", log_level, log_level).into())
+    };
 
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
@@ -333,14 +397,9 @@ async fn main() -> Result<()> {
         .with_thread_names(true)
         .init();
 
-    let args = Args::parse();
-
-    // Get IPFS URL from command line argument, environment variable, or default
-    let ipfs_url = args.ipfs.unwrap_or_else(get_ipfs_url);
-
     let start_time = std::time::Instant::now();
     info!("Starting basic-p2p application");
-    info!(ipfs_url = %ipfs_url, "Bootstrap IPFS node");
+    info!(ipfs_url = %ipfs_url, log_level = %log_level, "Bootstrap IPFS node");
 
     // 1. Query Kubo node to get its peers for DHT bootstrap
     let kubo_start = std::time::Instant::now();

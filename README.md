@@ -30,17 +30,25 @@ A minimal Rust libp2p application that connects to a local Kubo (IPFS) node and 
    kubo daemon
    ```
 
-2. **Run the application** (IPFS endpoint is now optional):
+2. **Run the application** (IPFS endpoint and log level are now configurable):
    ```bash
-   # Use default endpoint (http://localhost:5001)
+   # Use defaults (http://localhost:5001, info log level)
    cargo run
    
-   # Or specify custom endpoint with --ipfs flag
+   # Custom IPFS endpoint
    cargo run -- --ipfs http://127.0.0.1:5001
    cargo run -- --ipfs http://192.168.1.100:5001
    
-   # Or use environment variable
+   # Custom log level
+   cargo run -- --loglvl debug
+   cargo run -- --loglvl trace
+   
+   # Combine both
+   cargo run -- --ipfs http://192.168.1.100:5001 --loglvl debug
+   
+   # Or use environment variables
    export WW_IPFS=http://192.168.1.100:5001
+   export WW_LOGLVL=debug
    cargo run
    ```
 
@@ -62,16 +70,18 @@ The application uses structured logging with the `tracing` crate. You can config
   export WW_IPFS=https://ipfs.example.com:5001
   ```
 
-- **`WW_LOGLVL`**: Controls the log level for different components
+- **`WW_LOGLVL`**: Controls the log level (trace, debug, info, warn, error)
   ```bash
-  # Set default log level
-  export WW_LOGLVL=ww=info,libp2p=debug
+  # Set log level for all components
+  export WW_LOGLVL=info
   
   # More verbose logging
-  export WW_LOGLVL=ww=debug,libp2p=trace
+  export WW_LOGLVL=debug
+  export WW_LOGLVL=trace
   
   # Only show warnings and errors
-  export WW_LOGLVL=ww=warn
+  export WW_LOGLVL=warn
+  export WW_LOGLVL=error
   ```
 
 ### Log Levels
