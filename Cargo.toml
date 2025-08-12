@@ -1,25 +1,17 @@
 [package]
-name = "ww"
+name = "basic-p2p"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[workspace]
-members = ["lib/fs", "lib/net", "lib/proc"]
-
 [dependencies]
-anyhow = "1"
-clap = { version = "4.5.27", features = ["derive"] }
-futures = "0.3.31"
-ipfs-api-backend-hyper = "0.6"
-libp2p = { version = "0.55.0", features = ["full"] }
-rand = "0.8"
-tokio = { version = "1.*", features = ["full"] }
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-wasmer-wasix = { version = "0.35" }
-
-fs = { path = "lib/fs" }
-net = { path = "lib/net" }
-proc = { path = "lib/proc" }
+libp2p = { version = "0.56.0", features = ["tokio", "tcp", "noise", "yamux", "macros", "kad"] }
+multiaddr = "0.18.2"
+anyhow = "1.0"
+tokio = { version = "1.47.1", features = ["full"] }
+reqwest = { version = "0.12.23", features = ["json"] }
+base64 = "0.22.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.142"
+futures = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.0", features = ["derive"] }
