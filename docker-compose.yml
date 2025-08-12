@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  wetware:
+    build: .
+    container_name: wetware-app
+    ports:
+      - "8080:8080"
+    environment:
+      - WW_IPFS=http://host.docker.internal:5001
+      - WW_LOGLVL=info
+    volumes:
+      - ./config:/app/config:ro
+    restart: unless-stopped
+    networks:
+      - wetware-net
+
+  # Optional: IPFS node for testing (uncomment if you don't have local IPFS)
+  # ipfs:
+  #   image: ipfs/kubo:latest
+  #   container_name: ipfs-node
+  #   ports:
+  #     - "4001:4001"   # P2P port
+  #     - "5001:5001"   # API port
+  #     - "8080:8080"   # Gateway port
+  #   volumes:
+  #     - ipfs-data:/data
+  #     - ipfs-staging:/export
+  #   restart: unless-stopped
+  #   networks:
+  #     - wetware-net
+
+networks:
+  wetware-net:
+    driver: bridge
+
+# volumes:
+#   ipfs-data:
+#   ipfs-staging:
