@@ -30,13 +30,18 @@ A minimal Rust libp2p application that connects to a local Kubo (IPFS) node and 
    kubo daemon
    ```
 
-2. **Run the application** with Kubo API endpoint:
+2. **Run the application** (IPFS endpoint is now optional):
    ```bash
-   # Connect to default Kubo API
-   cargo run -- http://127.0.0.1:5001
+   # Use default endpoint (http://localhost:5001)
+   cargo run
    
-   # Or specify custom endpoint
-   cargo run -- http://192.168.1.100:5001
+   # Or specify custom endpoint with --ipfs flag
+   cargo run -- --ipfs http://127.0.0.1:5001
+   cargo run -- --ipfs http://192.168.1.100:5001
+   
+   # Or use environment variable
+   export WW_IPFS=http://192.168.1.100:5001
+   cargo run
    ```
 
 ## Logging Configuration
@@ -44,6 +49,18 @@ A minimal Rust libp2p application that connects to a local Kubo (IPFS) node and 
 The application uses structured logging with the `tracing` crate. You can configure log levels using environment variables:
 
 ### Environment Variables
+
+- **`WW_IPFS`**: IPFS node HTTP API endpoint (defaults to http://localhost:5001)
+  ```bash
+  # Use default localhost endpoint
+  export WW_IPFS=http://localhost:5001
+  
+  # Use custom IPFS node
+  export WW_IPFS=http://192.168.1.100:5001
+  
+  # Use remote IPFS node
+  export WW_IPFS=https://ipfs.example.com:5001
+  ```
 
 - **`WW_LOGLVL`**: Controls the log level for different components
   ```bash
@@ -111,11 +128,12 @@ Application ready! Successfully joined the IPFS DHT network
 
 ## How It Works
 
-1. **Peer Discovery**: Queries local Kubo node's HTTP API to discover connected peers
-2. **Host Creation**: Generates Ed25519 keypair and creates libp2p swarm with IPFS-compatible protocols
-3. **DHT Bootstrap**: Adds discovered peers to Kademlia routing table and establishes connections
-4. **Network Integration**: Joins the IPFS DHT network and participates in DHT operations
-5. **DHT Operations**: Can provide content and query for providers in the IPFS network
+1. **Configuration**: Determines IPFS endpoint from command line, environment variable, or default
+2. **Peer Discovery**: Queries the configured IPFS node's HTTP API to discover connected peers
+3. **Host Creation**: Generates Ed25519 keypair and creates libp2p swarm with IPFS-compatible protocols
+4. **DHT Bootstrap**: Adds discovered peers to Kademlia routing table and establishes connections
+5. **Network Integration**: Joins the IPFS DHT network and participates in DHT operations
+6. **DHT Operations**: Can provide content and query for providers in the IPFS network
 
 ## DHT Bootstrap Process
 
@@ -145,10 +163,11 @@ This ensures the application can communicate with any IPFS node in the network, 
 ## Troubleshooting
 
 - **"IPFS API file not found"**: Make sure Kubo is running (`kubo daemon`)
-- **Connection errors**: Check if Kubo is listening on the expected port
+- **Connection errors**: Check if Kubo is listening on the expected port and endpoint
 - **DHT bootstrap failures**: Ensure Kubo has peers and the API endpoint is correct
 - **Protocol compatibility**: The application uses standard IPFS protocols for full compatibility
 - **RSA connection errors**: RSA support is included for legacy IPFS peers
+- **Configuration issues**: Check `WW_IPFS` environment variable for correct IPFS endpoint
 - **Logging issues**: Check `WW_LOGLVL` environment variable and ensure tracing is properly initialized
 
 ## Dependencies

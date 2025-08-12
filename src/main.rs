@@ -16,15 +16,24 @@ use tracing::{debug, error, info, warn};
 const IPFS_KADEMLIA_PROTOCOL: &str = "/ipfs/kad/1.0.0";  // Standard IPFS DHT protocol
 const IPFS_IDENTIFY_PROTOCOL: &str = "/ipfs/id/1.0.0";    // Standard IPFS identify protocol
 
+// Default IPFS node URL
+const DEFAULT_IPFS_URL: &str = "http://localhost:5001";
+
+/// Get the IPFS node URL from environment variable or use default
+fn get_ipfs_url() -> String {
+    std::env::var("WW_IPFS").unwrap_or_else(|_| DEFAULT_IPFS_URL.to_string())
+}
+
 #[derive(Parser)]
 #[command(name = "ww")]
 #[command(
     about = "P2P sandbox for Web3 applications that execute untrusted code on public networks."
 )]
 struct Args {
-    /// Kubo node HTTP API endpoint (e.g., http://127.0.0.1:5001)
-    #[arg(required = true)]
-    kubo_url: String,
+    /// IPFS node HTTP API endpoint (e.g., http://127.0.0.1:5001)
+    /// If not provided, uses WW_IPFS environment variable or defaults to http://localhost:5001
+    #[arg(long)]
+    ipfs: Option<String>,
 }
 
 /// Query a Kubo node to get its peer list for DHT bootstrap
@@ -326,13 +335,16 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // Get IPFS URL from command line argument, environment variable, or default
+    let ipfs_url = args.ipfs.unwrap_or_else(get_ipfs_url);
+
     let start_time = std::time::Instant::now();
     info!("Starting basic-p2p application");
-    info!(kubo_url = %args.kubo_url, "Bootstrap Kubo node");
+    info!(ipfs_url = %ipfs_url, "Bootstrap IPFS node");
 
     // 1. Query Kubo node to get its peers for DHT bootstrap
     let kubo_start = std::time::Instant::now();
-    let kubo_peers = get_kubo_peers(&args.kubo_url).await?;
+    let kubo_peers = get_kubo_peers(&ipfs_url).await?;
     let kubo_duration = kubo_start.elapsed();
 
     if kubo_peers.is_empty() {
