@@ -314,7 +314,7 @@ async fn build_host() -> Result<(identity::Keypair, PeerId, Swarm<AppBehaviour>)
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing subscriber with better configuration
-    let env_filter = tracing_subscriber::EnvFilter::try_from_env("WW_LOG")
+    let env_filter = tracing_subscriber::EnvFilter::try_from_env("WW_LOGLVL")
         .unwrap_or_else(|_| "ww=info,libp2p=debug".into());
 
     tracing_subscriber::fmt()

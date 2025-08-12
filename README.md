@@ -45,16 +45,16 @@ The application uses structured logging with the `tracing` crate. You can config
 
 ### Environment Variables
 
-- **`WW_LOG`**: Controls the log level for different components
+- **`WW_LOGLVL`**: Controls the log level for different components
   ```bash
   # Set default log level
-  export WW_LOG=ww=info,libp2p=debug
+  export WW_LOGLVL=ww=info,libp2p=debug
   
   # More verbose logging
-  export WW_LOG=ww=debug,libp2p=trace
+  export WW_LOGLVL=ww=debug,libp2p=trace
   
   # Only show warnings and errors
-  export WW_LOG=ww=warn
+  export WW_LOGLVL=ww=warn
   ```
 
 ### Log Levels
@@ -149,7 +149,7 @@ This ensures the application can communicate with any IPFS node in the network, 
 - **DHT bootstrap failures**: Ensure Kubo has peers and the API endpoint is correct
 - **Protocol compatibility**: The application uses standard IPFS protocols for full compatibility
 - **RSA connection errors**: RSA support is included for legacy IPFS peers
-- **Logging issues**: Check `WW_LOG` environment variable and ensure tracing is properly initialized
+- **Logging issues**: Check `WW_LOGLVL` environment variable and ensure tracing is properly initialized
 
 ## Dependencies
 
