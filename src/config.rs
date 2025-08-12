@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 /// Log level options
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,7 +181,7 @@ impl AppConfig {
         let log_level = args.loglvl.unwrap_or_else(get_log_level);
 
         let host_config = if args.env_config {
-            info!("Using host configuration from environment variables");
+            debug!("Using host configuration from environment variables");
             HostConfig::from_env()
         } else if let Some(preset) = &args.preset {
             match preset.as_str() {
@@ -212,13 +212,13 @@ impl AppConfig {
 
     /// Log the configuration summary
     pub fn log_summary(&self) {
-        info!(ipfs_url = %self.ipfs_url, log_level = %self.log_level, "Application configuration");
+        debug!(ipfs_url = %self.ipfs_url, log_level = %self.log_level, "Application configuration");
 
         if let Some(preset) = &self.get_preset_name() {
-            info!(preset = %preset, "Using preset host configuration");
+            debug!(preset = %preset, "Using preset host configuration");
         }
 
-        info!(summary = %self.host_config.summary(), "Host configuration");
+        debug!(summary = %self.host_config.summary(), "Host configuration");
 
         // Validate configuration and log warnings
         let warnings = self.host_config.validate();
