@@ -17,3 +17,10 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.0", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+capnp = "0.20"
+capnp-rpc = "0.20"
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1.0"
+
+[build-dependencies]
+capnpc = "0.20"

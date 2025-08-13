@@ -11,6 +11,8 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::config::HostConfig;
+use crate::rpc::WetwareStreamHandler;
+
 
 // IPFS protocol constants for DHT compatibility
 // These protocols ensure our node can communicate with the IPFS network
@@ -92,12 +94,18 @@ pub struct SwarmManager {
     swarm: Swarm<AppBehaviour>,
     #[allow(dead_code)] // TODO:  remove once we start using the peer_id
     peer_id: PeerId,
+    /// Wetware protocol handler for managing RPC connections
+    wetware_handler: WetwareStreamHandler,
 }
 
 impl SwarmManager {
     pub fn new(swarm: Swarm<AppBehaviour>, peer_id: PeerId) -> Self {
         debug!(peer_id = %peer_id, "Creating new SwarmManager");
-        Self { swarm, peer_id }
+        Self { 
+            swarm, 
+            peer_id,
+            wetware_handler: WetwareStreamHandler::new(),
+        }
     }
 
     /// Bootstrap the DHT by connecting to IPFS peers and triggering the bootstrap process
@@ -243,6 +251,22 @@ impl SwarmManager {
             .kad
             .add_address(peer_id, peer_addr.clone());
     }
+
+    /// Get the wetware protocol handler
+    pub fn get_wetware_handler(&self) -> &WetwareStreamHandler {
+        &self.wetware_handler
+    }
+
+    /// Get the wetware protocol handler mutably
+    pub fn get_wetware_handler_mut(&mut self) -> &mut WetwareStreamHandler {
+        &mut self.wetware_handler
+    }
+
+    /// Get the wetware protocol identifier
+    pub fn get_wetware_protocol(&self) -> &str {
+        crate::rpc::WW_PROTOCOL
+    }
+
 }
 
 /// Build a libp2p host with IPFS-compatible protocols and enhanced features
@@ -291,6 +315,7 @@ pub async fn build_host(
             libp2p::identify::Config::new(IPFS_IDENTIFY_PROTOCOL.to_string(), keypair.public())
                 .with_agent_version("ww/1.0.0".to_string()),
         ),
+
     };
 
     // Use SwarmBuilder to create a swarm with enhanced transport

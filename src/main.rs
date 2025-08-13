@@ -1,8 +1,11 @@
 use anyhow::Result;
 use tracing::{debug, info};
 
+mod auth;
+mod auth_capnp;
 mod boot;
 mod config;
+mod rpc;
 use boot::{build_host, get_kubo_peers, SwarmManager};
 use clap::Parser;
 use config::{init_tracing, AppConfig, Args};
@@ -58,6 +61,12 @@ async fn main() -> Result<()> {
 
     // 3. Create SwarmManager and bootstrap DHT
     let mut swarm_manager = SwarmManager::new(swarm, peer_id);
+    
+    // Log wetware protocol information
+    info!(
+        protocol = swarm_manager.get_wetware_protocol(),
+        "Wetware protocol available"
+    );
 
     // Add IPFS peers to Kademlia routing table for DHT bootstrap
     // This populates our routing table with known good peers before we start connecting
@@ -98,7 +107,9 @@ async fn main() -> Result<()> {
         "Provider query completed"
     );
 
-    // 4. Run the DHT event loop
+
+
+    // 6. Run the DHT event loop
     swarm_manager.run_event_loop().await?;
     Ok(())
 }
