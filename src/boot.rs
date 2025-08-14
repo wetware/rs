@@ -309,16 +309,11 @@ pub async fn build_host(
     debug!(peer_id = %peer_id, "Generated Ed25519 keypair");
 
     // Create Kademlia behaviour with IPFS-compatible protocol
-    let mut kademlia_config =
+    let kademlia_config =
         libp2p::kad::Config::new(libp2p::swarm::StreamProtocol::new(IPFS_KADEMLIA_PROTOCOL));
 
-    if config.periodic_bootstrap {
-        kademlia_config.set_periodic_bootstrap_interval(Some(Duration::from_secs(60)));
-        debug!("Enabled periodic DHT bootstrap (every 60 seconds)");
-    } else {
-        kademlia_config.set_periodic_bootstrap_interval(None);
-        debug!("Disabled periodic DHT bootstrap (manual only)");
-    }
+    // Removed periodic bootstrap logic - always use manual bootstrap only
+    debug!("Using manual DHT bootstrap only");
 
     debug!("Created Kademlia configuration");
 

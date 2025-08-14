@@ -44,16 +44,11 @@ impl std::fmt::Display for LogLevel {
 
 /// Configuration for libp2p host features
 #[derive(Debug, Clone, PartialEq)]
-pub struct HostConfig {
-    /// Enable periodic DHT bootstrap (default: false)
-    pub periodic_bootstrap: bool,
-}
+pub struct HostConfig {}
 
 impl Default for HostConfig {
     fn default() -> Self {
-        Self {
-            periodic_bootstrap: false,
-        }
+        Self {}
     }
 }
 
@@ -66,20 +61,7 @@ impl HostConfig {
     /// use config::HostConfig;
     ///
     /// // Basic usage
-    /// let config = HostConfig::builder()
-    ///     .periodic_bootstrap(true)
-    ///     .build();
-    ///
-    /// // Using convenience methods
-    /// let config = HostConfig::builder()
-    ///     .enable_periodic_bootstrap()
-    ///     .build();
-    ///
-    /// // Starting from a preset and customizing
-    /// let config = HostConfig::builder()
-    ///     .from_preset("development")
-    ///     .enable_periodic_bootstrap()
-    ///     .build();
+    /// let config = HostConfig::builder().build();
     ///
     /// // Using presets directly
     /// let config = HostConfig::minimal();
@@ -95,36 +77,22 @@ impl HostConfig {
 
     /// Create a minimal configuration with only essential features enabled
     pub fn minimal() -> Self {
-        Self {
-            periodic_bootstrap: false,
-        }
+        Self {}
     }
 
     /// Create a development configuration with most features enabled
     pub fn development() -> Self {
-        Self {
-            periodic_bootstrap: false,
-        }
+        Self {}
     }
 
     /// Create a production configuration with all features enabled
     pub fn production() -> Self {
-        Self {
-            periodic_bootstrap: true,
-        }
+        Self {}
     }
 
     /// Create configuration from environment variables
     pub fn from_env() -> Self {
-        let mut builder = Self::builder();
-
-        if let Ok(val) = std::env::var("WW_PERIODIC_BOOTSTRAP") {
-            if let Ok(enabled) = val.parse::<bool>() {
-                builder = builder.periodic_bootstrap(enabled);
-            }
-        }
-
-        builder.build()
+        Self::builder().build()
     }
 
     /// Validate the configuration and return any warnings
@@ -137,32 +105,18 @@ impl HostConfig {
 
     /// Get a human-readable summary of the configuration
     pub fn summary(&self) -> String {
-        if self.periodic_bootstrap {
-            "Features: Periodic Bootstrap".to_string()
-        } else {
-            "Minimal (TCP only)".to_string()
-        }
+        "Minimal (TCP only)".to_string()
     }
 }
 
 /// Builder for HostConfig
 #[derive(Debug, Default, Clone)]
-pub struct HostConfigBuilder {
-    periodic_bootstrap: Option<bool>,
-}
+pub struct HostConfigBuilder {}
 
 impl HostConfigBuilder {
-    /// Enable or disable periodic DHT bootstrap
-    pub fn periodic_bootstrap(mut self, enabled: bool) -> Self {
-        self.periodic_bootstrap = Some(enabled);
-        self
-    }
-
     /// Build the HostConfig
     pub fn build(self) -> HostConfig {
-        HostConfig {
-            periodic_bootstrap: self.periodic_bootstrap.unwrap_or(false),
-        }
+        HostConfig {}
     }
 }
 
@@ -194,12 +148,7 @@ impl AppConfig {
                 }
             }
         } else {
-            let mut builder = HostConfig::builder();
-
-            if args.periodic_bootstrap {
-                builder = builder.periodic_bootstrap(true);
-            }
-
+            let builder = HostConfig::builder();
             builder.build()
         };
 
@@ -258,10 +207,6 @@ pub struct Args {
     /// If not provided, uses WW_LOGLVL environment variable or defaults to info
     #[arg(long, value_name = "LEVEL")]
     pub loglvl: Option<LogLevel>,
-
-    /// Enable periodic DHT bootstrap (default: false)
-    #[arg(long)]
-    pub periodic_bootstrap: bool,
 
     /// Use preset configuration (minimal, development, production)
     #[arg(long, value_name = "PRESET")]
