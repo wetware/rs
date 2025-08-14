@@ -5,8 +5,9 @@ use libp2p::swarm::{ConnectionId, StreamProtocol};
 use std::collections::HashMap;
 use tokio_util::codec::{Decoder, Encoder};
 use tracing::{debug, info};
+use std::sync::{Arc, Mutex};
 
-use crate::swarm_capnp::swarm_capnp::{exporter, importer};
+use crate::service_manager::ServiceManager;
 
 // Protocol identifier for wetware
 pub const WW_PROTOCOL: &str = "/ww/0.1.0";
@@ -220,14 +221,13 @@ impl ListenerHandle {
 
 /// Swarm capabilities structure
 pub struct SwarmCapabilities {
-    pub importer: importer::Client,
-    pub exporter: exporter::Client,
+    pub service_manager: ServiceManager,
 }
 
 /// Default RPC server implementation using Cap'n Proto RPC
 pub struct DefaultRpcServer {
-    /// The swarm capabilities being exported
-    swarm_capabilities: SwarmCapabilities,
+    /// The service manager for handling import/export requests
+    service_manager: Arc<Mutex<ServiceManager>>,
     /// The underlying stream
     stream: DefaultStream<libp2p::Stream>,
 }
@@ -235,24 +235,24 @@ pub struct DefaultRpcServer {
 impl DefaultRpcServer {
     pub fn new(
         stream: DefaultStream<libp2p::Stream>,
-        swarm_capabilities: SwarmCapabilities,
+        service_manager: Arc<Mutex<ServiceManager>>,
     ) -> Result<Self> {
-        info!("Creating new DefaultRpcServer with Swarm capabilities");
+        info!("Creating new DefaultRpcServer with shared ServiceManager");
 
         Ok(Self {
-            swarm_capabilities,
+            service_manager,
             stream,
         })
     }
 
-    /// Get a reference to the swarm capabilities
-    pub fn get_swarm_capabilities(&self) -> &SwarmCapabilities {
-        &self.swarm_capabilities
+    /// Get a reference to the service manager
+    pub fn get_service_manager(&self) -> Arc<Mutex<ServiceManager>> {
+        Arc::clone(&self.service_manager)
     }
 
-    /// Get a mutable reference to the swarm capabilities
-    pub fn get_swarm_capabilities_mut(&mut self) -> &mut SwarmCapabilities {
-        &mut self.swarm_capabilities
+    /// Get a mutable reference to the service manager
+    pub fn get_service_manager_mut(&self) -> Arc<Mutex<ServiceManager>> {
+        Arc::clone(&self.service_manager)
     }
 
     /// Get a reference to the underlying stream
@@ -265,40 +265,11 @@ impl DefaultRpcServer {
         &mut self.stream
     }
 
-    /// Process an incoming RPC request
-    pub async fn process_rpc_request(&mut self, request_data: &[u8]) -> Result<Vec<u8>> {
-        // TODO: Implement proper Cap'n Proto RPC handling here
-        // This is where you would:
-        // 1. Deserialize Cap'n Proto messages
-        // 2. Handle RPC calls to the bootstrap capability
-        // 3. Return proper Cap'n Proto responses
-        
-        // For now, we'll implement a simple RPC protocol
-        // In the future, this will use proper Cap'n Proto RPC
-
-        if request_data.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Simple protocol: first byte indicates operation type
-        match request_data[0] {
-            0x01 => {
-                // Import service request
-                // TODO: Implement proper service import logic
-                let response = vec![0x01, 0x00]; // Success response
-                Ok(response)
-            }
-            0x02 => {
-                // Export service request
-                // TODO: Implement proper service export logic
-                let response = vec![0x02, 0x00]; // Success response
-                Ok(response)
-            }
-            _ => {
-                // Unknown operation
-                Ok(vec![0xFF, 0xFF, 0xFF, 0xFF]) // Error response
-            }
-        }
+    /// Process RPC requests using the Cap'n Proto RPC system
+    pub async fn process_rpc_request(&mut self, _request_data: &[u8]) -> Result<Vec<u8>> {
+        // TODO: Implement proper Cap'n Proto RPC handling
+        // For now, return empty response
+        Ok(Vec::new())
     }
 }
 
@@ -308,6 +279,8 @@ pub struct DefaultProtocolBehaviour {
     rpc_connections: HashMap<ConnectionId, DefaultRpcConnection>,
     /// Protocol upgrade info
     upgrade: DefaultProtocolUpgrade,
+    /// Shared service manager for all connections
+    shared_service_manager: ServiceManager,
 }
 
 // TODO: Implement NetworkBehaviour properly when ready
@@ -327,6 +300,7 @@ impl DefaultProtocolBehaviour {
         Self {
             rpc_connections: HashMap::new(),
             upgrade: DefaultProtocolUpgrade::new(),
+            shared_service_manager: ServiceManager::new(),
         }
     }
 
@@ -341,24 +315,17 @@ impl DefaultProtocolBehaviour {
         connection_id: ConnectionId,
         _stream: DefaultStream<libp2p::Stream>,
     ) -> Result<()> {
-        // TODO: Export swarm capabilities here
-        // This is where you would:
-        // 1. Create an RPC server with the swarm capabilities
-        // 2. Set up the stream to handle RPC requests
-        // 3. Export the Importer capability through the swarm
-        
-        // TODO: Implement proper swarm capabilities
-        // For now, just log that we received a stream
-        info!(
-            "New wetware RPC stream established on connection {} - TODO: Implement swarm capabilities",
-            connection_id
-        );
-        // TODO: Create RPC server with proper swarm capabilities when implemented
+        // Use the shared ServiceManager for this connection
+        // This allows services exported by one peer to be imported by others
+        let rpc_server = DefaultRpcServer::new(_stream, Arc::new(Mutex::new(self.shared_service_manager.clone())))?;
+        let rpc_connection = DefaultRpcConnection::new(rpc_server);
+        self.rpc_connections.insert(connection_id, rpc_connection);
         
         info!(
-            "New wetware RPC stream established on connection {} - TODO: Export swarm capabilities",
+            "New wetware RPC stream established on connection {} with shared ServiceManager",
             connection_id
         );
+        
         Ok(())
     }
 

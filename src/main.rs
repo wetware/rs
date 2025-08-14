@@ -2,6 +2,7 @@ use anyhow::Result;
 use tracing::{debug, info};
 
 mod swarm_capnp;
+mod service_manager;
 mod boot;
 mod config;
 mod rpc;
