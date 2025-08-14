@@ -6,10 +6,13 @@ use std::collections::HashMap;
 use tokio_util::codec::{Decoder, Encoder};
 use tracing::{debug, info};
 
-use crate::auth::{BootstrapCapability, Terminal};
+use crate::swarm_capnp::swarm_capnp::{exporter, importer};
 
 // Protocol identifier for wetware
 pub const WW_PROTOCOL: &str = "/ww/0.1.0";
+
+// TODO: Implement proper swarm capabilities
+// For now, we'll use placeholder values that will be properly implemented later
 
 /// Wetware protocol upgrade info (simplified)
 #[derive(Debug, Clone)]
@@ -215,28 +218,16 @@ impl ListenerHandle {
     }
 }
 
-/// Auth capabilities structure
-#[derive(Debug)]
-pub struct AuthCapabilities {
-    pub terminal: Option<Terminal>,
-    pub file_system: Option<FileSystemCapability>,
-    pub network: Option<NetworkCapability>,
-    pub process: Option<ProcessCapability>,
+/// Swarm capabilities structure
+pub struct SwarmCapabilities {
+    pub importer: importer::Client,
+    pub exporter: exporter::Client,
 }
 
-/// File system capability (placeholder)
-#[derive(Debug)]
-pub struct FileSystemCapability;
-
-/// Process capability (placeholder)
-#[derive(Debug)]
-pub struct ProcessCapability;
-
 /// Default RPC server implementation using Cap'n Proto RPC
-#[derive(Debug)]
 pub struct DefaultRpcServer {
-    /// The bootstrap capability being exported
-    bootstrap_capability: BootstrapCapability,
+    /// The swarm capabilities being exported
+    swarm_capabilities: SwarmCapabilities,
     /// The underlying stream
     stream: DefaultStream<libp2p::Stream>,
 }
@@ -244,24 +235,24 @@ pub struct DefaultRpcServer {
 impl DefaultRpcServer {
     pub fn new(
         stream: DefaultStream<libp2p::Stream>,
-        bootstrap_capability: BootstrapCapability,
+        swarm_capabilities: SwarmCapabilities,
     ) -> Result<Self> {
-        info!("Creating new DefaultRpcServer with Terminal capability");
+        info!("Creating new DefaultRpcServer with Swarm capabilities");
 
         Ok(Self {
-            bootstrap_capability,
+            swarm_capabilities,
             stream,
         })
     }
 
-    /// Get a reference to the bootstrap capability
-    pub fn get_bootstrap_capability(&self) -> &BootstrapCapability {
-        &self.bootstrap_capability
+    /// Get a reference to the swarm capabilities
+    pub fn get_swarm_capabilities(&self) -> &SwarmCapabilities {
+        &self.swarm_capabilities
     }
 
-    /// Get a mutable reference to the bootstrap capability
-    pub fn get_bootstrap_capability_mut(&mut self) -> &mut BootstrapCapability {
-        &mut self.bootstrap_capability
+    /// Get a mutable reference to the swarm capabilities
+    pub fn get_swarm_capabilities_mut(&mut self) -> &mut SwarmCapabilities {
+        &mut self.swarm_capabilities
     }
 
     /// Get a reference to the underlying stream
@@ -292,44 +283,15 @@ impl DefaultRpcServer {
         // Simple protocol: first byte indicates operation type
         match request_data[0] {
             0x01 => {
-                // Terminal read request
-                let max_bytes = if request_data.len() > 1 {
-                    u32::from_le_bytes([
-                        request_data[1],
-                        request_data[2],
-                        request_data[3],
-                        request_data[4],
-                    ])
-                } else {
-                    1024
-                };
-
-                let (data, eof) = self
-                    .bootstrap_capability
-                    .get_terminal()
-                    .read(max_bytes)
-                    .await?;
-
-                // Response format: [0x01, eof_byte, length_bytes, data...]
-                let mut response = vec![0x01, if eof { 1 } else { 0 }];
-                response.extend_from_slice(&(data.len() as u32).to_le_bytes());
-                response.extend_from_slice(&data);
-
+                // Import service request
+                // TODO: Implement proper service import logic
+                let response = vec![0x01, 0x00]; // Success response
                 Ok(response)
             }
             0x02 => {
-                // Terminal write request
-                if request_data.len() < 5 {
-                    return Ok(vec![0x02, 0xFF, 0xFF, 0xFF, 0xFF]); // Error response
-                }
-
-                let data = &request_data[5..];
-                let bytes_written = self.bootstrap_capability.get_terminal().write(data).await?;
-
-                // Response format: [0x02, bytes_written_bytes]
-                let mut response = vec![0x02];
-                response.extend_from_slice(&bytes_written.to_le_bytes());
-
+                // Export service request
+                // TODO: Implement proper service export logic
+                let response = vec![0x02, 0x00]; // Success response
                 Ok(response)
             }
             _ => {
@@ -341,14 +303,11 @@ impl DefaultRpcServer {
 }
 
 /// Wetware protocol behaviour that manages RPC connections
-#[derive(Debug)]
 pub struct DefaultProtocolBehaviour {
     /// Active RPC connections for each connection
     rpc_connections: HashMap<ConnectionId, DefaultRpcConnection>,
     /// Protocol upgrade info
     upgrade: DefaultProtocolUpgrade,
-    /// Bootstrap capability
-    bootstrap_capability: BootstrapCapability,
 }
 
 // TODO: Implement NetworkBehaviour properly when ready
@@ -368,7 +327,6 @@ impl DefaultProtocolBehaviour {
         Self {
             rpc_connections: HashMap::new(),
             upgrade: DefaultProtocolUpgrade::new(),
-            bootstrap_capability: BootstrapCapability::new(),
         }
     }
 
@@ -381,22 +339,24 @@ impl DefaultProtocolBehaviour {
     pub fn handle_incoming_stream(
         &mut self,
         connection_id: ConnectionId,
-        stream: DefaultStream<libp2p::Stream>,
+        _stream: DefaultStream<libp2p::Stream>,
     ) -> Result<()> {
-        // TODO: Export bootstrap capability here
+        // TODO: Export swarm capabilities here
         // This is where you would:
-        // 1. Create an RPC server with the bootstrap capability
+        // 1. Create an RPC server with the swarm capabilities
         // 2. Set up the stream to handle RPC requests
-        // 3. Export the Terminal capability through the bootstrap
+        // 3. Export the Importer capability through the swarm
         
-        // For now, just create a placeholder RPC server
-        let bootstrap_capability = crate::auth::BootstrapCapability::new();
-        let rpc_server = DefaultRpcServer::new(stream, bootstrap_capability)?;
-        let rpc_connection = DefaultRpcConnection::new(rpc_server);
-        self.rpc_connections.insert(connection_id, rpc_connection);
+        // TODO: Implement proper swarm capabilities
+        // For now, just log that we received a stream
+        info!(
+            "New wetware RPC stream established on connection {} - TODO: Implement swarm capabilities",
+            connection_id
+        );
+        // TODO: Create RPC server with proper swarm capabilities when implemented
         
         info!(
-            "New wetware RPC stream established on connection {} - TODO: Export bootstrap capability",
+            "New wetware RPC stream established on connection {} - TODO: Export swarm capabilities",
             connection_id
         );
         Ok(())
@@ -447,7 +407,6 @@ impl Default for DefaultProtocolBehaviour {
 }
 
 /// RPC connection wrapper
-#[derive(Debug)]
 pub struct DefaultRpcConnection {
     server: DefaultRpcServer,
 }
