@@ -84,13 +84,13 @@ pub async fn get_kubo_peers(kubo_url: &str) -> Result<Vec<(PeerId, Multiaddr)>> 
 }
 
 #[derive(NetworkBehaviour)]
-pub struct AppBehaviour {
+pub struct WetwareBehaviour {
     kad: libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>,
     identify: libp2p::identify::Behaviour,
 }
 
 pub struct SwarmManager {
-    swarm: Swarm<AppBehaviour>,
+    swarm: Swarm<WetwareBehaviour>,
     #[allow(dead_code)] // TODO:  remove once we start using the peer_id
     peer_id: PeerId,
     /// Default protocol handler for managing RPC connections
@@ -98,7 +98,7 @@ pub struct SwarmManager {
 }
 
 impl SwarmManager {
-    pub fn new(swarm: Swarm<AppBehaviour>, peer_id: PeerId) -> Self {
+    pub fn new(swarm: Swarm<WetwareBehaviour>, peer_id: PeerId) -> Self {
         debug!(peer_id = %peer_id, "Creating new SwarmManager");
         Self {
             swarm,
@@ -164,7 +164,7 @@ impl SwarmManager {
 
         loop {
             match self.swarm.next().await {
-                Some(SwarmEvent::Behaviour(AppBehaviourEvent::Kad(event))) => match event {
+                Some(SwarmEvent::Behaviour(WetwareBehaviourEvent::Kad(event))) => match event {
                     KademliaEvent::OutboundQueryProgressed { result, .. } => match result {
                         QueryResult::GetProviders(Ok(providers_result)) => match providers_result {
                             libp2p::kad::GetProvidersOk::FoundProviders { providers, .. } => {
@@ -207,7 +207,7 @@ impl SwarmManager {
                     },
                     _ => {}
                 },
-                Some(SwarmEvent::Behaviour(AppBehaviourEvent::Identify(event))) => match event {
+                Some(SwarmEvent::Behaviour(WetwareBehaviourEvent::Identify(event))) => match event {
                     libp2p::identify::Event::Received { peer_id, info, .. } => {
                         debug!(peer_id = %peer_id, listen_addrs = ?info.listen_addrs, "Received identify info from peer");
                         // Don't add peers to Kademlia here - we already added them upfront
@@ -293,7 +293,7 @@ impl SwarmManager {
 /// Build a libp2p host with IPFS-compatible protocols and enhanced features
 pub async fn build_host(
     config: Option<HostConfig>,
-) -> Result<(identity::Keypair, PeerId, Swarm<AppBehaviour>)> {
+) -> Result<(identity::Keypair, PeerId, Swarm<WetwareBehaviour>)> {
     let config = config.unwrap_or_default();
     let span = tracing::debug_span!("build_host");
     let _enter = span.enter();
@@ -330,7 +330,7 @@ pub async fn build_host(
     debug!("Set Kademlia to client mode");
 
     // Create network behaviour with IPFS-compatible protocols
-    let behaviour = AppBehaviour {
+    let behaviour = WetwareBehaviour {
         kad: kademlia,
         identify: libp2p::identify::Behaviour::new(
             libp2p::identify::Config::new(IPFS_IDENTIFY_PROTOCOL.to_string(), keypair.public())
