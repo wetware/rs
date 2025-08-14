@@ -1,8 +1,8 @@
 fn main() {
-    println!("cargo:rerun-if-changed=src/auth.capnp");
+    println!("cargo:rerun-if-changed=src/swarm.capnp");
 
     capnpc::CompilerCommand::new()
-        .file("src/auth.capnp")
+        .file("src/swarm.capnp")
         .src_prefix("src/") // Strip src/ prefix from input files
         .run()
         .expect("capnp schema compilation failed");
