@@ -1,8 +1,7 @@
 use anyhow::Result;
 use tracing::{debug, info};
 
-mod auth;
-mod auth_capnp;
+mod swarm_capnp;
 mod boot;
 mod config;
 mod rpc;
