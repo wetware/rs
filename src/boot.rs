@@ -11,8 +11,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::config::HostConfig;
-use crate::rpc::WetwareStreamHandler;
-
+use crate::rpc::DefaultStreamHandler;
 
 // IPFS protocol constants for DHT compatibility
 // These protocols ensure our node can communicate with the IPFS network
@@ -94,17 +93,17 @@ pub struct SwarmManager {
     swarm: Swarm<AppBehaviour>,
     #[allow(dead_code)] // TODO:  remove once we start using the peer_id
     peer_id: PeerId,
-    /// Wetware protocol handler for managing RPC connections
-    wetware_handler: WetwareStreamHandler,
+    /// Default protocol handler for managing RPC connections
+    wetware_handler: DefaultStreamHandler,
 }
 
 impl SwarmManager {
     pub fn new(swarm: Swarm<AppBehaviour>, peer_id: PeerId) -> Self {
         debug!(peer_id = %peer_id, "Creating new SwarmManager");
-        Self { 
-            swarm, 
+        Self {
+            swarm,
             peer_id,
-            wetware_handler: WetwareStreamHandler::new(),
+            wetware_handler: DefaultStreamHandler::new(),
         }
     }
 
@@ -252,21 +251,43 @@ impl SwarmManager {
             .add_address(peer_id, peer_addr.clone());
     }
 
-    /// Get the wetware protocol handler
-    pub fn get_wetware_handler(&self) -> &WetwareStreamHandler {
+    /// Get the default protocol handler
+    pub fn get_default_handler(&self) -> &DefaultStreamHandler {
         &self.wetware_handler
     }
 
-    /// Get the wetware protocol handler mutably
-    pub fn get_wetware_handler_mut(&mut self) -> &mut WetwareStreamHandler {
+    /// Get the default protocol handler mutably
+    pub fn get_default_handler_mut(&mut self) -> &mut DefaultStreamHandler {
         &mut self.wetware_handler
     }
 
-    /// Get the wetware protocol identifier
-    pub fn get_wetware_protocol(&self) -> &str {
+    /// Get the default protocol identifier
+    pub fn get_default_protocol(&self) -> &str {
         crate::rpc::WW_PROTOCOL
     }
 
+    /// Handle default protocol stream
+    pub async fn handle_default_stream(
+        &mut self,
+        connection_id: libp2p::swarm::ConnectionId,
+        stream: libp2p::Stream,
+    ) -> Result<()> {
+        use crate::rpc::DefaultStream;
+
+        // Create default stream wrapper
+        let _default_stream = DefaultStream::new(stream);
+
+        // Handle the stream in the default protocol behaviour
+        // For now, we'll just log that we received it
+        info!(
+            "Received default protocol stream on connection {}",
+            connection_id
+        );
+
+        // TODO: Process the stream and handle RPC requests
+
+        Ok(())
+    }
 }
 
 /// Build a libp2p host with IPFS-compatible protocols and enhanced features
@@ -315,7 +336,6 @@ pub async fn build_host(
             libp2p::identify::Config::new(IPFS_IDENTIFY_PROTOCOL.to_string(), keypair.public())
                 .with_agent_version("ww/1.0.0".to_string()),
         ),
-
     };
 
     // Use SwarmBuilder to create a swarm with enhanced transport

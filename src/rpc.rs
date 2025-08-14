@@ -1,10 +1,7 @@
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
-use futures::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
-use libp2p::{
-    swarm::ConnectionId,
-    StreamProtocol,
-};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use libp2p::{swarm::ConnectionId, StreamProtocol};
 use std::collections::HashMap;
 use tokio_util::codec::{Decoder, Encoder};
 use tracing::{debug, info};
@@ -16,11 +13,11 @@ pub const WW_PROTOCOL: &str = "/ww/0.1.0";
 
 /// Wetware protocol upgrade info (simplified)
 #[derive(Debug, Clone)]
-pub struct WetwareProtocolUpgrade {
+pub struct DefaultProtocolUpgrade {
     pub protocol: StreamProtocol,
 }
 
-impl WetwareProtocolUpgrade {
+impl DefaultProtocolUpgrade {
     pub fn new() -> Self {
         Self {
             protocol: StreamProtocol::new(WW_PROTOCOL),
@@ -29,13 +26,14 @@ impl WetwareProtocolUpgrade {
 }
 
 /// Wetware stream that handles Cap'n Proto RPC over libp2p
-pub struct WetwareStream<T> {
+#[derive(Debug)]
+pub struct DefaultStream<T> {
     io: T,
     read_buffer: BytesMut,
     write_buffer: BytesMut,
 }
 
-impl<T> WetwareStream<T>
+impl<T> DefaultStream<T>
 where
     T: AsyncRead + AsyncWrite + Send + Unpin,
 {
@@ -50,19 +48,19 @@ where
     /// Send a Cap'n Proto message over the stream
     pub async fn send_capnp_message(&mut self, message: &[u8]) -> Result<()> {
         let length = message.len() as u32;
-        
+
         // Write length prefix (4 bytes, big-endian for Cap'n Proto compatibility)
         bytes::BufMut::put_u32_le(&mut self.write_buffer, length);
         // Write message content
         self.write_buffer.extend_from_slice(message);
-        
+
         // Flush to underlying stream
         self.io.write_all(&self.write_buffer).await?;
         self.io.flush().await?;
-        
+
         // Clear write buffer
         self.write_buffer.clear();
-        
+
         debug!("Sent Cap'n Proto message: {} bytes", length);
         Ok(())
     }
@@ -76,7 +74,8 @@ where
             if bytes_read == 0 {
                 return Ok(None); // EOF
             }
-            self.read_buffer.extend_from_slice(&temp_buffer[..bytes_read]);
+            self.read_buffer
+                .extend_from_slice(&temp_buffer[..bytes_read]);
         }
 
         // Check if we have enough bytes for the length prefix
@@ -86,7 +85,7 @@ where
 
         // Read length prefix (big-endian)
         let length = bytes::Buf::get_u32_le(&mut self.read_buffer) as usize;
-        
+
         // Check if we have the full message
         if self.read_buffer.len() < length {
             return Ok(None);
@@ -94,7 +93,7 @@ where
 
         // Extract message
         let message_bytes = self.read_buffer.split_to(length);
-        
+
         debug!("Received Cap'n Proto message: {} bytes", length);
         Ok(Some(message_bytes.to_vec()))
     }
@@ -102,9 +101,9 @@ where
 
 /// Cap'n Proto message codec for framing
 #[derive(Debug)]
-pub struct WetwareCodec;
+pub struct DefaultCodec;
 
-impl Decoder for WetwareCodec {
+impl Decoder for DefaultCodec {
     type Item = Vec<u8>;
     type Error = anyhow::Error;
 
@@ -114,19 +113,19 @@ impl Decoder for WetwareCodec {
         }
 
         let length = u32::from_be_bytes([src[0], src[1], src[2], src[3]]) as usize;
-        
+
         if src.len() < 4 + length {
             return Ok(None);
         }
 
         let message = src[4..4 + length].to_vec();
         src.advance(4 + length);
-        
+
         Ok(Some(message))
     }
 }
 
-impl Encoder<Vec<u8>> for WetwareCodec {
+impl Encoder<Vec<u8>> for DefaultCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, item: Vec<u8>, dst: &mut BytesMut) -> Result<(), Self::Error> {
@@ -136,12 +135,6 @@ impl Encoder<Vec<u8>> for WetwareCodec {
         Ok(())
     }
 }
-
-
-
-
-
-
 
 /// Network capability implementation
 #[derive(Debug)]
@@ -239,29 +232,115 @@ pub struct FileSystemCapability;
 #[derive(Debug)]
 pub struct ProcessCapability;
 
-/// Wetware RPC server implementation (simplified)
+/// Default RPC server implementation using Cap'n Proto RPC
 #[derive(Debug)]
-pub struct WetwareRpcServer {
-    // TODO: Add actual RPC system when ready
+pub struct DefaultRpcServer {
+    /// The bootstrap capability being exported
+    bootstrap_capability: BootstrapCapability,
+    /// The underlying stream
+    stream: DefaultStream<libp2p::Stream>,
 }
 
-impl WetwareRpcServer {
+impl DefaultRpcServer {
     pub fn new(
-        _stream: WetwareStream<libp2p::Stream>,
-        _bootstrap_capability: BootstrapCapability,
+        stream: DefaultStream<libp2p::Stream>,
+        bootstrap_capability: BootstrapCapability,
     ) -> Result<Self> {
-        // TODO: Create actual RPC server when ready
-        Ok(Self {})
+        info!("Creating new DefaultRpcServer with Terminal capability");
+
+        Ok(Self {
+            bootstrap_capability,
+            stream,
+        })
+    }
+
+    /// Get a reference to the bootstrap capability
+    pub fn get_bootstrap_capability(&self) -> &BootstrapCapability {
+        &self.bootstrap_capability
+    }
+
+    /// Get a mutable reference to the bootstrap capability
+    pub fn get_bootstrap_capability_mut(&mut self) -> &mut BootstrapCapability {
+        &mut self.bootstrap_capability
+    }
+
+    /// Get a reference to the underlying stream
+    pub fn get_stream(&self) -> &DefaultStream<libp2p::Stream> {
+        &self.stream
+    }
+
+    /// Get a mutable reference to the underlying stream
+    pub fn get_stream_mut(&mut self) -> &mut DefaultStream<libp2p::Stream> {
+        &mut self.stream
+    }
+
+    /// Process an incoming RPC request
+    pub async fn process_rpc_request(&mut self, request_data: &[u8]) -> Result<Vec<u8>> {
+        // For now, we'll implement a simple RPC protocol
+        // In the future, this will use proper Cap'n Proto RPC
+
+        if request_data.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Simple protocol: first byte indicates operation type
+        match request_data[0] {
+            0x01 => {
+                // Terminal read request
+                let max_bytes = if request_data.len() > 1 {
+                    u32::from_le_bytes([
+                        request_data[1],
+                        request_data[2],
+                        request_data[3],
+                        request_data[4],
+                    ])
+                } else {
+                    1024
+                };
+
+                let (data, eof) = self
+                    .bootstrap_capability
+                    .get_terminal()
+                    .read(max_bytes)
+                    .await?;
+
+                // Response format: [0x01, eof_byte, length_bytes, data...]
+                let mut response = vec![0x01, if eof { 1 } else { 0 }];
+                response.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                response.extend_from_slice(&data);
+
+                Ok(response)
+            }
+            0x02 => {
+                // Terminal write request
+                if request_data.len() < 5 {
+                    return Ok(vec![0x02, 0xFF, 0xFF, 0xFF, 0xFF]); // Error response
+                }
+
+                let data = &request_data[5..];
+                let bytes_written = self.bootstrap_capability.get_terminal().write(data).await?;
+
+                // Response format: [0x02, bytes_written_bytes]
+                let mut response = vec![0x02];
+                response.extend_from_slice(&bytes_written.to_le_bytes());
+
+                Ok(response)
+            }
+            _ => {
+                // Unknown operation
+                Ok(vec![0xFF, 0xFF, 0xFF, 0xFF]) // Error response
+            }
+        }
     }
 }
 
 /// Wetware protocol behaviour that manages RPC connections
 #[derive(Debug)]
-pub struct WetwareProtocolBehaviour {
+pub struct DefaultProtocolBehaviour {
     /// Active RPC connections for each connection
-    rpc_connections: HashMap<ConnectionId, WetwareRpcConnection>,
+    rpc_connections: HashMap<ConnectionId, DefaultRpcConnection>,
     /// Protocol upgrade info
-    upgrade: WetwareProtocolUpgrade,
+    upgrade: DefaultProtocolUpgrade,
     /// Bootstrap capability
     bootstrap_capability: BootstrapCapability,
 }
@@ -269,17 +348,17 @@ pub struct WetwareProtocolBehaviour {
 // TODO: Implement NetworkBehaviour properly when ready
 // For now, we'll use a simpler approach
 
-impl WetwareProtocolBehaviour {
+impl DefaultProtocolBehaviour {
     pub fn new() -> Self {
         Self {
             rpc_connections: HashMap::new(),
-            upgrade: WetwareProtocolUpgrade::new(),
+            upgrade: DefaultProtocolUpgrade::new(),
             bootstrap_capability: BootstrapCapability::new(),
         }
     }
 
     /// Get the protocol upgrade info
-    pub fn upgrade_info(&self) -> &WetwareProtocolUpgrade {
+    pub fn upgrade_info(&self) -> &DefaultProtocolUpgrade {
         &self.upgrade
     }
 
@@ -287,19 +366,43 @@ impl WetwareProtocolBehaviour {
     pub fn handle_incoming_stream(
         &mut self,
         connection_id: ConnectionId,
-        stream: WetwareStream<libp2p::Stream>,
+        stream: DefaultStream<libp2p::Stream>,
     ) -> Result<()> {
-        // Create RPC server with bootstrap capability
-        let rpc_server = WetwareRpcServer::new(stream, BootstrapCapability::new())?;
-        let rpc_connection = WetwareRpcConnection::new(rpc_server);
+        // Create RPC server with bootstrap capability from auth module
+        let bootstrap_capability = crate::auth::BootstrapCapability::new();
+        let rpc_server = DefaultRpcServer::new(stream, bootstrap_capability)?;
+        let rpc_connection = DefaultRpcConnection::new(rpc_server);
         self.rpc_connections.insert(connection_id, rpc_connection);
-        
-        info!("New wetware RPC stream established on connection {}", connection_id);
+
+        info!(
+            "New wetware RPC stream established on connection {} with Terminal capability",
+            connection_id
+        );
         Ok(())
     }
 
+    /// Process RPC request for a specific connection
+    pub async fn process_rpc_request(
+        &mut self,
+        connection_id: ConnectionId,
+        request_data: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        if let Some(connection) = self.rpc_connections.get_mut(&connection_id) {
+            let response = connection
+                .get_server_mut()
+                .process_rpc_request(request_data)
+                .await?;
+            Ok(Some(response))
+        } else {
+            Ok(None) // Connection not found
+        }
+    }
+
     /// Get RPC connection for a specific connection ID
-    pub fn get_rpc_connection(&mut self, connection_id: ConnectionId) -> Option<&mut WetwareRpcConnection> {
+    pub fn get_rpc_connection(
+        &mut self,
+        connection_id: ConnectionId,
+    ) -> Option<&mut DefaultRpcConnection> {
         self.rpc_connections.get_mut(&connection_id)
     }
 
@@ -316,7 +419,7 @@ impl WetwareProtocolBehaviour {
     }
 }
 
-impl Default for WetwareProtocolBehaviour {
+impl Default for DefaultProtocolBehaviour {
     fn default() -> Self {
         Self::new()
     }
@@ -324,37 +427,37 @@ impl Default for WetwareProtocolBehaviour {
 
 /// RPC connection wrapper
 #[derive(Debug)]
-pub struct WetwareRpcConnection {
-    server: WetwareRpcServer,
+pub struct DefaultRpcConnection {
+    server: DefaultRpcServer,
 }
 
-impl WetwareRpcConnection {
-    pub fn new(server: WetwareRpcServer) -> Self {
+impl DefaultRpcConnection {
+    pub fn new(server: DefaultRpcServer) -> Self {
         Self { server }
     }
 
     /// Get mutable reference to the RPC server
-    pub fn get_server_mut(&mut self) -> &mut WetwareRpcServer {
+    pub fn get_server_mut(&mut self) -> &mut DefaultRpcServer {
         &mut self.server
     }
 }
 
-/// Stream handler for processing incoming wetware streams
+/// Stream handler for processing incoming default streams
 #[derive(Debug)]
-pub struct WetwareStreamHandler {
+pub struct DefaultStreamHandler {
     /// Protocol upgrade info
-    upgrade: WetwareProtocolUpgrade,
+    upgrade: DefaultProtocolUpgrade,
 }
 
-impl WetwareStreamHandler {
+impl DefaultStreamHandler {
     pub fn new() -> Self {
         Self {
-            upgrade: WetwareProtocolUpgrade::new(),
+            upgrade: DefaultProtocolUpgrade::new(),
         }
     }
 
     /// Get the protocol upgrade info
-    pub fn upgrade_info(&self) -> &WetwareProtocolUpgrade {
+    pub fn upgrade_info(&self) -> &DefaultProtocolUpgrade {
         &self.upgrade
     }
 
@@ -362,13 +465,13 @@ impl WetwareStreamHandler {
     pub async fn handle_stream(
         &self,
         stream: libp2p::Stream,
-    ) -> Result<WetwareStream<libp2p::Stream>> {
-        let wetware_stream = WetwareStream::new(stream);
-        Ok(wetware_stream)
+    ) -> Result<DefaultStream<libp2p::Stream>> {
+        let default_stream = DefaultStream::new(stream);
+        Ok(default_stream)
     }
 }
 
-impl Default for WetwareStreamHandler {
+impl Default for DefaultStreamHandler {
     fn default() -> Self {
         Self::new()
     }
@@ -385,12 +488,12 @@ mod tests {
 
     #[test]
     fn test_codec_encoding_decoding() {
-        let mut codec = WetwareCodec;
+        let mut codec = DefaultCodec;
         let mut buffer = BytesMut::new();
-        
+
         let test_data = b"Hello, World!";
         codec.encode(test_data.to_vec(), &mut buffer).unwrap();
-        
+
         let decoded = codec.decode(&mut buffer).unwrap().unwrap();
         assert_eq!(decoded, test_data);
     }

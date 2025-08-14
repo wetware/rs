@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Terminal capability implementation that provides actual terminal operations
 #[derive(Debug)]
@@ -41,17 +41,17 @@ impl Terminal {
     /// Read from terminal input
     pub async fn read(&self, max_bytes: u32) -> Result<(Vec<u8>, bool)> {
         let mut buffers = self.buffers.lock().unwrap();
-        
+
         if buffers.input_buffer.is_empty() {
             // For now, simulate some input (in a real implementation, this would read from stdin)
             let simulated_input = b"Hello from wetware terminal!\n";
             buffers.input_buffer.extend_from_slice(simulated_input);
         }
-        
+
         let bytes_to_read = std::cmp::min(max_bytes as usize, buffers.input_buffer.len());
         let data = buffers.input_buffer.drain(..bytes_to_read).collect();
         let eof = buffers.input_buffer.is_empty();
-        
+
         debug!("Terminal read: {} bytes, EOF: {}", bytes_to_read, eof);
         Ok((data, eof))
     }
@@ -60,14 +60,14 @@ impl Terminal {
     pub async fn write(&self, data: &[u8]) -> Result<u32> {
         let mut buffers = self.buffers.lock().unwrap();
         buffers.output_buffer.extend_from_slice(data);
-        
+
         // In a real implementation, this would write to stdout
         if let Ok(s) = String::from_utf8(data.to_vec()) {
             info!("Terminal output: {}", s.trim());
         } else {
             debug!("Terminal write: {} bytes (binary data)", data.len());
         }
-        
+
         Ok(data.len() as u32)
     }
 
@@ -76,7 +76,7 @@ impl Terminal {
         let mut dimensions = self.dimensions.lock().unwrap();
         dimensions.width = width;
         dimensions.height = height;
-        
+
         info!("Terminal resized to {}x{}", width, height);
         Ok(())
     }
@@ -164,12 +164,12 @@ mod tests {
     #[tokio::test]
     async fn test_terminal_read_write() {
         let terminal = Terminal::new();
-        
+
         // Write some data
         let data = b"Hello, World!";
         let bytes_written = terminal.write(data).await.unwrap();
         assert_eq!(bytes_written, data.len() as u32);
-        
+
         // Read some data
         let (read_data, eof) = terminal.read(100).await.unwrap();
         assert!(!read_data.is_empty());

@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
 
     // Get listen addresses for the startup message
     let listen_addrs: Vec<_> = swarm.listeners().collect();
-    
+
     // Clean startup message with key info
     info!(
         peer_id = %peer_id,
@@ -61,10 +61,10 @@ async fn main() -> Result<()> {
 
     // 3. Create SwarmManager and bootstrap DHT
     let mut swarm_manager = SwarmManager::new(swarm, peer_id);
-    
+
     // Log wetware protocol information
     info!(
-        protocol = swarm_manager.get_wetware_protocol(),
+        protocol = swarm_manager.get_default_protocol(),
         "Wetware protocol available"
     );
 
@@ -106,8 +106,6 @@ async fn main() -> Result<()> {
         duration_ms = query_duration.as_millis(),
         "Provider query completed"
     );
-
-
 
     // 6. Run the DHT event loop
     swarm_manager.run_event_loop().await?;
