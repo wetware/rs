@@ -87,6 +87,10 @@ pub async fn get_kubo_peers(kubo_url: &str) -> Result<Vec<(PeerId, Multiaddr)>> 
 pub struct WetwareBehaviour {
     kad: libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>,
     identify: libp2p::identify::Behaviour,
+    // TODO: Add default protocol behaviour for handling RPC streams
+    // This will handle incoming streams and export bootstrap capabilities
+    // NOTE: Temporarily commented out until NetworkBehaviour is implemented
+    // default: crate::rpc::DefaultProtocolBehaviour,
 }
 
 pub struct SwarmManager {
@@ -336,6 +340,7 @@ pub async fn build_host(
             libp2p::identify::Config::new(IPFS_IDENTIFY_PROTOCOL.to_string(), keypair.public())
                 .with_agent_version("ww/1.0.0".to_string()),
         ),
+        // default: crate::rpc::DefaultProtocolBehaviour::new(), // TODO: Add when NetworkBehaviour is implemented
     };
 
     // Use SwarmBuilder to create a swarm with enhanced transport

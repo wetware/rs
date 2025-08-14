@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use libp2p::{swarm::ConnectionId, StreamProtocol};
+use libp2p::swarm::{ConnectionId, StreamProtocol};
 use std::collections::HashMap;
 use tokio_util::codec::{Decoder, Encoder};
 use tracing::{debug, info};
@@ -276,6 +276,12 @@ impl DefaultRpcServer {
 
     /// Process an incoming RPC request
     pub async fn process_rpc_request(&mut self, request_data: &[u8]) -> Result<Vec<u8>> {
+        // TODO: Implement proper Cap'n Proto RPC handling here
+        // This is where you would:
+        // 1. Deserialize Cap'n Proto messages
+        // 2. Handle RPC calls to the bootstrap capability
+        // 3. Return proper Cap'n Proto responses
+        
         // For now, we'll implement a simple RPC protocol
         // In the future, this will use proper Cap'n Proto RPC
 
@@ -348,6 +354,15 @@ pub struct DefaultProtocolBehaviour {
 // TODO: Implement NetworkBehaviour properly when ready
 // For now, we'll use a simpler approach
 
+/// Event type for DefaultProtocolBehaviour
+#[derive(Debug)]
+pub enum DefaultProtocolEvent {
+    /// New RPC stream established
+    StreamEstablished(ConnectionId),
+    /// RPC request received
+    RpcRequest(ConnectionId, Vec<u8>),
+}
+
 impl DefaultProtocolBehaviour {
     pub fn new() -> Self {
         Self {
@@ -368,14 +383,20 @@ impl DefaultProtocolBehaviour {
         connection_id: ConnectionId,
         stream: DefaultStream<libp2p::Stream>,
     ) -> Result<()> {
-        // Create RPC server with bootstrap capability from auth module
+        // TODO: Export bootstrap capability here
+        // This is where you would:
+        // 1. Create an RPC server with the bootstrap capability
+        // 2. Set up the stream to handle RPC requests
+        // 3. Export the Terminal capability through the bootstrap
+        
+        // For now, just create a placeholder RPC server
         let bootstrap_capability = crate::auth::BootstrapCapability::new();
         let rpc_server = DefaultRpcServer::new(stream, bootstrap_capability)?;
         let rpc_connection = DefaultRpcConnection::new(rpc_server);
         self.rpc_connections.insert(connection_id, rpc_connection);
-
+        
         info!(
-            "New wetware RPC stream established on connection {} with Terminal capability",
+            "New wetware RPC stream established on connection {} - TODO: Export bootstrap capability",
             connection_id
         );
         Ok(())
