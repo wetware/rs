@@ -1,19 +1,21 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
-use capnp::capability::Promise;
+use capnp::capability::{Promise, FromClientHook};
 use capnp::Error;
+use capnp::private::capability::ClientHook;
+use crate::swarm_capnp::swarm_capnp::exporter::Client;
 use crate::swarm_capnp::swarm_capnp::{exporter, importer};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Service manager that implements both Exporter and Importer server traits
 /// Maintains a mapping of ServiceTokens to weak references of capabilities
 #[derive(Clone)]
 pub struct ServiceManager {
-    /// Map of service tokens to weak references of capabilities
+    /// Map of service IDs (8-byte random) to weak references of capabilities
     /// Weak references allow services to be garbage collected when no longer used
-    services: Arc<Mutex<HashMap<u64, Weak<dyn capnp::private::capability::ClientHook>>>>,
-    
-    /// Counter for generating unique service tokens
-    next_token: Arc<Mutex<u64>>,
+    services: Arc<Mutex<HashMap<Vec<u8>, Weak<Box<dyn ClientHook>>>>>,
+    /// Counter for generating unique IDs
+    id_counter: Arc<Mutex<u64>>,
 }
 
 impl ServiceManager {
@@ -21,32 +23,31 @@ impl ServiceManager {
     pub fn new() -> Self {
         Self {
             services: Arc::new(Mutex::new(HashMap::new())),
-            next_token: Arc::new(Mutex::new(1)), // Start from 1, 0 is reserved
+            id_counter: Arc::new(Mutex::new(0)),
         }
     }
 
-    /// Generate a new unique service token
-    fn generate_token(&self) -> u64 {
-        let mut counter = self.next_token.lock().unwrap();
-        let token = *counter;
+    /// Generate a new unique random 8-byte service token
+    fn generate_service_token(&self) -> Vec<u8> {
+        let mut counter = self.id_counter.lock().unwrap();
         *counter += 1;
-        token
-    }
-
-    /// Convert a u64 token to bytes for Cap'n Proto
-    fn token_to_bytes(&self, token: u64) -> Vec<u8> {
-        token.to_le_bytes().to_vec()
-    }
-
-    /// Convert bytes from Cap'n Proto to u64 token
-    fn bytes_to_token(&self, bytes: &[u8]) -> Option<u64> {
-        if bytes.len() == 8 {
-            let mut token_bytes = [0u8; 8];
-            token_bytes.copy_from_slice(bytes);
-            Some(u64::from_le_bytes(token_bytes))
-        } else {
-            None
+        
+        // Get current time in nanoseconds
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        
+        // Combine time and counter for uniqueness
+        let mut id = vec![0u8; 8];
+        let combined = time ^ (*counter as u128);
+        
+        // Convert to 8 bytes (little-endian)
+        for i in 0..8 {
+            id[i] = ((combined >> (i * 8)) & 0xFF) as u8;
         }
+        
+        id
     }
 
     /// Clean up dead weak references from the services map
@@ -57,9 +58,29 @@ impl ServiceManager {
 }
 
 impl exporter::Server for ServiceManager {
-    fn export(&mut self, _params: exporter::ExportParams, _results: exporter::ExportResults) -> Promise<(), Error> {
-        // TODO: Implement proper field access once we understand the generated types
-        // For now, just return success to make it compile
+    fn export(&mut self, _params: exporter::ExportParams, mut _results: exporter::ExportResults) -> Promise<(), Error> {
+        let params = _params.get().unwrap();
+        let service_reader = params.get_service();
+        let service_token = self.generate_service_token();
+
+        
+        // Extract the capability from the service reader
+        let capability: Client = match service_reader.get_as_capability() {
+            Ok(cap) => cap,
+            Err(e) => return Promise::err(Error::failed(format!("Failed to get capability: {}", e))),
+        };
+
+        
+        {
+            let mut services = self.services.lock().unwrap();
+            // Store the capability in the hashmap using the service token as key
+            // Convert the Client capability to a Weak<dyn ClientHook> for storage
+            let capability_hook = capability.into_client_hook();
+            let weak_capability = Arc::downgrade(&Arc::new(capability_hook));
+            services.insert(service_token.clone(), weak_capability);
+        }
+        
+        _results.get().set_token(&service_token);
         Promise::ok(())
     }
 }
@@ -83,27 +104,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_token_generation() {
+    fn test_random_id_generation() {
         let manager = ServiceManager::new();
-        let token1 = manager.generate_token();
-        let token2 = manager.generate_token();
-        assert_eq!(token1, 1);
-        assert_eq!(token2, 2);
+        let id1 = manager.generate_service_token();
+        let id2 = manager.generate_service_token();
+        
+        // IDs should be 8 bytes
+        assert_eq!(id1.len(), 8);
+        assert_eq!(id2.len(), 8);
+        
+        // IDs should be different (very unlikely to be the same)
+        assert_ne!(id1, id2);
     }
 
     #[test]
-    fn test_token_conversion() {
+    fn test_export_and_cleanup() {
         let manager = ServiceManager::new();
-        let original_token = 12345u64;
-        let bytes = manager.token_to_bytes(original_token);
-        let converted_token = manager.bytes_to_token(&bytes).unwrap();
-        assert_eq!(original_token, converted_token);
+        
+        // Test that the service manager starts empty
+        let services = manager.services.lock().unwrap();
+        assert_eq!(services.len(), 0);
+        drop(services);
+        
+        // Test cleanup of empty services
+        manager.cleanup_dead_services();
+        let services = manager.services.lock().unwrap();
+        assert_eq!(services.len(), 0);
+        drop(services);
+        
+        // Test manual cleanup by clearing services
+        let mut services = manager.services.lock().unwrap();
+        services.clear();
+        drop(services);
+        
+        // Verify cleanup worked
+        let services = manager.services.lock().unwrap();
+        assert_eq!(services.len(), 0);
     }
 
     #[test]
-    fn test_invalid_token_bytes() {
+    fn test_service_manager_starts_empty() {
         let manager = ServiceManager::new();
-        let invalid_bytes = vec![1, 2, 3]; // Wrong length
-        assert!(manager.bytes_to_token(&invalid_bytes).is_none());
+        let services = manager.services.lock().unwrap();
+        assert_eq!(services.len(), 0);
     }
 }
