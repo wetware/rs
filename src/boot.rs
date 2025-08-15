@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
 use libp2p::{
-    core::upgrade::Version,
     identity,
     kad::{Event as KademliaEvent, QueryResult, RecordKey},
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
@@ -15,7 +14,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::HostConfig;
 use crate::membrane::Membrane;
-use crate::rpc::{WetwareProtocolUpgrade, WetwareStreamHandler};
+use crate::rpc::WetwareStreamHandler;
 
 // IPFS protocol constants for DHT compatibility
 // These protocols ensure our node can communicate with the IPFS network
@@ -246,6 +245,21 @@ impl SwarmManager {
                         debug!(reason = ?error, "Failed to establish outgoing connection");
                     }
                 }
+                Some(SwarmEvent::IncomingConnection { .. }) => {
+                    debug!("New incoming connection");
+                }
+                Some(SwarmEvent::IncomingConnectionError { .. }) => {
+                    debug!("Incoming connection error");
+                }
+                Some(SwarmEvent::Dialing { peer_id, .. }) => {
+                    debug!(peer_id = ?peer_id, "Dialing peer");
+                }
+                Some(SwarmEvent::ListenerClosed { .. }) => {
+                    debug!("Listener closed");
+                }
+                Some(SwarmEvent::ListenerError { .. }) => {
+                    debug!("Listener error");
+                }
                 _ => {}
             }
         }
@@ -292,18 +306,32 @@ impl SwarmManager {
     }
 
     /// Handle wetware protocol stream and create RPC connection with importer capability
-    pub async fn handle_wetware_stream(&mut self, stream: libp2p::Stream) -> Result<()> {
+    pub async fn handle_wetware_stream(&mut self, _stream: libp2p::Stream) -> Result<()> {
         debug!("Handling wetware protocol stream");
 
         // Create a membrane for this connection
         let membrane = Arc::new(Mutex::new(Membrane::new()));
 
         // Create RPC server with the membrane
-        let rpc_server = crate::rpc::SimpleRpcServer::new(membrane);
+        let rpc_server = crate::rpc::DefaultRpcServer::new(membrane);
 
-        // TODO: Set up the stream handling and RPC processing
-        // For now, just log that we received a stream
+        // Create a wetware stream from the libp2p stream
+        // Note: We need to convert libp2p::Stream to something that implements tokio::io::AsyncRead/AsyncWrite
+        // For now, we'll log that we received it and set up the RPC server
         info!("Wetware stream received, RPC server created with importer capability");
+
+        // TODO: Convert libp2p::Stream to WetwareStream and handle RPC communication
+        // This requires bridging libp2p::Stream to tokio::io traits
+        
+        // For now, test the RPC server capability
+        match rpc_server.test_import_capability().await {
+            Ok(response) => {
+                info!("RPC server test successful: {:?}", String::from_utf8_lossy(&response));
+            }
+            Err(e) => {
+                warn!(reason = ?e, "RPC server test failed");
+            }
+        }
 
         Ok(())
     }
@@ -362,13 +390,7 @@ pub async fn build_host(
             libp2p::noise::Config::new,
             libp2p::yamux::Config::default,
         )?
-        .with_behaviour(|_| behaviour)?
-        .with_swarm_config(|config| {
-            // We need WetwareProtocolUpgrade to handle /ww/0.1.0 protocol streams because it:
-            // 1. Implements the libp2p upgrade traits for protocol negotiation
-            // 2. Creates WetwareStream instances for RPC communication
-            config.with_substream_upgrade_protocol_override(Version::V1)  // Server node, so use eager V1.
-        });
+        .with_behaviour(|_| behaviour)?;
 
     // Build the swarm with the configured behaviour
     let mut swarm = swarm_builder.build();

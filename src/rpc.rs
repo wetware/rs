@@ -142,14 +142,14 @@ where
     }
 }
 
-/// Simple RPC server that provides the importer capability
+/// Default RPC server that provides the importer capability
 #[derive(Debug)]
-pub struct SimpleRpcServer {
+pub struct DefaultRpcServer {
     /// The membrane for handling import/export requests
     membrane: Arc<Mutex<Membrane>>,
 }
 
-impl SimpleRpcServer {
+impl DefaultRpcServer {
     pub fn new(membrane: Arc<Mutex<Membrane>>) -> Self {
         Self { membrane }
     }
@@ -204,7 +204,7 @@ impl SimpleRpcServer {
 #[derive(Debug)]
 pub struct WetwareStreamHandler {
     /// Active RPC connections for each connection
-    rpc_connections: HashMap<ConnectionId, SimpleRpcServer>,
+    rpc_connections: HashMap<ConnectionId, DefaultRpcServer>,
     /// Shared membrane for all connections
     shared_membrane: Arc<Mutex<Membrane>>,
 }
@@ -224,7 +224,7 @@ impl WetwareStreamHandler {
         _stream: WetwareStream<libp2p::Stream>,
     ) -> Result<()> {
         // Create RPC server with shared Membrane
-        let rpc_server = SimpleRpcServer::new(Arc::clone(&self.shared_membrane));
+        let rpc_server = DefaultRpcServer::new(Arc::clone(&self.shared_membrane));
 
         // Store the connection
         self.rpc_connections.insert(connection_id, rpc_server);
@@ -257,16 +257,16 @@ impl Default for WetwareStreamHandler {
 /// Simple RPC connection wrapper
 #[derive(Debug)]
 pub struct DefaultRpcConnection {
-    server: SimpleRpcServer,
+    server: DefaultRpcServer,
 }
 
 impl DefaultRpcConnection {
-    pub fn new(server: SimpleRpcServer) -> Self {
+    pub fn new(server: DefaultRpcServer) -> Self {
         Self { server }
     }
 
     /// Get mutable reference to the RPC server
-    pub fn get_server_mut(&mut self) -> &mut SimpleRpcServer {
+    pub fn get_server_mut(&mut self) -> &mut DefaultRpcServer {
         &mut self.server
     }
 }
@@ -407,7 +407,7 @@ impl EchoCapability {
 #[derive(Debug)]
 pub struct WetwareProtocolBehaviour {
     /// Active RPC connections for each connection
-    rpc_connections: HashMap<ConnectionId, SimpleRpcServer>,
+    rpc_connections: HashMap<ConnectionId, DefaultRpcServer>,
     /// Shared membrane for all connections
     shared_membrane: Arc<Mutex<Membrane>>,
 }
@@ -432,7 +432,7 @@ impl WetwareProtocolBehaviour {
         _stream: WetwareStream<libp2p::Stream>,
     ) -> Result<()> {
         // Create RPC server with shared Membrane
-        let rpc_server = SimpleRpcServer::new(Arc::clone(&self.shared_membrane));
+        let rpc_server = DefaultRpcServer::new(Arc::clone(&self.shared_membrane));
 
         // Store the connection
         self.rpc_connections.insert(connection_id, rpc_server);
@@ -484,7 +484,7 @@ mod tests {
         let membrane = Arc::new(Mutex::new(Membrane::new()));
 
         // Create RPC server with the membrane
-        let rpc_server = SimpleRpcServer::new(membrane);
+        let rpc_server = DefaultRpcServer::new(membrane);
 
         // Test that the importer capability is available
         let test_response = rpc_server.test_import_capability().await.unwrap();

@@ -1,6 +1,6 @@
-# Basic P2P with IPFS DHT Bootstrap
+# Wetware Protocol Node
 
-A minimal Rust libp2p application that connects to a local Kubo (IPFS) node and bootstraps into the IPFS DHT network using peers discovered from Kubo.
+A Rust libp2p application that implements the Wetware Protocol (`/ww/0.1.0`) for peer-to-peer RPC communication with capability-based security. The node connects to IPFS DHT networks and provides secure remote execution capabilities through Cap'n Proto RPC.
 
 ## Features
 

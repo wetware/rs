@@ -105,7 +105,7 @@ async fn run_node(
         peer_id = %peer_id,
         listen_addrs = ?listen_addrs,
         version = "0.1.0",
-        "wetware started"
+        "Wetware started"
     );
 
     info!("⚗️ Starting wetware cell...");
