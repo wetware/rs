@@ -28,32 +28,55 @@ A minimal Rust libp2p application that connects to a local Kubo (IPFS) node and 
 
 ## Usage
 
+The application now uses a subcommand structure. The main command is `ww` with a `run` subcommand for starting a wetware node.
+
+### Command Structure
+
+```bash
+ww <COMMAND>
+
+Commands:
+  run     Run a wetware node
+  help    Print this message or the help of the given subcommand(s)
+```
+
+### Running a Wetware Node
+
 1. **Start Kubo daemon** (in a separate terminal):
    ```bash
    kubo daemon
    ```
 
-2. **Run the application** (IPFS endpoint and log level are now configurable):
+2. **Run the application** using the `run` subcommand:
    ```bash
    # Use defaults (http://localhost:5001, info log level)
-   cargo run
+   cargo run -- run
    
    # Custom IPFS endpoint
-   cargo run -- --ipfs http://127.0.0.1:5001
-   cargo run -- --ipfs http://192.168.1.100:5001
+   cargo run -- run --ipfs http://127.0.0.1:5001
+   cargo run -- run --ipfs http://192.168.1.100:5001
    
    # Custom log level
-   cargo run -- --loglvl debug
-   cargo run -- --loglvl trace
+   cargo run -- run --loglvl debug
+   cargo run -- run --loglvl trace
    
    # Combine both
-   cargo run -- --ipfs http://192.168.1.100:5001 --loglvl debug
+   cargo run -- run --ipfs http://192.168.1.100:5001 --loglvl debug
    
    # Or use environment variables
    export WW_IPFS=http://192.168.1.100:5001
    export WW_LOGLVL=debug
-   cargo run
+   cargo run -- run
    ```
+
+### Command Options
+
+The `run` subcommand supports the following options:
+
+- `--ipfs <IPFS>`: IPFS node HTTP API endpoint (e.g., http://127.0.0.1:5001)
+- `--loglvl <LEVEL>`: Log level (trace, debug, info, warn, error)
+- `--preset <PRESET>`: Use preset configuration (minimal, development, production)
+- `--env-config`: Use configuration from environment variables
 
 ## Docker Support
 
@@ -83,6 +106,15 @@ make podman-clean
 - **Efficient caching**: Leverages container layer caching for faster builds
 - **Minimal runtime**: Based on Debian Bookworm slim for smaller footprint
 
+**Note**: When running the container, you'll need to use the `run` subcommand:
+```bash
+# Run the container with the run subcommand
+podman run --rm -it wetware:latest run
+
+# With custom options
+podman run --rm -it wetware:latest run --ipfs http://host.docker.internal:5001 --loglvl debug
+```
+
 ### Podman Compose (Optional)
 
 Create a `docker-compose.yml` for easy development (works with both Docker and Podman):
@@ -99,6 +131,7 @@ services:
       - WW_LOGLVL=info
     volumes:
       - ./config:/app/config
+    command: ["run"]  # Use the run subcommand
 ```
 
 ## CI/CD Pipeline
