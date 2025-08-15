@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::HostConfig;
 use crate::membrane::Membrane;
-use crate::rpc::DefaultStreamHandler;
+use crate::rpc::WetwareStreamHandler;
 
 // IPFS protocol constants for DHT compatibility
 // These protocols ensure our node can communicate with the IPFS network
@@ -91,7 +91,7 @@ pub struct WetwareBehaviour {
     kad: libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>,
     identify: libp2p::identify::Behaviour,
     // TODO: Add wetware protocol when we implement a proper NetworkBehaviour
-    // wetware: crate::rpc::WetwareProtocol,
+    // wetware: crate::rpc::WetwareProtocolBehaviour,
 }
 
 pub struct SwarmManager {
@@ -99,7 +99,7 @@ pub struct SwarmManager {
     #[allow(dead_code)] // TODO:  remove once we start using the peer_id
     peer_id: PeerId,
     /// Default protocol handler for managing RPC connections
-    wetware_handler: DefaultStreamHandler,
+    wetware_handler: WetwareStreamHandler,
 }
 
 impl SwarmManager {
@@ -108,7 +108,7 @@ impl SwarmManager {
         Self {
             swarm,
             peer_id,
-            wetware_handler: DefaultStreamHandler::new(),
+            wetware_handler: WetwareStreamHandler::new(),
         }
     }
 
@@ -227,8 +227,7 @@ impl SwarmManager {
                         }
                         _ => {}
                     }
-                }
-                // TODO: Add wetware protocol event handling when it's implemented
+                },
                 Some(SwarmEvent::NewListenAddr { address, .. }) => {
                     debug!(address = %address, "Listening on address");
                 }
@@ -259,12 +258,12 @@ impl SwarmManager {
     }
 
     /// Get the default protocol handler
-    pub fn get_default_handler(&self) -> &DefaultStreamHandler {
+    pub fn get_default_handler(&self) -> &WetwareStreamHandler {
         &self.wetware_handler
     }
 
     /// Get the default protocol handler mutably
-    pub fn get_default_handler_mut(&mut self) -> &mut DefaultStreamHandler {
+    pub fn get_default_handler_mut(&mut self) -> &mut WetwareStreamHandler {
         &mut self.wetware_handler
     }
 
@@ -279,10 +278,10 @@ impl SwarmManager {
         connection_id: libp2p::swarm::ConnectionId,
         stream: libp2p::Stream,
     ) -> Result<()> {
-        use crate::rpc::DefaultStream;
+        use crate::rpc::WetwareStream;
 
         // Create default stream wrapper
-        let _default_stream = DefaultStream::new(stream);
+        let _default_stream = WetwareStream::new(stream);
 
         // Handle the stream in the default protocol behaviour
         // For now, we'll just log that we received it
@@ -356,7 +355,7 @@ pub async fn build_host(
                 .with_agent_version("ww/1.0.0".to_string()),
         ),
         // TODO: Add wetware protocol when we implement a proper NetworkBehaviour
-        // wetware: crate::rpc::WetwareProtocol::new(),
+        // wetware: crate::rpc::WetwareProtocolBehaviour::new(),
     };
 
     // Use SwarmBuilder to create a swarm with enhanced transport
@@ -366,10 +365,11 @@ pub async fn build_host(
             Default::default(),
             libp2p::noise::Config::new,
             libp2p::yamux::Config::default,
-        )?;
+        )?
+        .with_behaviour(|_| behaviour)?;
 
     // Build the swarm with the configured behaviour
-    let mut swarm = swarm_builder.with_behaviour(|_| behaviour).unwrap().build();
+    let mut swarm = swarm_builder.build();
 
     debug!("Built libp2p swarm with enhanced features");
 

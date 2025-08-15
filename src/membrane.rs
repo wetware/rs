@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, Weak};
 /// The membrane acts as a central registry for service capabilities, allowing
 /// services to be exported with unique tokens and later imported by those tokens.
 /// It uses weak references to allow automatic cleanup of dropped capabilities.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Membrane {
     /// Map of service tokens to weak references of capabilities
     services: Arc<Mutex<HashMap<Vec<u8>, Weak<Box<dyn ClientHook>>>>>,

@@ -108,11 +108,9 @@ async fn run_node(
         "wetware started"
     );
 
-    info!("⚗️ Wetware started");
-    info!("Peer ID: {}", peer_id);
-    info!("Listening on addresses: {:?}", listen_addrs);
-    info!("Wetware protocol /ww/0.1.0 is available and exported");
-    info!("Connected to IPFS network via DHT bootstrap");
+    info!("⚗️ Starting wetware cell...");
+    info!("Wetware protocol /ww/0.1.0 is available and exported through transport layer");
+    info!("Cap'n Proto RPC with importer capability is ready for connections");
 
     // 3. Create SwarmManager and bootstrap DHT
     let mut swarm_manager = SwarmManager::new(swarm, peer_id);

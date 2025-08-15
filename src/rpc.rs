@@ -2,26 +2,19 @@ use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::core::upgrade::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
-use libp2p::swarm::{ConnectionId, NetworkBehaviour, OneShotHandler, StreamProtocol, ToSwarm};
-use libp2p::Stream;
+use libp2p::swarm::{ConnectionId, StreamProtocol};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::io::{
-    AsyncRead as TokioAsyncRead, AsyncReadExt as TokioAsyncReadExt, AsyncWrite as TokioAsyncWrite,
-    AsyncWriteExt as TokioAsyncWriteExt,
-};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Decoder, Encoder};
 use tracing::{debug, info};
 
 use crate::membrane::Membrane;
-use capnp::capability::Promise;
-use capnp::Error;
 
 // Protocol identifier for wetware
 pub const WW_PROTOCOL: &str = "/ww/0.1.0";
 
-/// Simple wetware protocol that can be used in NetworkBehaviour
+/// Simple wetware protocol that can be used for stream upgrades
 #[derive(Debug, Clone)]
 pub struct WetwareProtocol {
     protocol: StreamProtocol,
@@ -43,13 +36,13 @@ impl Default for WetwareProtocol {
 
 /// Wetware stream that handles Cap'n Proto RPC over libp2p
 #[derive(Debug)]
-pub struct DefaultStream<T> {
+pub struct WetwareStream<T> {
     io: T,
     read_buffer: BytesMut,
     write_buffer: BytesMut,
 }
 
-impl<T> DefaultStream<T>
+impl<T> WetwareStream<T>
 where
     T: AsyncRead + AsyncWrite + Send + Unpin,
 {
@@ -65,7 +58,7 @@ where
     pub async fn send_capnp_message(&mut self, message: &[u8]) -> Result<()> {
         let length = message.len() as u32;
 
-        // Write length prefix (4 bytes, big-endian for Cap'n Proto compatibility)
+        // Write length prefix (4 bytes, little-endian for Cap'n Proto compatibility)
         bytes::BufMut::put_u32_le(&mut self.write_buffer, length);
         // Write message content
         self.write_buffer.extend_from_slice(message);
@@ -99,7 +92,7 @@ where
             return Ok(None);
         }
 
-        // Read length prefix (big-endian)
+        // Read length prefix (little-endian)
         let length = bytes::Buf::get_u32_le(&mut self.read_buffer) as usize;
 
         // Check if we have the full message
@@ -115,7 +108,7 @@ where
     }
 }
 
-impl<T> UpgradeInfo for DefaultStream<T>
+impl<T> UpgradeInfo for WetwareStream<T>
 where
     T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
@@ -127,33 +120,162 @@ where
     }
 }
 
-impl<T> InboundUpgrade<T> for DefaultStream<T>
+impl<T> InboundUpgrade<T> for WetwareStream<T>
 where
     T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    type Output = DefaultStream<T>;
+    type Output = WetwareStream<T>;
     type Error = std::io::Error;
     type Future = std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Self::Output, Self::Error>> + Send>,
     >;
 
     fn upgrade_inbound(self, io: T, _: Self::Info) -> Self::Future {
-        Box::pin(async move { Ok(DefaultStream::new(io)) })
+        Box::pin(async move { Ok(WetwareStream::new(io)) })
     }
 }
 
-impl<T> OutboundUpgrade<T> for DefaultStream<T>
+impl<T> OutboundUpgrade<T> for WetwareStream<T>
 where
     T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    type Output = DefaultStream<T>;
+    type Output = WetwareStream<T>;
     type Error = std::io::Error;
     type Future = std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Self::Output, Self::Error>> + Send>,
     >;
 
     fn upgrade_outbound(self, io: T, _: Self::Info) -> Self::Future {
-        Box::pin(async move { Ok(DefaultStream::new(io)) })
+        Box::pin(async move { Ok(WetwareStream::new(io)) })
+    }
+}
+
+/// Simple RPC server that provides the importer capability
+#[derive(Debug)]
+pub struct SimpleRpcServer {
+    /// The membrane for handling import/export requests
+    membrane: Arc<Mutex<Membrane>>,
+}
+
+impl SimpleRpcServer {
+    pub fn new(membrane: Arc<Mutex<Membrane>>) -> Self {
+        Self { membrane }
+    }
+
+    /// Process an RPC request and return the response
+    pub async fn process_rpc_request(&mut self, request_data: &[u8]) -> Result<Vec<u8>> {
+        debug!("Processing wetware RPC request: {} bytes", request_data.len());
+
+        // TODO: Implement proper Cap'n Proto message parsing and handling
+        debug!("RPC request received, importer capability available");
+
+        // Return a simple success response
+        Ok(b"OK".to_vec())
+    }
+
+    /// Handle export requests
+    async fn handle_export_request(&mut self, _request_data: &[u8]) -> Result<Vec<u8>> {
+        // TODO: Implement proper export request handling
+        Ok(b"Export OK".to_vec())
+    }
+
+    /// Handle import requests
+    async fn handle_import_request(&mut self, _request_data: &[u8]) -> Result<Vec<u8>> {
+        // TODO: Implement proper import request handling
+        Ok(b"Import OK".to_vec())
+    }
+
+    /// Get a reference to the membrane
+    pub fn get_membrane(&self) -> &Arc<Mutex<Membrane>> {
+        &self.membrane
+    }
+
+    /// Test method to demonstrate RPC functionality
+    /// This shows how the importer capability would be available to remote clients
+    pub async fn test_import_capability(&self) -> Result<Vec<u8>> {
+        debug!("Testing import capability availability");
+
+        // Get the membrane
+        let _membrane = self.membrane.lock().unwrap();
+
+        // Check if we can access the membrane (this demonstrates the capability is available)
+        // For now, just return a success message since we can't access private fields
+        debug!("Membrane accessible");
+
+        // Return a test response indicating the importer capability is working
+        Ok(b"Importer capability available".to_vec())
+    }
+}
+
+/// Handler for wetware protocol streams
+/// This integrates with libp2p's stream handling to set up Cap'n Proto RPC
+#[derive(Debug)]
+pub struct WetwareStreamHandler {
+    /// Active RPC connections for each connection
+    rpc_connections: HashMap<ConnectionId, SimpleRpcServer>,
+    /// Shared membrane for all connections
+    shared_membrane: Arc<Mutex<Membrane>>,
+}
+
+impl WetwareStreamHandler {
+    pub fn new() -> Self {
+        Self {
+            rpc_connections: HashMap::new(),
+            shared_membrane: Arc::new(Mutex::new(Membrane::new())),
+        }
+    }
+
+    /// Handle incoming wetware stream and set up Cap'n Proto RPC with importer capability
+    pub fn handle_incoming_stream(
+        &mut self,
+        connection_id: ConnectionId,
+        _stream: WetwareStream<libp2p::Stream>,
+    ) -> Result<()> {
+        // Create RPC server with shared Membrane
+        let rpc_server = SimpleRpcServer::new(Arc::clone(&self.shared_membrane));
+
+        // Store the connection
+        self.rpc_connections.insert(connection_id, rpc_server);
+
+        info!(
+            "New wetware RPC stream established on connection {} with importer capability available",
+            connection_id
+        );
+
+        Ok(())
+    }
+
+    /// Get count of active RPC connections
+    pub fn get_active_connection_count(&self) -> usize {
+        self.rpc_connections.len()
+    }
+
+    /// Get a reference to the shared membrane
+    pub fn membrane(&self) -> &Arc<Mutex<Membrane>> {
+        &self.shared_membrane
+    }
+}
+
+impl Default for WetwareStreamHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Simple RPC connection wrapper
+#[derive(Debug)]
+pub struct DefaultRpcConnection {
+    server: SimpleRpcServer,
+}
+
+impl DefaultRpcConnection {
+    pub fn new(server: SimpleRpcServer) -> Self {
+        Self { server }
+    }
+
+    /// Get mutable reference to the RPC server
+    pub fn get_server_mut(&mut self) -> &mut SimpleRpcServer {
+        &mut self.server
     }
 }
 
@@ -280,298 +402,6 @@ pub struct SwarmCapabilities {
     pub membrane: Membrane,
 }
 
-/// Simple RPC server that can handle Cap'n Proto RPC requests
-/// This provides the importer capability to remote clients
-pub struct SimpleRpcServer {
-    /// The membrane for handling import/export requests
-    membrane: Arc<Mutex<Membrane>>,
-}
-
-impl SimpleRpcServer {
-    pub fn new(membrane: Arc<Mutex<Membrane>>) -> Self {
-        info!("Creating new SimpleRpcServer with shared Membrane");
-        Self { membrane }
-    }
-
-    /// Process RPC requests using the Cap'n Proto RPC system
-    /// This provides the importer capability to remote clients
-    pub async fn process_rpc_request(&mut self, _request_data: &[u8]) -> Result<Vec<u8>> {
-        // For now, return a simple response indicating the importer capability is available
-        // TODO: Implement proper Cap'n Proto message parsing and handling
-        debug!("RPC request received, importer capability available");
-
-        // Return a simple success response
-        Ok(b"OK".to_vec())
-    }
-
-    /// Handle export requests
-    async fn handle_export_request(&mut self, _request_data: &[u8]) -> Result<Vec<u8>> {
-        // TODO: Implement proper export request handling
-        Ok(b"Export OK".to_vec())
-    }
-
-    /// Handle import requests
-    async fn handle_import_request(&mut self, _request_data: &[u8]) -> Result<Vec<u8>> {
-        // TODO: Implement proper import request handling
-        Ok(b"Import OK".to_vec())
-    }
-
-    /// Get a reference to the membrane
-    pub fn get_membrane(&self) -> Arc<Mutex<Membrane>> {
-        Arc::clone(&self.membrane)
-    }
-
-    /// Test method to demonstrate RPC functionality
-    /// This shows how the importer capability would be available to remote clients
-    pub async fn test_import_capability(&self) -> Result<Vec<u8>> {
-        debug!("Testing import capability availability");
-
-        // Get the membrane
-        let _membrane = self.membrane.lock().unwrap();
-
-        // Check if we can access the membrane (this demonstrates the capability is available)
-        // For now, just return a success message since we can't access private fields
-        debug!("Membrane accessible");
-
-        // Return a test response indicating the importer capability is working
-        Ok(b"Importer capability available".to_vec())
-    }
-}
-
-/// Wetware protocol behaviour that manages RPC connections
-pub struct DefaultProtocolBehaviour {
-    /// Active RPC connections for each connection
-    rpc_connections: HashMap<ConnectionId, DefaultRpcConnection>,
-    /// Protocol upgrade info
-    upgrade: WetwareProtocol,
-    /// Shared membrane for all connections
-    shared_membrane: Membrane,
-}
-
-/// Event type for DefaultProtocolBehaviour
-#[derive(Debug)]
-pub enum DefaultProtocolEvent {
-    /// New RPC stream established
-    StreamEstablished(ConnectionId),
-    /// RPC request received
-    RpcRequest(ConnectionId, Vec<u8>),
-}
-
-impl DefaultProtocolBehaviour {
-    pub fn new() -> Self {
-        Self {
-            rpc_connections: HashMap::new(),
-            shared_membrane: Membrane::new(),
-            upgrade: WetwareProtocol::new(),
-        }
-    }
-
-    /// Get the protocol upgrade info
-    pub fn upgrade_info(&self) -> &WetwareProtocol {
-        &self.upgrade
-    }
-
-    /// Handle incoming RPC stream and create connection with importer capability
-    pub fn handle_incoming_stream(
-        &mut self,
-        connection_id: ConnectionId,
-        stream: DefaultStream<libp2p::Stream>,
-    ) -> Result<()> {
-        // Create RPC server with shared Membrane
-        let rpc_server = SimpleRpcServer::new(Arc::new(Mutex::new(self.shared_membrane.clone())));
-
-        // Create RPC connection
-        let rpc_connection = DefaultRpcConnection::new(rpc_server);
-
-        // Store the connection
-        self.rpc_connections.insert(connection_id, rpc_connection);
-
-        info!(
-            "New wetware RPC stream established on connection {} with importer capability available",
-            connection_id
-        );
-
-        Ok(())
-    }
-
-    /// Process RPC request for a specific connection
-    pub async fn process_rpc_request(
-        &mut self,
-        connection_id: ConnectionId,
-        request_data: &[u8],
-    ) -> Result<Option<Vec<u8>>> {
-        if let Some(connection) = self.rpc_connections.get_mut(&connection_id) {
-            let response = connection
-                .get_server_mut()
-                .process_rpc_request(request_data)
-                .await?;
-            Ok(Some(response))
-        } else {
-            Ok(None) // Connection not found
-        }
-    }
-
-    /// Get RPC connection for a specific connection ID
-    pub fn get_rpc_connection(
-        &mut self,
-        connection_id: ConnectionId,
-    ) -> Option<&mut DefaultRpcConnection> {
-        self.rpc_connections.get_mut(&connection_id)
-    }
-
-    /// Remove RPC connection for a closed connection
-    pub fn remove_connection(&mut self, connection_id: ConnectionId) {
-        if self.rpc_connections.remove(&connection_id).is_some() {
-            debug!("Removed RPC connection for connection {}", connection_id);
-        }
-    }
-
-    /// Get count of active RPC connections
-    pub fn get_active_connection_count(&self) -> usize {
-        self.rpc_connections.len()
-    }
-
-    /// Get a reference to the shared membrane
-    pub fn get_membrane(&self) -> &Membrane {
-        &self.shared_membrane
-    }
-
-    /// Get a mutable reference to the shared membrane
-    pub fn get_membrane_mut(&mut self) -> &mut Membrane {
-        &mut self.shared_membrane
-    }
-}
-
-impl Default for DefaultProtocolBehaviour {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// RPC connection wrapper
-pub struct DefaultRpcConnection {
-    server: SimpleRpcServer,
-}
-
-impl DefaultRpcConnection {
-    pub fn new(server: SimpleRpcServer) -> Self {
-        Self { server }
-    }
-
-    /// Get mutable reference to the RPC server
-    pub fn get_server_mut(&mut self) -> &mut SimpleRpcServer {
-        &mut self.server
-    }
-}
-
-/// Stream handler for processing incoming default streams
-#[derive(Debug)]
-pub struct DefaultStreamHandler {
-    /// Protocol upgrade info
-    upgrade: WetwareProtocol,
-}
-
-impl DefaultStreamHandler {
-    pub fn new() -> Self {
-        Self {
-            upgrade: WetwareProtocol::new(),
-        }
-    }
-
-    /// Get the protocol upgrade info
-    pub fn upgrade_info(&self) -> &WetwareProtocol {
-        &self.upgrade
-    }
-
-    /// Handle an incoming stream
-    pub async fn handle_stream(
-        &self,
-        stream: libp2p::Stream,
-    ) -> Result<DefaultStream<libp2p::Stream>> {
-        let default_stream = DefaultStream::new(stream);
-        Ok(default_stream)
-    }
-}
-
-impl Default for DefaultStreamHandler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Stream wrapper for tokio streams with Cap'n Proto message framing
-pub struct TokioStream<T> {
-    io: T,
-    read_buffer: BytesMut,
-    write_buffer: BytesMut,
-}
-
-impl<T> TokioStream<T>
-where
-    T: TokioAsyncRead + TokioAsyncWrite + Send + Unpin,
-{
-    pub fn new(io: T) -> Self {
-        Self {
-            io,
-            read_buffer: BytesMut::new(),
-            write_buffer: BytesMut::new(),
-        }
-    }
-
-    /// Send a Cap'n Proto message over the stream
-    pub async fn send_capnp_message(&mut self, message: &[u8]) -> Result<()> {
-        let length = message.len() as u32;
-
-        // Write length prefix (4 bytes, little-endian for Cap'n Proto compatibility)
-        bytes::BufMut::put_u32_le(&mut self.write_buffer, length);
-        // Write message content
-        self.write_buffer.extend_from_slice(message);
-
-        // Flush to underlying stream
-        self.io.write_all(&self.write_buffer).await?;
-        self.io.flush().await?;
-
-        // Clear write buffer
-        self.write_buffer.clear();
-
-        debug!("Sent Cap'n Proto message: {} bytes", length);
-        Ok(())
-    }
-
-    /// Receive a Cap'n Proto message from the stream
-    pub async fn receive_capnp_message(&mut self) -> Result<Option<Vec<u8>>> {
-        // Read length prefix if we don't have enough bytes
-        if self.read_buffer.len() < 4 {
-            let mut temp_buffer = [0u8; 1024];
-            let bytes_read = self.io.read(&mut temp_buffer).await?;
-            if bytes_read == 0 {
-                return Ok(None); // EOF
-            }
-            self.read_buffer
-                .extend_from_slice(&temp_buffer[..bytes_read]);
-        }
-
-        // Check if we have enough bytes for the length prefix
-        if self.read_buffer.len() < 4 {
-            return Ok(None);
-        }
-
-        // Read length prefix (little-endian)
-        let length = bytes::Buf::get_u32_le(&mut self.read_buffer) as usize;
-
-        // Check if we have the full message
-        if self.read_buffer.len() < length {
-            return Ok(None);
-        }
-
-        // Extract message
-        let message_bytes = self.read_buffer.split_to(length);
-
-        debug!("Received Cap'n Proto message: {} bytes", length);
-        Ok(Some(message_bytes.to_vec()))
-    }
-}
-
 /// Simple echo capability for testing import/export functionality
 pub struct EchoCapability;
 
@@ -580,8 +410,6 @@ impl EchoCapability {
         format!("Echo: {}", message)
     }
 }
-
-// Remove the incorrect Server implementation - we'll use a simpler approach
 
 #[cfg(test)]
 mod tests {
@@ -658,8 +486,8 @@ mod tests {
         let client_stream = client_stream.unwrap();
 
         // 5. Test RPC communication
-        let mut server_rpc = TokioStream::new(server_stream);
-        let mut client_rpc = TokioStream::new(client_stream);
+        let mut server_rpc = WetwareStream::new(server_stream);
+        let mut client_rpc = WetwareStream::new(client_stream);
 
         // Send a test message from server to client
         let test_message = b"Hello from RPC server!";
@@ -681,3 +509,5 @@ mod tests {
         println!("🎉 Simple RPC connection test completed successfully!");
     }
 }
+
+
