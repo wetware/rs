@@ -1,5 +1,4 @@
 use anyhow::Result;
-use clap::Parser;
 use tracing::{debug, warn};
 
 /// Log level options
@@ -130,14 +129,15 @@ pub struct AppConfig {
 
 impl AppConfig {
     /// Create configuration from command line arguments and environment
-    pub fn from_args_and_env(args: &Args) -> Self {
-        let ipfs_url = args.ipfs.clone().unwrap_or_else(get_ipfs_url);
-        let log_level = args.loglvl.unwrap_or_else(get_log_level);
+    pub fn from_args_and_env(
+        ipfs: Option<String>,
+        loglvl: Option<LogLevel>,
+        preset: Option<String>,
+    ) -> Self {
+        let ipfs_url = ipfs.unwrap_or_else(get_ipfs_url);
+        let log_level = loglvl.unwrap_or_else(get_log_level);
 
-        let host_config = if args.env_config {
-            debug!("Using host configuration from environment variables");
-            HostConfig::from_env()
-        } else if let Some(preset) = &args.preset {
+        let host_config = if let Some(preset) = &preset {
             match preset.as_str() {
                 "minimal" => HostConfig::minimal(),
                 "development" => HostConfig::development(),
@@ -189,32 +189,6 @@ impl AppConfig {
             None
         }
     }
-}
-
-/// Command line arguments
-#[derive(Parser)]
-#[command(name = "ww")]
-#[command(
-    about = "P2P sandbox for Web3 applications that execute untrusted code on public networks."
-)]
-pub struct Args {
-    /// IPFS node HTTP API endpoint (e.g., http://127.0.0.1:5001)
-    /// If not provided, uses WW_IPFS environment variable or defaults to http://localhost:5001
-    #[arg(long)]
-    pub ipfs: Option<String>,
-
-    /// Log level (trace, debug, info, warn, error)
-    /// If not provided, uses WW_LOGLVL environment variable or defaults to info
-    #[arg(long, value_name = "LEVEL")]
-    pub loglvl: Option<LogLevel>,
-
-    /// Use preset configuration (minimal, development, production)
-    #[arg(long, value_name = "PRESET")]
-    pub preset: Option<String>,
-
-    /// Use configuration from environment variables
-    #[arg(long)]
-    pub env_config: bool,
 }
 
 /// Get the log level from environment variable or use default
