@@ -86,10 +86,25 @@ impl exporter::Server for ServiceManager {
 }
 
 impl importer::Server for ServiceManager {
-    fn import(&mut self, _params: importer::ImportParams, _results: importer::ImportResults) -> Promise<(), Error> {
-        // TODO: Implement proper field access once we understand the generated types
-        // For now, just return success to make it compile
-        Promise::ok(())
+    fn import(&mut self, params: importer::ImportParams, mut results: importer::ImportResults) -> Promise<(), Error> {
+        let params = params.get().unwrap();
+        let token = params.get_token().unwrap();
+        
+        // Look up the service by token
+        let services = self.services.lock().unwrap();
+        if let Some(weak_ref) = services.get(token) {
+            if let Some(capability) = weak_ref.upgrade() {
+                // Extract the Box<dyn ClientHook> from the Arc and set it in results
+                let capability_hook = Arc::try_unwrap(capability).unwrap_or_else(|arc| (*arc).clone());
+                results.get().init_service().set_as_capability(capability_hook);
+                Promise::ok(())
+            } else {
+                // Service was garbage collected
+                Promise::err(Error::failed("Service no longer available".to_string()))
+            }
+        } else {
+            Promise::err(Error::failed("Service token not found".to_string()))
+        }
     }
 }
 
