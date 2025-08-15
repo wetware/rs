@@ -116,7 +116,9 @@ impl Decoder for DefaultCodec {
             return Ok(None);
         }
 
-        let length = u32::from_be_bytes([src[0], src[1], src[2], src[3]]) as usize;
+        // Extract the message length from the first 4 bytes in little-endian order
+        // This matches the length prefix encoding used in Cap'n Proto RPC protocol
+        let length = u32::from_le_bytes([src[0], src[1], src[2], src[3]]) as usize;
 
         if src.len() < 4 + length {
             return Ok(None);
