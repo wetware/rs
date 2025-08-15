@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
 use libp2p::{
+    core::upgrade::Version,
     identity,
     kad::{Event as KademliaEvent, QueryResult, RecordKey},
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
@@ -14,7 +15,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::HostConfig;
 use crate::membrane::Membrane;
-use crate::rpc::WetwareStreamHandler;
+use crate::rpc::{WetwareProtocolUpgrade, WetwareStreamHandler};
 
 // IPFS protocol constants for DHT compatibility
 // These protocols ensure our node can communicate with the IPFS network
@@ -276,13 +277,8 @@ impl SwarmManager {
     pub async fn handle_default_stream(
         &mut self,
         connection_id: libp2p::swarm::ConnectionId,
-        stream: libp2p::Stream,
+        _stream: libp2p::Stream,
     ) -> Result<()> {
-        use crate::rpc::WetwareStream;
-
-        // Create default stream wrapper
-        let _default_stream = WetwareStream::new(stream);
-
         // Handle the stream in the default protocol behaviour
         // For now, we'll just log that we received it
         info!(
@@ -366,7 +362,13 @@ pub async fn build_host(
             libp2p::noise::Config::new,
             libp2p::yamux::Config::default,
         )?
-        .with_behaviour(|_| behaviour)?;
+        .with_behaviour(|_| behaviour)?
+        .with_swarm_config(|config| {
+            // We need WetwareProtocolUpgrade to handle /ww/0.1.0 protocol streams because it:
+            // 1. Implements the libp2p upgrade traits for protocol negotiation
+            // 2. Creates WetwareStream instances for RPC communication
+            config.with_substream_upgrade_protocol_override(Version::V1)  // Server node, so use eager V1.
+        });
 
     // Build the swarm with the configured behaviour
     let mut swarm = swarm_builder.build();

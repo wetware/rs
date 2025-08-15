@@ -1,11 +1,10 @@
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::core::upgrade::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
 use libp2p::swarm::{ConnectionId, StreamProtocol};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::codec::{Decoder, Encoder};
 use tracing::{debug, info};
 
@@ -14,13 +13,14 @@ use crate::membrane::Membrane;
 // Protocol identifier for wetware
 pub const WW_PROTOCOL: &str = "/ww/0.1.0";
 
-/// Simple wetware protocol that can be used for stream upgrades
+/// Wetware protocol upgrade that can be integrated with libp2p transport
+/// This implements the proper upgrade traits for libp2p 0.56.0
 #[derive(Debug, Clone)]
-pub struct WetwareProtocol {
+pub struct WetwareProtocolUpgrade {
     protocol: StreamProtocol,
 }
 
-impl WetwareProtocol {
+impl WetwareProtocolUpgrade {
     pub fn new() -> Self {
         Self {
             protocol: StreamProtocol::new(WW_PROTOCOL),
@@ -28,9 +28,48 @@ impl WetwareProtocol {
     }
 }
 
-impl Default for WetwareProtocol {
+impl Default for WetwareProtocolUpgrade {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl UpgradeInfo for WetwareProtocolUpgrade {
+    type Info = StreamProtocol;
+    type InfoIter = std::iter::Once<Self::Info>;
+
+    fn protocol_info(&self) -> Self::InfoIter {
+        std::iter::once(self.protocol.clone())
+    }
+}
+
+impl<T> InboundUpgrade<T> for WetwareProtocolUpgrade
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    type Output = WetwareStream<T>;
+    type Error = std::io::Error;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Output, Self::Error>> + Send>,
+    >;
+
+    fn upgrade_inbound(self, io: T, _: Self::Info) -> Self::Future {
+        Box::pin(async move { Ok(WetwareStream::new(io)) })
+    }
+}
+
+impl<T> OutboundUpgrade<T> for WetwareProtocolUpgrade
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    type Output = WetwareStream<T>;
+    type Error = std::io::Error;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Output, Self::Error>> + Send>,
+    >;
+
+    fn upgrade_outbound(self, io: T, _: Self::Info) -> Self::Future {
+        Box::pin(async move { Ok(WetwareStream::new(io)) })
     }
 }
 
@@ -44,7 +83,7 @@ pub struct WetwareStream<T> {
 
 impl<T> WetwareStream<T>
 where
-    T: AsyncRead + AsyncWrite + Send + Unpin,
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin,
 {
     pub fn new(io: T) -> Self {
         Self {
@@ -57,19 +96,14 @@ where
     /// Send a Cap'n Proto message over the stream
     pub async fn send_capnp_message(&mut self, message: &[u8]) -> Result<()> {
         let length = message.len() as u32;
-
-        // Write length prefix (4 bytes, little-endian for Cap'n Proto compatibility)
-        bytes::BufMut::put_u32_le(&mut self.write_buffer, length);
-        // Write message content
-        self.write_buffer.extend_from_slice(message);
-
-        // Flush to underlying stream
-        self.io.write_all(&self.write_buffer).await?;
+        
+        // Write length prefix (little-endian)
+        self.io.write_all(&length.to_le_bytes()).await?;
+        
+        // Write message
+        self.io.write_all(message).await?;
         self.io.flush().await?;
-
-        // Clear write buffer
-        self.write_buffer.clear();
-
+        
         debug!("Sent Cap'n Proto message: {} bytes", length);
         Ok(())
     }
@@ -105,48 +139,6 @@ where
 
         debug!("Received Cap'n Proto message: {} bytes", length);
         Ok(Some(message_bytes.to_vec()))
-    }
-}
-
-impl<T> UpgradeInfo for WetwareStream<T>
-where
-    T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
-{
-    type Info = StreamProtocol;
-    type InfoIter = std::iter::Once<Self::Info>;
-
-    fn protocol_info(&self) -> Self::InfoIter {
-        std::iter::once(StreamProtocol::new(WW_PROTOCOL))
-    }
-}
-
-impl<T> InboundUpgrade<T> for WetwareStream<T>
-where
-    T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
-{
-    type Output = WetwareStream<T>;
-    type Error = std::io::Error;
-    type Future = std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Self::Output, Self::Error>> + Send>,
-    >;
-
-    fn upgrade_inbound(self, io: T, _: Self::Info) -> Self::Future {
-        Box::pin(async move { Ok(WetwareStream::new(io)) })
-    }
-}
-
-impl<T> OutboundUpgrade<T> for WetwareStream<T>
-where
-    T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
-{
-    type Output = WetwareStream<T>;
-    type Error = std::io::Error;
-    type Future = std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Self::Output, Self::Error>> + Send>,
-    >;
-
-    fn upgrade_outbound(self, io: T, _: Self::Info) -> Self::Future {
-        Box::pin(async move { Ok(WetwareStream::new(io)) })
     }
 }
 
@@ -411,6 +403,60 @@ impl EchoCapability {
     }
 }
 
+/// Wetware protocol behaviour that handles RPC connections and exports the importer capability
+#[derive(Debug)]
+pub struct WetwareProtocolBehaviour {
+    /// Active RPC connections for each connection
+    rpc_connections: HashMap<ConnectionId, SimpleRpcServer>,
+    /// Shared membrane for all connections
+    shared_membrane: Arc<Mutex<Membrane>>,
+}
+
+impl WetwareProtocolBehaviour {
+    pub fn new() -> Self {
+        Self {
+            rpc_connections: HashMap::new(),
+            shared_membrane: Arc::new(Mutex::new(Membrane::new())),
+        }
+    }
+
+    /// Get a reference to the shared membrane
+    pub fn membrane(&self) -> &Arc<Mutex<Membrane>> {
+        &self.shared_membrane
+    }
+
+    /// Handle incoming RPC stream and create connection with importer capability
+    pub fn handle_incoming_stream(
+        &mut self,
+        connection_id: ConnectionId,
+        _stream: WetwareStream<libp2p::Stream>,
+    ) -> Result<()> {
+        // Create RPC server with shared Membrane
+        let rpc_server = SimpleRpcServer::new(Arc::clone(&self.shared_membrane));
+
+        // Store the connection
+        self.rpc_connections.insert(connection_id, rpc_server);
+
+        info!(
+            "New wetware RPC stream established on connection {} with importer capability available",
+            connection_id
+        );
+
+        Ok(())
+    }
+
+    /// Get count of active RPC connections
+    pub fn get_active_connection_count(&self) -> usize {
+        self.rpc_connections.len()
+    }
+}
+
+impl Default for WetwareProtocolBehaviour {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,31 +507,11 @@ mod tests {
     async fn test_rpc_connection_simple() {
         println!("🚀 Starting simple RPC connection test...");
 
-        // 1. Create a local TCP listener
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_addr = listener.local_addr().unwrap();
-        println!("📍 TCP listener bound to: {}", local_addr);
+        // 1. Create an in-memory bidirectional pipe instead of TCP
+        let (server_stream, client_stream) = tokio::io::duplex(1024);
+        println!("📍 In-memory pipe created");
 
-        // 2. Accept connection in background
-        let accept_handle = tokio::spawn(async move {
-            let (stream, _addr) = listener.accept().await.unwrap();
-            println!("📡 TCP connection accepted");
-            stream
-        });
-
-        // 3. Connect to listener
-        let connect_handle = tokio::spawn(async move {
-            let stream = TcpStream::connect(local_addr).await.unwrap();
-            println!("🔌 TCP connection established");
-            stream
-        });
-
-        // 4. Get both streams
-        let (server_stream, client_stream) = tokio::join!(accept_handle, connect_handle);
-        let server_stream = server_stream.unwrap();
-        let client_stream = client_stream.unwrap();
-
-        // 5. Test RPC communication
+        // 2. Test RPC communication
         let mut server_rpc = WetwareStream::new(server_stream);
         let mut client_rpc = WetwareStream::new(client_stream);
 
