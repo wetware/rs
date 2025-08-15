@@ -15,6 +15,9 @@ use tracing::{debug, info, warn};
 use crate::config::HostConfig;
 use crate::membrane::Membrane;
 use crate::rpc::WetwareStreamHandler;
+use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
+use capnp::capability::{Promise, Server as CapnpServer};
+use crate::swarm_capnp::{importer, exporter};
 
 // IPFS protocol constants for DHT compatibility
 // These protocols ensure our node can communicate with the IPFS network
@@ -401,19 +404,32 @@ impl SwarmManager {
     /// This is the core of our wetware protocol - providing the importer capability
     async fn process_bootstrap_request(
         &self,
-        rpc_server: &crate::rpc::DefaultRpcServer,
-        request: &[u8],
+        _rpc_server: &crate::rpc::DefaultRpcServer,
+        _request: &[u8],
     ) -> Result<Vec<u8>> {
         debug!("Processing bootstrap request for importer capability");
         
-        // For now, we'll return a simple success response
-        // TODO: Implement proper Cap'n Proto message parsing and response
-        // This should return the actual importer capability
+        // TODO: Implement proper Cap'n Proto RPC server that provides the importer capability
+        // This should:
+        // 1. Parse the incoming Cap'n Proto message
+        // 2. Set up a proper RPC server with the importer capability
+        // 3. Return the importer capability as a Cap'n Proto response
         
+        // For now, we'll return a simple success response
+        // In the next step, we'll implement the actual Cap'n Proto RPC server
         let response = b"Importer capability granted".to_vec();
         debug!("Bootstrap response: {} bytes", response.len());
         
         Ok(response)
+    }
+
+    /// Create a Cap'n Proto RPC server that provides the importer capability
+    /// This is the core of our wetware protocol implementation
+    fn create_importer_rpc_server(&self) -> Box<dyn importer::Server> {
+        // Create an importer server that provides access to capabilities
+        // This server will be used by clients to import capabilities from our membrane
+        // The Membrane itself implements both importer::Server and exporter::Server
+        Box::new(Membrane::new())
     }
 
     /// Test method to simulate receiving a wetware protocol request
@@ -447,6 +463,8 @@ impl SwarmManager {
         Ok(())
     }
 }
+
+
 
 /// Build a libp2p host with IPFS-compatible protocols and enhanced features
 pub async fn build_host(
