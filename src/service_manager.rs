@@ -51,9 +51,38 @@ impl ServiceManager {
     }
 
     /// Clean up dead weak references from the services map
+    /// 
+    /// Note: Arc::into_inner approach for automatic cleanup
+    /// 
+    /// The ideal approach would be to automatically clean up dead references
+    /// when the Arc refcount hits zero. This could be implemented by:
+    /// 
+    /// 1. Creating a wrapper that implements Drop and triggers cleanup
+    /// 2. Using Arc::into_inner to get the inner value and trigger cleanup
+    /// 3. Spawning a background task to monitor Arc::strong_count
+    /// 
+    /// However, the current ClientHook trait doesn't implement Send,
+    /// making it difficult to use with tokio::spawn for background cleanup.
+    /// 
+    /// For now, manual cleanup via this method is used.
+    /// This method can be called periodically or when importing services.
     pub fn cleanup_dead_services(&self) {
         let mut services = self.services.lock().unwrap();
         services.retain(|_, weak_ref| weak_ref.upgrade().is_some());
+    }
+
+    /// Export a service capability and return a token
+    pub fn export_service(&mut self, capability: Arc<Box<dyn ClientHook>>) -> anyhow::Result<Vec<u8>> {
+        let token = self.generate_service_token();
+        let weak_ref = Arc::downgrade(&capability);
+        
+        // Clean up dead references before adding new ones
+        let mut services = self.services.lock().unwrap();
+        services.retain(|_, weak_ref| weak_ref.upgrade().is_some());
+        
+        // Store the weak reference
+        services.insert(token.clone(), weak_ref);
+        Ok(token)
     }
 }
 
@@ -73,6 +102,10 @@ impl exporter::Server for ServiceManager {
         
         {
             let mut services = self.services.lock().unwrap();
+            
+            // Clean up dead references before adding new ones
+            services.retain(|_, weak_ref| weak_ref.upgrade().is_some());
+            
             // Store the capability in the hashmap using the service token as key
             // Convert the Client capability to a Weak<dyn ClientHook> for storage
             let capability_hook = capability.into_client_hook();
