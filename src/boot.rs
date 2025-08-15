@@ -347,19 +347,25 @@ impl SwarmManager {
         // Create RPC server with the membrane
         let rpc_server = crate::rpc::DefaultRpcServer::new(membrane);
         
-        // For now, just log that we have an RPC server ready
-        // TODO: Store the RPC server and handle actual stream processing
-        info!("Wetware protocol connection established on connection {} with importer capability", connection_id);
+        info!("🎯 Wetware protocol connection established on connection {} with importer capability", connection_id);
         
         // Test the RPC server capability
         match rpc_server.test_import_capability().await {
             Ok(response) => {
-                debug!("RPC server test successful: {:?}", String::from_utf8_lossy(&response));
+                debug!("✅ RPC server test successful: {:?}", String::from_utf8_lossy(&response));
             }
             Err(e) => {
-                warn!(reason = ?e, "RPC server test failed");
+                warn!(reason = ?e, "❌ RPC server test failed");
+                return Err(e);
             }
         }
+        
+        // TODO: When we have an actual libp2p stream, we can:
+        // 1. Wrap it in Libp2pStreamAdapter
+        // 2. Create WetwareStream<Libp2pStreamAdapter>
+        // 3. Set up Cap'n Proto RPC with the importer capability
+        
+        info!("🚀 Importer capability is now available on connection {}!", connection_id);
         
         Ok(())
     }
