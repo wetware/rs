@@ -397,6 +397,11 @@ pub async fn build_host(
 
     debug!("Built libp2p swarm with enhanced features");
 
+    // Register the wetware protocol with the swarm
+    // This makes libp2p aware of our /ww/0.1.0 protocol
+    let wetware_protocol = libp2p::swarm::StreamProtocol::new(crate::rpc::WW_PROTOCOL);
+    debug!("Registered wetware protocol: {}", wetware_protocol);
+
     // Listen on all interfaces with random port for TCP
     let tcp_listen_addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse()?;
     swarm.listen_on(tcp_listen_addr.clone())?;
