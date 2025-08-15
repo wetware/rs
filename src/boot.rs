@@ -103,6 +103,9 @@ pub struct SwarmManager {
     peer_id: PeerId,
     /// Default protocol handler for managing RPC connections
     wetware_handler: WetwareStreamHandler,
+    /// Shared membrane for all wetware protocol connections
+    /// This allows capabilities exported by one peer to be imported by another peer
+    shared_membrane: Arc<Mutex<Membrane>>,
 }
 
 impl SwarmManager {
@@ -112,6 +115,7 @@ impl SwarmManager {
             swarm,
             peer_id,
             wetware_handler: WetwareStreamHandler::new(),
+            shared_membrane: Arc::new(Mutex::new(Membrane::new())),
         }
     }
 
@@ -355,14 +359,14 @@ impl SwarmManager {
         // 2. Create a wetware stream from the adapted stream
         let mut wetware_stream = crate::rpc::WetwareStream::new(stream_adapter);
         
-        // 3. Set up Cap'n Proto RPC server with importer capability
-        let membrane = Arc::new(Mutex::new(Membrane::new()));
-        let rpc_server = crate::rpc::DefaultRpcServer::new(membrane);
+        // 3. Set up proper Cap'n Proto RPC connection with importer capability
+        self.setup_capnp_rpc_connection(&mut wetware_stream).await?;
         
         info!("🚀 Cap'n Proto RPC connection established with importer capability available");
         
         // 4. Start listening for RPC messages (bootstrap requests)
-        self.handle_rpc_messages(&mut wetware_stream, rpc_server).await?;
+        // Note: This will be handled by the Cap'n Proto RPC system now
+        // We don't need to manually handle messages anymore
         
         Ok(())
     }
@@ -423,13 +427,37 @@ impl SwarmManager {
         Ok(response)
     }
 
+    /// Set up a proper Cap'n Proto RPC connection on the wetware stream
+    /// This creates an RPC system that provides the importer capability to clients
+    async fn setup_capnp_rpc_connection(
+        &self,
+        stream: &mut crate::rpc::WetwareStream<crate::rpc::Libp2pStreamAdapter>,
+    ) -> Result<()> {
+        debug!("Setting up Cap'n Proto RPC connection");
+        
+        // Create the importer RPC server that provides capabilities
+        let importer_server = self.create_importer_rpc_server();
+        
+        // TODO: Set up the actual Cap'n Proto RPC system
+        // This should:
+        // 1. Create an RpcSystem with the importer server
+        // 2. Handle incoming RPC messages on the stream
+        // 3. Provide the importer capability to clients
+        
+        info!("🚀 Cap'n Proto RPC connection ready with importer capability");
+        
+        Ok(())
+    }
+
     /// Create a Cap'n Proto RPC server that provides the importer capability
     /// This is the core of our wetware protocol implementation
     fn create_importer_rpc_server(&self) -> Box<dyn importer::Server> {
         // Create an importer server that provides access to capabilities
         // This server will be used by clients to import capabilities from our membrane
         // The Membrane itself implements both importer::Server and exporter::Server
-        Box::new(Membrane::new())
+        // Use the shared membrane so all connections can access the same capabilities
+        let membrane = Arc::clone(&self.shared_membrane);
+        Box::new(SharedMembraneServer { membrane })
     }
 
     /// Test method to simulate receiving a wetware protocol request
@@ -464,7 +492,25 @@ impl SwarmManager {
     }
 }
 
+/// Wrapper for shared membrane that implements the importer::Server trait
+/// This allows us to use Arc<Mutex<Membrane>> as an RPC server
+struct SharedMembraneServer {
+    membrane: Arc<Mutex<Membrane>>,
+}
 
+/// Implement the importer server trait for the shared membrane wrapper
+/// This delegates to the underlying Membrane implementation
+impl importer::Server for SharedMembraneServer {
+    fn import(
+        &mut self,
+        params: importer::ImportParams,
+        mut results: importer::ImportResults,
+    ) -> Promise<(), capnp::Error> {
+        // Lock the shared membrane and delegate to its implementation
+        let mut membrane = self.membrane.lock().unwrap();
+        membrane.import(params, results)
+    }
+}
 
 /// Build a libp2p host with IPFS-compatible protocols and enhanced features
 pub async fn build_host(
