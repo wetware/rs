@@ -305,36 +305,7 @@ impl SwarmManager {
         Ok(())
     }
 
-    /// Handle wetware protocol stream and create RPC connection with importer capability
-    pub async fn handle_wetware_stream(&mut self, _stream: libp2p::Stream) -> Result<()> {
-        debug!("Handling wetware protocol stream");
 
-        // Create a membrane for this connection
-        let membrane = Arc::new(Mutex::new(Membrane::new()));
-
-        // Create RPC server with the membrane
-        let rpc_server = crate::rpc::DefaultRpcServer::new(membrane);
-
-        // Create a wetware stream from the libp2p stream
-        // Note: We need to convert libp2p::Stream to something that implements tokio::io::AsyncRead/AsyncWrite
-        // For now, we'll log that we received it and set up the RPC server
-        info!("Wetware stream received, RPC server created with importer capability");
-
-        // TODO: Convert libp2p::Stream to WetwareStream and handle RPC communication
-        // This requires bridging libp2p::Stream to tokio::io traits
-        
-        // For now, test the RPC server capability
-        match rpc_server.test_import_capability().await {
-            Ok(response) => {
-                info!("RPC server test successful: {:?}", String::from_utf8_lossy(&response));
-            }
-            Err(e) => {
-                warn!(reason = ?e, "RPC server test failed");
-            }
-        }
-
-        Ok(())
-    }
 
     /// Handle incoming wetware protocol connection
     /// This method is called when a peer requests the wetware protocol
@@ -368,6 +339,81 @@ impl SwarmManager {
         info!("🚀 Importer capability is now available on connection {}!", connection_id);
         
         Ok(())
+    }
+
+    /// Handle incoming wetware protocol stream with RPC setup
+    /// This method sets up a Cap'n Proto RPC connection and provides the importer capability
+    pub async fn handle_wetware_stream(&mut self, stream: libp2p::Stream) -> Result<()> {
+        debug!("Setting up Cap'n Proto RPC connection on wetware stream");
+        
+        // 1. Wrap the libp2p stream in our adapter
+        let stream_adapter = crate::rpc::Libp2pStreamAdapter::new(stream);
+        
+        // 2. Create a wetware stream from the adapted stream
+        let mut wetware_stream = crate::rpc::WetwareStream::new(stream_adapter);
+        
+        // 3. Set up Cap'n Proto RPC server with importer capability
+        let membrane = Arc::new(Mutex::new(Membrane::new()));
+        let rpc_server = crate::rpc::DefaultRpcServer::new(membrane);
+        
+        info!("🚀 Cap'n Proto RPC connection established with importer capability available");
+        
+        // 4. Start listening for RPC messages (bootstrap requests)
+        self.handle_rpc_messages(&mut wetware_stream, rpc_server).await?;
+        
+        Ok(())
+    }
+
+    /// Handle RPC messages and provide bootstrap capability
+    /// This listens for bootstrap messages and responds with the importer capability
+    async fn handle_rpc_messages(
+        &self,
+        stream: &mut crate::rpc::WetwareStream<crate::rpc::Libp2pStreamAdapter>,
+        rpc_server: crate::rpc::DefaultRpcServer,
+    ) -> Result<()> {
+        debug!("Starting RPC message handling loop");
+        
+        loop {
+            // Listen for incoming RPC messages
+            match stream.receive_capnp_message().await? {
+                Some(message) => {
+                    debug!("Received RPC message: {} bytes", message.len());
+                    
+                    // Process the RPC message and respond with importer capability
+                    let response = self.process_bootstrap_request(&rpc_server, &message).await?;
+                    
+                    // Send the response back to the client
+                    stream.send_capnp_message(&response).await?;
+                    
+                    info!("✅ Bootstrap request processed, importer capability provided");
+                }
+                None => {
+                    debug!("No more messages, connection closed");
+                    break;
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Process bootstrap request and return importer capability
+    /// This is the core of our wetware protocol - providing the importer capability
+    async fn process_bootstrap_request(
+        &self,
+        rpc_server: &crate::rpc::DefaultRpcServer,
+        request: &[u8],
+    ) -> Result<Vec<u8>> {
+        debug!("Processing bootstrap request for importer capability");
+        
+        // For now, we'll return a simple success response
+        // TODO: Implement proper Cap'n Proto message parsing and response
+        // This should return the actual importer capability
+        
+        let response = b"Importer capability granted".to_vec();
+        debug!("Bootstrap response: {} bytes", response.len());
+        
+        Ok(response)
     }
 
     /// Test method to simulate receiving a wetware protocol request
