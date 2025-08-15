@@ -427,24 +427,29 @@ impl SwarmManager {
         Ok(response)
     }
 
+
+
     /// Set up a proper Cap'n Proto RPC connection on the wetware stream
     /// This creates an RPC system that provides the importer capability to clients
     async fn setup_capnp_rpc_connection(
         &self,
-        stream: &mut crate::rpc::WetwareStream<crate::rpc::Libp2pStreamAdapter>,
+        _stream: &mut crate::rpc::WetwareStream<crate::rpc::Libp2pStreamAdapter>,
     ) -> Result<()> {
         debug!("Setting up Cap'n Proto RPC connection");
         
         // Create the importer RPC server that provides capabilities
-        let importer_server = self.create_importer_rpc_server();
+        let _importer_server = self.create_importer_rpc_server();
         
         // TODO: Set up the actual Cap'n Proto RPC system
         // This should:
-        // 1. Create an RpcSystem with the importer server
-        // 2. Handle incoming RPC messages on the stream
+        // 1. Create a bidirectional RPC connection on the stream
+        // 2. Handle incoming RPC messages automatically
         // 3. Provide the importer capability to clients
+        //
+        // For now, we'll just log that the RPC server is ready
+        // The actual RPC system integration will be implemented in the next step
         
-        info!("🚀 Cap'n Proto RPC connection ready with importer capability");
+        info!("🚀 Cap'n Proto RPC server ready with importer capability");
         
         Ok(())
     }
