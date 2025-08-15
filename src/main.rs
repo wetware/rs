@@ -7,21 +7,63 @@ mod membrane;
 mod rpc;
 mod swarm_capnp;
 use boot::{build_host, get_kubo_peers, SwarmManager};
-use clap::Parser;
-use config::{init_tracing, AppConfig, Args};
-use std::sync::Arc;
-use std::sync::Mutex;
-use membrane::Membrane;
+use clap::{Parser, Subcommand};
+use config::{init_tracing, AppConfig};
+
+#[derive(Parser)]
+#[command(name = "ww")]
+#[command(
+    about = "P2P sandbox for Web3 applications that execute untrusted code on public networks."
+)]
+#[command(version = "0.1.0")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run a wetware node
+    Run {
+        /// IPFS node HTTP API endpoint (e.g., http://127.0.0.1:5001)
+        /// If not provided, uses WW_IPFS environment variable or defaults to http://localhost:5001
+        #[arg(long)]
+        ipfs: Option<String>,
+
+        /// Log level (trace, debug, info, warn, error)
+        /// If not provided, uses WW_LOGLVL environment variable or defaults to info
+        #[arg(long, value_name = "LEVEL")]
+        loglvl: Option<config::LogLevel>,
+
+        /// Use preset configuration (minimal, development, production)
+        #[arg(long, value_name = "PRESET")]
+        preset: Option<String>,
+    },
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let cli = Cli::parse();
 
+    match cli.command {
+        Commands::Run { ipfs, loglvl, preset } => {
+            run_node(ipfs, loglvl, preset).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_node(
+    ipfs: Option<String>,
+    loglvl: Option<config::LogLevel>,
+    preset: Option<String>,
+) -> Result<()> {
     // Create application configuration from command line arguments and environment
-    let app_config = AppConfig::from_args_and_env(&args);
+    let app_config = AppConfig::from_args_and_env(ipfs, loglvl, preset);
 
     // Initialize tracing with the determined log level
-    init_tracing(app_config.log_level, args.loglvl);
+    init_tracing(app_config.log_level, loglvl);
 
     // Log the configuration summary
     app_config.log_summary();
