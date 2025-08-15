@@ -9,6 +9,9 @@ mod rpc;
 use boot::{build_host, get_kubo_peers, SwarmManager};
 use clap::Parser;
 use config::{init_tracing, AppConfig, Args};
+use std::sync::Arc;
+use std::sync::Mutex;
+use service_manager::ServiceManager;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -58,6 +61,9 @@ async fn main() -> Result<()> {
         version = "0.1.0",
         "wetware started"
     );
+
+    info!("Starting wetware node...");
+    info!("Peer ID: {}", peer_id);
 
     // 3. Create SwarmManager and bootstrap DHT
     let mut swarm_manager = SwarmManager::new(swarm, peer_id);

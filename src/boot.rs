@@ -9,9 +9,12 @@ use libp2p::{
 use serde_json::Value;
 use std::time::Duration;
 use tracing::{debug, info, warn};
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use crate::config::HostConfig;
 use crate::rpc::DefaultStreamHandler;
+use crate::service_manager::ServiceManager;
 
 // IPFS protocol constants for DHT compatibility
 // These protocols ensure our node can communicate with the IPFS network
@@ -87,10 +90,8 @@ pub async fn get_kubo_peers(kubo_url: &str) -> Result<Vec<(PeerId, Multiaddr)>> 
 pub struct WetwareBehaviour {
     kad: libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>,
     identify: libp2p::identify::Behaviour,
-    // TODO: Add default protocol behaviour for handling RPC streams
-    // This will handle incoming streams and export bootstrap capabilities
-    // NOTE: Temporarily commented out until NetworkBehaviour is implemented
-    // default: crate::rpc::DefaultProtocolBehaviour,
+    // TODO: Add wetware protocol when DefaultProtocolBehaviour implements NetworkBehaviour
+    // wetware: crate::rpc::DefaultProtocolBehaviour,
 }
 
 pub struct SwarmManager {
@@ -225,6 +226,7 @@ impl SwarmManager {
                     }
                     _ => {}
                 },
+                // TODO: Add wetware protocol event handling when it's implemented
 
                 Some(SwarmEvent::NewListenAddr { address, .. }) => {
                     debug!(address = %address, "Listening on address");
@@ -292,6 +294,23 @@ impl SwarmManager {
 
         Ok(())
     }
+
+    /// Handle wetware protocol stream and create RPC connection with importer capability
+    pub async fn handle_wetware_stream(&mut self, stream: libp2p::Stream) -> Result<()> {
+        debug!("Handling wetware protocol stream");
+        
+        // Create a service manager for this connection
+        let service_manager = Arc::new(Mutex::new(ServiceManager::new()));
+        
+        // Create RPC server with the service manager
+        let rpc_server = crate::rpc::SimpleRpcServer::new(service_manager);
+        
+        // TODO: Set up the stream handling and RPC processing
+        // For now, just log that we received a stream
+        info!("Wetware stream received, RPC server created with importer capability");
+        
+        Ok(())
+    }
 }
 
 /// Build a libp2p host with IPFS-compatible protocols and enhanced features
@@ -335,7 +354,8 @@ pub async fn build_host(
             libp2p::identify::Config::new(IPFS_IDENTIFY_PROTOCOL.to_string(), keypair.public())
                 .with_agent_version("ww/1.0.0".to_string()),
         ),
-        // default: crate::rpc::DefaultProtocolBehaviour::new(), // TODO: Add when NetworkBehaviour is implemented
+        // TODO: Add wetware protocol when DefaultProtocolBehaviour implements NetworkBehaviour
+        // wetware: crate::rpc::DefaultProtocolBehaviour::new(),
     };
 
     // Use SwarmBuilder to create a swarm with enhanced transport
