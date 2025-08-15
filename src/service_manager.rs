@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn test_export_triggers_automatic_cleanup() {
-        let mut manager = ServiceManager::new();
+        let manager = ServiceManager::new();
         
         // Test that the service manager starts empty
         let services = manager.services.lock().unwrap();
