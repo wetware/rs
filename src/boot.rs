@@ -335,6 +335,34 @@ impl SwarmManager {
 
         Ok(())
     }
+
+    /// Handle incoming wetware protocol connection
+    /// This method is called when a peer requests the wetware protocol
+    pub async fn handle_wetware_connection(&mut self, connection_id: libp2p::swarm::ConnectionId) -> Result<()> {
+        debug!("Handling wetware protocol connection request on connection {}", connection_id);
+        
+        // Create a membrane for this connection
+        let membrane = Arc::new(Mutex::new(Membrane::new()));
+        
+        // Create RPC server with the membrane
+        let rpc_server = crate::rpc::DefaultRpcServer::new(membrane);
+        
+        // For now, just log that we have an RPC server ready
+        // TODO: Store the RPC server and handle actual stream processing
+        info!("Wetware protocol connection established on connection {} with importer capability", connection_id);
+        
+        // Test the RPC server capability
+        match rpc_server.test_import_capability().await {
+            Ok(response) => {
+                debug!("RPC server test successful: {:?}", String::from_utf8_lossy(&response));
+            }
+            Err(e) => {
+                warn!(reason = ?e, "RPC server test failed");
+            }
+        }
+        
+        Ok(())
+    }
 }
 
 /// Build a libp2p host with IPFS-compatible protocols and enhanced features
