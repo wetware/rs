@@ -1,12 +1,12 @@
+use crate::swarm_capnp::{exporter, importer};
+use capnp::capability::{FromClientHook, Promise};
 use capnp::private::capability::ClientHook;
+use capnp::Error;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
-use capnp::capability::{Promise, FromClientHook};
-use capnp::Error;
-use crate::swarm_capnp::{exporter, importer};
 
 /// A membrane that manages exported and imported service capabilities.
-/// 
+///
 /// The membrane acts as a central registry for service capabilities, allowing
 /// services to be exported with unique tokens and later imported by those tokens.
 /// It uses weak references to allow automatic cleanup of dropped capabilities.
@@ -31,18 +31,21 @@ impl Membrane {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        
+
         // Convert time to 8 bytes (little-endian)
         let mut token = vec![0u8; 8];
         for i in 0..8 {
             token[i] = ((time >> (i * 8)) & 0xFF) as u8;
         }
-        
+
         token
     }
 
     /// Export a service capability and return a token
-    pub fn export_service(&mut self, capability: Arc<Box<dyn ClientHook>>) -> anyhow::Result<Vec<u8>> {
+    pub fn export_service(
+        &mut self,
+        capability: Arc<Box<dyn ClientHook>>,
+    ) -> anyhow::Result<Vec<u8>> {
         let token = self.generate_service_token();
         let weak_ref = Arc::downgrade(&capability);
 
@@ -63,16 +66,23 @@ impl Membrane {
 }
 
 impl exporter::Server for Membrane {
-    fn export(&mut self, _params: exporter::ExportParams, mut _results: exporter::ExportResults) -> Promise<(), Error> {
+    fn export(
+        &mut self,
+        _params: exporter::ExportParams,
+        mut _results: exporter::ExportResults,
+    ) -> Promise<(), Error> {
         let params = _params.get().unwrap();
         let service_reader = params.get_service();
         let service_token = self.generate_service_token();
 
         // Extract the capability from the service reader
-        let capability: crate::swarm_capnp::swarm_capnp::exporter::Client = match service_reader.get_as_capability() {
-            Ok(cap) => cap,
-            Err(e) => return Promise::err(Error::failed(format!("Failed to get capability: {}", e))),
-        };
+        let capability: crate::swarm_capnp::swarm_capnp::exporter::Client =
+            match service_reader.get_as_capability() {
+                Ok(cap) => cap,
+                Err(e) => {
+                    return Promise::err(Error::failed(format!("Failed to get capability: {}", e)))
+                }
+            };
 
         {
             let mut services = self.services.lock().unwrap();
@@ -93,14 +103,21 @@ impl exporter::Server for Membrane {
 }
 
 impl importer::Server for Membrane {
-    fn import(&mut self, params: importer::ImportParams, mut results: importer::ImportResults) -> Promise<(), Error> {
+    fn import(
+        &mut self,
+        params: importer::ImportParams,
+        mut results: importer::ImportResults,
+    ) -> Promise<(), Error> {
         let token = params.get().unwrap().get_token().unwrap();
-        
+
         // Try to get the capability from the membrane
         if let Some(capability) = self.import_service(token) {
             // Set the capability in the results
             let capability_hook = Arc::try_unwrap(capability).unwrap_or_else(|arc| (*arc).clone());
-            results.get().init_service().set_as_capability(capability_hook);
+            results
+                .get()
+                .init_service()
+                .set_as_capability(capability_hook);
             Promise::ok(())
         } else {
             Promise::err(Error::failed("Service not found".to_string()))
@@ -122,23 +139,23 @@ mod tests {
     #[test]
     fn test_export_triggers_automatic_cleanup() {
         let membrane = Membrane::new();
-        
+
         // Test that the membrane starts empty
         let services = membrane.services.lock().unwrap();
         assert_eq!(services.len(), 0);
         drop(services);
-        
+
         // Test that we can generate tokens
         let token1 = membrane.generate_service_token();
         let token2 = membrane.generate_service_token();
-        
+
         // Tokens should be different
         assert_ne!(token1, token2);
-        
+
         // Tokens should be 8 bytes
         assert_eq!(token1.len(), 8);
         assert_eq!(token2.len(), 8);
-        
+
         // Note: We can't easily test the actual cleanup behavior without
         // implementing the full ClientHook trait, but we can verify that
         // the export_service method exists and the basic structure works

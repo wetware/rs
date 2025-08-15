@@ -46,7 +46,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { ipfs, loglvl, preset } => {
+        Commands::Run {
+            ipfs,
+            loglvl,
+            preset,
+        } => {
             run_node(ipfs, loglvl, preset).await?;
         }
     }
@@ -104,8 +108,11 @@ async fn run_node(
         "wetware started"
     );
 
-    info!("Starting wetware node...");
+    info!("⚗️ Wetware started");
     info!("Peer ID: {}", peer_id);
+    info!("Listening on addresses: {:?}", listen_addrs);
+    info!("Wetware protocol /ww/0.1.0 is available and exported");
+    info!("Connected to IPFS network via DHT bootstrap");
 
     // 3. Create SwarmManager and bootstrap DHT
     let mut swarm_manager = SwarmManager::new(swarm, peer_id);

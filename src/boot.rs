@@ -7,14 +7,14 @@ use libp2p::{
     Multiaddr, PeerId,
 };
 use serde_json::Value;
-use std::time::Duration;
-use tracing::{debug, info, warn};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
+use tracing::{debug, info, warn};
 
 use crate::config::HostConfig;
-use crate::rpc::DefaultStreamHandler;
 use crate::membrane::Membrane;
+use crate::rpc::DefaultStreamHandler;
 
 // IPFS protocol constants for DHT compatibility
 // These protocols ensure our node can communicate with the IPFS network
@@ -90,8 +90,8 @@ pub async fn get_kubo_peers(kubo_url: &str) -> Result<Vec<(PeerId, Multiaddr)>> 
 pub struct WetwareBehaviour {
     kad: libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>,
     identify: libp2p::identify::Behaviour,
-    // TODO: Add wetware protocol when DefaultProtocolBehaviour implements NetworkBehaviour
-    // wetware: crate::rpc::DefaultProtocolBehaviour,
+    // TODO: Add wetware protocol when we implement a proper NetworkBehaviour
+    // wetware: crate::rpc::WetwareProtocol,
 }
 
 pub struct SwarmManager {
@@ -212,22 +212,23 @@ impl SwarmManager {
                     },
                     _ => {}
                 },
-                Some(SwarmEvent::Behaviour(WetwareBehaviourEvent::Identify(event))) => match event {
-                    libp2p::identify::Event::Received { peer_id, info, .. } => {
-                        debug!(peer_id = %peer_id, listen_addrs = ?info.listen_addrs, "Received identify info from peer");
-                        // Don't add peers to Kademlia here - we already added them upfront
-                        // This is just for logging peer discovery
+                Some(SwarmEvent::Behaviour(WetwareBehaviourEvent::Identify(event))) => {
+                    match event {
+                        libp2p::identify::Event::Received { peer_id, info, .. } => {
+                            debug!(peer_id = %peer_id, listen_addrs = ?info.listen_addrs, "Received identify info from peer");
+                            // Don't add peers to Kademlia here - we already added them upfront
+                            // This is just for logging peer discovery
+                        }
+                        libp2p::identify::Event::Sent { peer_id, .. } => {
+                            debug!(peer_id = %peer_id, "Sent identify info to peer");
+                        }
+                        libp2p::identify::Event::Error { peer_id, error, .. } => {
+                            warn!(peer_id = %peer_id, reason = ?error, "Identify error with peer");
+                        }
+                        _ => {}
                     }
-                    libp2p::identify::Event::Sent { peer_id, .. } => {
-                        debug!(peer_id = %peer_id, "Sent identify info to peer");
-                    }
-                    libp2p::identify::Event::Error { peer_id, error, .. } => {
-                        warn!(peer_id = %peer_id, reason = ?error, "Identify error with peer");
-                    }
-                    _ => {}
-                },
+                }
                 // TODO: Add wetware protocol event handling when it's implemented
-
                 Some(SwarmEvent::NewListenAddr { address, .. }) => {
                     debug!(address = %address, "Listening on address");
                 }
@@ -298,17 +299,17 @@ impl SwarmManager {
     /// Handle wetware protocol stream and create RPC connection with importer capability
     pub async fn handle_wetware_stream(&mut self, stream: libp2p::Stream) -> Result<()> {
         debug!("Handling wetware protocol stream");
-        
+
         // Create a membrane for this connection
         let membrane = Arc::new(Mutex::new(Membrane::new()));
-        
+
         // Create RPC server with the membrane
         let rpc_server = crate::rpc::SimpleRpcServer::new(membrane);
-        
+
         // TODO: Set up the stream handling and RPC processing
         // For now, just log that we received a stream
         info!("Wetware stream received, RPC server created with importer capability");
-        
+
         Ok(())
     }
 }
@@ -354,8 +355,8 @@ pub async fn build_host(
             libp2p::identify::Config::new(IPFS_IDENTIFY_PROTOCOL.to_string(), keypair.public())
                 .with_agent_version("ww/1.0.0".to_string()),
         ),
-        // TODO: Add wetware protocol when DefaultProtocolBehaviour implements NetworkBehaviour
-        // wetware: crate::rpc::DefaultProtocolBehaviour::new(),
+        // TODO: Add wetware protocol when we implement a proper NetworkBehaviour
+        // wetware: crate::rpc::WetwareProtocol::new(),
     };
 
     // Use SwarmBuilder to create a swarm with enhanced transport
