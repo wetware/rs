@@ -363,6 +363,37 @@ impl SwarmManager {
         
         Ok(())
     }
+
+    /// Test method to simulate receiving a wetware protocol request
+    /// This allows us to test our end-to-end flow without needing to handle actual protocol events yet
+    pub async fn test_wetware_protocol_flow(&mut self) -> Result<()> {
+        info!("🧪 Testing wetware protocol flow...");
+        
+        // For testing purposes, we'll create a simple test that doesn't require a ConnectionId
+        // In real usage, ConnectionId would come from libp2p when a connection is established
+        
+        info!("🎯 Testing wetware protocol infrastructure...");
+        
+        // Test that we can create a membrane and RPC server
+        let membrane = Arc::new(Mutex::new(Membrane::new()));
+        let rpc_server = crate::rpc::DefaultRpcServer::new(membrane);
+        
+        // Test the RPC server capability
+        match rpc_server.test_import_capability().await {
+            Ok(response) => {
+                info!("✅ RPC server test successful: {:?}", String::from_utf8_lossy(&response));
+            }
+            Err(e) => {
+                warn!(reason = ?e, "❌ RPC server test failed");
+                return Err(e);
+            }
+        }
+        
+        info!("✅ Wetware protocol flow test completed successfully!");
+        info!("🎯 Importer capability infrastructure is working!");
+        
+        Ok(())
+    }
 }
 
 /// Build a libp2p host with IPFS-compatible protocols and enhanced features
