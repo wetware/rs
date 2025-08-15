@@ -1,17 +1,17 @@
 use anyhow::Result;
 use tracing::{debug, info};
 
-mod swarm_capnp;
-mod service_manager;
 mod boot;
 mod config;
+mod membrane;
 mod rpc;
+mod swarm_capnp;
 use boot::{build_host, get_kubo_peers, SwarmManager};
 use clap::Parser;
 use config::{init_tracing, AppConfig, Args};
 use std::sync::Arc;
 use std::sync::Mutex;
-use service_manager::ServiceManager;
+use membrane::Membrane;
 
 #[tokio::main]
 async fn main() -> Result<()> {

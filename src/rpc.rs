@@ -12,7 +12,7 @@ use libp2p::core::upgrade::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
 use libp2p::swarm::{NetworkBehaviour, OneShotHandler, ToSwarm};
 use libp2p::Stream;
 
-use crate::service_manager::ServiceManager;
+use crate::membrane::Membrane;
 use capnp::capability::Promise;
 use capnp::Error;
 
@@ -272,20 +272,20 @@ impl ListenerHandle {
 
 /// Swarm capabilities structure
 pub struct SwarmCapabilities {
-    pub service_manager: ServiceManager,
+    pub membrane: Membrane,
 }
 
 /// Simple RPC server that can handle Cap'n Proto RPC requests
 /// This provides the importer capability to remote clients
 pub struct SimpleRpcServer {
-    /// The service manager for handling import/export requests
-    service_manager: Arc<Mutex<ServiceManager>>,
+    /// The membrane for handling import/export requests
+    membrane: Arc<Mutex<Membrane>>,
 }
 
 impl SimpleRpcServer {
-    pub fn new(service_manager: Arc<Mutex<ServiceManager>>) -> Self {
-        info!("Creating new SimpleRpcServer with shared ServiceManager");
-        Self { service_manager }
+    pub fn new(membrane: Arc<Mutex<Membrane>>) -> Self {
+        info!("Creating new SimpleRpcServer with shared Membrane");
+        Self { membrane }
     }
 
     /// Process RPC requests using the Cap'n Proto RPC system
@@ -311,9 +311,9 @@ impl SimpleRpcServer {
         Ok(b"Import OK".to_vec())
     }
 
-    /// Get a reference to the service manager
-    pub fn get_service_manager(&self) -> Arc<Mutex<ServiceManager>> {
-        Arc::clone(&self.service_manager)
+    /// Get a reference to the membrane
+    pub fn get_membrane(&self) -> Arc<Mutex<Membrane>> {
+        Arc::clone(&self.membrane)
     }
     
     /// Test method to demonstrate RPC functionality
@@ -321,12 +321,12 @@ impl SimpleRpcServer {
     pub async fn test_import_capability(&self) -> Result<Vec<u8>> {
         debug!("Testing import capability availability");
         
-        // Get the service manager
-        let _service_manager = self.service_manager.lock().unwrap();
+        // Get the membrane
+        let _membrane = self.membrane.lock().unwrap();
         
-        // Check if we can access the service manager (this demonstrates the capability is available)
+        // Check if we can access the membrane (this demonstrates the capability is available)
         // For now, just return a success message since we can't access private fields
-        debug!("Service manager accessible");
+        debug!("Membrane accessible");
         
         // Return a test response indicating the importer capability is working
         Ok(b"Importer capability available".to_vec())
@@ -339,8 +339,8 @@ pub struct DefaultProtocolBehaviour {
     rpc_connections: HashMap<ConnectionId, DefaultRpcConnection>,
     /// Protocol upgrade info
     upgrade: DefaultProtocolUpgrade,
-    /// Shared service manager for all connections
-    shared_service_manager: ServiceManager,
+    /// Shared membrane for all connections
+    shared_membrane: Membrane,
 }
 
 // TODO: Implement NetworkBehaviour properly when ready
@@ -359,7 +359,7 @@ impl DefaultProtocolBehaviour {
     pub fn new() -> Self {
         Self {
             rpc_connections: HashMap::new(),
-            shared_service_manager: ServiceManager::new(),
+            shared_membrane: Membrane::new(),
             upgrade: DefaultProtocolUpgrade::new(),
         }
     }
@@ -375,9 +375,9 @@ impl DefaultProtocolBehaviour {
         connection_id: ConnectionId,
         stream: DefaultStream<libp2p::Stream>,
     ) -> Result<()> {
-        // Create RPC server with shared ServiceManager
+        // Create RPC server with shared Membrane
         let rpc_server = SimpleRpcServer::new(
-            Arc::new(Mutex::new(self.shared_service_manager.clone()))
+            Arc::new(Mutex::new(self.shared_membrane.clone()))
         );
         
         // Create RPC connection
@@ -431,14 +431,14 @@ impl DefaultProtocolBehaviour {
         self.rpc_connections.len()
     }
 
-    /// Get a reference to the shared service manager
-    pub fn get_service_manager(&self) -> &ServiceManager {
-        &self.shared_service_manager
+    /// Get a reference to the shared membrane
+    pub fn get_membrane(&self) -> &Membrane {
+        &self.shared_membrane
     }
 
-    /// Get a mutable reference to the shared service manager
-    pub fn get_service_manager_mut(&mut self) -> &mut ServiceManager {
-        &mut self.shared_service_manager
+    /// Get a mutable reference to the shared membrane
+    pub fn get_membrane_mut(&mut self) -> &mut Membrane {
+        &mut self.shared_membrane
     }
 }
 
@@ -606,21 +606,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_rpc_import_export_flow() {
-        // Create a service manager
-        let service_manager = Arc::new(Mutex::new(ServiceManager::new()));
+        // Create a membrane
+        let membrane = Arc::new(Mutex::new(Membrane::new()));
         
-        // Create RPC server with the service manager
-        let rpc_server = SimpleRpcServer::new(service_manager);
+        // Create RPC server with the membrane
+        let rpc_server = SimpleRpcServer::new(membrane);
         
         // Test that the importer capability is available
         let test_response = rpc_server.test_import_capability().await.unwrap();
         let response_str = String::from_utf8_lossy(&test_response);
         println!("✅ {}", response_str);
         
-        // Verify that we can access the service manager through the RPC server
-        let rpc_service_manager = rpc_server.get_service_manager();
-        assert!(rpc_service_manager.lock().is_ok(), "Should be able to lock service manager");
-        println!("✅ Service manager access verified");
+        // Verify that we can access the membrane through the RPC server
+        let rpc_membrane = rpc_server.get_membrane();
+        assert!(rpc_membrane.lock().is_ok(), "Should be able to lock membrane");
+        println!("✅ Membrane access verified");
         
         println!("🎉 Basic RPC functionality test passed!");
     }

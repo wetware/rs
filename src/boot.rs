@@ -14,7 +14,7 @@ use std::sync::Mutex;
 
 use crate::config::HostConfig;
 use crate::rpc::DefaultStreamHandler;
-use crate::service_manager::ServiceManager;
+use crate::membrane::Membrane;
 
 // IPFS protocol constants for DHT compatibility
 // These protocols ensure our node can communicate with the IPFS network
@@ -299,11 +299,11 @@ impl SwarmManager {
     pub async fn handle_wetware_stream(&mut self, stream: libp2p::Stream) -> Result<()> {
         debug!("Handling wetware protocol stream");
         
-        // Create a service manager for this connection
-        let service_manager = Arc::new(Mutex::new(ServiceManager::new()));
+        // Create a membrane for this connection
+        let membrane = Arc::new(Mutex::new(Membrane::new()));
         
-        // Create RPC server with the service manager
-        let rpc_server = crate::rpc::SimpleRpcServer::new(service_manager);
+        // Create RPC server with the membrane
+        let rpc_server = crate::rpc::SimpleRpcServer::new(membrane);
         
         // TODO: Set up the stream handling and RPC processing
         // For now, just log that we received a stream
