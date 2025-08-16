@@ -5,6 +5,7 @@ use libp2p::swarm::{ConnectionId, StreamProtocol};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use futures::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{Decoder, Encoder};
 use tracing::{debug, info};
 
@@ -87,17 +88,40 @@ impl tokio::io::AsyncRead for Libp2pStreamAdapter {
     ) -> std::task::Poll<std::io::Result<()>> {
         use std::pin::Pin;
         use std::task::Poll;
+        use std::io;
         
-        // TODO: Implement actual libp2p stream reading
-        // This is where we'd:
-        // 1. Call the appropriate libp2p stream read method
-        // 2. Convert the result to tokio's ReadBuf format
-        // 3. Handle async coordination between libp2p and tokio
-        // 4. Return the appropriate Poll state
+        // Get a mutable reference to the stream
+        let stream = &mut self.stream;
         
-        // For now, return a placeholder that indicates no data available
-        // This allows the system to compile and demonstrates the interface
-        Poll::Ready(Ok(()))
+        // We need to bridge between futures::AsyncRead and tokio::io::AsyncRead
+        // libp2p::Stream implements futures::AsyncRead, which returns Poll<Result<usize, Error>>
+        // tokio::io::AsyncRead expects Poll<Result<(), Error>> and fills the ReadBuf
+        
+        // Create a temporary buffer for the futures::AsyncRead call
+        let mut temp_buf = vec![0u8; buf.remaining()];
+        
+        match Pin::new(stream).poll_read(cx, &mut temp_buf) {
+            Poll::Ready(Ok(bytes_read)) => {
+                if bytes_read > 0 {
+                    // Copy the read data to the tokio ReadBuf
+                    let data = &temp_buf[..bytes_read];
+                    buf.put_slice(data);
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => {
+                // Convert libp2p error to std::io::Error
+                let io_error = io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("libp2p stream read error: {}", e)
+                );
+                Poll::Ready(Err(io_error))
+            }
+            Poll::Pending => {
+                // Stream is not ready for reading, need to wait
+                Poll::Pending
+            }
+        }
     }
 }
 
@@ -130,17 +154,30 @@ impl tokio::io::AsyncWrite for Libp2pStreamAdapter {
     ) -> std::task::Poll<std::io::Result<usize>> {
         use std::pin::Pin;
         use std::task::Poll;
+        use std::io;
         
-        // TODO: Implement actual libp2p stream writing
-        // This is where we'd:
-        // 1. Call the appropriate libp2p stream write method
-        // 2. Handle the async write operation
-        // 3. Return the number of bytes written
-        // 4. Handle write failures and backpressure
+        // Get a mutable reference to the stream
+        let stream = &mut self.stream;
         
-        // For now, return a placeholder that indicates all bytes were written
-        // This allows the system to compile and demonstrates the interface
-        Poll::Ready(Ok(buf.len()))
+        // Delegate to the libp2p stream's AsyncWrite implementation
+        match Pin::new(stream).poll_write(cx, buf) {
+            Poll::Ready(Ok(bytes_written)) => {
+                // Successfully wrote data to the stream
+                Poll::Ready(Ok(bytes_written))
+            }
+            Poll::Ready(Err(e)) => {
+                // Convert libp2p error to std::io::Error
+                let io_error = io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("libp2p stream write error: {}", e)
+                );
+                Poll::Ready(Err(io_error))
+            }
+            Poll::Pending => {
+                // Stream is not ready for writing, need to wait
+                Poll::Pending
+            }
+        }
     }
 
     fn poll_flush(
@@ -149,11 +186,31 @@ impl tokio::io::AsyncWrite for Libp2pStreamAdapter {
     ) -> std::task::Poll<std::io::Result<()>> {
         use std::pin::Pin;
         use std::task::Poll;
+        use std::io;
         
-        // TODO: Implement actual stream flushing
-        // This ensures all buffered data is written to the underlying stream
+        // Get a mutable reference to the stream
+        let stream = &mut self.stream;
         
-        Poll::Ready(Ok(()))
+        // Delegate to the libp2p stream's flush implementation
+        match Pin::new(stream).poll_flush(cx) {
+            Poll::Ready(Ok(())) => {
+                // Successfully flushed the stream
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => {
+                // Convert libp2p error to std::io::Error
+                let io_error = io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("libp2p stream flush error: {}", e)
+                );
+                Poll::Ready(Err(io_error))
+            }
+            Poll::Pending => {
+                // Stream is not ready for flushing, need to wait
+                Poll::Pending
+                // Note: This is unusual for flush, but we handle it gracefully
+            }
+        }
     }
 
     fn poll_shutdown(
@@ -162,12 +219,33 @@ impl tokio::io::AsyncWrite for Libp2pStreamAdapter {
     ) -> std::task::Poll<std::io::Result<()>> {
         use std::pin::Pin;
         use std::task::Poll;
+        use std::io;
         
-        // TODO: Implement graceful stream shutdown
-        // This should close the write side of the stream while keeping read open
-        // for any final messages from the peer
+        // Get a mutable reference to the stream
+        let stream = &mut self.stream;
         
-        Poll::Ready(Ok(()))
+        // Delegate to the libp2p stream's shutdown implementation
+        // Note: futures::AsyncWrite doesn't have poll_shutdown, so we'll implement a basic version
+        // that closes the write side while keeping read open
+        match Pin::new(stream).poll_close(cx) {
+            Poll::Ready(Ok(())) => {
+                // Successfully shut down the write side of the stream
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => {
+                // Convert libp2p error to std::io::Result
+                let io_error = io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("libp2p stream shutdown error: {}", e)
+                );
+                Poll::Ready(Err(io_error))
+            }
+            Poll::Pending => {
+                // Stream is not ready for shutdown, need to wait
+                Poll::Pending
+                // Note: This is unusual for shutdown, but we handle it gracefully
+            }
+        }
     }
 }
 
