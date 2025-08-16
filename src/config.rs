@@ -43,11 +43,19 @@ impl std::fmt::Display for LogLevel {
 
 /// Configuration for libp2p host features
 #[derive(Debug, Clone, PartialEq)]
-pub struct HostConfig {}
+pub struct HostConfig {
+    /// List of multiaddrs to listen on
+    pub listen_addrs: Vec<String>,
+}
 
 impl Default for HostConfig {
     fn default() -> Self {
-        Self {}
+        Self {
+            listen_addrs: vec![
+                "/ip4/0.0.0.0/tcp/2020".to_string(),
+                "/ip6/::/tcp/2020".to_string(),
+            ],
+        }
     }
 }
 
@@ -76,17 +84,17 @@ impl HostConfig {
 
     /// Create a minimal configuration with only essential features enabled
     pub fn minimal() -> Self {
-        Self {}
+        Self::default()
     }
 
     /// Create a development configuration with most features enabled
     pub fn development() -> Self {
-        Self {}
+        Self::default()
     }
 
     /// Create a production configuration with all features enabled
     pub fn production() -> Self {
-        Self {}
+        Self::default()
     }
 
     /// Create configuration from environment variables
@@ -115,7 +123,7 @@ pub struct HostConfigBuilder {}
 impl HostConfigBuilder {
     /// Build the HostConfig
     pub fn build(self) -> HostConfig {
-        HostConfig {}
+        HostConfig::default()
     }
 }
 

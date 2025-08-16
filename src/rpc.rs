@@ -332,14 +332,14 @@ where
     /// Send a Cap'n Proto message over the stream
     pub async fn send_capnp_message(&mut self, message: &[u8]) -> Result<()> {
         let length = message.len() as u32;
-        
+
         // Write length prefix (little-endian)
         self.io.write_all(&length.to_le_bytes()).await?;
         
         // Write message
         self.io.write_all(message).await?;
         self.io.flush().await?;
-        
+
         debug!("Sent Cap'n Proto message: {} bytes", length);
         Ok(())
     }
@@ -669,15 +669,15 @@ impl WetwareProtocolBehaviour {
     ) -> Result<()> {
         // Create RPC server with shared Membrane
         let rpc_server = DefaultRpcServer::new(Arc::clone(&self.shared_membrane));
-
+        
         // Store the connection
         self.rpc_connections.insert(connection_id, rpc_server);
-
+        
         info!(
             "New wetware RPC stream established on connection {} with importer capability available",
             connection_id
         );
-
+        
         Ok(())
     }
 
@@ -728,15 +728,15 @@ mod tests {
     async fn test_rpc_import_export_flow() {
         // Create a membrane
         let membrane = Arc::new(Mutex::new(Membrane::new()));
-
+        
         // Create RPC server with the membrane
         let rpc_server = DefaultRpcServer::new(membrane);
-
+        
         // Test that the importer capability is available
         let test_response = rpc_server.test_import_capability().await.unwrap();
         let response_str = String::from_utf8_lossy(&test_response);
         println!("✅ {}", response_str);
-
+        
         // Verify that we can access the membrane through the RPC server
         let rpc_membrane = rpc_server.get_membrane();
         assert!(
@@ -744,7 +744,7 @@ mod tests {
             "Should be able to lock membrane"
         );
         println!("✅ Membrane access verified");
-
+        
         println!("🎉 Basic RPC functionality test passed!");
     }
 
@@ -752,7 +752,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_connection_simple() {
         println!("🚀 Starting simple RPC connection test...");
-
+        
         // 1. Create an in-memory bidirectional pipe instead of TCP
         let (server_stream, client_stream) = tokio::io::duplex(1024);
         println!("📍 In-memory pipe created");
@@ -760,12 +760,12 @@ mod tests {
         // 2. Test RPC communication
         let mut server_rpc = WetwareStream::new(server_stream);
         let mut client_rpc = WetwareStream::new(client_stream);
-
+        
         // Send a test message from server to client
         let test_message = b"Hello from RPC server!";
         server_rpc.send_capnp_message(test_message).await.unwrap();
         println!("📤 Test message sent from server");
-
+        
         // Receive the message on client side
         if let Ok(Some(received)) = client_rpc.receive_capnp_message().await {
             assert_eq!(received, test_message);
@@ -777,7 +777,7 @@ mod tests {
         } else {
             panic!("Failed to receive test message");
         }
-
+        
         println!("🎉 Simple RPC connection test completed successfully!");
     }
 

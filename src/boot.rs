@@ -221,18 +221,18 @@ impl SwarmManager {
                 },
                 Some(SwarmEvent::Behaviour(WetwareBehaviourEvent::Identify(event))) => {
                     match event {
-                        libp2p::identify::Event::Received { peer_id, info, .. } => {
-                            debug!(peer_id = %peer_id, listen_addrs = ?info.listen_addrs, "Received identify info from peer");
-                            // Don't add peers to Kademlia here - we already added them upfront
-                            // This is just for logging peer discovery
-                        }
-                        libp2p::identify::Event::Sent { peer_id, .. } => {
-                            debug!(peer_id = %peer_id, "Sent identify info to peer");
-                        }
-                        libp2p::identify::Event::Error { peer_id, error, .. } => {
-                            warn!(peer_id = %peer_id, reason = ?error, "Identify error with peer");
-                        }
-                        _ => {}
+                    libp2p::identify::Event::Received { peer_id, info, .. } => {
+                        debug!(peer_id = %peer_id, listen_addrs = ?info.listen_addrs, "Received identify info from peer");
+                        // Don't add peers to Kademlia here - we already added them upfront
+                        // This is just for logging peer discovery
+                    }
+                    libp2p::identify::Event::Sent { peer_id, .. } => {
+                        debug!(peer_id = %peer_id, "Sent identify info to peer");
+                    }
+                    libp2p::identify::Event::Error { peer_id, error, .. } => {
+                        warn!(peer_id = %peer_id, reason = ?error, "Identify error with peer");
+                    }
+                    _ => {}
                     }
                 },
                 Some(SwarmEvent::NewListenAddr { address, .. }) => {
@@ -643,10 +643,19 @@ pub async fn build_host(
     let wetware_protocol = libp2p::swarm::StreamProtocol::new(crate::rpc::WW_PROTOCOL);
     debug!("Registered wetware protocol: {}", wetware_protocol);
 
-    // Listen on all interfaces with random port for TCP
-    let tcp_listen_addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse()?;
-    swarm.listen_on(tcp_listen_addr.clone())?;
-    debug!(listen_addr = %tcp_listen_addr, "Started listening on TCP");
+    // Listen on all interfaces with port 2020 for both IPv4 and IPv6
+    let ipv4_listen_addr: Multiaddr = "/ip4/0.0.0.0/tcp/2020".parse()?;
+    let ipv6_listen_addr: Multiaddr = "/ip6/::/tcp/2020".parse()?;
+    
+    swarm.listen_on(ipv4_listen_addr.clone())?;
+    debug!(listen_addr = %ipv4_listen_addr, "Started listening on IPv4");
+    
+    swarm.listen_on(ipv6_listen_addr.clone())?;
+    debug!(listen_addr = %ipv6_listen_addr, "Started listening on IPv6");
+    
+    info!("🌐 Wetware node listening on:");
+    info!("   IPv4: {}/p2p/{}", ipv4_listen_addr, peer_id);
+    info!("   IPv6: {}/p2p/{}", ipv6_listen_addr, peer_id);
 
     debug!("Host setup completed with configuration: {:?}", config);
 
