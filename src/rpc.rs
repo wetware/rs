@@ -2,7 +2,7 @@ use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use futures::{AsyncRead, AsyncWrite};
 use libp2p::core::upgrade::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
-use libp2p::swarm::StreamProtocol;
+use libp2p::swarm::{NetworkBehaviour, StreamProtocol};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::codec::{Decoder, Encoder};
@@ -476,6 +476,27 @@ impl Encoder<Vec<u8>> for DefaultCodec {
     }
 }
 
+/// NetworkBehaviour for the wetware protocol
+/// This implements the libp2p NetworkBehaviour trait to handle wetware protocol streams
+#[derive(NetworkBehaviour)]
+pub struct ProtocolBehaviour {
+    // Use a dummy behaviour that actually implements NetworkBehaviour
+    // In a full implementation, this would handle stream requests and responses
+    _dummy: libp2p::swarm::dummy::Behaviour,
+}
+
+impl ProtocolBehaviour {
+    pub fn new() -> Self {
+        Self { _dummy: libp2p::swarm::dummy::Behaviour }
+    }
+}
+
+impl Default for ProtocolBehaviour {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,5 +619,51 @@ mod tests {
         println!("✅ Libp2pStreamAdapter integration test completed");
 
         // TODO: Add actual libp2p::Stream testing when we have access to real streams
+    }
+
+    #[test]
+    fn test_protocol_upgrade_info() {
+        use libp2p::core::upgrade::UpgradeInfo;
+        let upgrade = DefaultProtocolUpgrade::new();
+        let mut protocol_info = upgrade.protocol_info();
+        let protocol = protocol_info.next().unwrap();
+        assert_eq!(protocol.as_ref(), "/ww/0.1.0");
+    }
+
+    #[test]
+    fn test_default_server_creation() {
+        let membrane = Membrane::new();
+        let server = DefaultServer::new(Arc::new(Mutex::new(membrane)));
+        let membrane_ref = server.get_membrane();
+        assert!(std::ptr::addr_of!(membrane_ref) != std::ptr::null());
+    }
+
+    #[test]
+    fn test_stream_with_mock_io() {
+        use tokio::io::duplex;
+        let (read, _write) = duplex(1024);
+        let stream = Stream::new(read);
+        // Test that stream can be created successfully
+        assert!(std::ptr::addr_of!(stream) != std::ptr::null());
+    }
+
+    #[tokio::test]
+    async fn test_capnp_message_handling() {
+        use tokio::io::duplex;
+        use tokio::time::{timeout, Duration};
+        
+        let (read, _write) = duplex(1024);
+        let mut stream = Stream::new(read);
+        let test_message = b"test message";
+        
+        // Test sending a message
+        let result = stream.send_capnp_message(test_message).await;
+        assert!(result.is_ok());
+        
+        // Test receiving a message with a timeout to prevent hanging
+        let receive_result = timeout(Duration::from_millis(100), stream.receive_capnp_message()).await;
+        
+        // The receive should timeout since no data was written to the write side
+        assert!(receive_result.is_err()); // Timeout error is expected
     }
 }

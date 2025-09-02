@@ -102,7 +102,10 @@ impl HostConfig {
             if addr.is_empty() {
                 return Err(format!("Listen address {} is empty", i));
             } else if !addr.starts_with("/ip4/") && !addr.starts_with("/ip6/") {
-                return Err(format!("Listen address '{}' is invalid (should start with /ip4/ or /ip6/)", addr));
+                return Err(format!(
+                    "Listen address '{}' is invalid (should start with /ip4/ or /ip6/)",
+                    addr
+                ));
             }
         }
 
@@ -123,7 +126,10 @@ impl HostConfig {
 
         // Warn about empty listen addresses (not an error, but worth noting)
         if self.listen_addrs.is_empty() {
-            warnings.push("No listening addresses configured - node will not accept incoming connections".to_string());
+            warnings.push(
+                "No listening addresses configured - node will not accept incoming connections"
+                    .to_string(),
+            );
         }
 
         warnings
