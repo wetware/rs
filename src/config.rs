@@ -75,8 +75,6 @@ impl HostConfig {
     /// let config = HostConfig::development();
     /// let config = HostConfig::production();
     ///
-    /// // From environment variables
-    /// let config = HostConfig::from_env();
     /// ```
     pub fn builder() -> HostConfigBuilder {
         HostConfigBuilder::default()
@@ -97,22 +95,51 @@ impl HostConfig {
         Self::default()
     }
 
-    /// Create configuration from environment variables
-    pub fn from_env() -> Self {
-        Self::builder().build()
+    /// Validate the configuration and return any errors
+    pub fn validate(&self) -> Result<(), String> {
+        // Check for invalid addresses
+        for (i, addr) in self.listen_addrs.iter().enumerate() {
+            if addr.is_empty() {
+                return Err(format!("Listen address {} is empty", i));
+            } else if !addr.starts_with("/ip4/") && !addr.starts_with("/ip6/") {
+                return Err(format!("Listen address '{}' is invalid (should start with /ip4/ or /ip6/)", addr));
+            }
+        }
+
+        // Check for duplicate addresses
+        let mut seen = std::collections::HashSet::new();
+        for addr in &self.listen_addrs {
+            if !seen.insert(addr) {
+                return Err(format!("Duplicate listen address: {}", addr));
+            }
+        }
+
+        Ok(())
     }
 
-    /// Validate the configuration and return any warnings
-    pub fn validate(&self) -> Vec<String> {
-        let warnings = Vec::new();
+    /// Get configuration warnings (non-fatal issues)
+    pub fn warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
 
-        // No validation warnings for basic configuration
+        // Warn about empty listen addresses (not an error, but worth noting)
+        if self.listen_addrs.is_empty() {
+            warnings.push("No listening addresses configured - node will not accept incoming connections".to_string());
+        }
+
         warnings
     }
 
     /// Get a human-readable summary of the configuration
     pub fn summary(&self) -> String {
-        "Minimal (TCP only)".to_string()
+        if self.listen_addrs.is_empty() {
+            "Client configuration: no listen addresses configured".to_string()
+        } else {
+            format!(
+                "Server configuration: listening on {} address(es): {}",
+                self.listen_addrs.len(),
+                self.listen_addrs.join(", ")
+            )
+        }
     }
 }
 
@@ -141,11 +168,12 @@ impl AppConfig {
         ipfs: Option<String>,
         loglvl: Option<LogLevel>,
         preset: Option<String>,
+        listen_addrs: Option<Vec<String>>,
     ) -> Self {
         let ipfs_url = ipfs.unwrap_or_else(get_ipfs_url);
         let log_level = loglvl.unwrap_or_else(get_log_level);
 
-        let host_config = if let Some(preset) = &preset {
+        let mut host_config = if let Some(preset) = &preset {
             match preset.as_str() {
                 "minimal" => HostConfig::minimal(),
                 "development" => HostConfig::development(),
@@ -159,6 +187,11 @@ impl AppConfig {
             let builder = HostConfig::builder();
             builder.build()
         };
+
+        // Override listen addresses if provided via CLI
+        if let Some(addrs) = listen_addrs {
+            host_config.listen_addrs = addrs;
+        }
 
         Self {
             ipfs_url,
@@ -177,8 +210,13 @@ impl AppConfig {
 
         debug!(summary = %self.host_config.summary(), "Host configuration");
 
-        // Validate configuration and log warnings
-        let warnings = self.host_config.validate();
+        // Validate configuration and log any errors
+        if let Err(error) = self.host_config.validate() {
+            warn!("Configuration error: {}", error);
+        }
+
+        // Log warnings (non-fatal issues)
+        let warnings = self.host_config.warnings();
         for warning in &warnings {
             warn!("Configuration warning: {}", warning);
         }
