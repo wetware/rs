@@ -7,17 +7,11 @@ use libp2p::{
     Multiaddr, PeerId,
 };
 use serde_json::Value;
-use std::sync::Arc;
-use std::sync::Mutex;
+
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::config::HostConfig;
-use crate::membrane::Membrane;
-use crate::rpc::WetwareStreamHandler;
-use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
-use capnp::capability::{Promise, Server as CapnpServer};
-use crate::swarm_capnp::{importer, exporter};
 
 // IPFS protocol constants for DHT compatibility
 // These protocols ensure our node can communicate with the IPFS network
@@ -99,24 +93,13 @@ pub struct WetwareBehaviour {
 
 pub struct SwarmManager {
     swarm: Swarm<WetwareBehaviour>,
-    #[allow(dead_code)] // TODO:  remove once we start using the peer_id
     peer_id: PeerId,
-    /// Default protocol handler for managing RPC connections
-    wetware_handler: WetwareStreamHandler,
-    /// Shared membrane for all wetware protocol connections
-    /// This allows capabilities exported by one peer to be imported by another peer
-    shared_membrane: Arc<Mutex<Membrane>>,
 }
 
 impl SwarmManager {
     pub fn new(swarm: Swarm<WetwareBehaviour>, peer_id: PeerId) -> Self {
         debug!(peer_id = %peer_id, "Creating new SwarmManager");
-        Self {
-            swarm,
-            peer_id,
-            wetware_handler: WetwareStreamHandler::new(),
-            shared_membrane: Arc::new(Mutex::new(Membrane::new())),
-        }
+        Self { swarm, peer_id }
     }
 
     /// Bootstrap the DHT by connecting to IPFS peers and triggering the bootstrap process
@@ -221,20 +204,20 @@ impl SwarmManager {
                 },
                 Some(SwarmEvent::Behaviour(WetwareBehaviourEvent::Identify(event))) => {
                     match event {
-                    libp2p::identify::Event::Received { peer_id, info, .. } => {
-                        debug!(peer_id = %peer_id, listen_addrs = ?info.listen_addrs, "Received identify info from peer");
-                        // Don't add peers to Kademlia here - we already added them upfront
-                        // This is just for logging peer discovery
+                        libp2p::identify::Event::Received { peer_id, info, .. } => {
+                            debug!(peer_id = %peer_id, listen_addrs = ?info.listen_addrs, "Received identify info from peer");
+                            // Don't add peers to Kademlia here - we already added them upfront
+                            // This is just for logging peer discovery
+                        }
+                        libp2p::identify::Event::Sent { peer_id, .. } => {
+                            debug!(peer_id = %peer_id, "Sent identify info to peer");
+                        }
+                        libp2p::identify::Event::Error { peer_id, error, .. } => {
+                            warn!(peer_id = %peer_id, reason = ?error, "Identify error with peer");
+                        }
+                        _ => {}
                     }
-                    libp2p::identify::Event::Sent { peer_id, .. } => {
-                        debug!(peer_id = %peer_id, "Sent identify info to peer");
-                    }
-                    libp2p::identify::Event::Error { peer_id, error, .. } => {
-                        warn!(peer_id = %peer_id, reason = ?error, "Identify error with peer");
-                    }
-                    _ => {}
-                    }
-                },
+                }
                 Some(SwarmEvent::NewListenAddr { address, .. }) => {
                     debug!(address = %address, "Listening on address");
                 }
@@ -279,302 +262,9 @@ impl SwarmManager {
             .add_address(peer_id, peer_addr.clone());
     }
 
-    /// Get the default protocol handler
-    pub fn get_default_handler(&self) -> &WetwareStreamHandler {
-        &self.wetware_handler
-    }
-
-    /// Get the default protocol handler mutably
-    pub fn get_default_handler_mut(&mut self) -> &mut WetwareStreamHandler {
-        &mut self.wetware_handler
-    }
-
     /// Get the default protocol identifier
     pub fn get_default_protocol(&self) -> &str {
         crate::rpc::WW_PROTOCOL
-    }
-
-    /// Handle default protocol stream
-    pub async fn handle_default_stream(
-        &mut self,
-        connection_id: libp2p::swarm::ConnectionId,
-        _stream: libp2p::Stream,
-    ) -> Result<()> {
-        // Handle the stream in the default protocol behaviour
-        // For now, we'll just log that we received it
-        info!(
-            "Received default protocol stream on connection {}",
-            connection_id
-        );
-
-        // TODO: Process the stream and handle RPC requests
-
-        Ok(())
-    }
-
-
-
-    /// Handle incoming wetware protocol connection
-    /// This method is called when a peer requests the wetware protocol
-    pub async fn handle_wetware_connection(&mut self, connection_id: libp2p::swarm::ConnectionId) -> Result<()> {
-        debug!("Handling wetware protocol connection request on connection {}", connection_id);
-        
-        // Create a membrane for this connection
-        let membrane = Arc::new(Mutex::new(Membrane::new()));
-        
-        // Create RPC server with the membrane
-        let rpc_server = crate::rpc::DefaultRpcServer::new(membrane);
-        
-        info!("🎯 Wetware protocol connection established on connection {} with importer capability", connection_id);
-        
-        // Test the RPC server capability
-        match rpc_server.test_import_capability().await {
-            Ok(response) => {
-                debug!("✅ RPC server test successful: {:?}", String::from_utf8_lossy(&response));
-            }
-            Err(e) => {
-                warn!(reason = ?e, "❌ RPC server test failed");
-                return Err(e);
-            }
-        }
-        
-        // TODO: When we have an actual libp2p stream, we can:
-        // 1. Wrap it in Libp2pStreamAdapter
-        // 2. Create WetwareStream<Libp2pStreamAdapter>
-        // 3. Set up Cap'n Proto RPC with the importer capability
-        
-        info!("🚀 Importer capability is now available on connection {}!", connection_id);
-        
-        Ok(())
-    }
-
-    /// Handle incoming wetware protocol stream with RPC setup
-    /// This method sets up a Cap'n Proto RPC connection and provides the importer capability
-    pub async fn handle_wetware_stream(&mut self, stream: libp2p::Stream) -> Result<()> {
-        debug!("Setting up Cap'n Proto RPC connection on wetware stream");
-        
-        // 1. Wrap the libp2p stream in our adapter
-        let stream_adapter = crate::rpc::Libp2pStreamAdapter::new(stream);
-        
-        // 2. Create a wetware stream from the adapted stream
-        let mut wetware_stream = crate::rpc::WetwareStream::new(stream_adapter);
-        
-        // 3. Set up proper Cap'n Proto RPC connection with importer capability
-        self.setup_capnp_rpc_connection(&mut wetware_stream).await?;
-        
-        info!("🚀 Cap'n Proto RPC connection established with importer capability available");
-        
-        // 4. Start listening for RPC messages (bootstrap requests)
-        // Note: This will be handled by the Cap'n Proto RPC system now
-        // We don't need to manually handle messages anymore
-        
-        Ok(())
-    }
-
-    /// Handle RPC messages and provide bootstrap capability
-    /// This listens for bootstrap messages and responds with the importer capability
-    async fn handle_rpc_messages(
-        &self,
-        stream: &mut crate::rpc::WetwareStream<crate::rpc::Libp2pStreamAdapter>,
-        rpc_server: crate::rpc::DefaultRpcServer,
-    ) -> Result<()> {
-        debug!("Starting RPC message handling loop");
-        
-        loop {
-            // Listen for incoming RPC messages
-            match stream.receive_capnp_message().await? {
-                Some(message) => {
-                    debug!("Received RPC message: {} bytes", message.len());
-                    
-                    // Process the RPC message and respond with importer capability
-                    let response = self.process_bootstrap_request(&rpc_server, &message).await?;
-                    
-                    // Send the response back to the client
-                    stream.send_capnp_message(&response).await?;
-                    
-                    info!("✅ Bootstrap request processed, importer capability provided");
-                }
-                None => {
-                    debug!("No more messages, connection closed");
-                    break;
-                }
-            }
-        }
-        
-        Ok(())
-    }
-
-    /// Process bootstrap request and return importer capability
-    /// This is the core of our wetware protocol - providing the importer capability
-    async fn process_bootstrap_request(
-        &self,
-        _rpc_server: &crate::rpc::DefaultRpcServer,
-        _request: &[u8],
-    ) -> Result<Vec<u8>> {
-        debug!("Processing bootstrap request for importer capability");
-        
-        // TODO: Implement proper Cap'n Proto RPC server that provides the importer capability
-        // This should:
-        // 1. Parse the incoming Cap'n Proto message
-        // 2. Set up a proper RPC server with the importer capability
-        // 3. Return the importer capability as a Cap'n Proto response
-        
-        // For now, we'll return a simple success response
-        // In the next step, we'll implement the actual Cap'n Proto RPC server
-        let response = b"Importer capability granted".to_vec();
-        debug!("Bootstrap response: {} bytes", response.len());
-        
-        Ok(response)
-    }
-
-
-
-    /// Set up a proper Cap'n Proto RPC connection on the wetware stream
-    /// This creates an RPC system that provides the importer capability to clients
-    async fn setup_capnp_rpc_connection(
-        &self,
-        stream: &mut crate::rpc::WetwareStream<crate::rpc::Libp2pStreamAdapter>,
-    ) -> Result<()> {
-        debug!("Setting up Cap'n Proto RPC connection");
-        
-        // Create the importer RPC server that provides capabilities
-        let importer_server = self.create_importer_rpc_server();
-        
-        // Set up the actual Cap'n Proto RPC system
-        // This creates a bidirectional RPC connection on the stream
-        // and automatically handles incoming RPC messages
-        
-        // 1. Create a proper Cap'n Proto RPC system
-        // We'll use the stream's public methods to handle RPC communication
-        // and integrate with the Cap'n Proto RPC framework
-        
-        // Store the importer server for use in message handling
-        let importer_server = importer_server;
-        
-        // 2. Set up Cap'n Proto RPC message handling
-        // This will parse incoming Cap'n Proto messages and handle RPC calls
-        // We'll integrate this with our existing message handling infrastructure
-        
-        debug!("Setting up Cap'n Proto RPC message parser and handler");
-        debug!("Importer capability is available for client requests");
-        
-        // 3. Set up the actual RPC message handling
-        // We'll use our existing message handling infrastructure
-        // but enhance it to parse and handle Cap'n Proto RPC calls
-        
-        // 3. Set up the actual RPC message handling
-        // We'll use our existing message handling infrastructure
-        // but enhance it to parse and handle Cap'n Proto RPC calls
-        
-        // For now, we'll handle messages in the main stream handling loop
-        // This avoids the Send trait issues with the importer server
-        
-        debug!("📡 Cap'n Proto RPC message handling infrastructure ready");
-        debug!("🎯 Ready to process import/export capability requests");
-        debug!("🔄 Messages will be handled in the main stream loop");
-        
-        info!("📡 Cap'n Proto RPC message handling infrastructure ready");
-        info!("🎯 Ready to process import/export capability requests");
-        
-        info!("🚀 Cap'n Proto RPC system active with importer capability");
-        info!("📡 RPC system will automatically handle incoming requests");
-        
-        Ok(())
-    }
-
-    /// Handle incoming Cap'n Proto RPC messages
-    /// This method parses Cap'n Proto messages and routes RPC calls to the appropriate server
-    async fn handle_capnp_rpc_message(
-        stream: &mut crate::rpc::WetwareStream<crate::rpc::Libp2pStreamAdapter>,
-        importer_server: &Box<dyn importer::Server>,
-        message: &[u8],
-    ) -> Result<()> {
-        debug!("🔍 Parsing Cap'n Proto RPC message: {} bytes", message.len());
-        
-        // TODO: Implement proper Cap'n Proto message parsing
-        // For now, we'll handle basic message routing
-        
-        // Check if this is a bootstrap request for the importer capability
-        if message.len() > 0 {
-            debug!("📋 Processing RPC message (basic handling)");
-            
-            // TODO: Parse actual Cap'n Proto message format
-            // This should:
-            // 1. Deserialize the message using capnp
-            // 2. Identify the RPC method being called
-            // 3. Route to the appropriate server method
-            // 4. Serialize the response
-            
-            // For now, send a simple acknowledgment
-            let response = b"RPC message received - importer capability available";
-            stream.send_capnp_message(response).await?;
-            
-            info!("✅ RPC message processed successfully");
-        }
-        
-        Ok(())
-    }
-
-    /// Create a Cap'n Proto RPC server that provides the importer capability
-    /// This is the core of our wetware protocol implementation
-    fn create_importer_rpc_server(&self) -> Box<dyn importer::Server> {
-        // Create an importer server that provides access to capabilities
-        // This server will be used by clients to import capabilities from our membrane
-        // The Membrane itself implements both importer::Server and exporter::Server
-        // Use the shared membrane so all connections can access the same capabilities
-        let membrane = Arc::clone(&self.shared_membrane);
-        Box::new(SharedMembraneServer { membrane })
-    }
-
-    /// Test method to simulate receiving a wetware protocol request
-    /// This allows us to test our end-to-end flow without needing to handle actual protocol events yet
-    pub async fn test_wetware_protocol_flow(&mut self) -> Result<()> {
-        info!("🧪 Testing wetware protocol flow...");
-        
-        // For testing purposes, we'll create a simple test that doesn't require a ConnectionId
-        // In real usage, ConnectionId would come from libp2p when a connection is established
-        
-        info!("🎯 Testing wetware protocol infrastructure...");
-        
-        // Test that we can create a membrane and RPC server
-        let membrane = Arc::new(Mutex::new(Membrane::new()));
-        let rpc_server = crate::rpc::DefaultRpcServer::new(membrane);
-        
-        // Test the RPC server capability
-        match rpc_server.test_import_capability().await {
-            Ok(response) => {
-                info!("✅ RPC server test successful: {:?}", String::from_utf8_lossy(&response));
-            }
-            Err(e) => {
-                warn!(reason = ?e, "❌ RPC server test failed");
-                return Err(e);
-            }
-        }
-        
-        info!("✅ Wetware protocol flow test completed successfully!");
-        info!("🎯 Importer capability infrastructure is working!");
-        
-        Ok(())
-    }
-}
-
-/// Wrapper for shared membrane that implements the importer::Server trait
-/// This allows us to use Arc<Mutex<Membrane>> as an RPC server
-struct SharedMembraneServer {
-    membrane: Arc<Mutex<Membrane>>,
-}
-
-/// Implement the importer server trait for the shared membrane wrapper
-/// This delegates to the underlying Membrane implementation
-impl importer::Server for SharedMembraneServer {
-    fn import(
-        &mut self,
-        params: importer::ImportParams,
-        mut results: importer::ImportResults,
-    ) -> Promise<(), capnp::Error> {
-        // Lock the shared membrane and delegate to its implementation
-        let mut membrane = self.membrane.lock().unwrap();
-        membrane.import(params, results)
     }
 }
 
@@ -631,31 +321,53 @@ pub async fn build_host(
             libp2p::noise::Config::new,
             libp2p::yamux::Config::default,
         )?
-        .with_behaviour(|_| behaviour)?;
+        .with_behaviour(|_| behaviour)?
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)));
 
     // Build the swarm with the configured behaviour
     let mut swarm = swarm_builder.build();
 
     debug!("Built libp2p swarm with enhanced features");
 
-    // Register the wetware protocol with the swarm
-    // This makes libp2p aware of our /ww/0.1.0 protocol
+    // Note: Protocol upgrade registration will be handled differently in libp2p 0.56.0
+    // For now, we'll log that the wetware protocol is available
     let wetware_protocol = libp2p::swarm::StreamProtocol::new(crate::rpc::WW_PROTOCOL);
-    debug!("Registered wetware protocol: {}", wetware_protocol);
+    debug!("Wetware protocol available: {}", wetware_protocol);
 
-    // Listen on all interfaces with port 2020 for both IPv4 and IPv6
-    let ipv4_listen_addr: Multiaddr = "/ip4/0.0.0.0/tcp/2020".parse()?;
-    let ipv6_listen_addr: Multiaddr = "/ip6/::/tcp/2020".parse()?;
-    
-    swarm.listen_on(ipv4_listen_addr.clone())?;
-    debug!(listen_addr = %ipv4_listen_addr, "Started listening on IPv4");
-    
-    swarm.listen_on(ipv6_listen_addr.clone())?;
-    debug!(listen_addr = %ipv6_listen_addr, "Started listening on IPv6");
-    
-    info!("🌐 Wetware node listening on:");
-    info!("   IPv4: {}/p2p/{}", ipv4_listen_addr, peer_id);
-    info!("   IPv6: {}/p2p/{}", ipv6_listen_addr, peer_id);
+    // Listen on configured addresses or use defaults
+    let listen_addrs: Vec<Multiaddr> = config
+        .listen_addrs
+        .iter()
+        .map(|addr_str| addr_str.parse())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if listen_addrs.is_empty() {
+        warn!("No listen addresses configured, using defaults");
+        // Use default addresses if none configured
+        let default_ipv4: Multiaddr = "/ip4/0.0.0.0/tcp/2020".parse()?;
+        let default_ipv6: Multiaddr = "/ip6/::/tcp/2020".parse()?;
+
+        swarm.listen_on(default_ipv4.clone())?;
+        debug!(listen_addr = %default_ipv4, "Started listening on default IPv4");
+
+        swarm.listen_on(default_ipv6.clone())?;
+        debug!(listen_addr = %default_ipv6, "Started listening on default IPv6");
+
+        info!("🌐 Wetware node listening on (defaults):");
+        info!("   IPv4: {}/p2p/{}", default_ipv4, peer_id);
+        info!("   IPv6: {}/p2p/{}", default_ipv6, peer_id);
+    } else {
+        // Use configured addresses
+        for addr in &listen_addrs {
+            swarm.listen_on(addr.clone())?;
+            debug!(listen_addr = %addr, "Started listening on configured address");
+        }
+
+        info!("🌐 Wetware node listening on (configured):");
+        for addr in &listen_addrs {
+            info!("   {}/p2p/{}", addr, peer_id);
+        }
+    }
 
     debug!("Host setup completed with configuration: {:?}", config);
 
