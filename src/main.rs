@@ -38,6 +38,11 @@ enum Commands {
         /// Use preset configuration (minimal, development, production)
         #[arg(long, value_name = "PRESET")]
         preset: Option<String>,
+
+        /// List of multiaddrs to listen on (e.g., "/ip4/0.0.0.0/tcp/2020,/ip6/::/tcp/2020")
+        /// If not provided, defaults to IPv4 and IPv6 on port 2020
+        #[arg(long, value_delimiter = ',', value_name = "MULTIADDRS")]
+        listen_addrs: Option<Vec<String>>,
     },
 }
 
@@ -50,8 +55,9 @@ async fn main() -> Result<()> {
             ipfs,
             loglvl,
             preset,
+            listen_addrs,
         } => {
-            run_node(ipfs, loglvl, preset).await?;
+            run_node(ipfs, loglvl, preset, listen_addrs).await?;
         }
     }
 
@@ -62,9 +68,10 @@ async fn run_node(
     ipfs: Option<String>,
     loglvl: Option<config::LogLevel>,
     preset: Option<String>,
+    listen_addrs: Option<Vec<String>>,
 ) -> Result<()> {
     // Create application configuration from command line arguments and environment
-    let app_config = AppConfig::from_args_and_env(ipfs, loglvl, preset);
+    let app_config = AppConfig::from_args_and_env(ipfs, loglvl, preset, listen_addrs);
 
     // Initialize tracing with the determined log level
     init_tracing(app_config.log_level, loglvl);

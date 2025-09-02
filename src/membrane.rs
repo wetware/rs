@@ -41,23 +41,6 @@ impl Membrane {
         token
     }
 
-    /// Export a service capability and return a token
-    pub fn export_service(
-        &mut self,
-        capability: Arc<Box<dyn ClientHook>>,
-    ) -> anyhow::Result<Vec<u8>> {
-        let token = self.generate_service_token();
-        let weak_ref = Arc::downgrade(&capability);
-
-        // Clean up dead references before adding new ones
-        let mut services = self.services.lock().unwrap();
-        services.retain(|_, weak_ref| weak_ref.upgrade().is_some());
-
-        // Store the weak reference
-        services.insert(token.clone(), weak_ref);
-        Ok(token)
-    }
-
     /// Import a service capability by its token
     pub fn import_service(&self, token: &[u8]) -> Option<Arc<Box<dyn ClientHook>>> {
         let services = self.services.lock().unwrap();

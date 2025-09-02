@@ -1,11 +1,10 @@
 @0x990392714b7ccd36;
 
-using ServiceToken = Data;
 
 interface Exporter {
-    export @0 (service :Capability) -> (token :ServiceToken);
+    export @0 (service :Capability) -> (token :Data);
 }
 
 interface Importer {
-    import @0 (token :ServiceToken) -> (service :Capability);
+    import @0 (token :Data) -> (service :Capability);
 }
