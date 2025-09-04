@@ -501,16 +501,6 @@ impl Default for ProtocolBehaviour {
 mod tests {
     use super::*;
 
-    // Mock libp2p stream for testing purposes
-    #[derive(Debug)]
-    struct MockLibp2pStream;
-
-    impl MockLibp2pStream {
-        fn new() -> Self {
-            MockLibp2pStream
-        }
-    }
-
     #[test]
     fn test_protocol_identifier() {
         assert_eq!(WW_PROTOCOL, "/ww/0.1.0");
