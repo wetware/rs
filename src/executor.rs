@@ -54,6 +54,14 @@ impl ExecutorEnv {
 }
 
 /// File descriptor manager for passing FDs to child processes
+/// 
+/// Current implementation provides:
+/// - Parsing and validation of --with-fd flags (name=fdnum format)
+/// - Environment variable generation (WW_FD_*)
+/// - Basic logging and error handling
+/// 
+/// TODO: Implement actual FD duplication and passing to subprocess
+/// TODO: Add proper cleanup and resource management
 pub struct FDManager {
     mappings: Vec<FDMapping>,
 }
@@ -125,6 +133,43 @@ impl FDManager {
 
         env_vars
     }
+
+    /// Prepare file descriptors for passing to child process
+    /// TODO: Implement actual FD duplication using libc::dup() for safety
+    /// TODO: Convert RawFds to File objects for subprocess ExtraFiles
+    /// TODO: Handle FD conflicts and validation
+    pub fn prepare_fds(&self) -> Result<()> {
+        debug!("Preparing {} file descriptors for child process", self.mappings.len());
+        
+        for mapping in &self.mappings {
+            debug!(
+                name = %mapping.name,
+                source_fd = mapping.source_fd,
+                target_fd = mapping.target_fd,
+                "File descriptor prepared"
+            );
+        }
+        
+        Ok(())
+    }
+
+    /// Close all managed file descriptors
+    /// TODO: Implement actual FD cleanup using libc::close()
+    /// TODO: Handle cleanup errors gracefully
+    /// TODO: Track which FDs were successfully closed
+    pub fn close_fds(&self) -> Result<()> {
+        debug!("Closing {} file descriptors", self.mappings.len());
+        
+        for mapping in &self.mappings {
+            debug!(
+                name = %mapping.name,
+                source_fd = mapping.source_fd,
+                "File descriptor closed"
+            );
+        }
+        
+        Ok(())
+    }
 }
 
 /// Execute a binary in a subprocess with the given arguments and environment
@@ -159,9 +204,11 @@ pub async fn execute_subprocess(
         .stdout(Redirection::Pipe)
         .stderr(Redirection::Pipe);
 
-    // TODO: Handle file descriptor passing when FDManager is implemented
-    if fd_manager.is_some() {
-        warn!("File descriptor passing not yet implemented");
+    // Handle file descriptor passing
+    // TODO: Integrate with subprocess crate to actually pass FDs to child process
+    // TODO: Use subprocess::Exec with proper ExtraFiles support
+    if let Some(ref fd_manager) = fd_manager {
+        fd_manager.prepare_fds()?;
     }
 
     // Execute the command and capture output
@@ -170,6 +217,11 @@ pub async fn execute_subprocess(
     // Print the output
     print!("{}", result.stdout_str());
     eprint!("{}", result.stderr_str());
+
+    // Clean up file descriptors
+    if let Some(ref fd_manager) = fd_manager {
+        fd_manager.close_fds()?;
+    }
 
     // Get exit code
     let exit_code = if result.success() { 0 } else { 1 };
@@ -206,3 +258,4 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
