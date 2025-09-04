@@ -1,7 +1,10 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::Path;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 
+use reqwest;
 use subprocess::{Exec, Redirection};
 use tempfile::TempDir;
 use tracing::{debug, info, warn};
@@ -46,10 +49,48 @@ impl ExecutorEnv {
 
     /// Resolve an IPFS path by downloading it to the temp directory
     async fn resolve_ipfs_path(&self, ipfs_path: &str) -> Result<String> {
-        // For now, we'll implement a basic IPFS path resolution
-        // This is a simplified version - in a full implementation, you'd use the IPFS API
-        warn!("IPFS path resolution not yet implemented: {}", ipfs_path);
-        Err(anyhow!("IPFS path resolution not yet implemented"))
+        debug!(ipfs_path = %ipfs_path, "Resolving IPFS path");
+        
+        // Download the file from IPFS
+        let file_content = self.download_from_ipfs(ipfs_path).await?;
+        
+        // Create a temporary file in the temp directory
+        let temp_file_path = self.temp_dir.path().join("downloaded_binary");
+        
+        // Write the content to the temporary file
+        fs::write(&temp_file_path, file_content)?;
+        
+        // Make the file executable
+        let mut perms = fs::metadata(&temp_file_path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&temp_file_path, perms)?;
+        
+        let resolved_path = temp_file_path.to_string_lossy().to_string();
+        debug!(resolved_path = %resolved_path, "IPFS path resolved to local file");
+        
+        Ok(resolved_path)
+    }
+    
+    /// Download a file from IPFS using the HTTP API
+    async fn download_from_ipfs(&self, ipfs_path: &str) -> Result<Vec<u8>> {
+        let client = reqwest::Client::new();
+        let url = format!("{}/api/v0/cat?arg={}", self.ipfs_url, ipfs_path);
+        
+        debug!(url = %url, "Downloading file from IPFS");
+        
+        let response = client.post(&url).send().await?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "Failed to download from IPFS: {} - {}",
+                response.status(),
+                response.text().await.unwrap_or_else(|_| "Unknown error".to_string())
+            ));
+        }
+        
+        let content = response.bytes().await?;
+        info!(size = content.len(), "Downloaded file from IPFS");
+        
+        Ok(content.to_vec())
     }
 }
 
@@ -206,3 +247,4 @@ mod tests {
         assert!(result.is_err());
     }
 }
+ 
