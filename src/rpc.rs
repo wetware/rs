@@ -487,7 +487,9 @@ pub struct ProtocolBehaviour {
 
 impl ProtocolBehaviour {
     pub fn new() -> Self {
-        Self { _dummy: libp2p::swarm::dummy::Behaviour }
+        Self {
+            _dummy: libp2p::swarm::dummy::Behaviour,
+        }
     }
 }
 
@@ -641,18 +643,19 @@ mod tests {
     async fn test_capnp_message_handling() {
         use tokio::io::duplex;
         use tokio::time::{timeout, Duration};
-        
+
         let (read, _write) = duplex(1024);
         let mut stream = Stream::new(read);
         let test_message = b"test message";
-        
+
         // Test sending a message
         let result = stream.send_capnp_message(test_message).await;
         assert!(result.is_ok());
-        
+
         // Test receiving a message with a timeout to prevent hanging
-        let receive_result = timeout(Duration::from_millis(100), stream.receive_capnp_message()).await;
-        
+        let receive_result =
+            timeout(Duration::from_millis(100), stream.receive_capnp_message()).await;
+
         // The receive should timeout since no data was written to the write side
         assert!(receive_result.is_err()); // Timeout error is expected
     }

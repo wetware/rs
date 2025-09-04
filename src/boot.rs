@@ -491,9 +491,8 @@ mod tests {
     #[test]
     fn test_rpc_server_creation() {
         let membrane = crate::membrane::Membrane::new();
-        let rpc_server = crate::rpc::DefaultServer::new(
-            std::sync::Arc::new(std::sync::Mutex::new(membrane))
-        );
+        let rpc_server =
+            crate::rpc::DefaultServer::new(std::sync::Arc::new(std::sync::Mutex::new(membrane)));
         // Test that RPC server can be created successfully
         let membrane_ref = rpc_server.get_membrane();
         assert!(std::ptr::addr_of!(membrane_ref) != std::ptr::null());
@@ -516,7 +515,7 @@ mod tests {
         let config = HostConfig::default();
         let (_keypair, peer_id, swarm) = build_host(Some(config)).await.unwrap();
         let swarm_manager = SwarmManager::new(swarm, peer_id);
-        
+
         // Test protocol identifier
         assert_eq!(swarm_manager.get_default_protocol(), "/ww/0.1.0");
     }
