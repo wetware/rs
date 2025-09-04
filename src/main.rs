@@ -1,14 +1,17 @@
 use anyhow::Result;
+use std::collections::HashMap;
 use tracing::{debug, info};
 
 mod boot;
 mod config;
+mod executor;
 mod membrane;
 mod rpc;
 mod swarm_capnp;
 use boot::{build_host, get_kubo_peers, SwarmManager};
 use clap::{Parser, Subcommand};
 use config::{init_tracing, AppConfig};
+use executor::{execute_subprocess, ExecutorEnv, FDManager};
 
 #[derive(Parser)]
 #[command(name = "ww")]
@@ -23,8 +26,35 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run a wetware node
+    /// Execute a binary in a subprocess (like the Go implementation)
     Run {
+        /// Binary to execute
+        binary: String,
+        
+        /// Arguments to pass to the binary
+        args: Vec<String>,
+
+        /// IPFS node HTTP API endpoint (e.g., http://127.0.0.1:5001)
+        /// If not provided, uses WW_IPFS environment variable or defaults to http://localhost:5001
+        #[arg(long)]
+        ipfs: Option<String>,
+
+        /// Environment variables to set for the child process (e.g., DEBUG=1,LOG_LEVEL=info)
+        #[arg(long, value_delimiter = ',')]
+        env: Option<Vec<String>>,
+
+        /// Map existing parent fd to name (e.g., db=3). Use --with-fd multiple times for multiple fds.
+        #[arg(long, value_delimiter = ',')]
+        with_fd: Option<Vec<String>>,
+
+        /// Log level (trace, debug, info, warn, error)
+        /// If not provided, uses WW_LOGLVL environment variable or defaults to info
+        #[arg(long, value_name = "LEVEL")]
+        loglvl: Option<config::LogLevel>,
+    },
+    
+    /// Run a wetware node (daemon mode)
+    Daemon {
         /// IPFS node HTTP API endpoint (e.g., http://127.0.0.1:5001)
         /// If not provided, uses WW_IPFS environment variable or defaults to http://localhost:5001
         #[arg(long)]
@@ -52,19 +82,87 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Run {
+            binary,
+            args,
+            ipfs,
+            env,
+            with_fd,
+            loglvl,
+        } => {
+            run_subprocess(binary, args, ipfs, env, with_fd, loglvl).await?;
+        }
+        Commands::Daemon {
             ipfs,
             loglvl,
             preset,
             listen_addrs,
         } => {
-            run_node(ipfs, loglvl, preset, listen_addrs).await?;
+            run_daemon(ipfs, loglvl, preset, listen_addrs).await?;
         }
     }
 
     Ok(())
 }
 
-async fn run_node(
+async fn run_subprocess(
+    binary: String,
+    args: Vec<String>,
+    ipfs: Option<String>,
+    env: Option<Vec<String>>,
+    with_fd: Option<Vec<String>>,
+    loglvl: Option<config::LogLevel>,
+) -> Result<()> {
+    // Initialize tracing with the determined log level
+    let log_level = loglvl.unwrap_or_else(config::get_log_level);
+    config::init_tracing(log_level, loglvl);
+
+    // Get IPFS URL
+    let ipfs_url = ipfs.unwrap_or_else(config::get_ipfs_url);
+    
+    info!(binary = %binary, args = ?args, ipfs_url = %ipfs_url, "Starting subprocess execution");
+
+    // Create executor environment
+    let executor_env = ExecutorEnv::new(ipfs_url)?;
+
+    // Parse environment variables
+    let mut env_vars = HashMap::new();
+    if let Some(env_flags) = env {
+        for env_flag in env_flags {
+            if let Some((key, value)) = env_flag.split_once('=') {
+                env_vars.insert(key.to_string(), value.to_string());
+            } else {
+                return Err(anyhow::anyhow!("Invalid environment variable format: {}", env_flag));
+            }
+        }
+    }
+
+    // Set up file descriptor manager
+    let fd_manager = if let Some(fd_flags) = with_fd {
+        Some(FDManager::new(fd_flags)?)
+    } else {
+        None
+    };
+
+    // Add FD environment variables
+    if let Some(ref fd_manager) = fd_manager {
+        let fd_env_vars = fd_manager.generate_env_vars();
+        env_vars.extend(fd_env_vars);
+    }
+
+    // Execute the subprocess
+    let exit_code = execute_subprocess(
+        binary,
+        args,
+        env_vars,
+        fd_manager,
+        &executor_env,
+    ).await?;
+
+    // Exit with the same code as the subprocess
+    std::process::exit(exit_code);
+}
+
+async fn run_daemon(
     ipfs: Option<String>,
     loglvl: Option<config::LogLevel>,
     preset: Option<String>,
