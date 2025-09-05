@@ -111,10 +111,9 @@ impl tokio::io::AsyncRead for Libp2pStreamAdapter {
             }
             Poll::Ready(Err(e)) => {
                 // Convert libp2p error to std::io::Error
-                let io_error = io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("libp2p stream read error: {}", e),
-                );
+                                  let io_error = io::Error::other(
+                      format!("libp2p stream read error: {}", e),
+                  );
                 Poll::Ready(Err(io_error))
             }
             Poll::Pending => {
@@ -167,10 +166,9 @@ impl tokio::io::AsyncWrite for Libp2pStreamAdapter {
             }
             Poll::Ready(Err(e)) => {
                 // Convert libp2p error to std::io::Error
-                let io_error = io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("libp2p stream write error: {}", e),
-                );
+                                  let io_error = io::Error::other(
+                      format!("libp2p stream write error: {}", e),
+                  );
                 Poll::Ready(Err(io_error))
             }
             Poll::Pending => {
@@ -199,10 +197,9 @@ impl tokio::io::AsyncWrite for Libp2pStreamAdapter {
             }
             Poll::Ready(Err(e)) => {
                 // Convert libp2p error to std::io::Error
-                let io_error = io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("libp2p stream flush error: {}", e),
-                );
+                                  let io_error = io::Error::other(
+                      format!("libp2p stream flush error: {}", e),
+                  );
                 Poll::Ready(Err(io_error))
             }
             Poll::Pending => {
@@ -234,10 +231,9 @@ impl tokio::io::AsyncWrite for Libp2pStreamAdapter {
             }
             Poll::Ready(Err(e)) => {
                 // Convert libp2p error to std::io::Result
-                let io_error = io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("libp2p stream shutdown error: {}", e),
-                );
+                                  let io_error = io::Error::other(
+                      format!("libp2p stream shutdown error: {}", e),
+                  );
                 Poll::Ready(Err(io_error))
             }
             Poll::Pending => {
@@ -450,6 +446,7 @@ impl DefaultServer {
 
 /// Cap'n Proto message codec for framing
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct DefaultCodec;
 
 impl Decoder for DefaultCodec {
