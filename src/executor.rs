@@ -2,11 +2,14 @@ use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 
-use subprocess::{Exec, Redirection};
+use std::process::{Command, Stdio};
 use tempfile::TempDir;
 use tracing::{debug, info};
+
+use crate::system::FDManager;
 
 /// Environment for subprocess execution
 pub struct ExecutorEnv {
@@ -93,138 +96,32 @@ impl ExecutorEnv {
     }
 }
 
-/// File descriptor manager for passing FDs to child processes
-///
-/// Current implementation provides:
-/// - Parsing and validation of --with-fd flags (name=fdnum format)
-/// - Environment variable generation (WW_FD_*)
-/// - Basic logging and error handling
-///
-/// TODO: Implement actual FD duplication and passing to subprocess
-/// TODO: Add proper cleanup and resource management
-pub struct FDManager {
-    mappings: Vec<FDMapping>,
-}
-
-struct FDMapping {
-    name: String,
-    source_fd: i32,
-    target_fd: i32,
-}
-
-impl FDManager {
-    /// Create a new FD manager from --with-fd flag values
-    pub fn new(fd_flags: Vec<String>) -> Result<Self> {
-        let mut mappings = Vec::new();
-        let mut used_names = std::collections::HashSet::new();
-
-        for (i, flag) in fd_flags.iter().enumerate() {
-            let (name, source_fd) = Self::parse_fd_flag(flag)?;
-
-            if used_names.contains(&name) {
-                return Err(anyhow!("Duplicate name '{}' in --with-fd flags", name));
-            }
-
-            // Target FD starts at 3 and increments sequentially
-            let target_fd = 3 + i as i32;
-
-            mappings.push(FDMapping {
-                name: name.clone(),
-                source_fd,
-                target_fd,
-            });
-
-            used_names.insert(name);
-        }
-
-        Ok(Self { mappings })
-    }
-
-    /// Parse a --with-fd flag value in "name=fdnum" format
-    fn parse_fd_flag(value: &str) -> Result<(String, i32)> {
-        let parts: Vec<&str> = value.splitn(2, '=').collect();
-        if parts.len() != 2 {
-            return Err(anyhow!(
-                "Invalid format: expected 'name=fdnum', got '{}'",
-                value
-            ));
-        }
-
-        let name = parts[0].to_string();
-        if name.is_empty() {
-            return Err(anyhow!("Name cannot be empty"));
-        }
-
-        let fdnum: i32 = parts[1]
-            .parse()
-            .map_err(|_| anyhow!("Invalid fd number '{}'", parts[1]))?;
-
-        if fdnum < 0 {
-            return Err(anyhow!("FD number must be non-negative, got {}", fdnum));
-        }
-
-        Ok((name, fdnum))
-    }
-
-    /// Generate environment variables for the child process
-    pub fn generate_env_vars(&self) -> HashMap<String, String> {
-        let mut env_vars = HashMap::new();
-
-        for mapping in &self.mappings {
-            let env_var = format!("WW_FD_{}", mapping.name.to_uppercase());
-            env_vars.insert(env_var, mapping.target_fd.to_string());
-        }
-
-        env_vars
-    }
-
-    /// Prepare file descriptors for passing to child process
-    /// TODO: Implement actual FD duplication using libc::dup() for safety
-    /// TODO: Convert RawFds to File objects for subprocess ExtraFiles
-    /// TODO: Handle FD conflicts and validation
-    pub fn prepare_fds(&self) -> Result<()> {
-        debug!(
-            "Preparing {} file descriptors for child process",
-            self.mappings.len()
-        );
-
-        for mapping in &self.mappings {
-            debug!(
-                name = %mapping.name,
-                source_fd = mapping.source_fd,
-                target_fd = mapping.target_fd,
-                "File descriptor prepared"
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Close all managed file descriptors
-    /// TODO: Implement actual FD cleanup using libc::close()
-    /// TODO: Handle cleanup errors gracefully
-    /// TODO: Track which FDs were successfully closed
-    pub fn close_fds(&self) -> Result<()> {
-        debug!("Closing {} file descriptors", self.mappings.len());
-
-        for mapping in &self.mappings {
-            debug!(
-                name = %mapping.name,
-                source_fd = mapping.source_fd,
-                "File descriptor closed"
-            );
-        }
-
-        Ok(())
-    }
-}
-
 /// Execute a binary in a subprocess with the given arguments and environment
+///
+/// This function launches a subprocess with proper file descriptor inheritance,
+/// including the Unix domain socket pair for host-guest communication (FD3) and
+/// user file descriptors (FD4+) passed via --with-fd flags.
+///
+/// # Arguments
+///
+/// * `binary` - Path to the executable to run
+/// * `args` - Command line arguments to pass to the executable
+/// * `env_vars` - Environment variables to set for the subprocess
+/// * `fd_manager` - File descriptor manager for FD inheritance
+/// * `executor_env` - Execution environment with IPFS and temp directory
+///
+/// # Returns
+///
+/// Returns the exit code of the subprocess.
+///
+/// # Errors
+///
+/// Returns an error if subprocess execution fails or if FD preparation fails.
 pub async fn execute_subprocess(
     binary: String,
     args: Vec<String>,
     env_vars: HashMap<String, String>,
-    fd_manager: Option<FDManager>,
+    mut fd_manager: Option<FDManager>,
     executor_env: &ExecutorEnv,
 ) -> Result<i32> {
     info!(binary = %binary, args = ?args, "Executing subprocess");
@@ -233,35 +130,63 @@ pub async fn execute_subprocess(
     let resolved_binary = executor_env.resolve_exec_path(&binary).await?;
     debug!(resolved_binary = %resolved_binary, "Resolved executable path");
 
-    // Build the command
-    let mut cmd = Exec::cmd(&resolved_binary);
+    // Prepare file descriptors for subprocess
+    let extra_fds = if let Some(ref mut fd_manager) = fd_manager {
+        fd_manager.prepare_fds()?
+    } else {
+        Vec::new()
+    };
 
-    // Add arguments
-    for arg in args {
-        cmd = cmd.arg(arg);
-    }
+    // Build the command
+    let mut cmd = Command::new(&resolved_binary);
+    cmd.args(&args);
 
     // Set up environment variables
-    for (key, value) in env_vars {
-        cmd = cmd.env(key, value);
+    for (key, value) in &env_vars {
+        cmd.env(key, value);
     }
 
-    // Set up standard streams
-    cmd = cmd.stdout(Redirection::Pipe).stderr(Redirection::Pipe);
+    // Set up standard streams (passthrough to parent)
+    cmd.stdin(Stdio::inherit());
+    cmd.stdout(Stdio::inherit());
+    cmd.stderr(Stdio::inherit());
 
-    // Handle file descriptor passing
-    // TODO: Integrate with subprocess crate to actually pass FDs to child process
-    // TODO: Use subprocess::Exec with proper ExtraFiles support
-    if let Some(ref fd_manager) = fd_manager {
-        fd_manager.prepare_fds()?;
+    // Set up file descriptor inheritance using pre_exec hook
+    let extra_fds_clone = extra_fds.clone();
+    unsafe {
+        cmd.pre_exec(move || {
+            // Set up process group for proper signal handling
+            libc::setpgid(0, 0);
+
+            // Duplicate file descriptors to the child process
+            for (i, fd) in extra_fds_clone.iter().enumerate() {
+                let target_fd = 3 + i as i32; // Start from FD 3
+
+                // Duplicate the file descriptor to the target FD
+                if libc::dup2(*fd, target_fd) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+
+            Ok(())
+        });
     }
 
-    // Execute the command and capture output
-    let result = cmd.capture()?;
+    info!(
+        extra_files_count = env_vars.len(),
+        "Launching subprocess with {} extra file descriptors",
+        env_vars.len()
+    );
 
-    // Print the output
-    print!("{}", result.stdout_str());
-    eprint!("{}", result.stderr_str());
+    // Execute the command
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow!("Failed to spawn subprocess '{}': {}", resolved_binary, e))?;
+
+    // Wait for the subprocess to complete
+    let status = child
+        .wait()
+        .map_err(|e| anyhow!("Failed to wait for subprocess: {}", e))?;
 
     // Clean up file descriptors
     if let Some(ref fd_manager) = fd_manager {
@@ -269,7 +194,7 @@ pub async fn execute_subprocess(
     }
 
     // Get exit code
-    let exit_code = if result.success() { 0 } else { 1 };
+    let exit_code = status.code().unwrap_or(1);
     info!(exit_code = exit_code, "Subprocess completed");
 
     Ok(exit_code)
