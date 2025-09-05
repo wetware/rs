@@ -18,7 +18,19 @@ A Rust libp2p application that implements the Wetware Protocol (`/ww/0.1.0`) for
    kubo daemon
    ```
 
-2. **Rust toolchain (nightly required)**
+2. **Cap'n Proto compiler (version 0.5.2 or higher)**
+   ```bash
+   # Ubuntu/Debian
+   sudo apt-get install capnproto
+   
+   # macOS
+   brew install capnp
+   
+   # Or build from source
+   # See https://capnproto.org/install.html
+   ```
+
+3. **Rust toolchain (nightly required)**
    ```bash
    rustup install nightly
    rustup default nightly
