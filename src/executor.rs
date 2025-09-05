@@ -210,8 +210,8 @@ mod tests {
         let fd_manager = FDManager::new(fd_flags).unwrap();
 
         let env_vars = fd_manager.generate_env_vars();
-        assert_eq!(env_vars.get("WW_FD_DB"), Some(&"3".to_string()));
-        assert_eq!(env_vars.get("WW_FD_CACHE"), Some(&"4".to_string()));
+        assert_eq!(env_vars.get("WW_FD_DB"), Some(&"4".to_string()));
+        assert_eq!(env_vars.get("WW_FD_CACHE"), Some(&"5".to_string()));
     }
 
     #[test]
