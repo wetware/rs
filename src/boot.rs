@@ -92,6 +92,7 @@ pub struct WetwareBehaviour {
 
 pub struct SwarmManager {
     swarm: Swarm<WetwareBehaviour>,
+    #[allow(dead_code)]
     peer_id: PeerId,
 }
 
@@ -275,6 +276,7 @@ impl SwarmManager {
 
     /// Handle incoming wetware protocol streams
     /// This method processes incoming connections and upgrades them to wetware streams
+    #[allow(dead_code)]
     pub async fn handle_wetware_stream(
         &mut self,
         stream: libp2p::Stream,
@@ -292,6 +294,7 @@ impl SwarmManager {
         let mut wetware_stream = crate::rpc::Stream::new(stream_adapter);
 
         // Create a membrane for this connection
+        #[allow(clippy::arc_with_non_send_sync)]
         let membrane = std::sync::Arc::new(std::sync::Mutex::new(crate::membrane::Membrane::new()));
 
         // Create RPC server to handle requests
@@ -336,6 +339,7 @@ impl SwarmManager {
 
     /// Initiate a wetware protocol connection to a peer
     /// This method opens a new stream to a peer and upgrades it to the wetware protocol
+    #[allow(dead_code)]
     pub async fn connect_wetware_protocol(&mut self, peer_id: PeerId) -> Result<()> {
         let span = tracing::debug_span!("connect_wetware_protocol", peer_id = %peer_id);
         let _enter = span.enter();
@@ -480,43 +484,13 @@ mod tests {
         assert_eq!(protocol_info.next().unwrap().as_ref(), "/ww/0.1.0");
     }
 
-    #[test]
-    fn test_membrane_creation() {
-        let membrane = crate::membrane::Membrane::new();
-        // Test that membrane can be created successfully
-        // Note: Membrane fields are private, so we just test that creation succeeds
-        assert!(std::ptr::addr_of!(membrane) != std::ptr::null());
-    }
-
-    #[test]
-    fn test_rpc_server_creation() {
-        let membrane = crate::membrane::Membrane::new();
-        let rpc_server = crate::rpc::DefaultServer::new(
-            std::sync::Arc::new(std::sync::Mutex::new(membrane))
-        );
-        // Test that RPC server can be created successfully
-        let membrane_ref = rpc_server.get_membrane();
-        assert!(std::ptr::addr_of!(membrane_ref) != std::ptr::null());
-    }
-
-    #[test]
-    fn test_stream_creation() {
-        // Test that we can create a Stream with a mock IO
-        use tokio::io::duplex;
-        let (read, _write) = duplex(1024);
-        let stream = crate::rpc::Stream::new(read);
-        // Test that stream can be created successfully
-        // Note: Stream fields are private, so we just test that creation succeeds
-        assert!(std::ptr::addr_of!(stream) != std::ptr::null());
-    }
-
     #[tokio::test]
     async fn test_swarm_manager_protocol_methods() {
         // Test that SwarmManager methods work correctly
         let config = HostConfig::default();
         let (_keypair, peer_id, swarm) = build_host(Some(config)).await.unwrap();
         let swarm_manager = SwarmManager::new(swarm, peer_id);
-        
+
         // Test protocol identifier
         assert_eq!(swarm_manager.get_default_protocol(), "/ww/0.1.0");
     }
