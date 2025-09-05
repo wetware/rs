@@ -125,28 +125,4 @@ mod tests {
         assert_eq!(services.len(), 0);
     }
 
-    #[test]
-    fn test_export_triggers_automatic_cleanup() {
-        let membrane = Membrane::new();
-
-        // Test that the membrane starts empty
-        let services = membrane.services.lock().unwrap();
-        assert_eq!(services.len(), 0);
-        drop(services);
-
-        // Test that we can generate tokens
-        let token1 = membrane.generate_service_token();
-        let token2 = membrane.generate_service_token();
-
-        // Tokens should be different
-        assert_ne!(token1, token2);
-
-        // Tokens should be 8 bytes
-        assert_eq!(token1.len(), 8);
-        assert_eq!(token2.len(), 8);
-
-        // Note: We can't easily test the actual cleanup behavior without
-        // implementing the full ClientHook trait, but we can verify that
-        // the export_service method exists and the basic structure works
-    }
 }

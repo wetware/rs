@@ -484,35 +484,8 @@ mod tests {
         assert_eq!(protocol_info.next().unwrap().as_ref(), "/ww/0.1.0");
     }
 
-    #[test]
-    fn test_membrane_creation() {
-        let membrane = crate::membrane::Membrane::new();
-        // Test that membrane can be created successfully
-        // Note: Membrane fields are private, so we just test that creation succeeds
-        assert!(!std::ptr::addr_of!(membrane).is_null());
-    }
 
-    #[test]
-    fn test_rpc_server_creation() {
-        let membrane = crate::membrane::Membrane::new();
-        #[allow(clippy::arc_with_non_send_sync)]
-        let rpc_server =
-            crate::rpc::DefaultServer::new(std::sync::Arc::new(std::sync::Mutex::new(membrane)));
-        // Test that RPC server can be created successfully
-        let membrane_ref = rpc_server.get_membrane();
-        assert!(!std::ptr::addr_of!(membrane_ref).is_null());
-    }
 
-    #[test]
-    fn test_stream_creation() {
-        // Test that we can create a Stream with a mock IO
-        use tokio::io::duplex;
-        let (read, _write) = duplex(1024);
-        let stream = crate::rpc::Stream::new(read);
-        // Test that stream can be created successfully
-        // Note: Stream fields are private, so we just test that creation succeeds
-        assert!(!std::ptr::addr_of!(stream).is_null());
-    }
 
     #[tokio::test]
     async fn test_swarm_manager_protocol_methods() {

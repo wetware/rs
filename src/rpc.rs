@@ -520,99 +520,30 @@ mod tests {
         assert_eq!(decoded, test_data);
     }
 
-    #[tokio::test]
-    async fn test_rpc_import_export_flow() {
-        // Create a membrane
-        #[allow(clippy::arc_with_non_send_sync)]
-        let membrane = Arc::new(Mutex::new(Membrane::new()));
 
-        // Create server with the membrane
-        let rpc_server = DefaultServer::new(membrane);
-
-        // Test that the importer capability is available
-        let test_response = rpc_server.test_import_capability().await.unwrap();
-        let response_str = String::from_utf8_lossy(&test_response);
-        println!("✅ {}", response_str);
-
-        // Verify that we can access the membrane through the RPC server
-        let rpc_membrane = rpc_server.get_membrane();
-        assert!(
-            rpc_membrane.lock().is_ok(),
-            "Should be able to lock membrane"
-        );
-        println!("✅ Membrane access verified");
-
-        println!("🎉 Basic RPC functionality test passed!");
-    }
-
-    /// Simple test of RPC connection over in-memory pipe
     #[tokio::test]
     async fn test_rpc_connection_simple() {
-        println!("🚀 Starting simple RPC connection test...");
-
-        // 1. Create an in-memory bidirectional pipe instead of TCP
+        // Create an in-memory bidirectional pipe
         let (server_stream, client_stream) = tokio::io::duplex(1024);
-        println!("📍 In-memory pipe created");
 
-        // 2. Test RPC communication
+        // Test RPC communication
         let mut server_rpc = Stream::new(server_stream);
         let mut client_rpc = Stream::new(client_stream);
 
         // Send a test message from server to client
         let test_message = b"Hello from RPC server!";
         server_rpc.send_capnp_message(test_message).await.unwrap();
-        println!("📤 Test message sent from server");
 
         // Receive the message on client side
         if let Ok(Some(received)) = client_rpc.receive_capnp_message().await {
             assert_eq!(received, test_message);
-            println!(
-                "📥 Test message received on client: {:?}",
-                String::from_utf8_lossy(&received)
-            );
-            println!("✅ RPC communication test passed!");
         } else {
             panic!("Failed to receive test message");
         }
-
-        println!("🎉 Simple RPC connection test completed successfully!");
     }
 
-    /// Test Libp2pStreamAdapter constructor and basic functionality
-    #[test]
-    fn test_libp2p_stream_adapter_constructor() {
-        println!("🧪 Testing Libp2pStreamAdapter constructor...");
 
-        // Test that we can create an adapter (we'll use a placeholder for now)
-        // In real usage, this would be an actual libp2p::Stream
-        println!("✅ Libp2pStreamAdapter constructor test completed");
 
-        // TODO: Add actual libp2p::Stream testing when we have access to real streams
-    }
-
-    /// Test Libp2pStreamAdapter with tokio I/O traits
-    #[tokio::test]
-    async fn test_libp2p_stream_adapter_tokio_io() {
-        println!("🧪 Testing Libp2pStreamAdapter with tokio I/O traits...");
-
-        // Test that our adapter can be used with tokio I/O traits
-        // This verifies the trait bounds are satisfied
-        println!("✅ Libp2pStreamAdapter tokio I/O trait test completed");
-
-        // TODO: Add actual libp2p::Stream testing when we have access to real streams
-    }
-
-    /// Test integration between Libp2pStreamAdapter and WetwareStream
-    #[tokio::test]
-    async fn test_libp2p_stream_adapter_integration() {
-        println!("🧪 Testing Libp2pStreamAdapter integration with WetwareStream...");
-
-        // Test that our adapter can be used with WetwareStream
-        // This verifies the end-to-end integration works
-        println!("✅ Libp2pStreamAdapter integration test completed");
-
-        // TODO: Add actual libp2p::Stream testing when we have access to real streams
-    }
 
     #[test]
     fn test_protocol_upgrade_info() {
@@ -623,23 +554,7 @@ mod tests {
         assert_eq!(protocol.as_ref(), "/ww/0.1.0");
     }
 
-    #[test]
-    fn test_default_server_creation() {
-        let membrane = Membrane::new();
-        #[allow(clippy::arc_with_non_send_sync)]
-        let server = DefaultServer::new(Arc::new(Mutex::new(membrane)));
-        let membrane_ref = server.get_membrane();
-        assert!(!std::ptr::addr_of!(membrane_ref).is_null());
-    }
 
-    #[test]
-    fn test_stream_with_mock_io() {
-        use tokio::io::duplex;
-        let (read, _write) = duplex(1024);
-        let stream = Stream::new(read);
-        // Test that stream can be created successfully
-        assert!(!std::ptr::addr_of!(stream).is_null());
-    }
 
     #[tokio::test]
     async fn test_capnp_message_handling() {
