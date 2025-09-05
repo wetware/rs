@@ -484,9 +484,6 @@ mod tests {
         assert_eq!(protocol_info.next().unwrap().as_ref(), "/ww/0.1.0");
     }
 
-
-
-
     #[tokio::test]
     async fn test_swarm_manager_protocol_methods() {
         // Test that SwarmManager methods work correctly

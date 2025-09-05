@@ -124,5 +124,4 @@ mod tests {
         let services = membrane.services.lock().unwrap();
         assert_eq!(services.len(), 0);
     }
-
 }

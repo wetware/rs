@@ -520,7 +520,6 @@ mod tests {
         assert_eq!(decoded, test_data);
     }
 
-
     #[tokio::test]
     async fn test_rpc_connection_simple() {
         // Create an in-memory bidirectional pipe
@@ -542,9 +541,6 @@ mod tests {
         }
     }
 
-
-
-
     #[test]
     fn test_protocol_upgrade_info() {
         use libp2p::core::upgrade::UpgradeInfo;
@@ -553,8 +549,6 @@ mod tests {
         let protocol = protocol_info.next().unwrap();
         assert_eq!(protocol.as_ref(), "/ww/0.1.0");
     }
-
-
 
     #[tokio::test]
     async fn test_capnp_message_handling() {
