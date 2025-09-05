@@ -5,6 +5,9 @@ use capnp::Error;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
+/// Type alias for the services map to reduce complexity
+type ServicesMap = Arc<Mutex<HashMap<Vec<u8>, Weak<Box<dyn ClientHook>>>>>;
+
 /// A membrane that manages exported and imported service capabilities.
 ///
 /// The membrane acts as a central registry for service capabilities, allowing
@@ -13,13 +16,15 @@ use std::sync::{Arc, Mutex, Weak};
 #[derive(Debug, Clone)]
 pub struct Membrane {
     /// Map of service tokens to weak references of capabilities
-    services: Arc<Mutex<HashMap<Vec<u8>, Weak<Box<dyn ClientHook>>>>>,
+    services: ServicesMap,
 }
 
 impl Membrane {
     /// Create a new membrane instance
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
+            #[allow(clippy::arc_with_non_send_sync)]
             services: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -34,8 +39,8 @@ impl Membrane {
 
         // Convert time to 8 bytes (little-endian)
         let mut token = vec![0u8; 8];
-        for i in 0..8 {
-            token[i] = ((time >> (i * 8)) & 0xFF) as u8;
+        for (i, item) in token.iter_mut().enumerate().take(8) {
+            *item = ((time >> (i * 8)) & 0xFF) as u8;
         }
 
         token
@@ -59,7 +64,7 @@ impl exporter::Server for Membrane {
         let service_token = self.generate_service_token();
 
         // Extract the capability from the service reader
-        let capability: crate::swarm_capnp::swarm_capnp::exporter::Client =
+        let capability: crate::swarm_capnp::exporter::Client =
             match service_reader.get_as_capability() {
                 Ok(cap) => cap,
                 Err(e) => {
@@ -76,6 +81,7 @@ impl exporter::Server for Membrane {
             // Store the capability in the hashmap using the service token as key
             // Convert the Client capability to a Weak<dyn ClientHook> for storage
             let capability_hook = capability.into_client_hook();
+            #[allow(clippy::arc_with_non_send_sync)]
             let weak_capability = Arc::downgrade(&Arc::new(capability_hook));
             services.insert(service_token.clone(), weak_capability);
         }

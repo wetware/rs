@@ -92,6 +92,7 @@ pub struct WetwareBehaviour {
 
 pub struct SwarmManager {
     swarm: Swarm<WetwareBehaviour>,
+    #[allow(dead_code)]
     peer_id: PeerId,
 }
 
@@ -275,6 +276,7 @@ impl SwarmManager {
 
     /// Handle incoming wetware protocol streams
     /// This method processes incoming connections and upgrades them to wetware streams
+    #[allow(dead_code)]
     pub async fn handle_wetware_stream(
         &mut self,
         stream: libp2p::Stream,
@@ -292,6 +294,7 @@ impl SwarmManager {
         let mut wetware_stream = crate::rpc::Stream::new(stream_adapter);
 
         // Create a membrane for this connection
+        #[allow(clippy::arc_with_non_send_sync)]
         let membrane = std::sync::Arc::new(std::sync::Mutex::new(crate::membrane::Membrane::new()));
 
         // Create RPC server to handle requests
@@ -336,6 +339,7 @@ impl SwarmManager {
 
     /// Initiate a wetware protocol connection to a peer
     /// This method opens a new stream to a peer and upgrades it to the wetware protocol
+    #[allow(dead_code)]
     pub async fn connect_wetware_protocol(&mut self, peer_id: PeerId) -> Result<()> {
         let span = tracing::debug_span!("connect_wetware_protocol", peer_id = %peer_id);
         let _enter = span.enter();

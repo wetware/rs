@@ -248,7 +248,7 @@ pub fn get_log_level() -> LogLevel {
     std::env::var("WW_LOGLVL")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| LogLevel::Info)
+        .unwrap_or(LogLevel::Info)
 }
 
 /// Get the IPFS node URL from environment variable or use default

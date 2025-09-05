@@ -52,6 +52,7 @@ impl Libp2pStreamAdapter {
     ///
     /// This is the entry point for converting libp2p streams into something that can
     /// work with our Cap'n Proto RPC infrastructure.
+    #[allow(dead_code)]
     pub fn new(stream: libp2p::Stream) -> Self {
         Self { stream }
     }
@@ -311,8 +312,11 @@ where
 /// Generic stream that handles Cap'n Proto RPC over libp2p
 #[derive(Debug)]
 pub struct Stream<T> {
+    #[allow(dead_code)]
     io: T,
+    #[allow(dead_code)]
     read_buffer: BytesMut,
+    #[allow(dead_code)]
     write_buffer: BytesMut,
 }
 
@@ -379,17 +383,20 @@ where
 
 /// Default server that provides the importer capability
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct DefaultServer {
     /// The membrane for handling import/export requests
     membrane: Arc<Mutex<Membrane>>,
 }
 
 impl DefaultServer {
+    #[allow(dead_code)]
     pub fn new(membrane: Arc<Mutex<Membrane>>) -> Self {
         Self { membrane }
     }
 
     /// Process an RPC request and return the response
+    #[allow(dead_code)]
     pub async fn process_rpc_request(&mut self, request_data: &[u8]) -> Result<Vec<u8>> {
         debug!(
             "Processing wetware RPC request: {} bytes",
@@ -404,24 +411,28 @@ impl DefaultServer {
     }
 
     /// Handle export requests
+    #[allow(dead_code)]
     async fn handle_export_request(&mut self, _request_data: &[u8]) -> Result<Vec<u8>> {
         // TODO: Implement proper export request handling
         Ok(b"Export OK".to_vec())
     }
 
     /// Handle import requests
+    #[allow(dead_code)]
     async fn handle_import_request(&mut self, _request_data: &[u8]) -> Result<Vec<u8>> {
         // TODO: Implement proper import request handling
         Ok(b"Import OK".to_vec())
     }
 
     /// Get a reference to the membrane
+    #[allow(dead_code)]
     pub fn get_membrane(&self) -> &Arc<Mutex<Membrane>> {
         &self.membrane
     }
 
     /// Test method to demonstrate RPC functionality
     /// This shows how the importer capability would be available to remote clients
+    #[allow(dead_code)]
     pub async fn test_import_capability(&self) -> Result<Vec<u8>> {
         debug!("Testing import capability availability");
 

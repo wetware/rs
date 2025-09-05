@@ -4,7 +4,6 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use reqwest;
 use subprocess::{Exec, Redirection};
 use tempfile::TempDir;
 use tracing::{debug, info};
