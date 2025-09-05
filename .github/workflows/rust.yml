@@ -21,6 +21,11 @@ jobs:
       with:
         targets: x86_64-unknown-linux-gnu
         
+    - name: Install Cap'n Proto compiler
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y capnproto
+        
     - name: Cache dependencies
       uses: actions/cache@v3
       with:
@@ -56,6 +61,11 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: x86_64-unknown-linux-gnu
+        
+    - name: Install Cap'n Proto compiler
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y capnproto
         
     - name: Cache dependencies
       uses: actions/cache@v3
