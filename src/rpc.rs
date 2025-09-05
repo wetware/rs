@@ -523,6 +523,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_import_export_flow() {
         // Create a membrane
+        #[allow(clippy::arc_with_non_send_sync)]
         let membrane = Arc::new(Mutex::new(Membrane::new()));
 
         // Create server with the membrane
@@ -625,9 +626,10 @@ mod tests {
     #[test]
     fn test_default_server_creation() {
         let membrane = Membrane::new();
+        #[allow(clippy::arc_with_non_send_sync)]
         let server = DefaultServer::new(Arc::new(Mutex::new(membrane)));
         let membrane_ref = server.get_membrane();
-        assert!(std::ptr::addr_of!(membrane_ref) != std::ptr::null());
+        assert!(!std::ptr::addr_of!(membrane_ref).is_null());
     }
 
     #[test]
@@ -636,7 +638,7 @@ mod tests {
         let (read, _write) = duplex(1024);
         let stream = Stream::new(read);
         // Test that stream can be created successfully
-        assert!(std::ptr::addr_of!(stream) != std::ptr::null());
+        assert!(!std::ptr::addr_of!(stream).is_null());
     }
 
     #[tokio::test]

@@ -489,17 +489,18 @@ mod tests {
         let membrane = crate::membrane::Membrane::new();
         // Test that membrane can be created successfully
         // Note: Membrane fields are private, so we just test that creation succeeds
-        assert!(std::ptr::addr_of!(membrane) != std::ptr::null());
+        assert!(!std::ptr::addr_of!(membrane).is_null());
     }
 
     #[test]
     fn test_rpc_server_creation() {
         let membrane = crate::membrane::Membrane::new();
+        #[allow(clippy::arc_with_non_send_sync)]
         let rpc_server =
             crate::rpc::DefaultServer::new(std::sync::Arc::new(std::sync::Mutex::new(membrane)));
         // Test that RPC server can be created successfully
         let membrane_ref = rpc_server.get_membrane();
-        assert!(std::ptr::addr_of!(membrane_ref) != std::ptr::null());
+        assert!(!std::ptr::addr_of!(membrane_ref).is_null());
     }
 
     #[test]
@@ -510,7 +511,7 @@ mod tests {
         let stream = crate::rpc::Stream::new(read);
         // Test that stream can be created successfully
         // Note: Stream fields are private, so we just test that creation succeeds
-        assert!(std::ptr::addr_of!(stream) != std::ptr::null());
+        assert!(!std::ptr::addr_of!(stream).is_null());
     }
 
     #[tokio::test]
