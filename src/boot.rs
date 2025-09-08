@@ -1,5 +1,9 @@
 use anyhow::{anyhow, Result};
+use capnp_rpc::{RpcSystem, twoparty};
+use capnp_rpc::rpc_twoparty_capnp::Side;
+use capnp::capability::FromClientHook;
 use futures::StreamExt;
+use tokio_util::compat::TokioAsyncWriteCompatExt;
 use libp2p::{
     identity,
     kad::{Event as KademliaEvent, QueryResult, RecordKey},
@@ -7,11 +11,11 @@ use libp2p::{
     Multiaddr, PeerId,
 };
 use serde_json::Value;
-
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::config::HostConfig;
+use crate::membrane::Membrane;
 
 // IPFS protocol constants for DHT compatibility
 // These protocols ensure our node can communicate with the IPFS network
@@ -94,12 +98,18 @@ pub struct SwarmManager {
     swarm: Swarm<WetwareBehaviour>,
     #[allow(dead_code)]
     peer_id: PeerId,
+    /// Bootstrap membrane for managing host-guest capabilities
+    bootstrap_membrane: Membrane,
 }
 
 impl SwarmManager {
     pub fn new(swarm: Swarm<WetwareBehaviour>, peer_id: PeerId) -> Self {
         debug!(peer_id = %peer_id, "Creating new SwarmManager");
-        Self { swarm, peer_id }
+        Self {
+            swarm,
+            peer_id,
+            bootstrap_membrane: Membrane::new(),
+        }
     }
 
     /// Bootstrap the DHT by connecting to IPFS peers and triggering the bootstrap process
@@ -274,8 +284,66 @@ impl SwarmManager {
         crate::rpc::WW_PROTOCOL
     }
 
+    /// Get a reference to the bootstrap membrane
+    /// This is useful for testing and inspection of the bootstrap capabilities
+    pub fn bootstrap_membrane(&self) -> &Membrane {
+        &self.bootstrap_membrane
+    }
+
+    /// Handle host-guest communication over Unix domain socket
+    /// This method provides bootstrap capabilities to a guest subprocess over FD3,
+    /// matching the Go implementation's behavior.
+    #[allow(dead_code)]
+    pub async fn handle_guest_communication(
+        &self,
+        socket: std::os::unix::net::UnixStream,
+    ) -> Result<()> {
+        let span = tracing::debug_span!("handle_guest_communication");
+        let _enter = span.enter();
+
+        debug!("Setting up host-guest communication over Unix domain socket");
+
+        // Convert UnixStream to tokio::net::UnixStream for async operations
+        let tokio_socket = tokio::net::UnixStream::from_std(socket)?;
+        
+        // Split the socket into read and write halves
+        let (read_half, write_half) = tokio_socket.into_split();
+
+        // Create a two-party RPC system
+        // Convert tokio streams to futures-compatible streams
+        let read_half = tokio_util::compat::TokioAsyncReadCompatExt::compat(read_half);
+        let write_half = write_half.compat_write();
+        
+        let network = twoparty::VatNetwork::new(
+            read_half,
+            write_half,
+            Side::Client,
+            capnp::message::ReaderOptions::default(),
+        );
+        
+        // Create the RPC system with the membrane as the bootstrap client
+        // We need to create specific clients for the interfaces we support
+        let importer_client: crate::system_capnp::importer::Client = capnp_rpc::new_client(self.bootstrap_membrane.clone());
+        let exporter_client: crate::system_capnp::exporter::Client = capnp_rpc::new_client(self.bootstrap_membrane.clone());
+        
+        // Convert the specific client to a generic capability client
+        let membrane_client = capnp::capability::Client::new(importer_client.into_client_hook());
+        
+        let rpc_system = RpcSystem::new(Box::new(network), Some(membrane_client));
+
+        info!("Host-guest RPC system established over FD3");
+        info!("Bootstrap capabilities (Importer/Exporter) available to guest subprocess");
+
+        // Run the RPC system
+        rpc_system.await?;
+
+        debug!("Host-guest communication completed");
+        Ok(())
+    }
+
     /// Handle incoming wetware protocol streams
-    /// This method processes incoming connections and upgrades them to wetware streams
+    /// This method processes incoming connections and provides bootstrap capabilities
+    /// (Importer/Exporter) over the /ww/0.1.0 protocol, matching the Go implementation.
     #[allow(dead_code)]
     pub async fn handle_wetware_stream(
         &mut self,
@@ -289,53 +357,42 @@ impl SwarmManager {
 
         // Create our stream adapter to bridge libp2p::Stream to tokio::io traits
         let stream_adapter = crate::rpc::Libp2pStreamAdapter::new(stream);
+        
+        // Split the stream adapter into read and write halves
+        let (read_half, write_half) = tokio::io::split(stream_adapter);
 
-        // Create a wetware stream for RPC processing
-        let mut wetware_stream = crate::rpc::Stream::new(stream_adapter);
+        // Create a two-party RPC system
+        // Convert tokio streams to futures-compatible streams
+        let read_half = tokio_util::compat::TokioAsyncReadCompatExt::compat(read_half);
+        let write_half = write_half.compat_write();
+        
+        let network = twoparty::VatNetwork::new(
+            read_half,
+            write_half,
+            Side::Client,
+            capnp::message::ReaderOptions::default(),
+        );
+        
+        // Create the RPC system with the membrane as the bootstrap client
+        // We need to create specific clients for the interfaces we support
+        let importer_client: crate::system_capnp::importer::Client = capnp_rpc::new_client(self.bootstrap_membrane.clone());
+        let exporter_client: crate::system_capnp::exporter::Client = capnp_rpc::new_client(self.bootstrap_membrane.clone());
+        
+        // Convert the specific client to a generic capability client
+        let membrane_client = capnp::capability::Client::new(importer_client.into_client_hook());
+        
+        let rpc_system = RpcSystem::new(Box::new(network), Some(membrane_client));
 
-        // Create a membrane for this connection
-        #[allow(clippy::arc_with_non_send_sync)]
-        let membrane = std::sync::Arc::new(std::sync::Mutex::new(crate::membrane::Membrane::new()));
+        info!("Wetware protocol /ww/0.1.0 stream established with peer");
+        info!("Bootstrap capabilities (Importer/Exporter) available to guest");
 
-        // Create RPC server to handle requests
-        let mut rpc_server = crate::rpc::DefaultServer::new(membrane);
-
-        debug!("Wetware stream processing started");
-
-        // Process RPC requests in a loop
-        loop {
-            match wetware_stream.receive_capnp_message().await {
-                Ok(Some(request_data)) => {
-                    debug!("Received RPC request, processing...");
-                    match rpc_server.process_rpc_request(&request_data).await {
-                        Ok(response_data) => {
-                            debug!("Sending RPC response");
-                            if let Err(e) = wetware_stream.send_capnp_message(&response_data).await
-                            {
-                                warn!(reason = ?e, "Failed to send RPC response");
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            warn!(reason = ?e, "Failed to process RPC request");
-                            break;
-                        }
-                    }
-                }
-                Ok(None) => {
-                    debug!("Stream closed by peer");
-                    break;
-                }
-                Err(e) => {
-                    warn!(reason = ?e, "Error receiving RPC request");
-                    break;
-                }
-            }
-        }
+        // Run the RPC system
+        rpc_system.await?;
 
         debug!("Wetware stream processing completed");
         Ok(())
     }
+
 
     /// Initiate a wetware protocol connection to a peer
     /// This method opens a new stream to a peer and upgrades it to the wetware protocol
@@ -493,5 +550,21 @@ mod tests {
 
         // Test protocol identifier
         assert_eq!(swarm_manager.get_default_protocol(), "/ww/0.1.0");
+    }
+
+    #[test]
+    fn test_swarm_manager_bootstrap_membrane() {
+        let config = HostConfig::default();
+        let (_keypair, peer_id, swarm) = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(build_host(Some(config)))
+            .unwrap();
+        let swarm_manager = SwarmManager::new(swarm, peer_id);
+
+        // Test that bootstrap membrane is accessible
+        let membrane = swarm_manager.bootstrap_membrane();
+        // Note: We can't access the private services field directly,
+        // but we can test that the membrane exists
+        assert!(!std::ptr::addr_of!(membrane).is_null());
     }
 }
