@@ -1,14 +1,15 @@
 fn main() {
-    println!("cargo:rerun-if-changed=src/swarm.capnp");
+    println!("cargo:rerun-if-changed=src/system.capnp");
 
+    // Compile system.capnp
     capnpc::CompilerCommand::new()
-        .file("src/swarm.capnp")
+        .file("src/system.capnp")
         .src_prefix("src/") // Strip src/ prefix from input files
         .run()
         .expect("capnp schema compilation failed");
 
     // Add dead_code allow annotation to generated file
-    let generated_file = "src/swarm_capnp.rs";
+    let generated_file = "src/system_capnp.rs";
     if std::path::Path::new(generated_file).exists() {
         let content =
             std::fs::read_to_string(generated_file).expect("Failed to read generated file");
