@@ -30,7 +30,7 @@ enum Commands {
     Run {
         /// Binary to execute
         binary: String,
-        
+
         /// Arguments to pass to the binary
         args: Vec<String>,
 
@@ -52,7 +52,7 @@ enum Commands {
         #[arg(long, value_name = "LEVEL")]
         loglvl: Option<config::LogLevel>,
     },
-    
+
     /// Run a wetware node (daemon mode)
     Daemon {
         /// IPFS node HTTP API endpoint (e.g., http://127.0.0.1:5001)
@@ -118,7 +118,7 @@ async fn run_subprocess(
 
     // Get IPFS URL
     let ipfs_url = ipfs.unwrap_or_else(config::get_ipfs_url);
-    
+
     info!(binary = %binary, args = ?args, ipfs_url = %ipfs_url, "Starting subprocess execution");
 
     // Create executor environment
@@ -131,7 +131,10 @@ async fn run_subprocess(
             if let Some((key, value)) = env_flag.split_once('=') {
                 env_vars.insert(key.to_string(), value.to_string());
             } else {
-                return Err(anyhow::anyhow!("Invalid environment variable format: {}", env_flag));
+                return Err(anyhow::anyhow!(
+                    "Invalid environment variable format: {}",
+                    env_flag
+                ));
             }
         }
     }
@@ -150,13 +153,7 @@ async fn run_subprocess(
     }
 
     // Execute the subprocess
-    let exit_code = execute_subprocess(
-        binary,
-        args,
-        env_vars,
-        fd_manager,
-        &executor_env,
-    ).await?;
+    let exit_code = execute_subprocess(binary, args, env_vars, fd_manager, &executor_env).await?;
 
     // Exit with the same code as the subprocess
     std::process::exit(exit_code);

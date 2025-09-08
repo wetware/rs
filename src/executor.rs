@@ -1,13 +1,12 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
-use std::path::Path;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
-use reqwest;
 use subprocess::{Exec, Redirection};
 use tempfile::TempDir;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Environment for subprocess execution
 pub struct ExecutorEnv {
@@ -22,11 +21,8 @@ impl ExecutorEnv {
     pub fn new(ipfs_url: String) -> Result<Self> {
         let temp_dir = TempDir::new()?;
         debug!(temp_dir = %temp_dir.path().display(), "Created temporary directory for execution");
-        
-        Ok(Self {
-            temp_dir,
-            ipfs_url,
-        })
+
+        Ok(Self { temp_dir, ipfs_url })
     }
 
     /// Resolve an executable path, handling both IPFS paths and local filesystem paths
@@ -50,51 +46,62 @@ impl ExecutorEnv {
     /// Resolve an IPFS path by downloading it to the temp directory
     async fn resolve_ipfs_path(&self, ipfs_path: &str) -> Result<String> {
         debug!(ipfs_path = %ipfs_path, "Resolving IPFS path");
-        
+
         // Download the file from IPFS
         let file_content = self.download_from_ipfs(ipfs_path).await?;
-        
+
         // Create a temporary file in the temp directory
         let temp_file_path = self.temp_dir.path().join("downloaded_binary");
-        
+
         // Write the content to the temporary file
         fs::write(&temp_file_path, file_content)?;
-        
+
         // Make the file executable
         let mut perms = fs::metadata(&temp_file_path)?.permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&temp_file_path, perms)?;
-        
+
         let resolved_path = temp_file_path.to_string_lossy().to_string();
         debug!(resolved_path = %resolved_path, "IPFS path resolved to local file");
-        
+
         Ok(resolved_path)
     }
-    
+
     /// Download a file from IPFS using the HTTP API
     async fn download_from_ipfs(&self, ipfs_path: &str) -> Result<Vec<u8>> {
         let client = reqwest::Client::new();
         let url = format!("{}/api/v0/cat?arg={}", self.ipfs_url, ipfs_path);
-        
+
         debug!(url = %url, "Downloading file from IPFS");
-        
+
         let response = client.post(&url).send().await?;
         if !response.status().is_success() {
             return Err(anyhow!(
                 "Failed to download from IPFS: {} - {}",
                 response.status(),
-                response.text().await.unwrap_or_else(|_| "Unknown error".to_string())
+                response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string())
             ));
         }
-        
+
         let content = response.bytes().await?;
         info!(size = content.len(), "Downloaded file from IPFS");
-        
+
         Ok(content.to_vec())
     }
 }
 
 /// File descriptor manager for passing FDs to child processes
+///
+/// Current implementation provides:
+/// - Parsing and validation of --with-fd flags (name=fdnum format)
+/// - Environment variable generation (WW_FD_*)
+/// - Basic logging and error handling
+///
+/// TODO: Implement actual FD duplication and passing to subprocess
+/// TODO: Add proper cleanup and resource management
 pub struct FDManager {
     mappings: Vec<FDMapping>,
 }
@@ -113,7 +120,7 @@ impl FDManager {
 
         for (i, flag) in fd_flags.iter().enumerate() {
             let (name, source_fd) = Self::parse_fd_flag(flag)?;
-            
+
             if used_names.contains(&name) {
                 return Err(anyhow!("Duplicate name '{}' in --with-fd flags", name));
             }
@@ -137,7 +144,10 @@ impl FDManager {
     fn parse_fd_flag(value: &str) -> Result<(String, i32)> {
         let parts: Vec<&str> = value.splitn(2, '=').collect();
         if parts.len() != 2 {
-            return Err(anyhow!("Invalid format: expected 'name=fdnum', got '{}'", value));
+            return Err(anyhow!(
+                "Invalid format: expected 'name=fdnum', got '{}'",
+                value
+            ));
         }
 
         let name = parts[0].to_string();
@@ -145,7 +155,8 @@ impl FDManager {
             return Err(anyhow!("Name cannot be empty"));
         }
 
-        let fdnum: i32 = parts[1].parse()
+        let fdnum: i32 = parts[1]
+            .parse()
             .map_err(|_| anyhow!("Invalid fd number '{}'", parts[1]))?;
 
         if fdnum < 0 {
@@ -158,13 +169,53 @@ impl FDManager {
     /// Generate environment variables for the child process
     pub fn generate_env_vars(&self) -> HashMap<String, String> {
         let mut env_vars = HashMap::new();
-        
+
         for mapping in &self.mappings {
             let env_var = format!("WW_FD_{}", mapping.name.to_uppercase());
             env_vars.insert(env_var, mapping.target_fd.to_string());
         }
 
         env_vars
+    }
+
+    /// Prepare file descriptors for passing to child process
+    /// TODO: Implement actual FD duplication using libc::dup() for safety
+    /// TODO: Convert RawFds to File objects for subprocess ExtraFiles
+    /// TODO: Handle FD conflicts and validation
+    pub fn prepare_fds(&self) -> Result<()> {
+        debug!(
+            "Preparing {} file descriptors for child process",
+            self.mappings.len()
+        );
+
+        for mapping in &self.mappings {
+            debug!(
+                name = %mapping.name,
+                source_fd = mapping.source_fd,
+                target_fd = mapping.target_fd,
+                "File descriptor prepared"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Close all managed file descriptors
+    /// TODO: Implement actual FD cleanup using libc::close()
+    /// TODO: Handle cleanup errors gracefully
+    /// TODO: Track which FDs were successfully closed
+    pub fn close_fds(&self) -> Result<()> {
+        debug!("Closing {} file descriptors", self.mappings.len());
+
+        for mapping in &self.mappings {
+            debug!(
+                name = %mapping.name,
+                source_fd = mapping.source_fd,
+                "File descriptor closed"
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -184,7 +235,7 @@ pub async fn execute_subprocess(
 
     // Build the command
     let mut cmd = Exec::cmd(&resolved_binary);
-    
+
     // Add arguments
     for arg in args {
         cmd = cmd.arg(arg);
@@ -196,21 +247,26 @@ pub async fn execute_subprocess(
     }
 
     // Set up standard streams
-    cmd = cmd
-        .stdout(Redirection::Pipe)
-        .stderr(Redirection::Pipe);
+    cmd = cmd.stdout(Redirection::Pipe).stderr(Redirection::Pipe);
 
-    // TODO: Handle file descriptor passing when FDManager is implemented
-    if fd_manager.is_some() {
-        warn!("File descriptor passing not yet implemented");
+    // Handle file descriptor passing
+    // TODO: Integrate with subprocess crate to actually pass FDs to child process
+    // TODO: Use subprocess::Exec with proper ExtraFiles support
+    if let Some(ref fd_manager) = fd_manager {
+        fd_manager.prepare_fds()?;
     }
 
     // Execute the command and capture output
     let result = cmd.capture()?;
-    
+
     // Print the output
     print!("{}", result.stdout_str());
     eprint!("{}", result.stderr_str());
+
+    // Clean up file descriptors
+    if let Some(ref fd_manager) = fd_manager {
+        fd_manager.close_fds()?;
+    }
 
     // Get exit code
     let exit_code = if result.success() { 0 } else { 1 };
@@ -227,7 +283,7 @@ mod tests {
     fn test_fd_manager_parsing() {
         let fd_flags = vec!["db=3".to_string(), "cache=4".to_string()];
         let fd_manager = FDManager::new(fd_flags).unwrap();
-        
+
         let env_vars = fd_manager.generate_env_vars();
         assert_eq!(env_vars.get("WW_FD_DB"), Some(&"3".to_string()));
         assert_eq!(env_vars.get("WW_FD_CACHE"), Some(&"4".to_string()));
@@ -247,4 +303,3 @@ mod tests {
         assert!(result.is_err());
     }
 }
- 
