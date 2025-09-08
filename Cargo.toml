@@ -19,7 +19,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 capnp = "0.21.4"
 capnp-rpc = "0.21.0"
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio-util = { version = "0.7", features = ["codec", "compat"] }
 bytes = "1.0"
 ipfs-api-backend-hyper = "0.6.0"
 subprocess = "0.2"
