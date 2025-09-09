@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 /// Bootstrap file descriptor number for host-guest communication
 /// This matches the Go implementation's BOOTSTRAP_FD constant
@@ -74,9 +74,12 @@ impl Socket {
         // We need to take ownership of the FDs to avoid double-close issues
         let host_fd_raw = host_fd.as_raw_fd();
         let guest_fd_raw = guest_fd.as_raw_fd();
+        
+        // Prevent the nix Fd objects from closing the FDs when dropped
         std::mem::forget(host_fd);
         std::mem::forget(guest_fd);
-
+        
+        // Create UnixStream objects from the raw FDs
         let host_socket = unsafe { UnixStream::from_raw_fd(host_fd_raw) };
         let guest_socket = unsafe { UnixStream::from_raw_fd(guest_fd_raw) };
 
@@ -397,20 +400,40 @@ impl FDManager {
         debug!("Closing {} user file descriptors", self.mappings.len());
 
         for mapping in &self.mappings {
-            // Close the duplicated FD
-            let result = unsafe { libc::close(mapping.source_fd) };
-            if result < 0 {
-                debug!(
-                    name = %mapping.name,
-                    source_fd = mapping.source_fd,
-                    error = %std::io::Error::last_os_error(),
-                    "Failed to close file descriptor"
-                );
+            // Only close file descriptors that are valid (>= 0)
+            // In test contexts, source_fd might be invalid test values
+            if mapping.source_fd >= 0 {
+                // Check if the file descriptor is actually open before trying to close it
+                let result = unsafe { libc::fcntl(mapping.source_fd, libc::F_GETFD) };
+                if result >= 0 {
+                    // File descriptor is open, close it
+                    let close_result = unsafe { libc::close(mapping.source_fd) };
+                    if close_result < 0 {
+                        debug!(
+                            name = %mapping.name,
+                            source_fd = mapping.source_fd,
+                            error = %std::io::Error::last_os_error(),
+                            "Failed to close file descriptor"
+                        );
+                    } else {
+                        debug!(
+                            name = %mapping.name,
+                            source_fd = mapping.source_fd,
+                            "File descriptor closed"
+                        );
+                    }
+                } else {
+                    debug!(
+                        name = %mapping.name,
+                        source_fd = mapping.source_fd,
+                        "File descriptor not open, skipping"
+                    );
+                }
             } else {
                 debug!(
                     name = %mapping.name,
                     source_fd = mapping.source_fd,
-                    "File descriptor closed"
+                    "Skipping invalid file descriptor"
                 );
             }
         }
@@ -448,14 +471,14 @@ impl FDManager {
 }
 
 impl Drop for FDManager {
-    /// Automatically clean up file descriptors when FDManager is dropped
+    /// Clean up resources when FDManager is dropped
     ///
-    /// This ensures that file descriptors are properly closed even if the subprocess
-    /// doesn't exit gracefully or if an error occurs during execution.
+    /// Note: This does not close file descriptors because:
+    /// - Original source_fd should remain open (owned by caller)
+    /// - Duplicated file descriptors are passed to subprocess and closed by it
+    /// - Socket file descriptors are handled by Socket's own Drop implementation
     fn drop(&mut self) {
-        if let Err(e) = self.close_fds() {
-            error!("Error during automatic file descriptor cleanup: {}", e);
-        }
+        debug!("Dropping FDManager - no file descriptor cleanup needed");
     }
 }
 
