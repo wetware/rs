@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 /// Bootstrap file descriptor number for host-guest communication
 /// This matches the Go implementation's BOOTSTRAP_FD constant
@@ -444,6 +444,18 @@ impl FDManager {
     #[allow(dead_code)]
     pub fn take_socket(&mut self) -> Option<Socket> {
         self.socket.take()
+    }
+}
+
+impl Drop for FDManager {
+    /// Automatically clean up file descriptors when FDManager is dropped
+    ///
+    /// This ensures that file descriptors are properly closed even if the subprocess
+    /// doesn't exit gracefully or if an error occurs during execution.
+    fn drop(&mut self) {
+        if let Err(e) = self.close_fds() {
+            error!("Error during automatic file descriptor cleanup: {}", e);
+        }
     }
 }
 

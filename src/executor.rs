@@ -117,6 +117,9 @@ impl ExecutorEnv {
 /// # Errors
 ///
 /// Returns an error if subprocess execution fails or if FD preparation fails.
+///
+/// File descriptors will be automatically cleaned up when fd_manager is dropped
+/// due to the Drop trait implementation.
 pub async fn execute_subprocess(
     binary: String,
     args: Vec<String>,
@@ -187,11 +190,6 @@ pub async fn execute_subprocess(
     let status = child
         .wait()
         .map_err(|e| anyhow!("Failed to wait for subprocess: {}", e))?;
-
-    // Clean up file descriptors
-    if let Some(ref fd_manager) = fd_manager {
-        fd_manager.close_fds()?;
-    }
 
     // Get exit code
     let exit_code = status.code().unwrap_or(1);
