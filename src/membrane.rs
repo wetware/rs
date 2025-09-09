@@ -34,27 +34,27 @@ impl Membrane {
 
     /// Generate a unique service token
     fn generate_service_token(&self) -> ServiceToken {
-        use std::time::{SystemTime, UNIX_EPOCH};
         use std::sync::atomic::{AtomicU64, Ordering};
-        
+        use std::time::{SystemTime, UNIX_EPOCH};
+
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        
+
         let time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        
+
         let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
 
         // Convert time and counter to 20 bytes (little-endian)
         let mut token = [0u8; 20];
-        
+
         // Use the first 16 bytes for time (128 bits)
         let time_bytes = time.to_le_bytes();
         for (i, item) in token.iter_mut().enumerate().take(16) {
             *item = time_bytes[i];
         }
-        
+
         // Use the last 4 bytes for counter (32 bits)
         let counter_bytes = counter.to_le_bytes();
         for (i, item) in token.iter_mut().enumerate().skip(16) {
@@ -78,7 +78,6 @@ impl Membrane {
             .get(&service_token)
             .and_then(|weak_ref| weak_ref.upgrade())
     }
-
 }
 
 impl exporter::Server for Membrane {
@@ -132,12 +131,9 @@ impl importer::Server for Membrane {
             // Extract the ClientHook from the Arc<Mutex<Box<dyn ClientHook>>>
             let capability_hook = wrapped_capability.lock().unwrap();
             let capability = capability_hook.clone();
-            
+
             // Set the capability in the results
-            results
-                .get()
-                .init_service()
-                .set_as_capability(capability);
+            results.get().init_service().set_as_capability(capability);
             Promise::ok(())
         } else {
             Promise::err(Error::failed("Service not found".to_string()))
@@ -145,18 +141,15 @@ impl importer::Server for Membrane {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     #[test]
     fn test_service_token_uniqueness_under_load() {
         let membrane = Membrane::new();
         let mut tokens = std::collections::HashSet::new();
-        
+
         // Generate 1000 tokens and ensure they're all unique
         // This tests the time-based generation under load
         for _ in 0..1000 {
@@ -176,10 +169,10 @@ mod tests {
         // Test with 20-byte token that doesn't exist
         let non_existent_token = [0u8; 20];
         assert!(membrane.import_service(&non_existent_token).is_none());
-        
+
         // Test with empty slice
         assert!(membrane.import_service(&[]).is_none());
-        
+
         // Test with exactly 20 bytes of zeros (edge case)
         assert!(membrane.import_service(&[0u8; 20]).is_none());
     }
@@ -188,14 +181,14 @@ mod tests {
     fn test_rapid_token_generation() {
         let membrane = Membrane::new();
         let mut tokens = Vec::new();
-        
+
         // Generate tokens rapidly to test collision resistance
         for _ in 0..1000 {
             let token = membrane.generate_service_token();
             assert_eq!(token.len(), 20);
             tokens.push(token);
         }
-        
+
         // Verify all tokens are unique
         let unique_tokens: std::collections::HashSet<_> = tokens.into_iter().collect();
         assert_eq!(unique_tokens.len(), 1000);
@@ -204,7 +197,7 @@ mod tests {
     #[test]
     fn test_services_map_initial_state() {
         let membrane = Membrane::new();
-        
+
         // Test that the services map starts empty
         let services = membrane.services.lock().unwrap();
         assert_eq!(services.len(), 0);
@@ -213,17 +206,17 @@ mod tests {
     #[test]
     fn test_service_token_time_based_generation() {
         let membrane = Membrane::new();
-        
+
         // Generate tokens with small delays to test time-based uniqueness
         let mut tokens = Vec::new();
         for _i in 0..10 {
             let token = membrane.generate_service_token();
             tokens.push(token);
-            
+
             // Small delay to ensure different timestamps
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        
+
         // All tokens should be unique
         let unique_tokens: std::collections::HashSet<_> = tokens.into_iter().collect();
         assert_eq!(unique_tokens.len(), 10);
@@ -233,14 +226,14 @@ mod tests {
     fn test_token_collision_resistance() {
         let membrane = Membrane::new();
         let mut tokens = std::collections::HashSet::new();
-        
+
         // Generate tokens rapidly to test collision resistance
         // This is important because our token generation uses time-based seeding
         for _ in 0..10000 {
             let token = membrane.generate_service_token();
             assert!(tokens.insert(token), "Token collision detected!");
         }
-        
+
         // Verify we have exactly 10000 unique tokens
         assert_eq!(tokens.len(), 10000);
     }

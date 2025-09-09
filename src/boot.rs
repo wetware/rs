@@ -1,9 +1,8 @@
 use anyhow::{anyhow, Result};
-use capnp_rpc::{RpcSystem, twoparty};
-use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp::capability::FromClientHook;
+use capnp_rpc::rpc_twoparty_capnp::Side;
+use capnp_rpc::{twoparty, RpcSystem};
 use futures::StreamExt;
-use tokio_util::compat::TokioAsyncWriteCompatExt;
 use libp2p::{
     identity,
     kad::{Event as KademliaEvent, QueryResult, RecordKey},
@@ -12,6 +11,7 @@ use libp2p::{
 };
 use serde_json::Value;
 use std::time::Duration;
+use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tracing::{debug, info, warn};
 
 use crate::config::HostConfig;
@@ -305,7 +305,7 @@ impl SwarmManager {
 
         // Convert UnixStream to tokio::net::UnixStream for async operations
         let tokio_socket = tokio::net::UnixStream::from_std(socket)?;
-        
+
         // Split the socket into read and write halves
         let (read_half, write_half) = tokio_socket.into_split();
 
@@ -313,22 +313,24 @@ impl SwarmManager {
         // Convert tokio streams to futures-compatible streams
         let read_half = tokio_util::compat::TokioAsyncReadCompatExt::compat(read_half);
         let write_half = write_half.compat_write();
-        
+
         let network = twoparty::VatNetwork::new(
             read_half,
             write_half,
             Side::Client,
             capnp::message::ReaderOptions::default(),
         );
-        
+
         // Create the RPC system with the membrane as the bootstrap client
         // We need to create specific clients for the interfaces we support
-        let importer_client: crate::system_capnp::importer::Client = capnp_rpc::new_client(self.bootstrap_membrane.clone());
-        let exporter_client: crate::system_capnp::exporter::Client = capnp_rpc::new_client(self.bootstrap_membrane.clone());
-        
+        let importer_client: crate::system_capnp::importer::Client =
+            capnp_rpc::new_client(self.bootstrap_membrane.clone());
+        let exporter_client: crate::system_capnp::exporter::Client =
+            capnp_rpc::new_client(self.bootstrap_membrane.clone());
+
         // Convert the specific client to a generic capability client
         let membrane_client = capnp::capability::Client::new(importer_client.into_client_hook());
-        
+
         let rpc_system = RpcSystem::new(Box::new(network), Some(membrane_client));
 
         info!("Host-guest RPC system established over FD3");
@@ -357,7 +359,7 @@ impl SwarmManager {
 
         // Create our stream adapter to bridge libp2p::Stream to tokio::io traits
         let stream_adapter = crate::rpc::Libp2pStreamAdapter::new(stream);
-        
+
         // Split the stream adapter into read and write halves
         let (read_half, write_half) = tokio::io::split(stream_adapter);
 
@@ -365,22 +367,24 @@ impl SwarmManager {
         // Convert tokio streams to futures-compatible streams
         let read_half = tokio_util::compat::TokioAsyncReadCompatExt::compat(read_half);
         let write_half = write_half.compat_write();
-        
+
         let network = twoparty::VatNetwork::new(
             read_half,
             write_half,
             Side::Client,
             capnp::message::ReaderOptions::default(),
         );
-        
+
         // Create the RPC system with the membrane as the bootstrap client
         // We need to create specific clients for the interfaces we support
-        let importer_client: crate::system_capnp::importer::Client = capnp_rpc::new_client(self.bootstrap_membrane.clone());
-        let exporter_client: crate::system_capnp::exporter::Client = capnp_rpc::new_client(self.bootstrap_membrane.clone());
-        
+        let importer_client: crate::system_capnp::importer::Client =
+            capnp_rpc::new_client(self.bootstrap_membrane.clone());
+        let exporter_client: crate::system_capnp::exporter::Client =
+            capnp_rpc::new_client(self.bootstrap_membrane.clone());
+
         // Convert the specific client to a generic capability client
         let membrane_client = capnp::capability::Client::new(importer_client.into_client_hook());
-        
+
         let rpc_system = RpcSystem::new(Box::new(network), Some(membrane_client));
 
         info!("Wetware protocol /ww/0.1.0 stream established with peer");
@@ -392,7 +396,6 @@ impl SwarmManager {
         debug!("Wetware stream processing completed");
         Ok(())
     }
-
 
     /// Initiate a wetware protocol connection to a peer
     /// This method opens a new stream to a peer and upgrades it to the wetware protocol
