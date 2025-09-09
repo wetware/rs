@@ -321,6 +321,7 @@ where
     }
 
     /// Send a Cap'n Proto message over the stream
+    #[allow(dead_code)]
     pub async fn send_capnp_message(&mut self, message: &[u8]) -> Result<()> {
         let length = message.len() as u32;
 
@@ -336,6 +337,7 @@ where
     }
 
     /// Receive a Cap'n Proto message from the stream
+    #[allow(dead_code)]
     pub async fn receive_capnp_message(&mut self) -> Result<Option<Vec<u8>>> {
         // Read length prefix if we don't have enough bytes
         if self.read_buffer.len() < 4 {

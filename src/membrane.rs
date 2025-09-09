@@ -28,6 +28,7 @@ impl Membrane {
     /// Create a new membrane instance
     pub fn new() -> Self {
         Self {
+            #[allow(clippy::arc_with_non_send_sync)]
             services: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -109,6 +110,7 @@ impl exporter::Server for Membrane {
             // Wrap ClientHook in Mutex<> to make it Send + Sync
             let capability_hook = capability.into_client_hook();
             let wrapped_capability = Mutex::new(capability_hook);
+            #[allow(clippy::arc_with_non_send_sync)]
             let weak_capability = Arc::downgrade(&Arc::new(wrapped_capability));
             services.insert(service_token, weak_capability);
         }

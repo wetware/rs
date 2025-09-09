@@ -9,11 +9,10 @@ mod membrane;
 mod rpc;
 mod system;
 mod system_capnp;
-use boot::{build_host, get_kubo_peers, SwarmManager};
+use boot::{build_host, get_kubo_peers, FDManager, SwarmManager};
 use clap::{Parser, Subcommand};
 use config::{init_tracing, AppConfig};
 use executor::{execute_subprocess, ExecutorEnv};
-use system::FDManager;
 
 #[derive(Parser)]
 #[command(name = "ww")]
