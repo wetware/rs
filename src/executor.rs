@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use tempfile::TempDir;
 use tracing::{debug, info};
 
-use crate::system::FDManager;
+use crate::boot::FDManager;
 
 /// Environment for subprocess execution
 pub struct ExecutorEnv {
@@ -201,22 +201,48 @@ pub async fn execute_subprocess(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+    use std::os::unix::io::AsRawFd;
 
     #[test]
     fn test_fd_manager_parsing() {
-        let fd_flags = vec!["db=3".to_string(), "cache=4".to_string()];
+        // Create temporary files to get valid file descriptors
+        // We need to keep the File objects alive to prevent them from being closed
+        let _temp_file1 = File::create("/tmp/test_db").unwrap();
+        let _temp_file2 = File::create("/tmp/test_cache").unwrap();
+
+        let db_fd = _temp_file1.as_raw_fd();
+        let cache_fd = _temp_file2.as_raw_fd();
+
+        let fd_flags = vec![format!("db={}", db_fd), format!("cache={}", cache_fd)];
         let fd_manager = FDManager::new(fd_flags).unwrap();
 
         let env_vars = fd_manager.generate_env_vars();
         assert_eq!(env_vars.get("WW_FD_DB"), Some(&"4".to_string()));
         assert_eq!(env_vars.get("WW_FD_CACHE"), Some(&"5".to_string()));
+
+        // Clean up temporary files
+        std::fs::remove_file("/tmp/test_db").ok();
+        std::fs::remove_file("/tmp/test_cache").ok();
     }
 
     #[test]
     fn test_fd_manager_duplicate_names() {
-        let fd_flags = vec!["db=3".to_string(), "db=4".to_string()];
+        // Create temporary files to get valid file descriptors
+        // We need to keep the File objects alive to prevent them from being closed
+        let _temp_file1 = File::create("/tmp/test_db1").unwrap();
+        let _temp_file2 = File::create("/tmp/test_db2").unwrap();
+
+        let db_fd1 = _temp_file1.as_raw_fd();
+        let db_fd2 = _temp_file2.as_raw_fd();
+
+        let fd_flags = vec![format!("db={}", db_fd1), format!("db={}", db_fd2)];
         let result = FDManager::new(fd_flags);
         assert!(result.is_err());
+
+        // Clean up temporary files
+        std::fs::remove_file("/tmp/test_db1").ok();
+        std::fs::remove_file("/tmp/test_db2").ok();
     }
 
     #[test]

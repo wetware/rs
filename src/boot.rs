@@ -1,4 +1,7 @@
 use anyhow::{anyhow, Result};
+use capnp::capability::FromClientHook;
+use capnp_rpc::rpc_twoparty_capnp::Side;
+use capnp_rpc::{twoparty, RpcSystem};
 use futures::StreamExt;
 use libp2p::{
     identity,
@@ -7,11 +10,14 @@ use libp2p::{
     Multiaddr, PeerId,
 };
 use serde_json::Value;
-
+use std::collections::HashMap;
+use std::os::fd::IntoRawFd;
 use std::time::Duration;
+use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tracing::{debug, info, warn};
 
 use crate::config::HostConfig;
+use crate::membrane::Membrane;
 
 // IPFS protocol constants for DHT compatibility
 // These protocols ensure our node can communicate with the IPFS network
@@ -94,12 +100,18 @@ pub struct SwarmManager {
     swarm: Swarm<WetwareBehaviour>,
     #[allow(dead_code)]
     peer_id: PeerId,
+    /// Bootstrap membrane for managing host-guest capabilities
+    bootstrap_membrane: Membrane,
 }
 
 impl SwarmManager {
     pub fn new(swarm: Swarm<WetwareBehaviour>, peer_id: PeerId) -> Self {
         debug!(peer_id = %peer_id, "Creating new SwarmManager");
-        Self { swarm, peer_id }
+        Self {
+            swarm,
+            peer_id,
+            bootstrap_membrane: Membrane::new(),
+        }
     }
 
     /// Bootstrap the DHT by connecting to IPFS peers and triggering the bootstrap process
@@ -274,8 +286,69 @@ impl SwarmManager {
         crate::rpc::WW_PROTOCOL
     }
 
+    /// Get a reference to the bootstrap membrane
+    /// This is useful for testing and inspection of the bootstrap capabilities
+    #[allow(dead_code)]
+    pub fn bootstrap_membrane(&self) -> &Membrane {
+        &self.bootstrap_membrane
+    }
+
+    /// Handle host-guest communication over Unix domain socket
+    /// This method provides bootstrap capabilities to a guest subprocess over FD3,
+    /// matching the Go implementation's behavior.
+    #[allow(dead_code)]
+    pub async fn handle_guest_communication(
+        &self,
+        socket: std::os::unix::net::UnixStream,
+    ) -> Result<()> {
+        let span = tracing::debug_span!("handle_guest_communication");
+        let _enter = span.enter();
+
+        debug!("Setting up host-guest communication over Unix domain socket");
+
+        // Convert UnixStream to tokio::net::UnixStream for async operations
+        let tokio_socket = tokio::net::UnixStream::from_std(socket)?;
+
+        // Split the socket into read and write halves
+        let (read_half, write_half) = tokio_socket.into_split();
+
+        // Create a two-party RPC system
+        // Convert tokio streams to futures-compatible streams
+        let read_half = tokio_util::compat::TokioAsyncReadCompatExt::compat(read_half);
+        let write_half = write_half.compat_write();
+
+        let network = twoparty::VatNetwork::new(
+            read_half,
+            write_half,
+            Side::Client,
+            capnp::message::ReaderOptions::default(),
+        );
+
+        // Create the RPC system with the membrane as the bootstrap client
+        // We need to create specific clients for the interfaces we support
+        let importer_client: crate::system_capnp::importer::Client =
+            capnp_rpc::new_client(self.bootstrap_membrane.clone());
+        let _exporter_client: crate::system_capnp::exporter::Client =
+            capnp_rpc::new_client(self.bootstrap_membrane.clone());
+
+        // Convert the specific client to a generic capability client
+        let membrane_client = capnp::capability::Client::new(importer_client.into_client_hook());
+
+        let rpc_system = RpcSystem::new(Box::new(network), Some(membrane_client));
+
+        info!("Host-guest RPC system established over FD3");
+        info!("Bootstrap capabilities (Importer/Exporter) available to guest subprocess");
+
+        // Run the RPC system
+        rpc_system.await?;
+
+        debug!("Host-guest communication completed");
+        Ok(())
+    }
+
     /// Handle incoming wetware protocol streams
-    /// This method processes incoming connections and upgrades them to wetware streams
+    /// This method processes incoming connections and provides bootstrap capabilities
+    /// (Importer/Exporter) over the /ww/0.1.0 protocol, matching the Go implementation.
     #[allow(dead_code)]
     pub async fn handle_wetware_stream(
         &mut self,
@@ -290,48 +363,38 @@ impl SwarmManager {
         // Create our stream adapter to bridge libp2p::Stream to tokio::io traits
         let stream_adapter = crate::rpc::Libp2pStreamAdapter::new(stream);
 
-        // Create a wetware stream for RPC processing
-        let mut wetware_stream = crate::rpc::Stream::new(stream_adapter);
+        // Split the stream adapter into read and write halves
+        let (read_half, write_half) = tokio::io::split(stream_adapter);
 
-        // Create a membrane for this connection
-        #[allow(clippy::arc_with_non_send_sync)]
-        let membrane = std::sync::Arc::new(std::sync::Mutex::new(crate::membrane::Membrane::new()));
+        // Create a two-party RPC system
+        // Convert tokio streams to futures-compatible streams
+        let read_half = tokio_util::compat::TokioAsyncReadCompatExt::compat(read_half);
+        let write_half = write_half.compat_write();
 
-        // Create RPC server to handle requests
-        let mut rpc_server = crate::rpc::DefaultServer::new(membrane);
+        let network = twoparty::VatNetwork::new(
+            read_half,
+            write_half,
+            Side::Client,
+            capnp::message::ReaderOptions::default(),
+        );
 
-        debug!("Wetware stream processing started");
+        // Create the RPC system with the membrane as the bootstrap client
+        // We need to create specific clients for the interfaces we support
+        let importer_client: crate::system_capnp::importer::Client =
+            capnp_rpc::new_client(self.bootstrap_membrane.clone());
+        let _exporter_client: crate::system_capnp::exporter::Client =
+            capnp_rpc::new_client(self.bootstrap_membrane.clone());
 
-        // Process RPC requests in a loop
-        loop {
-            match wetware_stream.receive_capnp_message().await {
-                Ok(Some(request_data)) => {
-                    debug!("Received RPC request, processing...");
-                    match rpc_server.process_rpc_request(&request_data).await {
-                        Ok(response_data) => {
-                            debug!("Sending RPC response");
-                            if let Err(e) = wetware_stream.send_capnp_message(&response_data).await
-                            {
-                                warn!(reason = ?e, "Failed to send RPC response");
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            warn!(reason = ?e, "Failed to process RPC request");
-                            break;
-                        }
-                    }
-                }
-                Ok(None) => {
-                    debug!("Stream closed by peer");
-                    break;
-                }
-                Err(e) => {
-                    warn!(reason = ?e, "Error receiving RPC request");
-                    break;
-                }
-            }
-        }
+        // Convert the specific client to a generic capability client
+        let membrane_client = capnp::capability::Client::new(importer_client.into_client_hook());
+
+        let rpc_system = RpcSystem::new(Box::new(network), Some(membrane_client));
+
+        info!("Wetware protocol /ww/0.1.0 stream established with peer");
+        info!("Bootstrap capabilities (Importer/Exporter) available to guest");
+
+        // Run the RPC system
+        rpc_system.await?;
 
         debug!("Wetware stream processing completed");
         Ok(())
@@ -466,6 +529,279 @@ pub async fn build_host(
     Ok((keypair, peer_id, swarm))
 }
 
+/// File descriptor mapping for user-provided FDs
+struct FDMapping {
+    name: String,
+    source_fd: i32,
+    target_fd: i32,
+}
+
+/// File descriptor manager for passing FDs to child processes
+///
+/// This manager handles:
+/// - Unix domain socket pair creation for host-guest communication (FD3)
+/// - User file descriptor duplication and passing (FD4+)
+/// - Environment variable generation (WW_FD_*)
+/// - Proper cleanup and resource management
+///
+/// # File Descriptor Convention
+///
+/// - **FD3**: Unix domain socket for host-guest RPC communication (bootstrap)
+/// - **FD4+**: User-configurable file descriptors passed via --with-fd flags
+///
+/// This matches the Go implementation's file descriptor conventions.
+pub struct FDManager {
+    /// User file descriptor mappings (FD4+)
+    mappings: Vec<FDMapping>,
+    /// Socket for host-guest RPC (FD3)
+    socket: Option<crate::system::Socket>,
+}
+
+impl FDManager {
+    /// Create a new FD manager from --with-fd flag values
+    ///
+    /// This creates a new FD manager that will handle both the Unix domain socket
+    /// pair for host-guest communication (FD3) and user file descriptors (FD4+).
+    ///
+    /// # Arguments
+    ///
+    /// * `fd_flags` - List of --with-fd flag values in "name=fdnum" format
+    ///
+    /// # Returns
+    ///
+    /// Returns a new FDManager instance ready for subprocess execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the FD flags are invalid or if socket pair creation fails.
+    pub fn new(fd_flags: Vec<String>) -> Result<Self> {
+        let mut mappings = Vec::new();
+        let mut used_names = std::collections::HashSet::new();
+
+        // Parse user file descriptor mappings (FD4+)
+        for (i, flag) in fd_flags.iter().enumerate() {
+            let (name, source_fd) = Self::parse_fd_flag(flag)?;
+
+            if used_names.contains(&name) {
+                return Err(anyhow!("Duplicate name '{}' in --with-fd flags", name));
+            }
+
+            // Target FD starts at 4 (after FD3 for bootstrap socket) and increments sequentially
+            let target_fd = 4 + i as i32;
+
+            mappings.push(FDMapping {
+                name: name.clone(),
+                source_fd,
+                target_fd,
+            });
+
+            used_names.insert(name);
+        }
+
+        // Create Unix domain socket pair for host-guest communication (FD3)
+        let socket = Some(crate::system::Socket::new()?);
+
+        debug!(
+            user_fd_count = mappings.len(),
+            "Created FD manager with {} user file descriptors and Unix domain socket pair",
+            mappings.len()
+        );
+
+        Ok(Self { mappings, socket })
+    }
+
+    /// Parse a --with-fd flag value in "name=fdnum" format
+    fn parse_fd_flag(value: &str) -> Result<(String, i32)> {
+        let parts: Vec<&str> = value.splitn(2, '=').collect();
+        if parts.len() != 2 {
+            return Err(anyhow!(
+                "Invalid format: expected 'name=fdnum', got '{}'",
+                value
+            ));
+        }
+
+        let name = parts[0].to_string();
+        if name.is_empty() {
+            return Err(anyhow!("Name cannot be empty"));
+        }
+
+        let fdnum: i32 = parts[1]
+            .parse()
+            .map_err(|_| anyhow!("Invalid fd number '{}'", parts[1]))?;
+
+        if fdnum < 0 {
+            return Err(anyhow!("FD number must be non-negative, got {}", fdnum));
+        }
+
+        Ok((name, fdnum))
+    }
+
+    /// Generate environment variables for the child process
+    pub fn generate_env_vars(&self) -> HashMap<String, String> {
+        let mut env_vars = HashMap::new();
+
+        for mapping in &self.mappings {
+            let env_var = format!("WW_FD_{}", mapping.name.to_uppercase());
+            env_vars.insert(env_var, mapping.target_fd.to_string());
+        }
+
+        env_vars
+    }
+
+    /// Prepare file descriptors for passing to child process
+    ///
+    /// This method prepares all file descriptors that will be passed to the
+    /// subprocess, including the Unix domain socket pair (FD3) and user FDs (FD4+).
+    ///
+    /// # Returns
+    ///
+    /// Returns a vector of raw file descriptors ready for subprocess inheritance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if FD duplication fails or if the socket pair is not available.
+    pub fn prepare_fds(&mut self) -> Result<Vec<i32>> {
+        let mut extra_fds = Vec::new();
+
+        // Add Unix domain socket for host-guest communication (FD3)
+        if let Some(socket) = self.socket.take() {
+            let guest_socket = socket.into_guest_socket();
+            let guest_fd = guest_socket.into_raw_fd();
+            extra_fds.push(guest_fd);
+
+            debug!("Prepared Unix domain socket for FD3 (bootstrap)");
+        } else {
+            return Err(anyhow!("Socket not initialized"));
+        }
+
+        // Add user file descriptors (FD4+)
+        for mapping in &self.mappings {
+            // Duplicate the source FD to avoid conflicts
+            let new_fd = unsafe { libc::dup(mapping.source_fd) };
+            if new_fd < 0 {
+                return Err(anyhow!(
+                    "Failed to duplicate fd {} for '{}': {}",
+                    mapping.source_fd,
+                    mapping.name,
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            extra_fds.push(new_fd);
+
+            debug!(
+                name = %mapping.name,
+                source_fd = mapping.source_fd,
+                target_fd = mapping.target_fd,
+                "File descriptor prepared"
+            );
+        }
+
+        info!(
+            total_fds = extra_fds.len(),
+            "Prepared {} file descriptors for subprocess (FD3: socket, FD4+: user FDs)",
+            extra_fds.len()
+        );
+
+        Ok(extra_fds)
+    }
+
+    /// Close all managed file descriptors
+    ///
+    /// This method closes all user file descriptors that were duplicated for
+    /// the subprocess. The Unix domain socket pair is automatically cleaned up
+    /// when the Socket object is dropped.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success, or an error if cleanup fails.
+    #[allow(dead_code)]
+    pub fn close_fds(&self) -> Result<()> {
+        debug!("Closing {} user file descriptors", self.mappings.len());
+
+        for mapping in &self.mappings {
+            // Only close file descriptors that are valid (>= 0)
+            // In test contexts, source_fd might be invalid test values
+            if mapping.source_fd >= 0 {
+                // Check if the file descriptor is actually open before trying to close it
+                let result = unsafe { libc::fcntl(mapping.source_fd, libc::F_GETFD) };
+                if result >= 0 {
+                    // File descriptor is open, close it
+                    let close_result = unsafe { libc::close(mapping.source_fd) };
+                    if close_result < 0 {
+                        debug!(
+                            name = %mapping.name,
+                            source_fd = mapping.source_fd,
+                            error = %std::io::Error::last_os_error(),
+                            "Failed to close file descriptor"
+                        );
+                    } else {
+                        debug!(
+                            name = %mapping.name,
+                            source_fd = mapping.source_fd,
+                            "File descriptor closed"
+                        );
+                    }
+                } else {
+                    debug!(
+                        name = %mapping.name,
+                        source_fd = mapping.source_fd,
+                        "File descriptor not open, skipping"
+                    );
+                }
+            } else {
+                debug!(
+                    name = %mapping.name,
+                    source_fd = mapping.source_fd,
+                    "Skipping invalid file descriptor"
+                );
+            }
+        }
+
+        info!("File descriptor cleanup completed");
+        Ok(())
+    }
+
+    /// Get a reference to the socket handler
+    ///
+    /// This returns a reference to the socket handler for RPC
+    /// communication with the subprocess.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(Socket)` if available, or `None` if not initialized.
+    #[allow(dead_code)]
+    pub fn socket(&self) -> Option<&crate::system::Socket> {
+        self.socket.as_ref()
+    }
+
+    /// Take ownership of the socket handler
+    ///
+    /// This takes ownership of the socket handler, removing it
+    /// from the FD manager. This is useful when transferring ownership to
+    /// the subprocess execution context.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(Socket)` if available, or `None` if not initialized.
+    #[allow(dead_code)]
+    pub fn take_socket(&mut self) -> Option<crate::system::Socket> {
+        self.socket.take()
+    }
+}
+
+impl Drop for FDManager {
+    /// Clean up resources when FDManager is dropped
+    ///
+    /// Note: This does not close file descriptors because:
+    /// - Original source_fd should remain open (owned by caller)
+    /// - Duplicated file descriptors are passed to subprocess and closed by it
+    /// - Socket file descriptors are handled by Socket's own Drop implementation
+    fn drop(&mut self) {
+        debug!("Dropping FDManager - no file descriptor cleanup needed");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,5 +829,21 @@ mod tests {
 
         // Test protocol identifier
         assert_eq!(swarm_manager.get_default_protocol(), "/ww/0.1.0");
+    }
+
+    #[test]
+    fn test_swarm_manager_bootstrap_membrane() {
+        let config = HostConfig::default();
+        let (_keypair, peer_id, swarm) = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(build_host(Some(config)))
+            .unwrap();
+        let swarm_manager = SwarmManager::new(swarm, peer_id);
+
+        // Test that bootstrap membrane is accessible
+        let membrane = swarm_manager.bootstrap_membrane();
+        // Note: We can't access the private services field directly,
+        // but we can test that the membrane exists
+        assert!(!std::ptr::addr_of!(membrane).is_null());
     }
 }

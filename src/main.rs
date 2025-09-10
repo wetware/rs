@@ -7,13 +7,12 @@ mod config;
 mod executor;
 mod membrane;
 mod rpc;
-mod swarm_capnp;
 mod system;
-use boot::{build_host, get_kubo_peers, SwarmManager};
+mod system_capnp;
+use boot::{build_host, get_kubo_peers, FDManager, SwarmManager};
 use clap::{Parser, Subcommand};
 use config::{init_tracing, AppConfig};
 use executor::{execute_subprocess, ExecutorEnv};
-use system::FDManager;
 
 #[derive(Parser)]
 #[command(name = "ww")]
