@@ -17,13 +17,13 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.0", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-capnp = "0.21.4"
-capnp-rpc = "0.21.0"
 tokio-util = { version = "0.7", features = ["codec", "compat"] }
 bytes = "1.0"
 ipfs-api-backend-hyper = "0.6.0"
-subprocess = "0.2"
-tempfile = "3.8"
+wasmtime = "37.0"
+wasmtime-wasi = "37.0"
+rand = "0.8"
+base58 = "0.2"
 nix = { version = "0.27", features = ["socket"] }
 libc = "0.2"
 
