@@ -198,23 +198,39 @@ async fn run_cell_async(proc: Proc, port: u16, root_dir: std::path::PathBuf, ipf
     }
 }
 
+/// Check if a path is a valid IPFS-family path (IPFS, IPNS, or IPLD)
+/// 
+/// This centralizes IPFS path validation similar to Go's `path.NewPath(str)`.
+/// Returns true if the path starts with a valid IPFS namespace prefix.
+fn is_ipfs_path(path: &str) -> bool {
+    path.starts_with("/ipfs/") || 
+    path.starts_with("/ipns/") || 
+    path.starts_with("/ipld/")
+}
+
+/// Download content from IPFS via HTTP API
+async fn download_from_ipfs(ipfs_path: &str, ipfs_url: &str) -> Result<Vec<u8>> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v0/cat?arg={}", ipfs_url, ipfs_path);
+    let response = client.post(&url).send().await
+        .with_context(|| format!("Failed to connect to IPFS node at {}", ipfs_url))?;
+    
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!("Failed to download from IPFS: {}", response.status()));
+    }
+    
+    Ok(response.bytes().await?.to_vec())
+}
+
 /// Resolve binary path to WASM bytecode (like Go implementation)
 async fn resolve_binary(name: &str, ipfs_url: &str) -> Result<Vec<u8>> {
     use std::fs;
     use std::path::Path;
     use std::process::Command;
 
-    // Check if it's an IPFS path
-    if name.starts_with("/ipfs/") {
-        // Download from IPFS
-        let client = reqwest::Client::new();
-        let url = format!("{}/api/v0/cat?arg={}", ipfs_url, name);
-        let response = client.post(&url).send().await
-            .with_context(|| format!("Failed to connect to IPFS node at {}", ipfs_url))?;
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to download from IPFS: {}", response.status()));
-        }
-        return Ok(response.bytes().await?.to_vec());
+    // Check if it's an IPFS-family path (IPFS, IPNS, or IPLD)
+    if is_ipfs_path(name) {
+        return download_from_ipfs(name, ipfs_url).await;
     }
 
     // Check if it's an absolute path
