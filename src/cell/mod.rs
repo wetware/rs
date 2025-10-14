@@ -1,14 +1,12 @@
 //! Cell runtime implementation for Wetware
 //! 
 //! This module provides cell execution capabilities using Wasmtime, supporting
-//! both sync and async modes with method-based routing for cell exports.
+//! per-stream instantiation with duplex pipe communication.
 
-pub mod endpoint;
 pub mod proc;
 pub mod runtime;
 pub mod config;
-pub mod stream;
-pub mod pipe;
+pub mod executor;
 
-pub use proc::{Proc, Config};
-pub use runtime::WasmRuntime;
+pub use proc::{Proc, Config, ServiceInfo};
+pub use executor::{run_cell, Command, WetwareBehaviour};

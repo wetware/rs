@@ -108,20 +108,6 @@ impl WasmRuntime {
         
         Ok((instance, store))
     }
-    
-    /// Get the exit code from a WASI context after execution
-    /// Returns None if no exit code was set, or Some(code) if the process exited
-    pub fn get_exit_code(_store: &Store<WasiP1Ctx>) -> Option<i32> {
-        // WASIp1: Exit codes are typically tracked via process_exit traps
-        // For now, return None (no error) - proper exit code handling would require
-        // catching the process_exit trap during execution
-        None
-    }
-
-    /// Get the underlying engine
-    pub fn engine(&self) -> &Engine {
-        &self.engine
-    }
 }
 
 impl Default for WasmRuntime {
