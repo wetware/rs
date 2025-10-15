@@ -1,10 +1,28 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::io::Write;
-use tracing::info;
-use wasmtime::{Module, Instance, Store};
-use wasmtime_wasi::p1::WasiP1Ctx;
+use wasmtime::component::{Component, Instance, Linker, ResourceTable};
+use wasmtime::{Config as WasmConfig, Engine, Module, Store};
+use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
+use wasmtime_wasi::p2::add_to_linker_async;
+use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
-use crate::cell::runtime::WasmRuntime;
+pub const BUFFER_SIZE: usize = 1024;
+
+// Required for WASI IO to work.
+pub struct ComponentRunStates {
+    pub wasi_ctx: WasiCtx,
+    pub resource_table: ResourceTable,
+}
+
+// Required for WASI IO to work.
+impl WasiView for ComponentRunStates {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi_ctx,
+            table: &mut self.resource_table,
+        }
+    }
+}
 
 /// Configuration for cell process creation
 pub struct Config {
@@ -61,7 +79,7 @@ impl Config {
 }
 
 /// Cell process that encapsulates a WASM instance and its configuration.
-/// 
+///
 /// Designed for per-stream instantiation - each incoming stream gets its own Proc instance.
 /// This enables concurrent execution of multiple services.
 pub struct Proc {
@@ -69,12 +87,12 @@ pub struct Proc {
     pub config: Config,
     /// Service metadata
     pub service_info: ServiceInfo,
-    /// Compiled cell module
-    pub module: Module,
+    // /// Compiled cell module
+    // pub module: Module,
     /// Cell runtime instance
     pub instance: Instance,
     /// Cell runtime store
-    pub store: Store<WasiP1Ctx>,
+    pub store: Store<ComponentRunStates>,
     /// Host-side stdin handle for communication
     pub host_stdin: tokio::io::DuplexStream,
     /// Host-side stdout handle for communication
@@ -96,33 +114,56 @@ pub struct ServiceInfo {
 
 impl Proc {
     /// Create a new WASM process with duplex pipes for bidirectional communication
-    /// 
+    ///
     /// Returns the Proc instance with service metadata and host-side handles.
     /// The WASM instance gets the other end of the pipes.
-    pub fn new_with_duplex_pipes(
-        config: Config, 
+    pub async fn new_with_duplex_pipes(
+        config: Config,
         bytecode: &[u8],
         service_info: ServiceInfo,
     ) -> Result<Self> {
         // Create duplex pipes for bidirectional communication
-        let (host_stdin, wasm_stdin) = tokio::io::duplex(1024);
-        let (wasm_stdout, host_stdout) = tokio::io::duplex(1024);
-        
-        let runtime = WasmRuntime::new_with_debug(config.wasm_debug)?;
-        let module = runtime.compile_module(bytecode)?;
-        
-        let (instance, store) = runtime.instantiate_module(
-            &module,
-            &config.args,
-            &config.env,
-            Some(Box::new(wasm_stdin)),
-            Some(Box::new(wasm_stdout)),
-        )?;
-        
+        let (host_stdin, wasm_stdin) = tokio::io::duplex(BUFFER_SIZE);
+        let (wasm_stdout, host_stdout) = tokio::io::duplex(BUFFER_SIZE);
+
+        let wasm_stdin_async = AsyncStdinStream::new(wasm_stdin);
+        let wasm_stdout_async = AsyncStdoutStream::new(BUFFER_SIZE, wasm_stdout);
+
+        let mut wasm_config = WasmConfig::new();
+        wasm_config.async_support(true);
+        let engine = Engine::new(&wasm_config)?;
+        let mut linker = Linker::new(&engine);
+        add_to_linker_async(&mut linker)?;
+
+        // Prepare environment variables as key-value pairs
+        let envs: Vec<(&str, &str)> = config
+            .env
+            .iter()
+            .filter_map(|var| var.split_once('='))
+            .collect();
+
+        // Wire the async stdio streams into WASI and inherit host args.
+        let wasi = WasiCtx::builder()
+            .stdin(wasm_stdin_async)
+            .stdout(wasm_stdout_async)
+            .envs(&envs)
+            .args(&config.args)
+            .build();
+
+        let state = ComponentRunStates {
+            wasi_ctx: wasi,
+            resource_table: ResourceTable::new(),
+        };
+        let mut store = Store::new(&engine, state);
+
+        // Instantiate it as a normal component
+        let component = Component::from_binary(&engine, bytecode)?;
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+
         Ok(Self {
             config,
             service_info,
-            module,
+            // module,
             instance,
             store,
             host_stdin,
@@ -149,7 +190,7 @@ mod tests {
             .with_wasm_debug(true)
             .with_env(vec!["TEST=1".to_string()])
             .with_args(vec!["arg1".to_string()]);
-        
+
         assert!(config.wasm_debug);
         assert_eq!(config.env.len(), 1);
         assert_eq!(config.args.len(), 1);
@@ -163,7 +204,7 @@ mod tests {
             service_name: "echo".to_string(),
             protocol: "/ww/0.1.0/".to_string(),
         };
-        
+
         assert_eq!(service_info.service_path, "/ww/0.1.0/echo");
         assert_eq!(service_info.version, "0.1.0");
         assert_eq!(service_info.service_name, "echo");
