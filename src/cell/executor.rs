@@ -1,14 +1,14 @@
-use anyhow::{Result, Context};
-use tracing::{info, debug, warn};
-use libp2p::{identity, Multiaddr, SwarmBuilder};
-use libp2p::swarm::SwarmEvent;
+use anyhow::{Context, Result};
 use futures::StreamExt;
+use libp2p::swarm::SwarmEvent;
+use libp2p::{identity, Multiaddr, SwarmBuilder};
 use std::time::Duration;
+use tracing::{debug, info, warn};
 
-use crate::config;
+use super::{Config, Proc, ServiceInfo};
 use crate::boot;
+use crate::config;
 use crate::resolver;
-use super::{Proc, Config, ServiceInfo};
 
 /// Configuration for running a cell
 #[derive(Debug)]
@@ -36,7 +36,6 @@ pub struct WetwareBehaviour {
     pub identify: libp2p::identify::Behaviour,
 }
 
-
 /// Main entry point for running a cell
 pub async fn run_cell(config: Command) -> Result<()> {
     // Initialize tracing with the determined log level
@@ -47,7 +46,15 @@ pub async fn run_cell(config: Command) -> Result<()> {
     let ipfs_url = config.ipfs.unwrap_or_else(config::get_ipfs_url);
 
     // All binaries are treated as WASM (like Go implementation)
-    run_wasm(config.binary, config.args, ipfs_url, config.env, config.wasm_debug, config.port).await
+    run_wasm(
+        config.binary,
+        config.args,
+        ipfs_url,
+        config.env,
+        config.wasm_debug,
+        config.port,
+    )
+    .await
 }
 
 /// Run a WASM binary as a cell
@@ -62,13 +69,12 @@ async fn run_wasm(
     info!(binary = %binary, "Starting cell execution");
 
     // Resolve binary path (like Go implementation)
-    let bytecode = resolve_binary(&binary, &ipfs_url).await
+    let bytecode = resolve_binary(&binary, &ipfs_url)
+        .await
         .with_context(|| format!("Failed to resolve binary: {}", binary))?;
 
     // Create process configuration
-    let mut config = Config::new()
-        .with_wasm_debug(wasm_debug)
-        .with_args(args);
+    let mut config = Config::new().with_wasm_debug(wasm_debug).with_args(args);
 
     // Parse environment variables
     if let Some(env_vars) = env {
@@ -82,9 +88,10 @@ async fn run_wasm(
         service_name: "main".to_string(),
         protocol: "/ww/0.1.0/".to_string(),
     };
-    
+
     // Create cell process
     let proc = Proc::new_with_duplex_pipes(config, &bytecode, service_info)
+        .await
         .with_context(|| format!("Failed to create cell process from binary: {}", binary))?;
 
     // Run with libp2p host
@@ -93,7 +100,12 @@ async fn run_wasm(
 }
 
 /// Run the cell asynchronously with libp2p networking
-async fn run_cell_async(proc: Proc, port: u16, root_dir: std::path::PathBuf, ipfs_url: String) -> Result<()> {
+async fn run_cell_async(
+    proc: Proc,
+    port: u16,
+    root_dir: std::path::PathBuf,
+    ipfs_url: String,
+) -> Result<()> {
     let keypair = identity::Keypair::generate_ed25519();
     let peer_id = keypair.public().to_peer_id();
 
@@ -102,14 +114,19 @@ async fn run_cell_async(proc: Proc, port: u16, root_dir: std::path::PathBuf, ipf
 
     let behaviour = WetwareBehaviour {
         kad,
-        identify: libp2p::identify::Behaviour::new(
-            libp2p::identify::Config::new("ww/1.0.0".to_string(), keypair.public())
-        ),
+        identify: libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
+            "ww/1.0.0".to_string(),
+            keypair.public(),
+        )),
     };
 
     let mut swarm = SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
-        .with_tcp(Default::default(), libp2p::noise::Config::new, libp2p::yamux::Config::default)?
+        .with_tcp(
+            Default::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )?
         .with_behaviour(|_| behaviour)?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
@@ -124,9 +141,9 @@ async fn run_cell_async(proc: Proc, port: u16, root_dir: std::path::PathBuf, ipf
     let latest_version = resolver::ServiceResolver::new(boot_config.root.clone(), ipfs_url.clone())
         .get_latest_version()?
         .unwrap_or_else(|| "0.1.0".to_string());
-    
+
     info!(version = %latest_version, "Using version for boot peers");
-    
+
     // Get boot peers and connect to them
     let boot_peers = boot_config.get_all_boot_peers(&latest_version)?;
     for multiaddr in boot_peers {
@@ -143,9 +160,9 @@ async fn run_cell_async(proc: Proc, port: u16, root_dir: std::path::PathBuf, ipf
     // Register multiple protocol versions
     let resolver = resolver::ServiceResolver::new(boot_config.root.clone(), ipfs_url.clone());
     let available_versions = resolver.detect_versions()?;
-    
+
     info!(versions = ?available_versions, "Registering protocol versions");
-    
+
     // Register each version as a protocol
     for version in &available_versions {
         let protocol = resolver.get_protocol(version);
@@ -153,15 +170,17 @@ async fn run_cell_async(proc: Proc, port: u16, root_dir: std::path::PathBuf, ipf
         // Note: In libp2p, we'll handle protocol negotiation in the event loop
         // rather than registering multiple protocols in the behavior
     }
-    
+
     // For now, we'll use the latest version as the primary protocol
     let primary_protocol = resolver.get_protocol(&latest_version);
     info!(primary_protocol = %primary_protocol, "Using primary protocol");
 
     // CANONICAL BEHAVIOR: _start was already called during instantiation for initialization
     // Now we start the libp2p event loop to handle incoming streams
-    info!("Cell initialized and ready for connections. Incoming streams will be routed to services.");
-    
+    info!(
+        "Cell initialized and ready for connections. Incoming streams will be routed to services."
+    );
+
     // Run the event loop with service resolution and per-stream instances
     loop {
         match swarm.select_next_some().await {
@@ -171,10 +190,16 @@ async fn run_cell_async(proc: Proc, port: u16, root_dir: std::path::PathBuf, ipf
             SwarmEvent::IncomingConnection { .. } => {
                 debug!("Incoming connection");
             }
-            SwarmEvent::ConnectionEstablished { peer_id: remote_peer, .. } => {
+            SwarmEvent::ConnectionEstablished {
+                peer_id: remote_peer,
+                ..
+            } => {
                 info!(peer_id = %remote_peer, "Connection established");
             }
-            SwarmEvent::ConnectionClosed { peer_id: remote_peer, .. } => {
+            SwarmEvent::ConnectionClosed {
+                peer_id: remote_peer,
+                ..
+            } => {
                 debug!(peer_id = %remote_peer, "Connection closed");
             }
             SwarmEvent::IncomingConnectionError { error, .. } => {
@@ -183,13 +208,12 @@ async fn run_cell_async(proc: Proc, port: u16, root_dir: std::path::PathBuf, ipf
             // Handle incoming service requests
             // TODO: Implement proper protocol handler for service execution
             // For now, we'll log incoming connections and prepare for service routing
-            
+
             // Example of how we would handle service requests:
             // 1. Parse incoming stream protocol to extract version and service path
             // 2. Resolve service bytecode via resolver
             // 3. Create new Proc instance with duplex pipes
             // 4. Spawn task to handle stream I/O between libp2p and WASM
-            
             SwarmEvent::Behaviour(_event) => {
                 debug!("Behaviour event received");
             }
@@ -199,26 +223,30 @@ async fn run_cell_async(proc: Proc, port: u16, root_dir: std::path::PathBuf, ipf
 }
 
 /// Check if a path is a valid IPFS-family path (IPFS, IPNS, or IPLD)
-/// 
+///
 /// This centralizes IPFS path validation similar to Go's `path.NewPath(str)`.
 /// Returns true if the path starts with a valid IPFS namespace prefix.
 fn is_ipfs_path(path: &str) -> bool {
-    path.starts_with("/ipfs/") || 
-    path.starts_with("/ipns/") || 
-    path.starts_with("/ipld/")
+    path.starts_with("/ipfs/") || path.starts_with("/ipns/") || path.starts_with("/ipld/")
 }
 
 /// Download content from IPFS via HTTP API
 async fn download_from_ipfs(ipfs_path: &str, ipfs_url: &str) -> Result<Vec<u8>> {
     let client = reqwest::Client::new();
     let url = format!("{}/api/v0/cat?arg={}", ipfs_url, ipfs_path);
-    let response = client.post(&url).send().await
+    let response = client
+        .post(&url)
+        .send()
+        .await
         .with_context(|| format!("Failed to connect to IPFS node at {}", ipfs_url))?;
-    
+
     if !response.status().is_success() {
-        return Err(anyhow::anyhow!("Failed to download from IPFS: {}", response.status()));
+        return Err(anyhow::anyhow!(
+            "Failed to download from IPFS: {}",
+            response.status()
+        ));
     }
-    
+
     Ok(response.bytes().await?.to_vec())
 }
 
@@ -235,14 +263,12 @@ async fn resolve_binary(name: &str, ipfs_url: &str) -> Result<Vec<u8>> {
 
     // Check if it's an absolute path
     if Path::new(name).is_absolute() {
-        return fs::read(name)
-            .with_context(|| format!("Failed to read file: {}", name));
+        return fs::read(name).with_context(|| format!("Failed to read file: {}", name));
     }
 
     // Check if it's a relative path (starts with . or /)
     if name.starts_with('.') || name.starts_with('/') {
-        return fs::read(name)
-            .with_context(|| format!("Failed to read file: {}", name));
+        return fs::read(name).with_context(|| format!("Failed to read file: {}", name));
     }
 
     // Check if it's in $PATH
@@ -259,8 +285,7 @@ async fn resolve_binary(name: &str, ipfs_url: &str) -> Result<Vec<u8>> {
 
     // Try as a relative path in current directory
     if Path::new(name).exists() {
-        return fs::read(name)
-            .with_context(|| format!("Failed to read file: {}", name));
+        return fs::read(name).with_context(|| format!("Failed to read file: {}", name));
     }
 
     Err(anyhow::anyhow!("Binary not found: {}", name))
