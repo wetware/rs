@@ -101,7 +101,7 @@ async fn run_wasm(
 
 /// Run the cell asynchronously with libp2p networking
 async fn run_cell_async(
-    proc: Proc,
+    _proc: Proc, // TODO: process management.
     port: u16,
     root_dir: std::path::PathBuf,
     ipfs_url: String,

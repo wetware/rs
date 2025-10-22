@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::io::Write;
 use wasmtime::component::{Component, Instance, Linker, ResourceTable};
-use wasmtime::{Config as WasmConfig, Engine, Module, Store};
+use wasmtime::{Config as WasmConfig, Engine, Store};
 use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
 use wasmtime_wasi::p2::add_to_linker_async;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};

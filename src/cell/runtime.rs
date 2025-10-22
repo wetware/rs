@@ -45,7 +45,7 @@ impl WasmRuntime {
     pub fn new_store(&self) -> Store<ComponentRunStates> {
         let wasi_ctx = WasiCtx::builder().build();
         let state = ComponentRunStates {
-            wasi_ctx: wasi_ctx,
+            wasi_ctx,
             resource_table: ResourceTable::new(),
         };
         Store::new(&self.engine, state)
