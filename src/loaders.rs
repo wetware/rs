@@ -139,4 +139,3 @@ impl Loader for ChainLoader {
 fn is_ipfs_path(path: &str) -> bool {
     path.starts_with("/ipfs/") || path.starts_with("/ipns/") || path.starts_with("/ipld/")
 }
-

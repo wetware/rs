@@ -1,10 +1,10 @@
 use anyhow::Result;
 
 mod boot;
-mod config;
 mod cell;
-mod resolver;
+mod config;
 mod loaders;
+mod resolver;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -80,7 +80,9 @@ impl Commands {
                     wasm_debug,
                     port,
                     loglvl,
-                }.run().await
+                }
+                .run()
+                .await
             }
         }
     }

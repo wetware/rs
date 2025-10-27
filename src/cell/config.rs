@@ -1,5 +1,5 @@
 /// Simple configuration for cell modules
-/// 
+///
 /// This provides basic configuration for cell module instantiation.
 /// The actual WASI setup is handled in the runtime.
 pub struct ModuleConfig {
@@ -60,7 +60,7 @@ mod tests {
             .with_env("DEBUG", "1")
             .with_envs(vec!["TEST_VAR=test_value".to_string()])
             .with_args(vec!["arg1".to_string(), "arg2".to_string()]);
-        
+
         assert_eq!(config.env.len(), 2);
         assert_eq!(config.args.len(), 2);
     }

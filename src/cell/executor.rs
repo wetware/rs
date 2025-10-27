@@ -5,7 +5,7 @@ use libp2p::{identity, Multiaddr, SwarmBuilder};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-use super::{Config, Proc, ServiceInfo, Loader};
+use super::{Config, Loader, Proc, ServiceInfo};
 use crate::boot;
 use crate::config;
 use crate::resolver;
@@ -66,7 +66,9 @@ async fn run_wasm(
     info!(binary = %binary, "Starting cell execution");
 
     // Resolve binary path using the provided loader
-    let bytecode = loader.load(&binary).await
+    let bytecode = loader
+        .load(&binary)
+        .await
         .with_context(|| format!("Failed to resolve binary: {}", binary))?;
 
     // Create process configuration

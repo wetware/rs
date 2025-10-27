@@ -50,23 +50,22 @@ pub fn get_log_level() -> LogLevel {
 pub fn init_tracing(log_level: LogLevel, _explicit_level: Option<LogLevel>) {
     let level_str = match log_level {
         LogLevel::Trace => "trace",
-        LogLevel::Debug => "debug", 
+        LogLevel::Debug => "debug",
         LogLevel::Info => "info",
         LogLevel::Warn => "warn",
         LogLevel::Error => "error",
     };
-    
+
     // Set the RUST_LOG environment variable if not already set
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", level_str);
     }
-    
+
     // Initialize tracing
     let _ = tracing_subscriber::fmt::try_init();
 }
 
 /// Get the default IPFS URL from environment or default
 pub fn get_ipfs_url() -> String {
-    std::env::var("WW_IPFS")
-        .unwrap_or_else(|_| "http://localhost:5001".to_string())
+    std::env::var("WW_IPFS").unwrap_or_else(|_| "http://localhost:5001".to_string())
 }
