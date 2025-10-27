@@ -1,10 +1,10 @@
 use anyhow::Result;
-use tracing::info;
 
 mod boot;
 mod config;
 mod cell;
 mod resolver;
+mod loaders;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -64,10 +64,18 @@ impl Commands {
                 port,
                 loglvl,
             } => {
+                // Create chain of loaders: try UnixFSLoader first, then LocalFSLoader
+                let ipfs_url = ipfs.unwrap_or_else(config::get_ipfs_url);
+                let loader = Box::new(loaders::ChainLoader::new(vec![
+                    Box::new(loaders::UnixFSLoader::new(ipfs_url.clone())),
+                    Box::new(loaders::LocalFSLoader),
+                ]));
+
                 cell::Command {
                     binary,
                     args,
-                    ipfs,
+                    loader,
+                    ipfs: Some(ipfs_url),
                     env,
                     wasm_debug,
                     port,
@@ -83,4 +91,3 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     cli.command.run().await
 }
-

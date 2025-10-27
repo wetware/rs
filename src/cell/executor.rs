@@ -5,16 +5,16 @@ use libp2p::{identity, Multiaddr, SwarmBuilder};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-use super::{Config, Proc, ServiceInfo};
+use super::{Config, Proc, ServiceInfo, Loader};
 use crate::boot;
 use crate::config;
 use crate::resolver;
 
 /// Configuration for running a cell
-#[derive(Debug)]
 pub struct Command {
     pub binary: String,
     pub args: Vec<String>,
+    pub loader: Box<dyn Loader>,
     pub ipfs: Option<String>,
     pub env: Option<Vec<String>>,
     pub wasm_debug: bool,
@@ -42,14 +42,11 @@ pub async fn run_cell(config: Command) -> Result<()> {
     let log_level = config.loglvl.unwrap_or_else(config::get_log_level);
     config::init_tracing(log_level, config.loglvl);
 
-    // Get IPFS URL
-    let ipfs_url = config.ipfs.unwrap_or_else(config::get_ipfs_url);
-
     // All binaries are treated as WASM (like Go implementation)
     run_wasm(
         config.binary,
         config.args,
-        ipfs_url,
+        &*config.loader,
         config.env,
         config.wasm_debug,
         config.port,
@@ -61,16 +58,15 @@ pub async fn run_cell(config: Command) -> Result<()> {
 async fn run_wasm(
     binary: String,
     args: Vec<String>,
-    ipfs_url: String,
+    loader: &dyn Loader,
     env: Option<Vec<String>>,
     wasm_debug: bool,
     port: u16,
 ) -> Result<()> {
     info!(binary = %binary, "Starting cell execution");
 
-    // Resolve binary path (like Go implementation)
-    let bytecode = resolve_binary(&binary, &ipfs_url)
-        .await
+    // Resolve binary path using the provided loader
+    let bytecode = loader.load(&binary).await
         .with_context(|| format!("Failed to resolve binary: {}", binary))?;
 
     // Create process configuration
@@ -96,6 +92,7 @@ async fn run_wasm(
 
     // Run with libp2p host
     let root_dir = std::env::current_dir()?;
+    let ipfs_url = config::get_ipfs_url(); // Use default IPFS URL for DHT bootstrap
     run_cell_async(proc, port, root_dir, ipfs_url).await
 }
 
@@ -226,6 +223,7 @@ async fn run_cell_async(
 ///
 /// This centralizes IPFS path validation similar to Go's `path.NewPath(str)`.
 /// Returns true if the path starts with a valid IPFS namespace prefix.
+#[allow(dead_code)]
 fn is_ipfs_path(path: &str) -> bool {
     path.starts_with("/ipfs/") || path.starts_with("/ipns/") || path.starts_with("/ipld/")
 }
