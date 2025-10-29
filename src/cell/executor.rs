@@ -6,9 +6,9 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use super::{Config, Proc, ServiceInfo};
-use crate::boot;
-use crate::config;
-use crate::resolver;
+use crate::cli::boot;
+use crate::cli::config;
+use crate::cli::resolver;
 
 /// Configuration for running a cell
 #[derive(Debug)]
