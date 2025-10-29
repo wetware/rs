@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use clap::{Parser, Subcommand};
-use ww::cli::{config, Command};
+use ww::{cli::Command, config};
 
 #[derive(Parser)]
 #[command(name = "ww")]

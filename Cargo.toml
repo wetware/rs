@@ -39,9 +39,6 @@ guest = ["capnp-rpc", "wasip2"]
 name = "ww"
 path = "src/cli/main.rs"
 
-[workspace]
-members = ["guest"]
-
 [dependencies.capnp-rpc]
 version = "0.21"
 optional = true

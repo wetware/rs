@@ -10,7 +10,6 @@
 //! so callers can do `ww::cli::Command { ... }.run().await`.
 
 pub mod boot;
-pub mod config;
 pub mod resolver;
 
 // Re-export the cell execution entrypoint for convenience under `ww::cli::Command`.
