@@ -6,9 +6,8 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use super::{Config, Proc, ServiceInfo};
-use crate::boot;
-use crate::config;
-use crate::resolver;
+use crate::net::boot;
+use crate::net::resolver;
 
 /// Configuration for running a cell
 #[derive(Debug)]
@@ -19,7 +18,7 @@ pub struct Command {
     pub env: Option<Vec<String>>,
     pub wasm_debug: bool,
     pub port: u16,
-    pub loglvl: Option<config::LogLevel>,
+    pub loglvl: Option<crate::config::LogLevel>,
 }
 
 impl Command {
@@ -39,11 +38,11 @@ pub struct WetwareBehaviour {
 /// Main entry point for running a cell
 pub async fn run_cell(config: Command) -> Result<()> {
     // Initialize tracing with the determined log level
-    let log_level = config.loglvl.unwrap_or_else(config::get_log_level);
-    config::init_tracing(log_level, config.loglvl);
+    let log_level = config.loglvl.unwrap_or_else(crate::config::get_log_level);
+    crate::config::init_tracing(log_level, config.loglvl);
 
     // Get IPFS URL
-    let ipfs_url = config.ipfs.unwrap_or_else(config::get_ipfs_url);
+    let ipfs_url = config.ipfs.unwrap_or_else(crate::net::ipfs::get_ipfs_url);
 
     // All binaries are treated as WASM (like Go implementation)
     run_wasm(

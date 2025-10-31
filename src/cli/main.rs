@@ -1,11 +1,7 @@
 use anyhow::Result;
-use tracing::info;
 
-mod boot;
-mod config;
-mod cell;
-mod resolver;
 use clap::{Parser, Subcommand};
+use ww::{cli::Command, config};
 
 #[derive(Parser)]
 #[command(name = "ww")]
@@ -64,7 +60,7 @@ impl Commands {
                 port,
                 loglvl,
             } => {
-                cell::Command {
+                Command {
                     binary,
                     args,
                     ipfs,
@@ -72,7 +68,9 @@ impl Commands {
                     wasm_debug,
                     port,
                     loglvl,
-                }.run().await
+                }
+                .run()
+                .await
             }
         }
     }
@@ -83,4 +81,3 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     cli.command.run().await
 }
-
