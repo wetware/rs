@@ -8,22 +8,22 @@ use async_trait::async_trait;
 
 use crate::cell::Loader;
 
-/// UnixFS loader for IPFS-based bytecode resolution
+/// IPFS filesystem loader for IPFS-based bytecode resolution
 ///
 /// Handles IPFS paths: `/ipfs/...`, `/ipns/...`, `/ipld/...`
-pub struct UnixFSLoader {
+pub struct IpfsFSLoader {
     ipfs_url: String,
 }
 
-impl UnixFSLoader {
-    /// Create a new UnixFS loader with the given IPFS HTTP API endpoint
+impl IpfsFSLoader {
+    /// Create a new IPFS filesystem loader with the given IPFS HTTP API endpoint
     pub fn new(ipfs_url: String) -> Self {
         Self { ipfs_url }
     }
 }
 
 #[async_trait]
-impl Loader for UnixFSLoader {
+impl Loader for IpfsFSLoader {
     async fn load(&self, path: &str) -> Result<Vec<u8>> {
         // Only handle IPFS-family paths
         if !is_ipfs_path(path) {

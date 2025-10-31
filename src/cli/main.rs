@@ -1,11 +1,7 @@
 use anyhow::Result;
 
-mod boot;
-mod cell;
-mod config;
-mod loaders;
-mod resolver;
 use clap::{Parser, Subcommand};
+use ww::{cli::Command, config, loaders};
 
 #[derive(Parser)]
 #[command(name = "ww")]
@@ -64,14 +60,15 @@ impl Commands {
                 port,
                 loglvl,
             } => {
-                // Create chain of loaders: try UnixFSLoader first, then LocalFSLoader
-                let ipfs_url = ipfs.unwrap_or_else(config::get_ipfs_url);
+                // Create chain of loaders: try IpfsFSLoader first, then LocalFSLoader
+                use ww::net::ipfs;
+                let ipfs_url = ipfs.unwrap_or_else(|| ipfs::get_ipfs_url());
                 let loader = Box::new(loaders::ChainLoader::new(vec![
-                    Box::new(loaders::UnixFSLoader::new(ipfs_url.clone())),
+                    Box::new(loaders::IpfsFSLoader::new(ipfs_url.clone())),
                     Box::new(loaders::LocalFSLoader),
                 ]));
 
-                cell::Command {
+                Command {
                     binary,
                     args,
                     loader,

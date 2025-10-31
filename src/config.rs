@@ -1,3 +1,17 @@
+/*! Top-level configuration module for Wetware
+
+This module centralizes configuration primitives that were previously
+scoped under `cli::config`. Moving these items to the crate root allows
+non-CLI subsystems (like `cell`) to depend on configuration without
+creating circular dependencies.
+
+Exports:
+- `LogLevel`: common log-level type used across the crate
+- `get_log_level()`: resolves the default log level (from env or default)
+- `init_tracing()`: initializes global tracing subscriber
+
+*/
+
 /// Log level options
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
@@ -39,6 +53,9 @@ impl std::fmt::Display for LogLevel {
 }
 
 /// Get the default log level from environment or default to Info
+///
+/// Current resolution uses the `RUST_LOG` environment variable if present,
+/// otherwise defaults to `info`.
 pub fn get_log_level() -> LogLevel {
     std::env::var("RUST_LOG")
         .ok()
@@ -47,6 +64,9 @@ pub fn get_log_level() -> LogLevel {
 }
 
 /// Initialize tracing with the specified log level
+///
+/// - Sets `RUST_LOG` if not already set, using the provided `log_level`.
+/// - Attempts to initialize a global `tracing_subscriber` (no-op if already set).
 pub fn init_tracing(log_level: LogLevel, _explicit_level: Option<LogLevel>) {
     let level_str = match log_level {
         LogLevel::Trace => "trace",
@@ -61,11 +81,6 @@ pub fn init_tracing(log_level: LogLevel, _explicit_level: Option<LogLevel>) {
         std::env::set_var("RUST_LOG", level_str);
     }
 
-    // Initialize tracing
+    // Initialize tracing (ignore error if already initialized)
     let _ = tracing_subscriber::fmt::try_init();
-}
-
-/// Get the default IPFS URL from environment or default
-pub fn get_ipfs_url() -> String {
-    std::env::var("WW_IPFS").unwrap_or_else(|_| "http://localhost:5001".to_string())
 }
