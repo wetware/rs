@@ -13,10 +13,13 @@ pub struct ServiceResolver {
     /// Root directory containing `/ww/` versions
     root: PathBuf,
     /// IPFS API endpoint URL (e.g., "http://localhost:5001")
+    #[allow(dead_code)]
     ipfs_url: String,
     /// Cache for IPFS content (hash -> content mapping)
+    #[allow(dead_code)]
     ipfs_cache: HashMap<String, Vec<u8>>,
     /// Cache for IPFS directory structures (hash -> directory listing)
+    #[allow(dead_code)]
     ipfs_dir_cache: HashMap<String, HashMap<String, String>>,
 }
 
@@ -78,6 +81,7 @@ impl ServiceResolver {
     /// - `/ww/0.1.0/echo` → `/ww/0.1.0/public/echo.wasm`
     /// - `/ww/0.1.0/math/add` → `/ww/0.1.0/public/math/add.wasm`
     /// - `/ipfs/QmHash` → fetch from IPFS and extract service
+    #[allow(dead_code)]
     pub async fn resolve_service(&mut self, service_path: &str) -> Result<Vec<u8>> {
         debug!(service_path = %service_path, "Resolving service");
 
@@ -326,6 +330,7 @@ impl ServiceResolver {
     }
 
     /// Parse a protocol string to extract version and service path
+    #[allow(dead_code)]
     pub fn parse_protocol(&self, protocol: &str) -> Result<(String, String)> {
         if !protocol.starts_with("/ww/") {
             return Err(anyhow!("Invalid protocol format: {}", protocol));
@@ -349,6 +354,7 @@ impl ServiceResolver {
     }
 
     /// Clear IPFS cache
+    #[allow(dead_code)]
     pub fn clear_ipfs_cache(&mut self) {
         self.ipfs_cache.clear();
         self.ipfs_dir_cache.clear();
@@ -356,6 +362,7 @@ impl ServiceResolver {
     }
 
     /// Get cache statistics
+    #[allow(dead_code)]
     pub fn get_cache_stats(&self) -> (usize, usize) {
         (self.ipfs_cache.len(), self.ipfs_dir_cache.len())
     }

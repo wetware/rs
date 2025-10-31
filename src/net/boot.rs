@@ -158,23 +158,6 @@ impl BootConfig {
         info!(version = %version, total_peers = all_peers.len(), "Collected all boot peers");
         Ok(all_peers)
     }
-
-    /// Get unique peer IDs from all boot peers
-    pub fn get_boot_peer_ids(&self, version: &str) -> Result<Vec<PeerId>> {
-        let multiaddrs = self.get_all_boot_peers(version)?;
-        let mut peer_ids = Vec::new();
-
-        for multiaddr in multiaddrs {
-            if let Some(peer_id) = self.extract_peer_id(&multiaddr)? {
-                if !peer_ids.contains(&peer_id) {
-                    peer_ids.push(peer_id);
-                }
-            }
-        }
-
-        info!(version = %version, unique_peers = peer_ids.len(), "Extracted unique peer IDs");
-        Ok(peer_ids)
-    }
 }
 
 #[cfg(test)]
@@ -340,10 +323,6 @@ mod tests {
         // Test with non-existent boot peers directory
         let multiaddrs = config.get_all_boot_peers(version).unwrap();
         assert_eq!(multiaddrs.len(), 6); // Only IPFS bootstrap peers
-
-        let peer_ids = config.get_boot_peer_ids(version).unwrap();
-        // Some IPFS bootstrap peers may not have extractable peer IDs
-        assert!(peer_ids.len() >= 5); // At least 5 should have peer IDs
     }
 
     #[test]

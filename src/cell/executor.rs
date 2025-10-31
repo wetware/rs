@@ -14,6 +14,7 @@ pub struct Command {
     pub binary: String,
     pub args: Vec<String>,
     pub loader: Box<dyn Loader>,
+    #[allow(dead_code)]
     pub ipfs: Option<String>,
     pub env: Option<Vec<String>>,
     pub wasm_debug: bool,
@@ -232,6 +233,7 @@ fn is_ipfs_path(path: &str) -> bool {
 }
 
 /// Download content from IPFS via HTTP API
+#[allow(dead_code)]
 async fn download_from_ipfs(ipfs_path: &str, ipfs_url: &str) -> Result<Vec<u8>> {
     let client = reqwest::Client::new();
     let url = format!("{}/api/v0/cat?arg={}", ipfs_url, ipfs_path);
@@ -252,6 +254,7 @@ async fn download_from_ipfs(ipfs_path: &str, ipfs_url: &str) -> Result<Vec<u8>> 
 }
 
 /// Resolve binary path to WASM bytecode (like Go implementation)
+#[allow(dead_code)]
 async fn resolve_binary(name: &str, ipfs_url: &str) -> Result<Vec<u8>> {
     use std::fs;
     use std::path::Path;

@@ -6,12 +6,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-pub mod config;
 pub mod executor;
 pub mod proc;
-pub mod runtime;
 
-pub use executor::{run_cell, Command, WetwareBehaviour};
+pub use executor::Command;
 pub use proc::{Config, Proc, ServiceInfo};
 
 /// Trait for loading bytecode from various sources (IPFS, filesystem, etc.)
