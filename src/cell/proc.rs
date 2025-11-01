@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::io::Write;
 use wasmtime::component::{Component, Instance, Linker, ResourceTable};
 use wasmtime::{Config as WasmConfig, Engine, Store};
 use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
@@ -32,8 +31,6 @@ pub struct Config {
     pub args: Vec<String>,
     /// Whether to enable cell debug info
     pub wasm_debug: bool,
-    /// Error writer for stderr
-    pub err_writer: Option<Box<dyn Write + Send + Sync>>,
 }
 
 impl Default for Config {
@@ -49,7 +46,6 @@ impl Config {
             env: Vec::new(),
             args: Vec::new(),
             wasm_debug: false,
-            err_writer: None,
         }
     }
 
@@ -70,12 +66,6 @@ impl Config {
         self.args = args;
         self
     }
-
-    /// Set error writer
-    pub fn with_err_writer(mut self, writer: Box<dyn Write + Send + Sync>) -> Self {
-        self.err_writer = Some(writer);
-        self
-    }
 }
 
 /// Cell process that encapsulates a WASM instance and its configuration.
@@ -84,18 +74,24 @@ impl Config {
 /// This enables concurrent execution of multiple services.
 pub struct Proc {
     /// Process configuration
+    #[allow(dead_code)]
     pub config: Config,
     /// Service metadata
+    #[allow(dead_code)]
     pub service_info: ServiceInfo,
     // /// Compiled cell module
     // pub module: Module,
     /// Cell runtime instance
+    #[allow(dead_code)]
     pub instance: Instance,
     /// Cell runtime store
+    #[allow(dead_code)]
     pub store: Store<ComponentRunStates>,
     /// Host-side stdin handle for communication
+    #[allow(dead_code)]
     pub host_stdin: tokio::io::DuplexStream,
     /// Host-side stdout handle for communication
+    #[allow(dead_code)]
     pub host_stdout: tokio::io::DuplexStream,
 }
 
@@ -103,12 +99,16 @@ pub struct Proc {
 #[derive(Debug, Clone)]
 pub struct ServiceInfo {
     /// Service path (e.g., "/ww/0.1.0/echo")
+    #[allow(dead_code)]
     pub service_path: String,
     /// Version (e.g., "0.1.0")
+    #[allow(dead_code)]
     pub version: String,
     /// Service name (e.g., "echo")
+    #[allow(dead_code)]
     pub service_name: String,
     /// Protocol used for this service
+    #[allow(dead_code)]
     pub protocol: String,
 }
 

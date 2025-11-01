@@ -7,6 +7,7 @@ edition = "2021"
 libp2p = { version = "0.56.0", features = ["tokio", "tcp", "noise", "yamux", "macros", "kad", "identify", "rsa", "request-response"] }
 multiaddr = "0.18.2"
 anyhow = "1.0"
+async-trait = "0.1"
 tokio = { version = "1.47.1", features = ["full"] }
 reqwest = { version = "0.12.23", features = ["json"] }
 base64 = "0.22.1"

@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use clap::{Parser, Subcommand};
-use ww::{cli::Command, config};
+use ww::{cli::Command, config, loaders};
 
 #[derive(Parser)]
 #[command(name = "ww")]
@@ -60,10 +60,19 @@ impl Commands {
                 port,
                 loglvl,
             } => {
+                // Create chain of loaders: try IpfsFSLoader first, then LocalFSLoader
+                use ww::net::ipfs;
+                let ipfs_url = ipfs.unwrap_or_else(|| ipfs::get_ipfs_url());
+                let loader = Box::new(loaders::ChainLoader::new(vec![
+                    Box::new(loaders::IpfsFSLoader::new(ipfs_url.clone())),
+                    Box::new(loaders::LocalFSLoader),
+                ]));
+
                 Command {
                     binary,
                     args,
-                    ipfs,
+                    loader,
+                    ipfs: Some(ipfs_url),
                     env,
                     wasm_debug,
                     port,
