@@ -3,8 +3,8 @@ use futures::StreamExt;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{identity, Multiaddr, SwarmBuilder};
 use std::time::Duration;
-use tracing::{debug, info, warn};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tracing::{debug, info, warn};
 
 use super::{Config, Loader, Proc, ServiceInfo};
 use crate::net::boot;
@@ -98,7 +98,7 @@ async fn run_wasm(
     // Extract host-side I/O streams for terminal bridging
     let mut host_stdin = proc.host_stdin;
     let mut host_stdout = proc.host_stdout;
-    
+
     // Keep store and instance for polling completion
     let mut store = proc.store;
     let _instance = proc.instance;
@@ -106,7 +106,7 @@ async fn run_wasm(
     // Run with libp2p host
     let root_dir = std::env::current_dir()?;
     let ipfs_url = ipfs.unwrap_or_else(crate::net::ipfs::get_ipfs_url);
-    
+
     // Spawn terminal I/O bridging tasks
     let stdin_task = tokio::spawn(async move {
         let mut terminal_stdin = io::stdin();
@@ -124,20 +124,16 @@ async fn run_wasm(
 
     // Keep store alive while waiting for guest to complete
     let _store_guard = store;
-    
+
     // Wait for stdout to finish, which indicates the guest has completed execution
     stdout_task.await??;
-    
+
     info!("WASM guest execution completed");
     Ok(())
 }
 
 /// Run the cell asynchronously with libp2p networking
-async fn run_cell_async(
-    port: u16,
-    root_dir: std::path::PathBuf,
-    ipfs_url: String,
-) -> Result<()> {
+async fn run_cell_async(port: u16, root_dir: std::path::PathBuf, ipfs_url: String) -> Result<()> {
     let keypair = identity::Keypair::generate_ed25519();
     let peer_id = keypair.public().to_peer_id();
 
