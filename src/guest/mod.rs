@@ -150,7 +150,7 @@ mod imp {
     }
 
     fn map_stream_error<E: std::fmt::Debug>(err: E) -> io::Error {
-        io::Error::new(io::ErrorKind::Other, format!("{err:?}"))
+        io::Error::other(format!("{err:?}"))
     }
 }
 

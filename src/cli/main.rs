@@ -62,7 +62,7 @@ impl Commands {
             } => {
                 // Create chain of loaders: try IpfsFSLoader first, then LocalFSLoader
                 use ww::net::ipfs;
-                let ipfs_url = ipfs.unwrap_or_else(|| ipfs::get_ipfs_url());
+                let ipfs_url = ipfs.unwrap_or_else(ipfs::get_ipfs_url);
                 let loader = Box::new(loaders::ChainLoader::new(vec![
                     Box::new(loaders::IpfsFSLoader::new(ipfs_url.clone())),
                     Box::new(loaders::LocalFSLoader),

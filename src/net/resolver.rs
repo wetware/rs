@@ -118,7 +118,7 @@ impl ServiceResolver {
             .join("ww")
             .join(version)
             .join("public")
-            .join(format!("{}.wasm", service_path));
+            .join(format!("{service_path}.wasm"));
 
         debug!(wasm_path = %wasm_path.display(), "Resolving local WASM file");
 
@@ -148,7 +148,7 @@ impl ServiceResolver {
         debug!(root_hash = %root_hash, service_path = %service_path, "Resolving IPFS service");
 
         // Check cache first
-        let cache_key = format!("{}:{}", root_hash, service_path);
+        let cache_key = format!("{root_hash}:{service_path}");
         if let Some(content) = self.ipfs_cache.get(&cache_key) {
             debug!(cache_key = %cache_key, "Using cached IPFS content");
             return Ok(content.clone());
@@ -214,7 +214,7 @@ impl ServiceResolver {
                             self.get_ipfs_directory_structure(public_hash).await?;
 
                         // Look for the service file
-                        let service_file = format!("{}.wasm", service_path);
+                        let service_file = format!("{service_path}.wasm");
                         if let Some(file_hash) = public_structure.get(&service_file) {
                             return self.fetch_ipfs_content(file_hash).await;
                         }
@@ -326,7 +326,7 @@ impl ServiceResolver {
 
     /// Get the protocol string for a given version
     pub fn get_protocol(&self, version: &str) -> String {
-        format!("/ww/{}/", version)
+        format!("/ww/{version}/")
     }
 
     /// Parse a protocol string to extract version and service path

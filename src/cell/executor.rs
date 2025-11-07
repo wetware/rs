@@ -71,7 +71,7 @@ async fn run_wasm(
     let bytecode = loader
         .load(&binary)
         .await
-        .with_context(|| format!("Failed to resolve binary: {}", binary))?;
+        .with_context(|| format!("Failed to resolve binary: {binary}"))?;
 
     // Create process configuration
     let mut config = Config::new().with_wasm_debug(wasm_debug).with_args(args);
@@ -92,7 +92,7 @@ async fn run_wasm(
     // Create cell process
     let proc = Proc::new_with_duplex_pipes(config, &bytecode, service_info)
         .await
-        .with_context(|| format!("Failed to create cell process from binary: {}", binary))?;
+        .with_context(|| format!("Failed to create cell process from binary: {binary}"))?;
 
     // Run with libp2p host
     let root_dir = std::env::current_dir()?;
@@ -132,7 +132,7 @@ async fn run_cell_async(
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
-    let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{}", port).parse()?;
+    let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
     swarm.listen_on(listen_addr)?;
 
     info!(peer_id = %peer_id, port = port, "Cell process started");
@@ -236,12 +236,12 @@ fn is_ipfs_path(path: &str) -> bool {
 #[allow(dead_code)]
 async fn download_from_ipfs(ipfs_path: &str, ipfs_url: &str) -> Result<Vec<u8>> {
     let client = reqwest::Client::new();
-    let url = format!("{}/api/v0/cat?arg={}", ipfs_url, ipfs_path);
+    let url = format!("{ipfs_url}/api/v0/cat?arg={ipfs_path}");
     let response = client
         .post(&url)
         .send()
         .await
-        .with_context(|| format!("Failed to connect to IPFS node at {}", ipfs_url))?;
+        .with_context(|| format!("Failed to connect to IPFS node at {ipfs_url}"))?;
 
     if !response.status().is_success() {
         return Err(anyhow::anyhow!(
@@ -267,12 +267,12 @@ async fn resolve_binary(name: &str, ipfs_url: &str) -> Result<Vec<u8>> {
 
     // Check if it's an absolute path
     if Path::new(name).is_absolute() {
-        return fs::read(name).with_context(|| format!("Failed to read file: {}", name));
+        return fs::read(name).with_context(|| format!("Failed to read file: {name}"));
     }
 
     // Check if it's a relative path (starts with . or /)
     if name.starts_with('.') || name.starts_with('/') {
-        return fs::read(name).with_context(|| format!("Failed to read file: {}", name));
+        return fs::read(name).with_context(|| format!("Failed to read file: {name}"));
     }
 
     // Check if it's in $PATH
@@ -282,14 +282,14 @@ async fn resolve_binary(name: &str, ipfs_url: &str) -> Result<Vec<u8>> {
             let path_str = path_str.trim();
             if !path_str.is_empty() {
                 return fs::read(path_str)
-                    .with_context(|| format!("Failed to read resolved binary: {}", path_str));
+                    .with_context(|| format!("Failed to read resolved binary: {path_str}"));
             }
         }
     }
 
     // Try as a relative path in current directory
     if Path::new(name).exists() {
-        return fs::read(name).with_context(|| format!("Failed to read file: {}", name));
+        return fs::read(name).with_context(|| format!("Failed to read file: {name}"));
     }
 
     Err(anyhow::anyhow!("Binary not found: {}", name))

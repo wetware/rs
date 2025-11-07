@@ -32,12 +32,13 @@ impl Loader for IpfsFSLoader {
 
         // Download from IPFS via HTTP API
         let client = reqwest::Client::new();
-        let url = format!("{}/api/v0/cat?arg={}", self.ipfs_url, path);
+        let ipfs_url = &self.ipfs_url;
+        let url = format!("{ipfs_url}/api/v0/cat?arg={path}");
         let response = client
             .post(&url)
             .send()
             .await
-            .with_context(|| format!("Failed to connect to IPFS node at {}", self.ipfs_url))?;
+            .with_context(|| format!("Failed to connect to IPFS node at {ipfs_url}"))?;
 
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
@@ -68,12 +69,12 @@ impl Loader for LocalFSLoader {
 
         // Check if it's an absolute path
         if Path::new(name).is_absolute() {
-            return fs::read(name).with_context(|| format!("Failed to read file: {}", name));
+            return fs::read(name).with_context(|| format!("Failed to read file: {name}"));
         }
 
         // Check if it's a relative path (starts with . or /)
         if name.starts_with('.') || name.starts_with('/') {
-            return fs::read(name).with_context(|| format!("Failed to read file: {}", name));
+            return fs::read(name).with_context(|| format!("Failed to read file: {name}"));
         }
 
         // Check if it's in $PATH
@@ -83,14 +84,14 @@ impl Loader for LocalFSLoader {
                 let path_str = path_str.trim();
                 if !path_str.is_empty() {
                     return fs::read(path_str)
-                        .with_context(|| format!("Failed to read resolved binary: {}", path_str));
+                        .with_context(|| format!("Failed to read resolved binary: {path_str}"));
                 }
             }
         }
 
         // Try as a relative path in current directory
         if Path::new(name).exists() {
-            return fs::read(name).with_context(|| format!("Failed to read file: {}", name));
+            return fs::read(name).with_context(|| format!("Failed to read file: {name}"));
         }
 
         Err(anyhow::anyhow!("Binary not found: {}", name))
@@ -120,7 +121,7 @@ impl Loader for ChainLoader {
             match loader.load(path).await {
                 Ok(data) => return Ok(data),
                 Err(e) => {
-                    errors.push(format!("Loader {}: {}", i, e));
+                    errors.push(format!("Loader {i}: {e}"));
                 }
             }
         }
