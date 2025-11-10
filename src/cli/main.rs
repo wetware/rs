@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use clap::{Parser, Subcommand};
-use ww::{cell::executor::Command, config, loaders};
+use ww::{cell::executor, config, loaders};
 
 #[derive(Parser)]
 #[command(name = "ww")]
@@ -65,7 +65,7 @@ impl Commands {
                     Box::new(loaders::LocalFSLoader),
                 ]));
 
-                Command {
+                executor::Command {
                     binary,
                     args,
                     loader,
@@ -78,6 +78,7 @@ impl Commands {
                 .run()
                 .await
             }
+            _ => unreachable!(),
         }
     }
 }
