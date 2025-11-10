@@ -78,7 +78,6 @@ impl Commands {
                 .run()
                 .await
             }
-            _ => unreachable!(),
         }
     }
 }
