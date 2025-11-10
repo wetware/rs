@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 
 /// Boot peer discovery and DHT bootstrap configuration
 pub struct BootConfig {
-    /// Root directory containing `/ww/` versions
+    /// Root directory for configuration files
     pub root: PathBuf,
     /// IPFS bootstrap peers (standard IPFS public nodes)
     pub ipfs_bootstrap_peers: Vec<Multiaddr>,
@@ -46,23 +46,19 @@ impl BootConfig {
         ]
     }
 
-    /// Get the path to the boot peers directory for a given version
-    pub fn get_boot_peers_dir(&self, version: &str) -> PathBuf {
-        self.root
-            .join("ww")
-            .join(version)
-            .join("boot")
-            .join("peers")
+    /// Get the path to the boot peers directory
+    pub fn get_boot_peers_dir(&self) -> PathBuf {
+        self.root.join("boot").join("peers")
     }
 
-    /// Load boot peers from filesystem for a specific version
-    pub fn load_boot_peers(&self, version: &str) -> Result<HashMap<PeerId, Vec<Multiaddr>>> {
-        let boot_peers_dir = self.get_boot_peers_dir(version);
+    /// Load boot peers from filesystem
+    pub fn load_boot_peers(&self) -> Result<HashMap<PeerId, Vec<Multiaddr>>> {
+        let boot_peers_dir = self.get_boot_peers_dir();
 
-        debug!(boot_peers_dir = %boot_peers_dir.display(), version = %version, "Loading boot peers");
+        debug!(boot_peers_dir = %boot_peers_dir.display(), "Loading boot peers");
 
         if !boot_peers_dir.exists() {
-            info!(version = %version, "No boot peers directory found");
+            info!("No boot peers directory found");
             return Ok(HashMap::new());
         }
 
@@ -105,7 +101,7 @@ impl BootConfig {
             }
         }
 
-        info!(version = %version, peer_count = boot_peers.len(), "Loaded boot peers");
+        info!(peer_count = boot_peers.len(), "Loaded boot peers");
         Ok(boot_peers)
     }
 
@@ -142,20 +138,20 @@ impl BootConfig {
         Ok(None)
     }
 
-    /// Get all boot peers (IPFS + version-specific)
-    pub fn get_all_boot_peers(&self, version: &str) -> Result<Vec<Multiaddr>> {
+    /// Get all boot peers (IPFS + filesystem)
+    pub fn get_all_boot_peers(&self) -> Result<Vec<Multiaddr>> {
         let mut all_peers = Vec::new();
 
         // Add IPFS bootstrap peers
         all_peers.extend(self.ipfs_bootstrap_peers.clone());
 
-        // Add version-specific boot peers
-        let version_peers = self.load_boot_peers(version)?;
-        for multiaddrs in version_peers.values() {
+        // Add filesystem boot peers
+        let filesystem_peers = self.load_boot_peers()?;
+        for multiaddrs in filesystem_peers.values() {
             all_peers.extend(multiaddrs.clone());
         }
 
-        info!(version = %version, total_peers = all_peers.len(), "Collected all boot peers");
+        info!(total_peers = all_peers.len(), "Collected all boot peers");
         Ok(all_peers)
     }
 }
@@ -220,10 +216,9 @@ mod tests {
     fn test_boot_peer_directory_parsing() {
         let temp_dir = TempDir::new().unwrap();
         let config = BootConfig::new(temp_dir.path().to_path_buf());
-        let version = "0.1.0";
 
         // Create boot peers directory
-        let peers_dir = config.get_boot_peers_dir(version);
+        let peers_dir = config.get_boot_peers_dir();
         fs::create_dir_all(&peers_dir).unwrap();
 
         // Create peer files with valid peer IDs
@@ -238,8 +233,8 @@ mod tests {
         )
         .unwrap();
 
-        let multiaddrs = config.get_all_boot_peers(version).unwrap();
-        // Should include IPFS bootstrap peers (6) + version-specific peers (3) = 9 total
+        let multiaddrs = config.get_all_boot_peers().unwrap();
+        // Should include IPFS bootstrap peers (6) + filesystem peers (3) = 9 total
         assert_eq!(multiaddrs.len(), 9);
 
         // Verify specific multiaddrs are present
@@ -253,15 +248,14 @@ mod tests {
     fn test_boot_peer_file_parsing() {
         let temp_dir = TempDir::new().unwrap();
         let config = BootConfig::new(temp_dir.path().to_path_buf());
-        let version = "0.1.0";
 
         // Create boot peers file (not directory)
-        let peers_file = config.get_boot_peers_dir(version);
+        let peers_file = config.get_boot_peers_dir();
         fs::create_dir_all(peers_file.parent().unwrap()).unwrap();
         fs::write(&peers_file, "/ip4/127.0.0.1/tcp/4001/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN\n/ip4/127.0.0.1/tcp/4002/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa\n").unwrap();
 
-        let multiaddrs = config.get_all_boot_peers(version).unwrap();
-        // Should include IPFS bootstrap peers (6) + version-specific peers (2) = 8 total
+        let multiaddrs = config.get_all_boot_peers().unwrap();
+        // Should include IPFS bootstrap peers (6) + filesystem peers (2) = 8 total
         assert_eq!(multiaddrs.len(), 8);
 
         // Verify specific multiaddrs are present
@@ -280,10 +274,9 @@ mod tests {
     fn test_boot_peer_ids_extraction() {
         let temp_dir = TempDir::new().unwrap();
         let config = BootConfig::new(temp_dir.path().to_path_buf());
-        let version = "0.1.0";
 
         // Create boot peers directory
-        let peers_dir = config.get_boot_peers_dir(version);
+        let peers_dir = config.get_boot_peers_dir();
         fs::create_dir_all(&peers_dir).unwrap();
 
         // Create peer files with valid peer IDs
@@ -300,7 +293,7 @@ mod tests {
         fs::write(peers_dir.join("invalid-peer"), "/ip4/127.0.0.1/tcp/4003").unwrap();
 
         // Test directory-based peer ID extraction (from filenames)
-        let boot_peers = config.load_boot_peers(version).unwrap();
+        let boot_peers = config.load_boot_peers().unwrap();
         assert_eq!(boot_peers.len(), 2); // Only valid peer IDs
 
         // Verify peer IDs are correct
@@ -318,10 +311,9 @@ mod tests {
     fn test_missing_boot_peers() {
         let temp_dir = TempDir::new().unwrap();
         let config = BootConfig::new(temp_dir.path().to_path_buf());
-        let version = "0.1.0";
 
         // Test with non-existent boot peers directory
-        let multiaddrs = config.get_all_boot_peers(version).unwrap();
+        let multiaddrs = config.get_all_boot_peers().unwrap();
         assert_eq!(multiaddrs.len(), 6); // Only IPFS bootstrap peers
     }
 

@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use clap::{Parser, Subcommand};
-use ww::{cli::Command, config, loaders};
+use ww::{cell::executor, config, loaders};
 
 #[derive(Parser)]
 #[command(name = "ww")]
@@ -24,10 +24,9 @@ enum Commands {
         /// Arguments to pass to the binary
         args: Vec<String>,
 
-        /// IPFS node HTTP API endpoint (e.g., http://127.0.0.1:5001)
-        /// If not provided, uses WW_IPFS environment variable or defaults to http://localhost:5001
-        #[arg(long)]
-        ipfs: Option<String>,
+        /// IPFS node HTTP API endpoint
+        #[arg(long, default_value = "http://localhost:5001")]
+        ipfs: String,
 
         /// Environment variables to set for the process (e.g., DEBUG=1,LOG_LEVEL=info)
         #[arg(long, value_delimiter = ',')]
@@ -61,18 +60,16 @@ impl Commands {
                 loglvl,
             } => {
                 // Create chain of loaders: try IpfsFSLoader first, then LocalFSLoader
-                use ww::net::ipfs;
-                let ipfs_url = ipfs.unwrap_or_else(ipfs::get_ipfs_url);
                 let loader = Box::new(loaders::ChainLoader::new(vec![
-                    Box::new(loaders::IpfsFSLoader::new(ipfs_url.clone())),
+                    Box::new(loaders::IpfsFSLoader::new(ipfs.clone())),
                     Box::new(loaders::LocalFSLoader),
                 ]));
 
-                Command {
+                executor::Command {
                     binary,
                     args,
                     loader,
-                    ipfs: Some(ipfs_url),
+                    ipfs,
                     env,
                     wasm_debug,
                     port,
