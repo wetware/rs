@@ -137,6 +137,6 @@ impl Loader for ChainLoader {
 ///
 /// This centralizes IPFS path validation similar to Go's `path.NewPath(str)`.
 /// Returns true if the path starts with a valid IPFS namespace prefix.
-fn is_ipfs_path(path: &str) -> bool {
+pub fn is_ipfs_path(path: &str) -> bool {
     path.starts_with("/ipfs/") || path.starts_with("/ipns/") || path.starts_with("/ipld/")
 }
