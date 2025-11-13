@@ -5,12 +5,20 @@ use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
 use wasmtime_wasi::p2::add_to_linker_async;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
+#[cfg(not(target_arch = "wasm32"))]
+use capnp::capability::Client;
+#[cfg(not(target_arch = "wasm32"))]
+use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
+
+use super::Loader;
+
 pub const BUFFER_SIZE: usize = 1024;
 
 // Required for WASI IO to work.
 pub struct ComponentRunStates {
     pub wasi_ctx: WasiCtx,
     pub resource_table: ResourceTable,
+    pub loader: Option<Box<dyn Loader>>,
 }
 
 // Required for WASI IO to work.
@@ -23,24 +31,15 @@ impl WasiView for ComponentRunStates {
     }
 }
 
-/// Configuration for cell process creation
-pub struct Config {
-    /// Environment variables for the cell process
-    pub env: Vec<String>,
-    /// Command line arguments for the cell process
-    pub args: Vec<String>,
-    /// Whether to enable cell debug info
-    pub wasm_debug: bool,
+/// Builder for constructing a Proc configuration
+pub struct Builder {
+    env: Vec<String>,
+    args: Vec<String>,
+    wasm_debug: bool,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Config {
-    /// Create a new process configuration
+impl Builder {
+    /// Create a new Proc builder
     pub fn new() -> Self {
         Self {
             env: Vec::new(),
@@ -66,6 +65,31 @@ impl Config {
         self.args = args;
         self
     }
+
+    /// Build the Proc configuration
+    pub fn build(self) -> ProcConfig {
+        ProcConfig {
+            env: self.env,
+            args: self.args,
+            wasm_debug: self.wasm_debug,
+        }
+    }
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Configuration for cell process creation
+pub struct ProcConfig {
+    /// Environment variables for the cell process
+    pub env: Vec<String>,
+    /// Command line arguments for the cell process
+    pub args: Vec<String>,
+    /// Whether to enable cell debug info
+    pub wasm_debug: bool,
 }
 
 /// Cell process that encapsulates a WASM instance and its configuration.
@@ -73,9 +97,6 @@ impl Config {
 /// Designed for per-stream instantiation - each incoming stream gets its own Proc instance.
 /// This enables concurrent execution of multiple services.
 pub struct Proc {
-    /// Process configuration
-    #[allow(dead_code)]
-    pub config: Config,
     /// Service metadata
     #[allow(dead_code)]
     pub service_info: ServiceInfo,
@@ -118,9 +139,10 @@ impl Proc {
     /// Returns the Proc instance with service metadata and host-side handles.
     /// The WASM instance gets the other end of the pipes.
     pub async fn new_with_duplex_pipes(
-        config: Config,
+        config: ProcConfig,
         bytecode: &[u8],
         service_info: ServiceInfo,
+        loader: Option<Box<dyn Loader>>,
     ) -> Result<Self> {
         // Create duplex pipes for bidirectional communication
         let (host_stdin, wasm_stdin) = tokio::io::duplex(BUFFER_SIZE);
@@ -134,6 +156,11 @@ impl Proc {
         let engine = Engine::new(&wasm_config)?;
         let mut linker = Linker::new(&engine);
         add_to_linker_async(&mut linker)?;
+        
+        // Add loader host function if loader is provided
+        if loader.is_some() {
+            add_loader_to_linker(&mut linker)?;
+        }
 
         // Prepare environment variables as key-value pairs
         let envs: Vec<(&str, &str)> = config
@@ -153,6 +180,7 @@ impl Proc {
         let state = ComponentRunStates {
             wasi_ctx: wasi,
             resource_table: ResourceTable::new(),
+            loader,
         };
         let mut store = Store::new(&engine, state);
 
@@ -161,7 +189,6 @@ impl Proc {
         let instance = linker.instantiate_async(&mut store, &component).await?;
 
         Ok(Self {
-            config,
             service_info,
             // module,
             instance,
@@ -170,6 +197,72 @@ impl Proc {
             host_stdout,
         })
     }
+
+    /// Create a host-side RPC system using the duplex streams
+    ///
+    /// This sets up a Cap'n Proto RPC system on the host side that communicates
+    /// with the guest over the duplex streams. The bootstrap capability is provided
+    /// to the guest when it calls `bootstrap()`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn create_host_rpc_system(
+        host_stdin: tokio::io::DuplexStream,
+        host_stdout: tokio::io::DuplexStream,
+        bootstrap: impl Into<Client>,
+    ) -> RpcSystem<rpc_twoparty_capnp::Side> {
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+        use tokio_util::compat::TokioAsyncWriteCompatExt;
+
+        // Convert tokio streams to futures-compatible streams
+        let read = host_stdin.compat();
+        let write = host_stdout.compat_write();
+
+        let network = twoparty::VatNetwork::new(
+            read,
+            write,
+            rpc_twoparty_capnp::Side::Server,
+            Default::default(),
+        );
+
+        RpcSystem::new(Box::new(network), Some(bootstrap.into()))
+    }
+}
+
+/// Add the loader host function to the Wasmtime linker
+///
+/// This exports a host function that allows WASM guests to call back into
+/// the host to load bytecode from various sources (IPFS, filesystem, etc.).
+///
+/// Note: This requires a WIT interface definition. For now, this is a
+/// placeholder that can be implemented once the WIT interface is defined.
+fn add_loader_to_linker<T>(_linker: &mut Linker<T>) -> Result<()> {
+    // TODO: Implement using WIT interface
+    // The WIT interface would look something like:
+    // 
+    // package wetware:loader;
+    // 
+    // interface loader {
+    //   load: func(path: string) -> result<list<u8>, string>;
+    // }
+    //
+    // world wetware {
+    //   import loader: self.loader;
+    // }
+    //
+    // Then we'd use wit-bindgen to generate bindings and implement:
+    // linker.root().func_wrap_async("wetware:loader/loader", "load", |mut store, (path,): (String,)| async move {
+    //     let state = store.data_mut();
+    //     if let Some(ref loader) = state.loader {
+    //         match loader.load(&path).await {
+    //             Ok(data) => Ok((data,)),
+    //             Err(e) => Err(e.to_string()),
+    //         }
+    //     } else {
+    //         Err("Loader not available".to_string())
+    //     }
+    // })?;
+    
+    // For now, this is a no-op placeholder
+    Ok(())
 }
 
 #[cfg(test)]
@@ -177,19 +270,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_proc_config_creation() {
-        let config = Config::new();
+    fn test_proc_builder_creation() {
+        let config = Builder::new().build();
         assert!(!config.wasm_debug);
         assert!(config.env.is_empty());
         assert!(config.args.is_empty());
     }
 
     #[test]
-    fn test_proc_config_builder() {
-        let config = Config::new()
+    fn test_proc_builder() {
+        let config = Builder::new()
             .with_wasm_debug(true)
             .with_env(vec!["TEST=1".to_string()])
-            .with_args(vec!["arg1".to_string()]);
+            .with_args(vec!["arg1".to_string()])
+            .build();
 
         assert!(config.wasm_debug);
         assert_eq!(config.env.len(), 1);
