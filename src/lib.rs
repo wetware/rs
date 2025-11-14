@@ -12,18 +12,19 @@ pub mod ipfs;
 pub mod loaders;
 
 // Modules available for both host and guest
-pub mod default_kernel;
 pub mod config;
+pub mod default_kernel;
 pub mod guest;
 
 // Cap'n Proto generated code
 // Note: For guests, the schema needs to be compiled separately or included differently
 // For now, we'll make it available to both host and guest
 pub mod router_capnp {
+    extern crate capnp;
     include!(concat!(env!("OUT_DIR"), "/src/schema/router_capnp.rs"));
 }
 
 // Re-export commonly used types for convenience
 #[cfg(not(target_arch = "wasm32"))]
-pub use cell::{Loader, ProcBuilder, Proc};
+pub use cell::{Loader, Proc, ProcBuilder};
 pub use config::LogLevel;
