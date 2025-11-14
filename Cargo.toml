@@ -6,50 +6,78 @@ edition = "2021"
 [dependencies]
 # Dependencies needed for both host and guest
 multiaddr = "0.18.2"
-anyhow = "1.0"
-async-trait = "0.1"
-tokio = { version = "1.47.1", features = ["full"] }
+anyhow = "1.0.100"
+async-trait = "0.1.89"
+tokio = { version = "1.48.0", features = ["full"] }
 base64 = "0.22.1"
-serde_json = "1.0"
-serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.145"
+serde = { version = "1.0.228", features = ["derive"] }
 futures = "0.3"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4.42", features = ["serde"] }
 tracing = "0.1"
-tokio-util = { version = "0.7", features = ["codec", "compat"] }
-bytes = "1.0"
-rand = "0.8"
+tokio-util = { version = "0.7.17", features = ["codec", "compat"] }
+bytes = "1.11.0"
+rand = "0.9.2"
 base58 = "0.2"
-libc = "0.2"
-tempfile = "3.0"
+libc = "0.2.177"
+tempfile = "3.23.0"
 
 # Host-only dependencies (not needed for WASM guests)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libp2p = { version = "0.56.0", features = ["tokio", "tcp", "noise", "yamux", "macros", "kad", "identify", "rsa", "request-response"] }
 ipfs-api-backend-hyper = "0.6.0"
-reqwest = { version = "0.12.23", features = ["json"] }
-clap = { version = "4.0", features = ["derive"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-nix = { version = "0.27", features = ["socket"] }
-wasmtime = "37.0"
-wasmtime-wasi = "37.0"
-capnp-rpc = "0.21"
-capnp = "0.21"
+reqwest = { version = "0.12.24", features = ["json"] }
+clap = { version = "4.5.51", features = ["derive"] }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+nix = { version = "0.30.1", features = ["socket"] }
+wasmtime = "38.0.4"
+wasmtime-wasi = "38.0.4"
+capnp-rpc = "0.23"
+capnp = "0.23"
 
 [build-dependencies]
-capnpc = "0.21.2"
+capnpc = "0.23.2"
 
 [features]
 default = []
-guest = ["capnp-rpc", "wasip2"]
+guest = ["capnp-rpc", "capnp", "wasip2"]
 
 [[bin]]
 name = "ww"
 path = "src/cli/main.rs"
 
 [dependencies.capnp-rpc]
-version = "0.21"
+version = "0.23.0"
+optional = true
+
+[dependencies.capnp]
+version = "0.23.0"
 optional = true
 
 [dependencies.wasip2]
 version = "1.0"
 optional = true
+
+# Patch libp2p-kad to fix QueryId generic parameter bug
+#
+# Issue: libp2p-kad 0.48.0 has a compilation bug in the bootstrap() method signature.
+# The method returns `Result<QueryId<QueryResult::Bootstrap>, NoKnownPeers>`, but
+# QueryId is defined as `pub struct QueryId(usize)` with no generic parameters.
+# This causes compilation errors:
+#   - error[E0573]: expected type, found variant `QueryResult::Bootstrap`
+#   - error[E0107]: struct takes 0 generic arguments but 1 generic argument was supplied
+#
+# Fix: The patch changes line 985 in behaviour.rs from:
+#   `Result<QueryId<QueryResult::Bootstrap>, NoKnownPeers>`
+# to:
+#   `Result<QueryId, NoKnownPeers>`
+#
+# When to remove: This patch can be removed once libp2p-kad releases a version
+# that fixes this bug (likely 0.48.1 or later). Check the libp2p-kad changelog
+# or GitHub issues for when this is fixed upstream.
+#
+# Related: libp2p 0.56.0 depends on libp2p-kad 0.48.0, so we cannot avoid this
+# patch without downgrading the entire libp2p ecosystem, which would require
+# cascading dependency downgrades.
+[patch.crates-io]
+libp2p-kad = { path = ".patches/libp2p-kad-0.48.0" }
