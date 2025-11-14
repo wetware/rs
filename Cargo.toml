@@ -24,7 +24,7 @@ tempfile = "3.23.0"
 
 # Host-only dependencies (not needed for WASM guests)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-libp2p = { version = "0.56.0", features = ["tokio", "tcp", "noise", "yamux", "macros", "kad", "identify", "rsa", "request-response"] }
+libp2p = { version = "0.55.0", features = ["tokio", "tcp", "noise", "yamux", "macros", "kad", "identify", "rsa", "request-response"] }
 ipfs-api-backend-hyper = "0.6.0"
 reqwest = { version = "0.12.24", features = ["json"] }
 clap = { version = "4.5.51", features = ["derive"] }
@@ -58,26 +58,3 @@ optional = true
 version = "1.0"
 optional = true
 
-# Patch libp2p-kad to fix QueryId generic parameter bug
-#
-# Issue: libp2p-kad 0.48.0 has a compilation bug in the bootstrap() method signature.
-# The method returns `Result<QueryId<QueryResult::Bootstrap>, NoKnownPeers>`, but
-# QueryId is defined as `pub struct QueryId(usize)` with no generic parameters.
-# This causes compilation errors:
-#   - error[E0573]: expected type, found variant `QueryResult::Bootstrap`
-#   - error[E0107]: struct takes 0 generic arguments but 1 generic argument was supplied
-#
-# Fix: The patch changes line 985 in behaviour.rs from:
-#   `Result<QueryId<QueryResult::Bootstrap>, NoKnownPeers>`
-# to:
-#   `Result<QueryId, NoKnownPeers>`
-#
-# When to remove: This patch can be removed once libp2p-kad releases a version
-# that fixes this bug (likely 0.48.1 or later). Check the libp2p-kad changelog
-# or GitHub issues for when this is fixed upstream.
-#
-# Related: libp2p 0.56.0 depends on libp2p-kad 0.48.0, so we cannot avoid this
-# patch without downgrading the entire libp2p ecosystem, which would require
-# cascading dependency downgrades.
-[patch.crates-io]
-libp2p-kad = { path = ".patches/libp2p-kad-0.48.0" }
