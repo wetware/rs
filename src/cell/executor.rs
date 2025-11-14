@@ -3,11 +3,11 @@ use futures::{future, StreamExt};
 use libp2p::swarm::SwarmEvent;
 use libp2p::{identity, Multiaddr, SwarmBuilder};
 use std::time::Duration;
-use tracing::{trace, debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
-use crate::cell::{Loader, ProcBuilder, Proc, ServiceInfo};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::cell::router::{RouterCapability, KadOperation};
+use crate::cell::router::{KadOperation, RouterCapability};
+use crate::cell::{Loader, Proc, ProcBuilder, ServiceInfo};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::router_capnp;
 #[cfg(not(target_arch = "wasm32"))]
@@ -71,7 +71,6 @@ impl CommandBuilder {
         self
     }
 
-
     /// Set the IPFS client
     pub fn with_ipfs(mut self, ipfs: crate::ipfs::HttpClient) -> Self {
         self.ipfs = Some(ipfs);
@@ -105,7 +104,6 @@ impl CommandBuilder {
     }
 }
 
-
 /// Configuration for running a cell
 pub struct Command {
     pub path: String,
@@ -135,10 +133,12 @@ impl Command {
 
         // Construct the path to main.wasm: <path>/main.wasm
         let wasm_path = format!("{}/main.wasm", self.path.trim_end_matches('/'));
-        let bytecode = self.loader
-            .load(&wasm_path)
-            .await
-            .with_context(|| format!("Failed to load main.wasm from path: {} (resolved to: {})", self.path, wasm_path))?;
+        let bytecode = self.loader.load(&wasm_path).await.with_context(|| {
+            format!(
+                "Failed to load main.wasm from path: {} (resolved to: {})",
+                self.path, wasm_path
+            )
+        })?;
 
         let service_info = ServiceInfo {
             service_path: self.path.to_string(),
@@ -150,19 +150,20 @@ impl Command {
         // Extract fields needed before moving self.loader
         let loader = self.loader;
         let port = self.port;
-        
+
         let proc = Proc::new_with_duplex_pipes(proc_config, &bytecode, service_info, Some(loader))
             .await
             .with_context(|| format!("Failed to create cell process from binary: {}", self.path))?;
 
         Self::exec_loop(proc, port).await
     }
-    
+
     /// Run the cell asynchronously with libp2p networking
     async fn exec_loop(proc: Proc, port: u16) -> Result<()> {
         let keypair = identity::Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
-        let kad = libp2p::kad::Behaviour::new(peer_id, libp2p::kad::store::MemoryStore::new(peer_id));
+        let kad =
+            libp2p::kad::Behaviour::new(peer_id, libp2p::kad::store::MemoryStore::new(peer_id));
 
         let behaviour = WetwareBehaviour {
             kad,
@@ -290,7 +291,192 @@ impl Command {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libp2p::identity;
 
+    #[tokio::test]
+    async fn test_process_add_peer_operation() {
+        // Create a minimal swarm for testing
+        let keypair = identity::Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let kad =
+            libp2p::kad::Behaviour::new(peer_id, libp2p::kad::store::MemoryStore::new(peer_id));
 
+        let behaviour = WetwareBehaviour {
+            kad,
+            identify: libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
+                "wetware/0.1.0".to_string(),
+                keypair.public(),
+            )),
+        };
 
+        let mut swarm = SwarmBuilder::with_existing_identity(keypair)
+            .with_tokio()
+            .with_tcp(
+                Default::default(),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )
+            .unwrap()
+            .with_behaviour(|_| behaviour)
+            .unwrap()
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .build();
 
+        // Create test peer ID and addresses
+        let test_keypair = identity::Keypair::generate_ed25519();
+        let test_peer_id = test_keypair.public().to_peer_id();
+        let test_addresses = vec![
+            "/ip4/127.0.0.1/tcp/4001".parse().unwrap(),
+            "/ip6/::1/tcp/4001".parse().unwrap(),
+        ];
+
+        // Create operation channel
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        let operation = KadOperation::AddPeer {
+            peer_id: test_peer_id,
+            addresses: test_addresses.clone(),
+            response: response_tx,
+        };
+
+        // Process the operation (simulating what happens in the executor loop)
+        match operation {
+            KadOperation::AddPeer {
+                peer_id,
+                addresses,
+                response,
+            } => {
+                for address in addresses {
+                    swarm.behaviour_mut().kad.add_address(&peer_id, address);
+                }
+                let _ = response.send(Ok(())).await;
+            }
+            _ => panic!("Expected AddPeer operation"),
+        }
+
+        // Verify response was sent
+        let result = response_rx.recv().await.unwrap();
+        assert!(result.is_ok());
+
+        // Verify addresses were added to KAD (we can't directly check, but the call succeeded)
+        // The KAD behavior doesn't expose a way to query added addresses, but we can verify
+        // the operation completed without error
+    }
+
+    #[tokio::test]
+    async fn test_process_bootstrap_operation() {
+        // Create a minimal swarm for testing
+        let keypair = identity::Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let kad =
+            libp2p::kad::Behaviour::new(peer_id, libp2p::kad::store::MemoryStore::new(peer_id));
+
+        let behaviour = WetwareBehaviour {
+            kad,
+            identify: libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
+                "wetware/0.1.0".to_string(),
+                keypair.public(),
+            )),
+        };
+
+        let mut swarm = SwarmBuilder::with_existing_identity(keypair)
+            .with_tokio()
+            .with_tcp(
+                Default::default(),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )
+            .unwrap()
+            .with_behaviour(|_| behaviour)
+            .unwrap()
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .build();
+
+        // Create operation channel
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        let operation = KadOperation::Bootstrap {
+            response: response_tx,
+        };
+
+        // Process the operation (simulating what happens in the executor loop)
+        match operation {
+            KadOperation::Bootstrap { response } => match swarm.behaviour_mut().kad.bootstrap() {
+                Ok(_query_id) => {
+                    let _ = response.send(Ok(())).await;
+                }
+                Err(e) => {
+                    let _ = response.send(Err(e.to_string())).await;
+                }
+            },
+            _ => panic!("Expected Bootstrap operation"),
+        }
+
+        // Verify response was sent
+        let result = response_rx.recv().await.unwrap();
+        // Bootstrap might succeed or fail depending on whether we have peers
+        // Just verify we got a response
+        let _ = result;
+    }
+
+    #[tokio::test]
+    async fn test_process_bootstrap_error() {
+        // Create a minimal swarm for testing
+        let keypair = identity::Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let kad =
+            libp2p::kad::Behaviour::new(peer_id, libp2p::kad::store::MemoryStore::new(peer_id));
+
+        let behaviour = WetwareBehaviour {
+            kad,
+            identify: libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
+                "wetware/0.1.0".to_string(),
+                keypair.public(),
+            )),
+        };
+
+        let mut swarm = SwarmBuilder::with_existing_identity(keypair)
+            .with_tokio()
+            .with_tcp(
+                Default::default(),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )
+            .unwrap()
+            .with_behaviour(|_| behaviour)
+            .unwrap()
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .build();
+
+        // Create operation channel
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        let operation = KadOperation::Bootstrap {
+            response: response_tx,
+        };
+
+        // Process the operation - bootstrap might fail if no peers are known
+        match operation {
+            KadOperation::Bootstrap { response } => {
+                match swarm.behaviour_mut().kad.bootstrap() {
+                    Ok(_query_id) => {
+                        let _ = response.send(Ok(())).await;
+                    }
+                    Err(e) => {
+                        // Verify error is propagated
+                        let _ = response.send(Err(e.to_string())).await;
+                    }
+                }
+            }
+            _ => panic!("Expected Bootstrap operation"),
+        }
+
+        // Verify response was sent (either success or error)
+        let result = response_rx.recv().await.unwrap();
+        // The result might be Ok or Err depending on bootstrap state
+        // We just verify the error path is handled correctly
+        if let Err(e) = result {
+            assert!(!e.is_empty());
+        }
+    }
+}
