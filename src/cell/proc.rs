@@ -156,7 +156,7 @@ impl Proc {
         let engine = Engine::new(&wasm_config)?;
         let mut linker = Linker::new(&engine);
         add_to_linker_async(&mut linker)?;
-        
+
         // Add loader host function if loader is provided
         if loader.is_some() {
             add_loader_to_linker(&mut linker)?;
@@ -237,9 +237,9 @@ impl Proc {
 fn add_loader_to_linker<T>(_linker: &mut Linker<T>) -> Result<()> {
     // TODO: Implement using WIT interface
     // The WIT interface would look something like:
-    // 
+    //
     // package wetware:loader;
-    // 
+    //
     // interface loader {
     //   load: func(path: string) -> result<list<u8>, string>;
     // }
@@ -260,7 +260,7 @@ fn add_loader_to_linker<T>(_linker: &mut Linker<T>) -> Result<()> {
     //         Err("Loader not available".to_string())
     //     }
     // })?;
-    
+
     // For now, this is a no-op placeholder
     Ok(())
 }

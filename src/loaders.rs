@@ -7,94 +7,118 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 
 use crate::cell::Loader;
+use crate::ipfs::{is_ipfs_path, UnixFS};
 
 /// IPFS filesystem loader for IPFS-based bytecode resolution
 ///
 /// Handles IPFS paths: `/ipfs/...`, `/ipns/...`, `/ipld/...`
-pub struct IpfsFSLoader {
-    ipfs_url: String,
+pub struct IpfsUnixfsLoader {
+    unixfs: UnixFS,
 }
 
-impl IpfsFSLoader {
-    /// Create a new IPFS filesystem loader with the given IPFS HTTP API endpoint
-    pub fn new(ipfs_url: String) -> Self {
-        Self { ipfs_url }
+impl IpfsUnixfsLoader {
+    /// Create a new IPFS filesystem loader with the given IPFS client
+    pub fn new(ipfs: crate::ipfs::HttpClient) -> Self {
+        Self {
+            unixfs: ipfs.unixfs(),
+        }
     }
 }
 
 #[async_trait]
-impl Loader for IpfsFSLoader {
+impl Loader for IpfsUnixfsLoader {
     async fn load(&self, path: &str) -> Result<Vec<u8>> {
         // Only handle IPFS-family paths
         if !is_ipfs_path(path) {
             return Err(anyhow::anyhow!("Not an IPFS path: {}", path));
         }
 
-        // Download from IPFS via HTTP API
-        let client = reqwest::Client::new();
-        let ipfs_url = &self.ipfs_url;
-        let url = format!("{ipfs_url}/api/v0/cat?arg={path}");
-        let response = client
-            .post(&url)
-            .send()
-            .await
-            .with_context(|| format!("Failed to connect to IPFS node at {ipfs_url}"))?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "Failed to download from IPFS: {}",
-                response.status()
-            ));
-        }
-
-        Ok(response.bytes().await?.to_vec())
+        // Download from IPFS using the Unixfs API
+        self.unixfs.get(path).await
     }
 }
 
 /// Local filesystem loader for resolving bytecode from local files
 ///
-/// Handles:
-/// - Absolute paths
-/// - Relative paths (`.` prefix)
-/// - `$PATH` lookup (via `which` command)
-/// - Current directory
-pub struct LocalFSLoader;
+/// Mounts a host filesystem path under a guest path prefix, with all access
+/// jailed to the host path to prevent directory traversal.
+pub struct LocalFSLoader {
+    /// Guest path prefix (e.g., "/app")
+    prefix: String,
+    /// Host filesystem path to jail to (e.g., "/home/user/app")
+    jail_path: String,
+}
+
+impl LocalFSLoader {
+    /// Create a new local filesystem loader
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - Guest path prefix that this loader handles (e.g., "/app")
+    /// * `jail_path` - Host filesystem path to jail all access to
+    pub fn new(prefix: String, jail_path: String) -> Self {
+        Self { prefix, jail_path }
+    }
+}
 
 #[async_trait]
 impl Loader for LocalFSLoader {
     async fn load(&self, name: &str) -> Result<Vec<u8>> {
         use std::fs;
         use std::path::Path;
-        use std::process::Command;
 
-        // Check if it's an absolute path
-        if Path::new(name).is_absolute() {
-            return fs::read(name).with_context(|| format!("Failed to read file: {name}"));
+        // Check if the path starts with our prefix
+        let path = if name.starts_with(&self.prefix) {
+            // Strip the prefix and get the relative path
+            name.strip_prefix(&self.prefix)
+                .unwrap_or(name)
+                .trim_start_matches('/')
+        } else {
+            // Path doesn't match this loader's prefix
+            return Err(anyhow::anyhow!(
+                "Path does not match prefix: {} (expected prefix: {})",
+                name,
+                self.prefix
+            ));
+        };
+
+        let jail_path = Path::new(&self.jail_path);
+
+        // Normalize the requested path by removing leading slashes and dots
+        let normalized_path = path.trim_start_matches('/').trim_start_matches("./");
+
+        // Build the jailed path
+        let mut jailed_path = jail_path.to_path_buf();
+        jailed_path.push(normalized_path);
+
+        // Normalize the path (resolves . and .. components)
+        let jailed_path = jailed_path.canonicalize().unwrap_or_else(|_| jailed_path);
+
+        // Verify the path is still within the jail
+        let canonical_jail = jail_path
+            .canonicalize()
+            .unwrap_or_else(|_| jail_path.to_path_buf());
+
+        if !jailed_path.starts_with(&canonical_jail) {
+            return Err(anyhow::anyhow!(
+                "Path would escape jail directory: {} (jail: {})",
+                name,
+                self.jail_path
+            ));
         }
 
-        // Check if it's a relative path (starts with . or /)
-        if name.starts_with('.') || name.starts_with('/') {
-            return fs::read(name).with_context(|| format!("Failed to read file: {name}"));
+        // Try reading from the jailed path
+        if jailed_path.exists() && jailed_path.is_file() {
+            return fs::read(&jailed_path)
+                .with_context(|| format!("Failed to read file: {}", jailed_path.display()));
         }
 
-        // Check if it's in $PATH
-        if let Ok(resolved_path) = Command::new("which").arg(name).output() {
-            if resolved_path.status.success() {
-                let path_str = String::from_utf8(resolved_path.stdout)?;
-                let path_str = path_str.trim();
-                if !path_str.is_empty() {
-                    return fs::read(path_str)
-                        .with_context(|| format!("Failed to read resolved binary: {path_str}"));
-                }
-            }
-        }
-
-        // Try as a relative path in current directory
-        if Path::new(name).exists() {
-            return fs::read(name).with_context(|| format!("Failed to read file: {name}"));
-        }
-
-        Err(anyhow::anyhow!("Binary not found: {}", name))
+        Err(anyhow::anyhow!(
+            "Binary not found: {} (mounted at {} -> {})",
+            name,
+            self.prefix,
+            self.jail_path
+        ))
     }
 }
 
@@ -131,12 +155,4 @@ impl Loader for ChainLoader {
             errors.join("; ")
         ))
     }
-}
-
-/// Check if a path is a valid IPFS-family path (IPFS, IPNS, or IPLD)
-///
-/// This centralizes IPFS path validation similar to Go's `path.NewPath(str)`.
-/// Returns true if the path starts with a valid IPFS namespace prefix.
-pub fn is_ipfs_path(path: &str) -> bool {
-    path.starts_with("/ipfs/") || path.starts_with("/ipns/") || path.starts_with("/ipld/")
 }
