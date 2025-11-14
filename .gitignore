@@ -16,3 +16,10 @@ Cargo.lock
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
+
+# Example-specific build artifacts
+examples/*/target/
+examples/*/Cargo.lock
+examples/*/*.cid
+# Patched dependencies (should not be committed)
+examples/*/.patches/
