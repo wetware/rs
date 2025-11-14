@@ -1,13 +1,13 @@
 use std::env;
-use std::path::Path;
 use std::fs;
+use std::path::Path;
 
 fn main() {
     // Compile Cap'n Proto schemas
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let schema_dir = Path::new(&manifest_dir).join("src").join("schema");
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
-    
+
     if schema_dir.exists() {
         capnpc::CompilerCommand::new()
             .file(schema_dir.join("router.capnp"))
@@ -15,10 +15,10 @@ fn main() {
             .run()
             .expect("compiling schema");
     }
-    
+
     let target_dir = Path::new(&manifest_dir).join("target");
     let cid_file = target_dir.join("default-config.cid");
-    
+
     // Read CID from the generated .cid file in target directory
     let cid_value = if cid_file.exists() {
         match fs::read_to_string(&cid_file) {
@@ -43,7 +43,7 @@ fn main() {
         let _ = fs::create_dir_all(&target_dir);
         String::new()
     };
-    
+
     // Set the environment variable for use in Rust code
     println!("cargo:rustc-env=DEFAULT_KERNEL_CID={}", cid_value);
     println!("cargo:rerun-if-changed={}", cid_file.display());
