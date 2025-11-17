@@ -458,6 +458,9 @@ impl Proc {
         wasm_config.async_support(true);
         let engine = Engine::new(&wasm_config)?;
         let mut linker = Linker::new(&engine);
+        // Allow duplicate definitions so `WetwareHost` bindings (which also export
+        // `wasi:io/*@0.2.6`) can coexist with the baseline WASI Preview 2 imports.
+        linker.allow_shadowing(true);
         add_to_linker_async(&mut linker)?;
         WetwareHost::add_to_linker::<_, ComponentRunStates>(&mut linker, |state| state)?;
 
