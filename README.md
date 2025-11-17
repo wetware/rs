@@ -94,6 +94,12 @@ The `run` subcommand supports the following options:
 
 WASM examples are built automatically when you run `make` or `make examples`. The `default-kernel` example is included by default.
 
+#### Dedicated RPC transport for PID0
+
+The host now exposes a `wetware:rpc/channel` interface to PID0. During start-up the default kernel requests this optional handle;
+when provided it wires Cap'n Proto RPC over the returned `wasi:io/streams` pair instead of hijacking `stdin/stdout`. If the host
+doesn't expose the interface the guest automatically falls back to the legacy stdio transport, so older runtimes keep working.
+
 **Quick start**:
 ```bash
 # Build everything (including examples)
@@ -117,13 +123,22 @@ To test `ww run` with the `default-kernel` example:
    
    The example Makefile handles building and ensuring the output is named `main.wasm`.
 
-2. **Run with local filesystem mount**:
+2. **Run directly from the local filesystem** (the path must contain `main.wasm`):
+   ```bash
+   cargo run -- run examples/default-kernel/target/wasm32-wasip2/release
+   ```
+   
+   When the supplied path exists on disk, `ww` automatically mounts it, so no `--volume`
+   flag is required for the common case of running local artifacts.
+
+3. **Run with an explicit volume mount** (useful when you need to map to a different
+   guest path):
    ```bash
    cargo run -- run /app \
      --volume examples/default-kernel/target/wasm32-wasip2/release:/app
    ```
 
-3. **Export to IPFS and run from IPFS** (optional):
+4. **Export to IPFS and run from IPFS** (optional):
    ```bash
    # Build and export to IPFS
    make example-default-kernel-ipfs

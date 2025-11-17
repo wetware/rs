@@ -1,6 +1,7 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 
 use clap::{Parser, Subcommand};
+use std::path::Path;
 use ww::ipfs::HttpClient as IPFS;
 use ww::{cell, config, loaders};
 
@@ -84,7 +85,7 @@ impl Commands {
     async fn run(self) -> Result<()> {
         match self {
             Commands::Run {
-                path,
+                mut path,
                 args,
                 ipfs: ipfs_url,
                 env,
@@ -104,6 +105,17 @@ impl Commands {
                 for vol in volume {
                     let (host_path, guest_path) = parse_volume_mount(&vol)?;
                     loader_chain.push(Box::new(loaders::LocalFSLoader::new(guest_path, host_path)));
+                }
+                // If the requested path exists locally, automatically mount it
+                if Path::new(&path).exists() {
+                    let canonical_path = std::fs::canonicalize(&path)
+                        .with_context(|| format!("Failed to canonicalize local path '{path}'"))?;
+                    let canonical_str = canonical_path.to_string_lossy().to_string();
+                    loader_chain.push(Box::new(loaders::LocalFSLoader::new(
+                        canonical_str.clone(),
+                        canonical_str.clone(),
+                    )));
+                    path = canonical_str;
                 }
                 // finally, build the chain loader
                 let loader = Box::new(loaders::ChainLoader::new(loader_chain));
