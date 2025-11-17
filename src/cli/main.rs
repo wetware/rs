@@ -20,14 +20,13 @@ fn parse_volume_mount(vol: &str) -> Result<(String, String)> {
             // hostpath:guestpath:ro or hostpath:guestpath:rw
             let mode = parts[2];
             if mode != "ro" && mode != "rw" {
-                return Err(anyhow!("Invalid volume mount mode: {} (expected 'ro' or 'rw')", mode));
+                return Err(anyhow!("Invalid volume mount mode: {mode} (expected 'ro' or 'rw')"));
             }
             // TODO: Store mode for future read-only enforcement
             Ok((parts[0].to_string(), parts[1].to_string()))
         }
         _ => Err(anyhow!(
-            "Invalid volume mount format: {} (expected 'hostpath:guestpath' or 'hostpath:guestpath:ro')",
-            vol
+            "Invalid volume mount format: {vol} (expected 'hostpath:guestpath' or 'hostpath:guestpath:ro')",
         )),
     }
 }

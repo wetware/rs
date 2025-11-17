@@ -27,7 +27,7 @@ fn main() {
                 if cid.is_empty() {
                     String::new()
                 } else {
-                    format!("/ipfs/{}", cid)
+                    format!("/ipfs/{cid}")
                 }
             }
             Err(_) => {
@@ -45,6 +45,6 @@ fn main() {
     };
 
     // Set the environment variable for use in Rust code
-    println!("cargo:rustc-env=DEFAULT_KERNEL_CID={}", cid_value);
+    println!("cargo:rustc-env=DEFAULT_KERNEL_CID={cid_value}");
     println!("cargo:rerun-if-changed={}", cid_file.display());
 }

@@ -97,7 +97,7 @@ impl UnixFS {
         response
             .bytes()
             .await
-            .with_context(|| format!("Failed to read IPFS content from {}", path))
+            .with_context(|| format!("Failed to read IPFS content from {path}"))
             .map(|b| b.to_vec())
     }
 }

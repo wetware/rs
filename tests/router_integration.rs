@@ -51,23 +51,21 @@ async fn test_router_to_executor_flow() {
     let test_keypair = identity::Keypair::generate_ed25519();
     let test_peer_id = test_keypair.public().to_peer_id();
     let test_peer_id_str = test_peer_id.to_string();
-    let test_addresses = vec!["/ip4/127.0.0.1/tcp/4001", "/ip6/::1/tcp/4001"];
+    let test_addresses = ["/ip4/127.0.0.1/tcp/4001", "/ip6/::1/tcp/4001"];
 
     // Spawn executor task that processes operations
     let executor_task = tokio::spawn(async move {
         while let Some(op) = operation_rx.recv().await {
-            match op {
-                KadOperation::AddPeer {
-                    peer_id,
-                    addresses,
-                    response,
-                } => {
-                    for address in addresses {
-                        swarm.behaviour_mut().kad.add_address(&peer_id, address);
-                    }
-                    let _ = response.send(Ok(())).await;
+            if let KadOperation::AddPeer {
+                peer_id,
+                addresses,
+                response,
+            } = op
+            {
+                for address in addresses {
+                    swarm.behaviour_mut().kad.add_address(&peer_id, address);
                 }
-                _ => {}
+                let _ = response.send(Ok(())).await;
             }
         }
     });
@@ -130,18 +128,15 @@ async fn test_bootstrap_flow() {
     // Spawn executor task that processes operations
     let executor_task = tokio::spawn(async move {
         while let Some(op) = operation_rx.recv().await {
-            match op {
-                KadOperation::Bootstrap { response } => {
-                    match swarm.behaviour_mut().kad.bootstrap() {
-                        Ok(_) => {
-                            let _ = response.send(Ok(())).await;
-                        }
-                        Err(e) => {
-                            let _ = response.send(Err(e.to_string())).await;
-                        }
+            if let KadOperation::Bootstrap { response } = op {
+                match swarm.behaviour_mut().kad.bootstrap() {
+                    Ok(_) => {
+                        let _ = response.send(Ok(())).await;
+                    }
+                    Err(e) => {
+                        let _ = response.send(Err(e.to_string())).await;
                     }
                 }
-                _ => {}
             }
         }
     });

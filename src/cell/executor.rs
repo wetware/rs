@@ -195,7 +195,7 @@ impl Command {
         let host_stdout = proc.host_stdout;
         let rpc_system = Proc::create_host_rpc_system(host_stdin, host_stdout, bootstrap_client);
 
-        let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{}", port).parse()?;
+        let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
         swarm.listen_on(listen_addr)?;
 
         info!(peer_id = %peer_id, port = port, "Cell process started");

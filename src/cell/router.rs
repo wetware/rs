@@ -58,8 +58,7 @@ impl router_capnp::router::Server for RouterCapability {
             Ok(id) => id,
             Err(e) => {
                 return ::capnp::capability::Promise::err(capnp::Error::failed(format!(
-                    "Invalid peer ID '{}': {}",
-                    peer_id_str, e
+                    "Invalid peer ID '{peer_id_str}': {e}"
                 )));
             }
         };
@@ -73,8 +72,7 @@ impl router_capnp::router::Server for RouterCapability {
                 Ok(addr) => addr,
                 Err(e) => {
                     return ::capnp::capability::Promise::err(capnp::Error::failed(format!(
-                        "Invalid address '{}': {}",
-                        addr_str, e
+                        "Invalid address '{addr_str}': {e}"
                     )));
                 }
             };
@@ -95,14 +93,14 @@ impl router_capnp::router::Server for RouterCapability {
                     response: response_tx,
                 })
                 .await
-                .map_err(|e| capnp::Error::failed(format!("Failed to send operation: {}", e)))?;
+                .map_err(|e| capnp::Error::failed(format!("Failed to send operation: {e}")))?;
 
             // Wait for response
             response_rx
                 .recv()
                 .await
                 .ok_or_else(|| capnp::Error::failed("No response from executor".to_string()))?
-                .map_err(|e| capnp::Error::failed(e))?;
+                .map_err(capnp::Error::failed)?;
 
             results.get().set_created(true);
             Ok(())
@@ -130,14 +128,14 @@ impl router_capnp::router::Server for RouterCapability {
                     response: response_tx,
                 })
                 .await
-                .map_err(|e| capnp::Error::failed(format!("Failed to send operation: {}", e)))?;
+                .map_err(|e| capnp::Error::failed(format!("Failed to send operation: {e}")))?;
 
             // Wait for response
             response_rx
                 .recv()
                 .await
                 .ok_or_else(|| capnp::Error::failed("No response from executor".to_string()))?
-                .map_err(|e| capnp::Error::failed(e))?;
+                .map_err(capnp::Error::failed)?;
 
             results.get().set_success(true);
             Ok(())
@@ -167,7 +165,7 @@ mod tests {
         let keypair = libp2p::identity::Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
         let peer_id_str = peer_id.to_string();
-        let addresses = vec!["/ip4/127.0.0.1/tcp/4001", "/ip6/::1/tcp/4001"];
+        let addresses = ["/ip4/127.0.0.1/tcp/4001", "/ip6/::1/tcp/4001"];
 
         // Spawn task to process the operation
         let operation_task = tokio::spawn(async move {
@@ -209,7 +207,7 @@ mod tests {
 
         // Create invalid peer ID
         let peer_id = "invalid-peer-id";
-        let addresses = vec!["/ip4/127.0.0.1/tcp/4001"];
+        let addresses = ["/ip4/127.0.0.1/tcp/4001"];
 
         // Make request via client - should return error
         let mut request = router_client.add_peer_request();
@@ -236,7 +234,7 @@ mod tests {
         let keypair = libp2p::identity::Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
         let peer_id_str = peer_id.to_string();
-        let addresses = vec!["/invalid/address"];
+        let addresses = ["/invalid/address"];
 
         // Make request via client - should return error
         let mut request = router_client.add_peer_request();
@@ -292,7 +290,7 @@ mod tests {
         let keypair = libp2p::identity::Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
         let peer_id_str = peer_id.to_string();
-        let addresses = vec!["/ip4/127.0.0.1/tcp/4001"];
+        let addresses = ["/ip4/127.0.0.1/tcp/4001"];
 
         // Drop the operation_tx to simulate channel failure
         // Note: We can't easily drop it here since it's inside the client

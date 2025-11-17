@@ -30,7 +30,7 @@ impl Loader for IpfsUnixfsLoader {
     async fn load(&self, path: &str) -> Result<Vec<u8>> {
         // Only handle IPFS-family paths
         if !is_ipfs_path(path) {
-            return Err(anyhow::anyhow!("Not an IPFS path: {}", path));
+            return Err(anyhow::anyhow!("Not an IPFS path: {path}"));
         }
 
         // Download from IPFS using the Unixfs API
@@ -92,7 +92,7 @@ impl Loader for LocalFSLoader {
         jailed_path.push(normalized_path);
 
         // Normalize the path (resolves . and .. components)
-        let jailed_path = jailed_path.canonicalize().unwrap_or_else(|_| jailed_path);
+        let jailed_path = jailed_path.canonicalize().unwrap_or(jailed_path);
 
         // Verify the path is still within the jail
         let canonical_jail = jail_path
