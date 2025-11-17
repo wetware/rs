@@ -11,6 +11,13 @@ The `default-kernel` example is a minimal implementation that:
 - Runs a simple event loop to drive the RPC system
 - Serves as the default kernel configuration for `ww run`
 
+## RPC Transport Selection
+
+PID0 now requests the optional `wetware:rpc/channel` interface from the host. When the host exposes this interface (via the
+new linker wiring in `ww`) the kernel binds Cap'n Proto RPC to the returned `wasi:io/streams` handles, leaving stdio free for
+logs. On older hosts, or when the channel is intentionally omitted, the kernel transparently falls back to its original
+stdio-based transport.
+
 ## Building
 
 ### Prerequisites

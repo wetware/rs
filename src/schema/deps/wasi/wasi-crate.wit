@@ -1,0 +1,5 @@
+package rust:wasi;
+
+world bindings {}
+
+

@@ -66,11 +66,31 @@ mod imp {
         init_with_side(rpc_twoparty_capnp::Side::Client)
     }
 
+    /// Initialize a Cap'n Proto RPC system using caller-provided streams.
+    ///
+    /// This enables guests to bind RPC traffic to non-stdio transports that
+    /// are exposed through `wasi:io/streams`.
+    pub fn init_with_streams(
+        input: streams::InputStream,
+        output: streams::OutputStream,
+    ) -> RpcSystem<rpc_twoparty_capnp::Side> {
+        init_with_streams_and_side(rpc_twoparty_capnp::Side::Client, input, output)
+    }
+
     /// Same as `init`, but allows specifying the local VAT side explicitly.
     fn init_with_side(side: rpc_twoparty_capnp::Side) -> RpcSystem<rpc_twoparty_capnp::Side> {
-        let stdin = Wasip2Stdin::new(stdin::get_stdin());
-        let stdout = Wasip2Stdout::new(stdout::get_stdout());
+        let stdin_stream = stdin::get_stdin();
+        let stdout_stream = stdout::get_stdout();
+        init_with_streams_and_side(side, stdin_stream, stdout_stream)
+    }
 
+    fn init_with_streams_and_side(
+        side: rpc_twoparty_capnp::Side,
+        input: streams::InputStream,
+        output: streams::OutputStream,
+    ) -> RpcSystem<rpc_twoparty_capnp::Side> {
+        let stdin = Wasip2Stdin::new(input);
+        let stdout = Wasip2Stdout::new(output);
         let network = twoparty::VatNetwork::new(stdin, stdout, side, Default::default());
 
         RpcSystem::new(Box::new(network), None)

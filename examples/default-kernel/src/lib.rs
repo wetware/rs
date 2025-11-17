@@ -5,6 +5,19 @@
 
 #![feature(wasip2)]
 
+mod rpc_channel {
+    wit_bindgen::generate!({
+        path: ["../../src/schema"],
+        world: "wetware-host",
+        with: {
+            "wasi:io/error@0.2.6": wasip2::io::error,
+            "wasi:io/poll@0.2.6": wasip2::io::poll,
+            "wasi:io/streams@0.2.6": wasip2::io::streams,
+        },
+    });
+}
+
+use rpc_channel::wetware::rpc::channel as host_channel;
 use ww::guest::{self, rpc_twoparty_capnp, RpcSystem};
 use capnp::capability::{Client, FromClientHook};
 use futures::executor::LocalPool;
@@ -43,7 +56,7 @@ fn extract_peer_id(multiaddr: &str) -> Option<(&str, &str)> {
 #[no_mangle]
 pub extern "C" fn _start() {
     // Initialize RPC system over wasi:cli streams
-    let mut rpc_system: RpcSystem<rpc_twoparty_capnp::Side> = guest::init();
+    let mut rpc_system: RpcSystem<rpc_twoparty_capnp::Side> = init_rpc_system();
     let provider_client: Client = rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server);
 
     // Drive the RPC system on a single-threaded executor
@@ -93,6 +106,19 @@ pub extern "C" fn _start() {
         };
         let _ = join(ready(()), rpc).await;
     });
+}
+
+fn init_rpc_system() -> RpcSystem<rpc_twoparty_capnp::Side> {
+    if let Some((input, output)) = acquire_host_channel() {
+        guest::init_with_streams(input, output)
+    } else {
+        guest::init()
+    }
+}
+
+fn acquire_host_channel(
+) -> Option<(wasip2::io::streams::InputStream, wasip2::io::streams::OutputStream)> {
+    host_channel::get()
 }
 
 

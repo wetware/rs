@@ -1,0 +1,16 @@
+package wetware:rpc;
+
+interface channel {
+  use wasi:io/streams@0.2.6.{input-stream, output-stream};
+
+  /// Returns a dedicated RPC channel backed by host-provided streams.
+  ///
+  /// When unavailable the host returns `none` so guests can fall back
+  /// to stdio-based transport.
+  get: func() -> option<tuple<input-stream, output-stream>>;
+}
+
+world wetware-host {
+  import channel;
+}
+
