@@ -75,7 +75,8 @@ impl UnixFS {
     /// # }
     /// ```
     pub async fn get(&self, path: &str) -> Result<Vec<u8>> {
-        let url = format!("{}/api/v0/cat?arg={}", self.client.base_url, path);
+        let base_url = &self.client.base_url;
+        let url = format!("{base_url}/api/v0/cat?arg={path}");
         let response = self
             .client
             .http_client
@@ -83,14 +84,14 @@ impl UnixFS {
             .send()
             .await
             .with_context(|| {
-                format!("Failed to connect to IPFS node at {}", self.client.base_url)
+                let base_url = &self.client.base_url;
+                format!("Failed to connect to IPFS node at {base_url}")
             })?;
 
         if !response.status().is_success() {
+            let status = response.status();
             return Err(anyhow::anyhow!(
-                "Failed to retrieve file from IPFS: {} (path: {})",
-                response.status(),
-                path
+                "Failed to retrieve file from IPFS: {status} (path: {path})"
             ));
         }
 

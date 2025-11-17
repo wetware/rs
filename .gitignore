@@ -23,3 +23,6 @@ examples/*/Cargo.lock
 examples/*/*.cid
 # Patched dependencies (should not be committed)
 examples/*/.patches/
+
+# Local temporary state
+tmp/
