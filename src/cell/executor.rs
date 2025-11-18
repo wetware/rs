@@ -93,16 +93,17 @@ async fn run_wasm(
         .with_context(|| format!("Failed to create cell process from binary: {binary}"))?;
 
     // Run with libp2p host
-    let root_dir = std::env::current_dir()?;
-    run_cell_async(proc, port, root_dir, ipfs).await
+    // Default to current directory as boot path (can be overridden in future)
+    let boot_path = std::env::current_dir()?.to_string_lossy().to_string();
+    run_cell_async(proc, port, boot_path, ipfs).await
 }
 
 /// Run the cell asynchronously with libp2p networking
 async fn run_cell_async(
     _proc: Proc, // TODO: process management.
     port: u16,
-    root_dir: std::path::PathBuf,
-    _ipfs_url: String, // TODO: may be needed for future IPFS service resolution
+    boot_path: String,
+    ipfs_url: String,
 ) -> Result<()> {
     let keypair = identity::Keypair::generate_ed25519();
     let peer_id = keypair.public().to_peer_id();
@@ -135,10 +136,10 @@ async fn run_cell_async(
     info!(peer_id = %peer_id, port = port, "Cell process started");
 
     // Load boot configuration and bootstrap DHT
-    let boot_config = boot::BootConfig::new(root_dir);
+    let boot_config = boot::BootConfig::new(boot_path, ipfs_url.clone());
 
     // Get boot peers and connect to them
-    let boot_peers = boot_config.get_all_boot_peers()?;
+    let boot_peers = boot_config.get_all_boot_peers().await?;
     for multiaddr in boot_peers {
         debug!(multiaddr = %multiaddr, "Connecting to boot peer");
         if let Err(e) = swarm.dial(multiaddr) {
