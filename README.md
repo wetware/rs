@@ -96,9 +96,9 @@ WASM examples are built automatically when you run `make` or `make examples`. Th
 
 #### Dedicated RPC transport for PID0
 
-The host now exposes a `wetware:rpc/channel` interface to PID0. During start-up the default kernel requests this optional handle;
-when provided it wires Cap'n Proto RPC over the returned `wasi:io/streams` pair instead of hijacking `stdin/stdout`. If the host
-doesn't expose the interface the guest automatically falls back to the legacy stdio transport, so older runtimes keep working.
+The host now exposes a mandatory `wetware:rpc/channel` interface to PID0. During start-up the default kernel requests this handle
+and wires Cap'n Proto RPC over the returned `wasi:io/streams` transport instead of hijacking `stdin/stdout`. Stdio is no longer a
+valid Cap'n Proto transport; runtimes must supply the dedicated channel.
 
 **Quick start**:
 ```bash

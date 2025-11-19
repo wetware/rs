@@ -11,13 +11,6 @@ The `default-kernel` example is a minimal implementation that:
 - Runs a simple event loop to drive the RPC system
 - Serves as the default kernel configuration for `ww run`
 
-## RPC Transport Selection
-
-PID0 now requests the optional `wetware:rpc/channel` interface from the host. When the host exposes this interface (via the
-new linker wiring in `ww`) the kernel binds Cap'n Proto RPC to the returned `wasi:io/streams` handles, leaving stdio free for
-logs. On older hosts, or when the channel is intentionally omitted, the kernel transparently falls back to its original
-stdio-based transport.
-
 ## Building
 
 ### Prerequisites
@@ -101,8 +94,10 @@ The example consists of a single entry point in `src/lib.rs`:
 ```rust
 #[no_mangle]
 pub extern "C" fn _start() {
-    // Initialize RPC system over wasi:cli streams
-    let mut rpc_system: RpcSystem<rpc_twoparty_capnp::Side> = guest::init();
+    // Initialize RPC system over the dedicated wetware:rpc/channel transport.
+    let channel: DuplexStream =
+        host_channel::get().map(DuplexStream::from).expect("host must expose wetware:rpc/channel to PID0");
+    let mut rpc_system: RpcSystem<rpc_twoparty_capnp::Side> = guest::init_with_stream(channel);
     let _provider_client = rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server);
 
     // Drive the RPC system on a single-threaded executor
@@ -119,7 +114,8 @@ pub extern "C" fn _start() {
 
 ### Key Components
 
-- **`guest::init()`**: Initializes the Cap'n Proto RPC system using WASI CLI streams (stdin/stdout)
+- **`host_channel::get()`**: Requests the dedicated `wetware:rpc/channel` transport from the host
+- **`guest::init_with_stream()`**: Wires the host-provided duplex transport into a Cap'n Proto RPC system
 - **`rpc_system.bootstrap()`**: Creates a provider client for RPC communication
 - **`LocalPool`**: Single-threaded async executor to drive the RPC system
 - **`join(guest, rpc)`**: Runs both the guest logic and RPC system concurrently
