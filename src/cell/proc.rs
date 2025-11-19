@@ -1,8 +1,15 @@
 use anyhow::Result;
-use wasmtime::component::{Component, Instance, Linker, ResourceTable};
+use std::future::ready;
+use tokio::io::{empty, sink, AsyncRead, AsyncWrite, DuplexStream};
+use wasmtime::component::{Component, Instance, Linker, Resource, ResourceTable};
 use wasmtime::{Config as WasmConfig, Engine, Store};
 use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
-use wasmtime_wasi::p2::add_to_linker_async;
+use wasmtime_wasi::cli::{StdinStream as _, StdoutStream as _};
+use wasmtime_wasi::p2::{
+    add_to_linker_async,
+    bindings::io::{error as wasi_io_error, poll as wasi_io_poll, streams as wasi_io_streams},
+    DynInputStream, DynOutputStream, StreamResult,
+};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -14,11 +21,44 @@ use super::Loader;
 
 pub const BUFFER_SIZE: usize = 1024;
 
+pub type HostStdin = Box<dyn AsyncRead + Send + Sync + Unpin + 'static>;
+pub type HostStdout = Box<dyn AsyncWrite + Send + Sync + Unpin + 'static>;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod rpc_channel_bindings {
+    wasmtime::component::bindgen!({
+        path: ["src/schema"],
+        world: "wetware-host",
+        imports: { default: async },
+        with: {
+            "wasi:io/error": wasmtime_wasi::p2::bindings::io::error,
+            "wasi:io/poll": wasmtime_wasi::p2::bindings::io::poll,
+            "wasi:io/streams": wasmtime_wasi::p2::bindings::io::streams,
+        },
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+use self::rpc_channel_bindings::wetware::rpc::channel as rpc_channel_imports;
+#[cfg(not(target_arch = "wasm32"))]
+use self::rpc_channel_bindings::WetwareHost;
+
 // Required for WASI IO to work.
 pub struct ComponentRunStates {
     pub wasi_ctx: WasiCtx,
     pub resource_table: ResourceTable,
     pub loader: Option<Box<dyn Loader>>,
+    rpc_channel: RpcChannel,
+}
+
+impl wasmtime::component::HasData for ComponentRunStates {
+    type Data<'a> = &'a mut ComponentRunStates;
+}
+
+impl ComponentRunStates {
+    fn table(&mut self) -> &mut ResourceTable {
+        &mut self.resource_table
+    }
 }
 
 // Required for WASI IO to work.
@@ -27,6 +67,259 @@ impl WasiView for ComponentRunStates {
         WasiCtxView {
             ctx: &mut self.wasi_ctx,
             table: &mut self.resource_table,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl rpc_channel_imports::Host for ComponentRunStates {
+    fn get(
+        &mut self,
+    ) -> impl futures::Future<
+        Output = std::option::Option<(
+            wasmtime::component::Resource<Box<dyn wasmtime_wasi::p2::InputStream + 'static>>,
+            wasmtime::component::Resource<Box<dyn wasmtime_wasi::p2::OutputStream + 'static>>,
+        )>,
+    > + std::marker::Send {
+        ready(
+            self.rpc_channel
+                .take_streams(&mut self.resource_table)
+                .ok()
+                .flatten(),
+        )
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl wasi_io_streams::Host for ComponentRunStates {
+    fn convert_stream_error(
+        &mut self,
+        err: wasmtime_wasi::p2::StreamError,
+    ) -> anyhow::Result<wasi_io_streams::StreamError> {
+        // use wasi_io_streams::Host as _;
+        self.table().convert_stream_error(err)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl wasi_io_streams::HostOutputStream for ComponentRunStates {
+    async fn drop(
+        &mut self,
+        stream: Resource<wasi_io_streams::OutputStream>,
+    ) -> anyhow::Result<()> {
+        // use wasi_io_streams::HostOutputStream as _;
+        self.table().drop(stream).await
+    }
+
+    fn check_write(
+        &mut self,
+        stream: Resource<wasi_io_streams::OutputStream>,
+    ) -> StreamResult<u64> {
+        // use wasi_io_streams::HostOutputStream as _;
+        self.table().check_write(stream)
+    }
+
+    fn write(
+        &mut self,
+        stream: Resource<wasi_io_streams::OutputStream>,
+        bytes: Vec<u8>,
+    ) -> StreamResult<()> {
+        // use wasi_io_streams::HostOutputStream as _;
+        self.table().write(stream, bytes)
+    }
+
+    async fn blocking_write_and_flush(
+        &mut self,
+        stream: Resource<wasi_io_streams::OutputStream>,
+        bytes: Vec<u8>,
+    ) -> StreamResult<()> {
+        // use wasi_io_streams::HostOutputStream as _;
+        self.table().blocking_write_and_flush(stream, bytes).await
+    }
+
+    async fn blocking_write_zeroes_and_flush(
+        &mut self,
+        stream: Resource<wasi_io_streams::OutputStream>,
+        len: u64,
+    ) -> StreamResult<()> {
+        // use wasi_io_streams::HostOutputStream as _;
+        self.table()
+            .blocking_write_zeroes_and_flush(stream, len)
+            .await
+    }
+
+    fn subscribe(
+        &mut self,
+        stream: Resource<wasi_io_streams::OutputStream>,
+    ) -> anyhow::Result<Resource<wasi_io_streams::Pollable>> {
+        // use wasi_io_streams::HostOutputStream as _;
+        self.table().subscribe(stream)
+    }
+
+    fn write_zeroes(
+        &mut self,
+        stream: Resource<wasi_io_streams::OutputStream>,
+        len: u64,
+    ) -> StreamResult<()> {
+        // use wasi_io_streams::HostOutputStream as _;
+        self.table().write_zeroes(stream, len)
+    }
+
+    fn flush(&mut self, stream: Resource<wasi_io_streams::OutputStream>) -> StreamResult<()> {
+        // use wasi_io_streams::HostOutputStream as _;
+        self.table().flush(stream)
+    }
+
+    async fn blocking_flush(
+        &mut self,
+        stream: Resource<wasi_io_streams::OutputStream>,
+    ) -> StreamResult<()> {
+        // use wasi_io_streams::HostOutputStream as _;
+        self.table().blocking_flush(stream).await
+    }
+
+    fn splice(
+        &mut self,
+        dst: Resource<wasi_io_streams::OutputStream>,
+        src: Resource<wasi_io_streams::InputStream>,
+        len: u64,
+    ) -> StreamResult<u64> {
+        // use wasi_io_streams::HostOutputStream as _;
+        self.table().splice(dst, src, len)
+    }
+
+    async fn blocking_splice(
+        &mut self,
+        dst: Resource<wasi_io_streams::OutputStream>,
+        src: Resource<wasi_io_streams::InputStream>,
+        len: u64,
+    ) -> StreamResult<u64> {
+        // use wasi_io_streams::HostOutputStream as _;
+        self.table().blocking_splice(dst, src, len).await
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl wasi_io_streams::HostInputStream for ComponentRunStates {
+    async fn drop(&mut self, stream: Resource<wasi_io_streams::InputStream>) -> anyhow::Result<()> {
+        // use wasi_io_streams::HostInputStream as _;
+        self.table().drop(stream).await
+    }
+
+    fn read(
+        &mut self,
+        stream: Resource<wasi_io_streams::InputStream>,
+        len: u64,
+    ) -> StreamResult<Vec<u8>> {
+        // use wasi_io_streams::HostInputStream as _;
+        self.table().read(stream, len)
+    }
+
+    async fn blocking_read(
+        &mut self,
+        stream: Resource<wasi_io_streams::InputStream>,
+        len: u64,
+    ) -> StreamResult<Vec<u8>> {
+        // use wasi_io_streams::HostInputStream as _;
+        self.table().blocking_read(stream, len).await
+    }
+
+    fn skip(
+        &mut self,
+        stream: Resource<wasi_io_streams::InputStream>,
+        len: u64,
+    ) -> StreamResult<u64> {
+        // use wasi_io_streams::HostInputStream as _;
+        self.table().skip(stream, len)
+    }
+
+    async fn blocking_skip(
+        &mut self,
+        stream: Resource<wasi_io_streams::InputStream>,
+        len: u64,
+    ) -> StreamResult<u64> {
+        // use wasi_io_streams::HostInputStream as _;
+        self.table().blocking_skip(stream, len).await
+    }
+
+    fn subscribe(
+        &mut self,
+        stream: Resource<wasi_io_streams::InputStream>,
+    ) -> anyhow::Result<Resource<wasi_io_streams::Pollable>> {
+        // use wasi_io_streams::HostInputStream as _;
+        self.table().subscribe(stream)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl wasi_io_poll::Host for ComponentRunStates {
+    async fn poll(
+        &mut self,
+        pollables: Vec<Resource<wasi_io_poll::Pollable>>,
+    ) -> anyhow::Result<Vec<u32>> {
+        // use wasi_io_poll::Host as _;
+        self.table().poll(pollables).await
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl wasi_io_poll::HostPollable for ComponentRunStates {
+    async fn ready(&mut self, pollable: Resource<wasi_io_poll::Pollable>) -> anyhow::Result<bool> {
+        // use wasi_io_poll::HostPollable as _;
+        self.table().ready(pollable).await
+    }
+
+    async fn block(&mut self, pollable: Resource<wasi_io_poll::Pollable>) -> anyhow::Result<()> {
+        // use wasi_io_poll::HostPollable as _;
+        self.table().block(pollable).await
+    }
+
+    fn drop(&mut self, pollable: Resource<wasi_io_poll::Pollable>) -> anyhow::Result<()> {
+        // use wasi_io_poll::HostPollable as _;
+        self.table().drop(pollable)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl wasi_io_error::HostError for ComponentRunStates {
+    fn to_debug_string(&mut self, error: Resource<wasi_io_error::Error>) -> anyhow::Result<String> {
+        // use wasi_io_error::HostError as _;
+        self.table().to_debug_string(error)
+    }
+
+    fn drop(&mut self, error: Resource<wasi_io_error::Error>) -> anyhow::Result<()> {
+        // use wasi_io_error::HostError as _;
+        self.table().drop(error)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl wasi_io_error::Host for ComponentRunStates {}
+
+struct RpcChannel {
+    input: Option<DynInputStream>,
+    output: Option<DynOutputStream>,
+}
+
+impl RpcChannel {
+    fn new(input: DynInputStream, output: DynOutputStream) -> Self {
+        Self {
+            input: Some(input),
+            output: Some(output),
+        }
+    }
+
+    fn take_streams(
+        &mut self,
+        table: &mut ResourceTable,
+    ) -> anyhow::Result<Option<(Resource<DynInputStream>, Resource<DynOutputStream>)>> {
+        match (self.input.take(), self.output.take()) {
+            (Some(input), Some(output)) => {
+                let input_res = table.push(input)?;
+                let output_res = table.push(output)?;
+                Ok(Some((input_res, output_res)))
+            }
+            _ => Ok(None),
         }
     }
 }
@@ -108,12 +401,6 @@ pub struct Proc {
     /// Cell runtime store
     #[allow(dead_code)]
     pub store: Store<ComponentRunStates>,
-    /// Host-side stdin handle for communication
-    #[allow(dead_code)]
-    pub host_stdin: tokio::io::DuplexStream,
-    /// Host-side stdout handle for communication
-    #[allow(dead_code)]
-    pub host_stdout: tokio::io::DuplexStream,
 }
 
 /// Service metadata for tracking per-stream instances
@@ -134,28 +421,48 @@ pub struct ServiceInfo {
 }
 
 impl Proc {
-    /// Create a new WASM process with duplex pipes for bidirectional communication
-    ///
-    /// Returns the Proc instance with service metadata and host-side handles.
-    /// The WASM instance gets the other end of the pipes.
-    pub async fn new_with_duplex_pipes(
+    /// Create a new WASM process.
+    pub async fn new(
         config: ProcConfig,
         bytecode: &[u8],
         service_info: ServiceInfo,
         loader: Option<Box<dyn Loader>>,
-    ) -> Result<Self> {
-        // Create duplex pipes for bidirectional communication
-        let (host_stdin, wasm_stdin) = tokio::io::duplex(BUFFER_SIZE);
-        let (wasm_stdout, host_stdout) = tokio::io::duplex(BUFFER_SIZE);
+        stdin: Option<HostStdin>,
+        stdout: Option<HostStdout>,
+        stderr: Option<HostStdout>,
+    ) -> Result<(Self, DuplexStream)> {
+        let stdin_stream = match stdin {
+            Some(stream) => AsyncStdinStream::new(stream),
+            None => AsyncStdinStream::new(empty()),
+        };
+        let stdout_stream = match stdout {
+            Some(stream) => AsyncStdoutStream::new(BUFFER_SIZE, stream),
+            None => AsyncStdoutStream::new(BUFFER_SIZE, sink()),
+        };
+        let stderr_stream = match stderr {
+            Some(stream) => AsyncStdoutStream::new(BUFFER_SIZE, stream),
+            None => AsyncStdoutStream::new(BUFFER_SIZE, sink()),
+        };
 
-        let wasm_stdin_async = AsyncStdinStream::new(wasm_stdin);
-        let wasm_stdout_async = AsyncStdoutStream::new(BUFFER_SIZE, wasm_stdout);
+        let (rpc_guest_stream, rpc_host_stream) = tokio::io::duplex(BUFFER_SIZE);
+        let (rpc_guest_read, rpc_guest_write) = tokio::io::split(rpc_guest_stream);
+        let rpc_guest_in_async = AsyncStdinStream::new(rpc_guest_read);
+        let rpc_guest_out_async = AsyncStdoutStream::new(BUFFER_SIZE, rpc_guest_write);
+
+        let rpc_channel = RpcChannel::new(
+            rpc_guest_in_async.p2_stream(),
+            rpc_guest_out_async.p2_stream(),
+        );
 
         let mut wasm_config = WasmConfig::new();
         wasm_config.async_support(true);
         let engine = Engine::new(&wasm_config)?;
         let mut linker = Linker::new(&engine);
+        // Allow duplicate definitions so `WetwareHost` bindings (which also export
+        // `wasi:io/*@0.2.6`) can coexist with the baseline WASI Preview 2 imports.
+        linker.allow_shadowing(true);
         add_to_linker_async(&mut linker)?;
+        WetwareHost::add_to_linker::<_, ComponentRunStates>(&mut linker, |state| state)?;
 
         // Add loader host function if loader is provided
         if loader.is_some() {
@@ -171,8 +478,9 @@ impl Proc {
 
         // Wire the async stdio streams into WASI and inherit host args.
         let wasi = WasiCtx::builder()
-            .stdin(wasm_stdin_async)
-            .stdout(wasm_stdout_async)
+            .stdin(stdin_stream)
+            .stdout(stdout_stream)
+            .stderr(stderr_stream)
             .envs(&envs)
             .args(&config.args)
             .build();
@@ -181,6 +489,7 @@ impl Proc {
             wasi_ctx: wasi,
             resource_table: ResourceTable::new(),
             loader,
+            rpc_channel,
         };
         let mut store = Store::new(&engine, state);
 
@@ -188,14 +497,15 @@ impl Proc {
         let component = Component::from_binary(&engine, bytecode)?;
         let instance = linker.instantiate_async(&mut store, &component).await?;
 
-        Ok(Self {
-            service_info,
-            // module,
-            instance,
-            store,
-            host_stdin,
-            host_stdout,
-        })
+        Ok((
+            Self {
+                service_info,
+                // module,
+                instance,
+                store,
+            },
+            rpc_host_stream,
+        ))
     }
 
     /// Create a host-side RPC system using the duplex streams
@@ -205,16 +515,17 @@ impl Proc {
     /// to the guest when it calls `bootstrap()`.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn create_host_rpc_system(
-        host_stdin: tokio::io::DuplexStream,
-        host_stdout: tokio::io::DuplexStream,
+        rpc_stream: tokio::io::DuplexStream,
         bootstrap: impl Into<Client>,
     ) -> RpcSystem<rpc_twoparty_capnp::Side> {
         use tokio_util::compat::TokioAsyncReadCompatExt;
         use tokio_util::compat::TokioAsyncWriteCompatExt;
 
+        // Split the duplex stream so Cap'n Proto can own independent read/write halves.
+        let (read_half, write_half) = tokio::io::split(rpc_stream);
         // Convert tokio streams to futures-compatible streams
-        let read = host_stdin.compat();
-        let write = host_stdout.compat_write();
+        let read = read_half.compat();
+        let write = write_half.compat_write();
 
         let network = twoparty::VatNetwork::new(
             read,

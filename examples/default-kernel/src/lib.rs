@@ -5,7 +5,20 @@
 
 #![feature(wasip2)]
 
-use ww::guest::{self, rpc_twoparty_capnp, RpcSystem};
+mod rpc_channel {
+    wit_bindgen::generate!({
+        path: ["../../src/schema"],
+        world: "wetware-host",
+        with: {
+            "wasi:io/error@0.2.6": wasip2::io::error,
+            "wasi:io/poll@0.2.6": wasip2::io::poll,
+            "wasi:io/streams@0.2.6": wasip2::io::streams,
+        },
+    });
+}
+
+use rpc_channel::wetware::rpc::channel as host_channel;
+use ww::guest::{self, rpc_twoparty_capnp, DuplexStream, RpcSystem};
 use capnp::capability::{Client, FromClientHook};
 use futures::executor::LocalPool;
 use futures::future::{join, ready};
@@ -42,8 +55,9 @@ fn extract_peer_id(multiaddr: &str) -> Option<(&str, &str)> {
 /// Initializes the RPC system and runs a minimal event loop.
 #[no_mangle]
 pub extern "C" fn _start() {
-    // Initialize RPC system over wasi:cli streams
-    let mut rpc_system: RpcSystem<rpc_twoparty_capnp::Side> = guest::init();
+    println!("[guest] starting default kernel");
+    // Initialize RPC system over the dedicated wetware:rpc/channel transport.
+    let mut rpc_system: RpcSystem<rpc_twoparty_capnp::Side> = init_rpc_system();
     let provider_client: Client = rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server);
 
     // Drive the RPC system on a single-threaded executor
@@ -55,6 +69,7 @@ pub extern "C" fn _start() {
         // Cast provider client to Router client
         let router_client: router_capnp::router::Client = provider_client.cast_to();
         
+        println!("[guest] starting DHT bootstrap sequence");
         // Group bootstrap peers by peer ID
         let mut peers: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
         for multiaddr in BOOTSTRAP_PEERS {
@@ -65,10 +80,20 @@ pub extern "C" fn _start() {
             }
         }
         
+        println!(
+            "[guest] prepared {} peer entries from {} bootstrap multiaddrs",
+            peers.len(),
+            BOOTSTRAP_PEERS.len()
+        );
+
         // Add all bootstrap peers to the router concurrently and
         // wait until all have completed.
         let mut add_peer_futures = Vec::new();
         for (peer_id, addresses) in peers {
+            println!(
+                "[guest] adding peer {peer_id} with {} addresses",
+                addresses.len()
+            );
             let mut request = router_client.add_peer_request();
             request.get().set_peer(&peer_id);
             {
@@ -80,11 +105,13 @@ pub extern "C" fn _start() {
             add_peer_futures.push(request.send().promise);
         }
         futures::future::join_all(add_peer_futures).await;
+        println!("[guest] finished sending add_peer requests");
         
         // Bootstrap the DHT
         let mut bootstrap_request = router_client.bootstrap_request();
         bootstrap_request.get().set_timeout(10000); // 10s timeout
         let _ = bootstrap_request.send().promise.await;
+        println!("[guest] bootstrap RPC completed");
 
         // Main Loop - Keep RPC system running
         ////
@@ -93,6 +120,17 @@ pub extern "C" fn _start() {
         };
         let _ = join(ready(()), rpc).await;
     });
+}
+
+fn init_rpc_system() -> RpcSystem<rpc_twoparty_capnp::Side> {
+    let channel = acquire_host_channel();
+    guest::init_with_stream(channel)
+}
+
+fn acquire_host_channel() -> DuplexStream {
+    host_channel::get()
+        .map(DuplexStream::from)
+        .expect("PID0 requires host-provided wetware:rpc/channel transport")
 }
 
 

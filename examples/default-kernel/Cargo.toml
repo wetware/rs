@@ -12,6 +12,8 @@ capnp-rpc = "0.23"
 capnp = "0.23"
 tokio = { version = "1.47.1", features = ["sync", "macros", "io-util", "rt", "time"], default-features = false }
 futures = "0.3"
+wit-bindgen = "0.46.0"
+wasip2 = "1.0"
 
 [build-dependencies]
 capnpc = "0.23.2"

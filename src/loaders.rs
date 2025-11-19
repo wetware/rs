@@ -75,10 +75,9 @@ impl Loader for LocalFSLoader {
                 .trim_start_matches('/')
         } else {
             // Path doesn't match this loader's prefix
+            let expected_prefix = &self.prefix;
             return Err(anyhow::anyhow!(
-                "Path does not match prefix: {} (expected prefix: {})",
-                name,
-                self.prefix
+                "Path does not match prefix: {name} (expected prefix: {expected_prefix})"
             ));
         };
 
@@ -100,24 +99,23 @@ impl Loader for LocalFSLoader {
             .unwrap_or_else(|_| jail_path.to_path_buf());
 
         if !jailed_path.starts_with(&canonical_jail) {
+            let jail = &self.jail_path;
             return Err(anyhow::anyhow!(
-                "Path would escape jail directory: {} (jail: {})",
-                name,
-                self.jail_path
+                "Path would escape jail directory: {name} (jail: {jail})"
             ));
         }
 
         // Try reading from the jailed path
         if jailed_path.exists() && jailed_path.is_file() {
+            let display_path = jailed_path.display().to_string();
             return fs::read(&jailed_path)
-                .with_context(|| format!("Failed to read file: {}", jailed_path.display()));
+                .with_context(|| format!("Failed to read file: {display_path}"));
         }
 
+        let prefix = &self.prefix;
+        let jail = &self.jail_path;
         Err(anyhow::anyhow!(
-            "Binary not found: {} (mounted at {} -> {})",
-            name,
-            self.prefix,
-            self.jail_path
+            "Binary not found: {name} (mounted at {prefix} -> {jail})"
         ))
     }
 }
