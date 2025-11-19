@@ -12,7 +12,7 @@ pub mod proc;
 pub mod router;
 
 pub use executor::{Command, CommandBuilder};
-pub use proc::{Builder as ProcBuilder, Proc, ServiceInfo};
+pub use proc::{Builder as ProcBuilder, HostStdin, HostStdout, Proc, ServiceInfo};
 
 /// Trait for loading bytecode from various sources (IPFS, filesystem, etc.)
 ///

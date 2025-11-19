@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 
 use clap::{Parser, Subcommand};
 use std::path::Path;
+use tokio::io;
 use ww::ipfs::HttpClient as IPFS;
 use ww::{cell, config, loaders};
 
@@ -74,6 +75,22 @@ enum Commands {
         #[arg(long, value_name = "LEVEL")]
         loglvl: Option<config::LogLevel>,
 
+        /// Attach host stdin to the guest
+        #[arg(long)]
+        with_stdin: bool,
+
+        /// Attach host stdout to the guest
+        #[arg(long)]
+        with_stdout: bool,
+
+        /// Attach host stderr to the guest
+        #[arg(long)]
+        with_stderr: bool,
+
+        /// Convenience flag to attach all stdio streams
+        #[arg(long)]
+        with_stdio: bool,
+
         /// Volume mounts in format hostpath:guestpath or hostpath:guestpath:ro
         /// Can be specified multiple times
         #[arg(short = 'v', long = "volume")]
@@ -92,6 +109,10 @@ impl Commands {
                 wasm_debug,
                 port,
                 loglvl,
+                with_stdin,
+                with_stdout,
+                with_stderr,
+                with_stdio,
                 volume,
             } => {
                 // Create IPFS clients (one for loader, one for cell)
@@ -120,15 +141,28 @@ impl Commands {
                 // finally, build the chain loader
                 let loader = Box::new(loaders::ChainLoader::new(loader_chain));
 
-                let cell = cell::CommandBuilder::new(path)
+                let mut cell_builder = cell::CommandBuilder::new(path)
                     .with_loader(loader)
                     .with_args(args)
                     .with_env(env.clone().unwrap_or_default())
                     .with_wasm_debug(wasm_debug)
                     .with_ipfs(ipfs)
                     .with_port(port)
-                    .with_loglvl(loglvl)
-                    .build();
+                    .with_loglvl(loglvl);
+
+                if with_stdio || with_stdin {
+                    cell_builder = cell_builder.with_stdin(io::stdin());
+                }
+
+                if with_stdio || with_stdout {
+                    cell_builder = cell_builder.with_stdout(io::stdout());
+                }
+
+                if with_stdio || with_stderr {
+                    cell_builder = cell_builder.with_stderr(io::stderr());
+                }
+
+                let cell = cell_builder.build();
                 cell.spawn().await
             }
         }

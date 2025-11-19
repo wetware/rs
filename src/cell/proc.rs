@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::future::ready;
+use tokio::io::{empty, sink, AsyncRead, AsyncWrite, DuplexStream};
 use wasmtime::component::{Component, Instance, Linker, Resource, ResourceTable};
 use wasmtime::{Config as WasmConfig, Engine, Store};
 use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
@@ -19,6 +20,9 @@ use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
 use super::Loader;
 
 pub const BUFFER_SIZE: usize = 1024;
+
+pub type HostStdin = Box<dyn AsyncRead + Send + Sync + Unpin + 'static>;
+pub type HostStdout = Box<dyn AsyncWrite + Send + Sync + Unpin + 'static>;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod rpc_channel_bindings {
@@ -397,18 +401,6 @@ pub struct Proc {
     /// Cell runtime store
     #[allow(dead_code)]
     pub store: Store<ComponentRunStates>,
-    /// Host-side stdin handle for communication
-    #[allow(dead_code)]
-    pub host_stdin: tokio::io::DuplexStream,
-    /// Host-side stdout handle for communication
-    #[allow(dead_code)]
-    pub host_stdout: tokio::io::DuplexStream,
-    /// Host-side RPC channel input (guest -> host)
-    #[allow(dead_code)]
-    pub rpc_host_in: tokio::io::DuplexStream,
-    /// Host-side RPC channel output (host -> guest)
-    #[allow(dead_code)]
-    pub rpc_host_out: tokio::io::DuplexStream,
 }
 
 /// Service metadata for tracking per-stream instances
@@ -429,26 +421,34 @@ pub struct ServiceInfo {
 }
 
 impl Proc {
-    /// Create a new WASM process with duplex pipes for bidirectional communication
-    ///
-    /// Returns the Proc instance with service metadata and host-side handles.
-    /// The WASM instance gets the other end of the pipes.
-    pub async fn new_with_duplex_pipes(
+    /// Create a new WASM process.
+    pub async fn new(
         config: ProcConfig,
         bytecode: &[u8],
         service_info: ServiceInfo,
         loader: Option<Box<dyn Loader>>,
-    ) -> Result<Self> {
-        // Create duplex pipes for bidirectional communication
-        let (host_stdin, wasm_stdin) = tokio::io::duplex(BUFFER_SIZE);
-        let (wasm_stdout, host_stdout) = tokio::io::duplex(BUFFER_SIZE);
-        let (rpc_host_in, rpc_guest_write) = tokio::io::duplex(BUFFER_SIZE);
-        let (rpc_guest_read, rpc_host_out) = tokio::io::duplex(BUFFER_SIZE);
+        stdin: Option<HostStdin>,
+        stdout: Option<HostStdout>,
+        stderr: Option<HostStdout>,
+    ) -> Result<(Self, DuplexStream)> {
+        let stdin_stream = match stdin {
+            Some(stream) => AsyncStdinStream::new(stream),
+            None => AsyncStdinStream::new(empty()),
+        };
+        let stdout_stream = match stdout {
+            Some(stream) => AsyncStdoutStream::new(BUFFER_SIZE, stream),
+            None => AsyncStdoutStream::new(BUFFER_SIZE, sink()),
+        };
+        let stderr_stream = match stderr {
+            Some(stream) => AsyncStdoutStream::new(BUFFER_SIZE, stream),
+            None => AsyncStdoutStream::new(BUFFER_SIZE, sink()),
+        };
 
-        let wasm_stdin_async = AsyncStdinStream::new(wasm_stdin);
-        let wasm_stdout_async = AsyncStdoutStream::new(BUFFER_SIZE, wasm_stdout);
+        let (rpc_guest_stream, rpc_host_stream) = tokio::io::duplex(BUFFER_SIZE);
+        let (rpc_guest_read, rpc_guest_write) = tokio::io::split(rpc_guest_stream);
         let rpc_guest_in_async = AsyncStdinStream::new(rpc_guest_read);
         let rpc_guest_out_async = AsyncStdoutStream::new(BUFFER_SIZE, rpc_guest_write);
+
         let rpc_channel = RpcChannel::new(
             rpc_guest_in_async.p2_stream(),
             rpc_guest_out_async.p2_stream(),
@@ -478,8 +478,9 @@ impl Proc {
 
         // Wire the async stdio streams into WASI and inherit host args.
         let wasi = WasiCtx::builder()
-            .stdin(wasm_stdin_async)
-            .stdout(wasm_stdout_async)
+            .stdin(stdin_stream)
+            .stdout(stdout_stream)
+            .stderr(stderr_stream)
             .envs(&envs)
             .args(&config.args)
             .build();
@@ -496,16 +497,15 @@ impl Proc {
         let component = Component::from_binary(&engine, bytecode)?;
         let instance = linker.instantiate_async(&mut store, &component).await?;
 
-        Ok(Self {
-            service_info,
-            // module,
-            instance,
-            store,
-            host_stdin,
-            host_stdout,
-            rpc_host_in,
-            rpc_host_out,
-        })
+        Ok((
+            Self {
+                service_info,
+                // module,
+                instance,
+                store,
+            },
+            rpc_host_stream,
+        ))
     }
 
     /// Create a host-side RPC system using the duplex streams
@@ -515,16 +515,17 @@ impl Proc {
     /// to the guest when it calls `bootstrap()`.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn create_host_rpc_system(
-        host_stdin: tokio::io::DuplexStream,
-        host_stdout: tokio::io::DuplexStream,
+        rpc_stream: tokio::io::DuplexStream,
         bootstrap: impl Into<Client>,
     ) -> RpcSystem<rpc_twoparty_capnp::Side> {
         use tokio_util::compat::TokioAsyncReadCompatExt;
         use tokio_util::compat::TokioAsyncWriteCompatExt;
 
+        // Split the duplex stream so Cap'n Proto can own independent read/write halves.
+        let (read_half, write_half) = tokio::io::split(rpc_stream);
         // Convert tokio streams to futures-compatible streams
-        let read = host_stdin.compat();
-        let write = host_stdout.compat_write();
+        let read = read_half.compat();
+        let write = write_half.compat_write();
 
         let network = twoparty::VatNetwork::new(
             read,

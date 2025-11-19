@@ -7,10 +7,12 @@ use tracing::{debug, info, trace, warn};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cell::router::{KadOperation, RouterCapability};
-use crate::cell::{Loader, Proc, ProcBuilder, ServiceInfo};
+use crate::cell::{HostStdin, HostStdout, Loader, Proc, ProcBuilder, ServiceInfo};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::router_capnp;
 #[cfg(not(target_arch = "wasm32"))]
+use tokio::io::DuplexStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
 /// Network behavior for Wetware cells
@@ -30,6 +32,9 @@ pub struct CommandBuilder {
     ipfs: Option<crate::ipfs::HttpClient>,
     port: Option<u16>,
     loglvl: Option<crate::config::LogLevel>,
+    stdin: Option<HostStdin>,
+    stdout: Option<HostStdout>,
+    stderr: Option<HostStdout>,
 }
 
 impl CommandBuilder {
@@ -44,6 +49,9 @@ impl CommandBuilder {
             ipfs: None,
             port: None,
             loglvl: None,
+            stdin: None,
+            stdout: None,
+            stderr: None,
         }
     }
 
@@ -89,6 +97,30 @@ impl CommandBuilder {
         self
     }
 
+    pub fn with_stdin<R>(mut self, stdin: R) -> Self
+    where
+        R: AsyncRead + Send + Sync + Unpin + 'static,
+    {
+        self.stdin = Some(Box::new(stdin));
+        self
+    }
+
+    pub fn with_stdout<W>(mut self, stdout: W) -> Self
+    where
+        W: AsyncWrite + Send + Sync + Unpin + 'static,
+    {
+        self.stdout = Some(Box::new(stdout));
+        self
+    }
+
+    pub fn with_stderr<W>(mut self, stderr: W) -> Self
+    where
+        W: AsyncWrite + Send + Sync + Unpin + 'static,
+    {
+        self.stderr = Some(Box::new(stderr));
+        self
+    }
+
     /// Build the Command
     pub fn build(self) -> Command {
         Command {
@@ -100,6 +132,9 @@ impl CommandBuilder {
             wasm_debug: self.wasm_debug,
             port: self.port.unwrap_or(2020),
             loglvl: self.loglvl,
+            stdin: self.stdin,
+            stdout: self.stdout,
+            stderr: self.stderr,
         }
     }
 }
@@ -114,6 +149,9 @@ pub struct Command {
     pub wasm_debug: bool,
     pub port: u16,
     pub loglvl: Option<crate::config::LogLevel>,
+    pub stdin: Option<HostStdin>,
+    pub stdout: Option<HostStdout>,
+    pub stderr: Option<HostStdout>,
 }
 
 impl Command {
@@ -150,16 +188,27 @@ impl Command {
         // Extract fields needed before moving self.loader
         let loader = self.loader;
         let port = self.port;
+        let stdin = self.stdin;
+        let stdout = self.stdout;
+        let stderr = self.stderr;
 
-        let proc = Proc::new_with_duplex_pipes(proc_config, &bytecode, service_info, Some(loader))
-            .await
-            .with_context(|| format!("Failed to create cell process from binary: {}", self.path))?;
+        let (proc, rpc_stream) = Proc::new(
+            proc_config,
+            &bytecode,
+            service_info,
+            Some(loader),
+            stdin,
+            stdout,
+            stderr,
+        )
+        .await
+        .with_context(|| format!("Failed to create cell process from binary: {}", self.path))?;
 
-        Self::exec_loop(proc, port).await
+        Self::exec_loop(proc, rpc_stream, port).await
     }
 
     /// Run the cell asynchronously with libp2p networking
-    async fn exec_loop(proc: Proc, port: u16) -> Result<()> {
+    async fn exec_loop(_proc: Proc, rpc_stream: DuplexStream, port: u16) -> Result<()> {
         let keypair = identity::Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
         let kad =
@@ -190,10 +239,8 @@ impl Command {
         // Access the inner capability client (typed clients wrap capnp::capability::Client)
         let bootstrap_client: capnp::capability::Client = router_client.client;
 
-        // Create host RPC system
-        let host_stdin = proc.host_stdin;
-        let host_stdout = proc.host_stdout;
-        let rpc_system = Proc::create_host_rpc_system(host_stdin, host_stdout, bootstrap_client);
+        // Create host RPC system on the dedicated transport stream
+        let rpc_system = Proc::create_host_rpc_system(rpc_stream, bootstrap_client);
 
         let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
         swarm.listen_on(listen_addr)?;
