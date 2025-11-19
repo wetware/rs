@@ -5,8 +5,8 @@ interface channel {
 
   /// Returns a dedicated RPC channel backed by host-provided streams.
   ///
-  /// When unavailable the host returns `none` so guests can fall back
-  /// to stdio-based transport.
+  /// The host hands out the transport at most once; subsequent calls
+  /// return `none` to signal that the channel has already been claimed.
   get: func() -> option<tuple<input-stream, output-stream>>;
 }
 

@@ -1,20 +1,23 @@
 #![doc = r#"
 WASI guest helpers for Cap'n Proto RPC.
 
-This module exposes a single `init` function that wires the WASI CLI
-stdin/stdout streams into a Cap'n Proto two-party RPC system. The resulting
-`RpcSystem` drives Cap'n Proto clients when polled on an async executor.
+This module exposes helpers for wiring a host-provided full-duplex transport
+into a Cap'n Proto two-party RPC system. Guests are expected to request a
+dedicated channel (e.g. `wetware:rpc/channel`) and feed it to `init_with_stream`.
 
 Usage (in a WASI guest crate that depends on `ww` with feature `guest` enabled):
 
 ```ignore
-use ww::guest::{self, rpc_twoparty_capnp, RpcSystem};
+use ww::guest::{self, rpc_twoparty_capnp, DuplexStream, RpcSystem};
 use futures::executor::LocalPool;
 use futures::future::{join, ready};
 
 fn main() {
-    // Initialize RPC system over wasi:cli streams.
-    let mut rpc_system: RpcSystem<rpc_twoparty_capnp::Side> = guest::init();
+    // Acquire the dedicated transport that the host exposes.
+    let stream: DuplexStream = acquire_host_channel().expect("host must provide rpc stream");
+
+    let mut rpc_system: RpcSystem<rpc_twoparty_capnp::Side> =
+        guest::init_with_stream(stream);
     let _provider_client = rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server);
 
     // Drive the RPC system on a single-threaded executor. In a real guest
@@ -47,41 +50,46 @@ mod imp {
     use std::io;
     use std::pin::Pin;
     use std::task::{Context, Poll};
-    use wasip2::cli::{stdin, stdout};
     use wasip2::io::streams;
 
     // Use Cap'n Proto RPC primitives re-exported at the crate level.
 
-    /// Initialize a Cap'n Proto RPC system over the WASI CLI stdin/stdout streams.
-    ///
-    /// This sets up non-blocking adapters around the raw wasi:io streams, wires
-    /// them into a two-party VatNetwork, and returns the `RpcSystem`. The local side
-    /// is configured as `rpc_twoparty_capnp::Side::Client`; typical guests will
-    /// call `RpcSystem::bootstrap` with `rpc_twoparty_capnp::Side::Server` to
-    /// obtain the server-provided bootstrap capability.
-    ///
-    /// The returned `RpcSystem` is a Future that must be driven on an executor
-    /// alongside guest logic.
-    pub fn init() -> RpcSystem<rpc_twoparty_capnp::Side> {
-        init_with_side(rpc_twoparty_capnp::Side::Client)
+    /// Full-duplex transport backed by WASI Preview 2 streams.
+    pub struct DuplexStream {
+        input: streams::InputStream,
+        output: streams::OutputStream,
     }
 
-    /// Initialize a Cap'n Proto RPC system using caller-provided streams.
-    ///
-    /// This enables guests to bind RPC traffic to non-stdio transports that
-    /// are exposed through `wasi:io/streams`.
-    pub fn init_with_streams(
+    impl DuplexStream {
+        /// Create a new duplex transport from WASI input/output resources.
+        pub fn new(input: streams::InputStream, output: streams::OutputStream) -> Self {
+            Self { input, output }
+        }
+
+        /// Consume the duplex transport and split it into its WASI parts.
+        pub fn into_parts(self) -> (streams::InputStream, streams::OutputStream) {
+            (self.input, self.output)
+        }
+    }
+
+    impl From<(streams::InputStream, streams::OutputStream)> for DuplexStream {
+        fn from((input, output): (streams::InputStream, streams::OutputStream)) -> Self {
+            Self::new(input, output)
+        }
+    }
+
+    /// Initialize a Cap'n Proto RPC system using a full-duplex transport.
+    pub fn init_with_stream(stream: DuplexStream) -> RpcSystem<rpc_twoparty_capnp::Side> {
+        let (input, output) = stream.into_parts();
+        init_with_streams(rpc_twoparty_capnp::Side::Client, input, output)
+    }
+
+    fn init_with_streams(
+        side: rpc_twoparty_capnp::Side,
         input: streams::InputStream,
         output: streams::OutputStream,
     ) -> RpcSystem<rpc_twoparty_capnp::Side> {
-        init_with_streams_and_side(rpc_twoparty_capnp::Side::Client, input, output)
-    }
-
-    /// Same as `init`, but allows specifying the local VAT side explicitly.
-    fn init_with_side(side: rpc_twoparty_capnp::Side) -> RpcSystem<rpc_twoparty_capnp::Side> {
-        let stdin_stream = stdin::get_stdin();
-        let stdout_stream = stdout::get_stdout();
-        init_with_streams_and_side(side, stdin_stream, stdout_stream)
+        init_with_streams_and_side(side, input, output)
     }
 
     fn init_with_streams_and_side(
