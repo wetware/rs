@@ -32,6 +32,17 @@ impl WasiView for ComponentRunStates {
     }
 }
 
+struct ProcInit {
+    env: Vec<String>,
+    args: Vec<String>,
+    wasm_debug: bool,
+    bytecode: Vec<u8>,
+    loader: Option<Box<dyn Loader>>,
+    stdin: BoxAsyncRead,
+    stdout: BoxAsyncWrite,
+    stderr: BoxAsyncWrite,
+}
+
 /// Builder for constructing a Proc configuration
 pub struct Builder {
     env: Vec<String>,
@@ -150,9 +161,16 @@ impl Builder {
         let stderr =
             stderr.ok_or_else(|| anyhow!("stderr handle must be provided to Proc::Builder"))?;
 
-        Proc::new(
-            env, args, wasm_debug, bytecode, loader, stdin, stdout, stderr,
-        )
+        Proc::new(ProcInit {
+            env,
+            args,
+            wasm_debug,
+            bytecode,
+            loader,
+            stdin,
+            stdout,
+            stderr,
+        })
         .await
     }
 }
@@ -180,16 +198,18 @@ pub struct Proc {
 
 impl Proc {
     /// Create a new WASM process with explicit stdio handles provided by the host.
-    async fn new(
-        env: Vec<String>,
-        args: Vec<String>,
-        wasm_debug: bool,
-        bytecode: Vec<u8>,
-        loader: Option<Box<dyn Loader>>,
-        stdin: BoxAsyncRead,
-        stdout: BoxAsyncWrite,
-        stderr: BoxAsyncWrite,
-    ) -> Result<Self> {
+    async fn new(init: ProcInit) -> Result<Self> {
+        let ProcInit {
+            env,
+            args,
+            wasm_debug,
+            bytecode,
+            loader,
+            stdin,
+            stdout,
+            stderr,
+        } = init;
+
         let stdin_stream = AsyncStdinStream::new(stdin);
         let stdout_stream = AsyncStdoutStream::new(BUFFER_SIZE, stdout);
         let stderr_stream = AsyncStdoutStream::new(BUFFER_SIZE, stderr);
