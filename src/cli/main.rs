@@ -1,4 +1,5 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
+use std::process;
 
 use clap::{Parser, Subcommand};
 use ww::ipfs::HttpClient as IPFS;
@@ -8,29 +9,6 @@ use ww::{cell, config, loaders};
 ///
 /// Format: `hostpath:guestpath` or `hostpath:guestpath:ro` (or `rw`)
 /// Returns: `(host_path, guest_path)`
-fn parse_volume_mount(vol: &str) -> Result<(String, String)> {
-    let parts: Vec<&str> = vol.split(':').collect();
-
-    match parts.len() {
-        2 => {
-            // hostpath:guestpath
-            Ok((parts[0].to_string(), parts[1].to_string()))
-        }
-        3 => {
-            // hostpath:guestpath:ro or hostpath:guestpath:rw
-            let mode = parts[2];
-            if mode != "ro" && mode != "rw" {
-                return Err(anyhow!("Invalid volume mount mode: {mode} (expected 'ro' or 'rw')"));
-            }
-            // TODO: Store mode for future read-only enforcement
-            Ok((parts[0].to_string(), parts[1].to_string()))
-        }
-        _ => Err(anyhow!(
-            "Invalid volume mount format: {vol} (expected 'hostpath:guestpath' or 'hostpath:guestpath:ro')",
-        )),
-    }
-}
-
 #[derive(Parser)]
 #[command(name = "ww")]
 #[command(
@@ -73,15 +51,11 @@ enum Commands {
         #[arg(long, value_name = "LEVEL")]
         loglvl: Option<config::LogLevel>,
 
-        /// Volume mounts in format hostpath:guestpath or hostpath:guestpath:ro
-        /// Can be specified multiple times
-        #[arg(short = 'v', long = "volume")]
-        volume: Vec<String>,
     },
 }
 
 impl Commands {
-    async fn run(self) -> Result<()> {
+    async fn run(self) -> Result<i32> {
         match self {
             Commands::Run {
                 path,
@@ -91,7 +65,6 @@ impl Commands {
                 wasm_debug,
                 port,
                 loglvl,
-                volume,
             } => {
                 // Create IPFS clients (one for loader, one for cell)
                 let ipfs = IPFS::new(ipfs_url.clone());
@@ -100,11 +73,8 @@ impl Commands {
                 let mut loader_chain =
                     vec![Box::new(loaders::IpfsUnixfsLoader::new(ipfs.clone()))
                         as Box<dyn cell::Loader>];
-                // then parse & add volume mounts
-                for vol in volume {
-                    let (host_path, guest_path) = parse_volume_mount(&vol)?;
-                    loader_chain.push(Box::new(loaders::LocalFSLoader::new(guest_path, host_path)));
-                }
+                // finally, allow host paths (relative or absolute) as a fallback
+                loader_chain.push(Box::new(loaders::HostPathLoader));
                 // finally, build the chain loader
                 let loader = Box::new(loaders::ChainLoader::new(loader_chain));
 
@@ -124,7 +94,10 @@ impl Commands {
 }
 
 #[tokio::main]
+#[allow(unreachable_code)]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    cli.command.run().await
+    let exit_code = cli.command.run().await?;
+    process::exit(exit_code);
+    Ok(())
 }

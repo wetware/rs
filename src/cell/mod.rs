@@ -8,11 +8,9 @@ use async_trait::async_trait;
 
 pub mod executor;
 pub mod proc;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod router;
 
 pub use executor::{Command, CommandBuilder};
-pub use proc::{Builder as ProcBuilder, Proc, ServiceInfo};
+pub use proc::{Builder as ProcBuilder, Proc};
 
 /// Trait for loading bytecode from various sources (IPFS, filesystem, etc.)
 ///

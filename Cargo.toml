@@ -32,29 +32,8 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 nix = { version = "0.30.1", features = ["socket"] }
 wasmtime = "38.0.4"
 wasmtime-wasi = "38.0.4"
-capnp-rpc = "0.23"
-capnp = "0.23"
-
-[build-dependencies]
-capnpc = "0.23.2"
-
-[features]
-default = []
-guest = ["capnp-rpc", "capnp", "wasip2"]
 
 [[bin]]
 name = "ww"
 path = "src/cli/main.rs"
-
-[dependencies.capnp-rpc]
-version = "0.23.0"
-optional = true
-
-[dependencies.capnp]
-version = "0.23.0"
-optional = true
-
-[dependencies.wasip2]
-version = "1.0"
-optional = true
 

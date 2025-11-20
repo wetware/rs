@@ -3,19 +3,7 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    // Compile Cap'n Proto schemas
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-    let schema_dir = Path::new(&manifest_dir).join("src").join("schema");
-    let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
-
-    if schema_dir.exists() {
-        capnpc::CompilerCommand::new()
-            .file(schema_dir.join("router.capnp"))
-            .output_path(&out_dir)
-            .run()
-            .expect("compiling schema");
-    }
-
     let target_dir = Path::new(&manifest_dir).join("target");
     let cid_file = target_dir.join("default-config.cid");
 
