@@ -5,32 +5,3 @@ edition = "2021"
 
 [lib]
 crate-type = ["cdylib"]
-
-[dependencies]
-ww = { path = "../../", features = ["guest"] }
-capnp-rpc = "0.23"
-capnp = "0.23"
-tokio = { version = "1.47.1", features = ["sync", "macros", "io-util", "rt", "time"], default-features = false }
-futures = "0.3"
-
-[build-dependencies]
-capnpc = "0.23.2"
-
-
-# Patch dependencies to add wasip2 feature flag
-# These crates use unstable wasip2 features but don't declare the feature flag
-[patch.crates-io]
-io-lifetimes = { path = ".patches/io-lifetimes-2.0.4" }
-tokio = { path = ".patches/tokio-1.48.0" }
-io-extras = { path = ".patches/io-extras-0.18.4" }
-# Patch zstd-sys to skip C compilation for WASM targets
-zstd-sys = { path = ".patches/zstd-sys-2.0.16" }
-# Patch fs-set-times to remove wasi_ext feature flag
-fs-set-times = { path = ".patches/fs-set-times-0.20.3" }
-# Patch cap-primitives to enable wasip2 feature
-cap-primitives = { path = ".patches/cap-primitives-3.4.5" }
-# Patch cap-std to enable wasip2 feature
-cap-std = { path = ".patches/cap-std-3.4.5" }
-# Patch socket2 to provide WASM stub implementation
-socket2 = { path = ".patches/socket2-0.5.10" }
-

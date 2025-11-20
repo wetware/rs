@@ -5,7 +5,7 @@
 # The #![feature(wasip2)] in lib.rs enables the feature for this crate and dependencies
 build:
 	@echo "Building default-kernel WASM..."
-	@PATH="$$(rustup which cargo | xargs dirname):$$PATH" RUSTFLAGS="--cfg tokio_unstable" cargo build --target wasm32-wasip2 --release
+	@PATH="$$(rustup which cargo | xargs dirname):$$PATH" cargo build --target wasm32-wasip2 --release
 	@WASM_FILE=$$(find target/wasm32-wasip2/release -name "*.wasm" -type f | head -1); \
 	if [ -n "$$WASM_FILE" ]; then \
 		cp "$$WASM_FILE" target/wasm32-wasip2/release/main.wasm; \
@@ -16,5 +16,8 @@ build:
 	fi
 
 clean:
-	cargo clean
+	@echo "Cleaning default-kernel artifacts..."
+	@cargo clean
+	@rm -f *.cid
+	@rm -rf target
 
