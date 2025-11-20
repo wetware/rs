@@ -3,9 +3,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config as WasmConfig, Engine, Store};
 use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
-use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::p2::add_to_linker_async;
 use wasmtime_wasi::p2::bindings::Command as WasiCliCommand;
+use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use super::Loader;
@@ -123,7 +123,9 @@ impl Builder {
         W1: AsyncWrite + Send + Sync + Unpin + 'static,
         W2: AsyncWrite + Send + Sync + Unpin + 'static,
     {
-        self.with_stdin(stdin).with_stdout(stdout).with_stderr(stderr)
+        self.with_stdin(stdin)
+            .with_stdout(stdout)
+            .with_stderr(stderr)
     }
 
     /// Build a Proc instance. All required parameters must be supplied first.
@@ -139,24 +141,17 @@ impl Builder {
             stderr,
         } = self;
 
-        let bytecode = bytecode
-            .ok_or_else(|| anyhow!("bytecode must be provided to Proc::Builder"))?;
-        let stdin = stdin
-            .ok_or_else(|| anyhow!("stdin handle must be provided to Proc::Builder"))?;
-        let stdout = stdout
-            .ok_or_else(|| anyhow!("stdout handle must be provided to Proc::Builder"))?;
-        let stderr = stderr
-            .ok_or_else(|| anyhow!("stderr handle must be provided to Proc::Builder"))?;
+        let bytecode =
+            bytecode.ok_or_else(|| anyhow!("bytecode must be provided to Proc::Builder"))?;
+        let stdin =
+            stdin.ok_or_else(|| anyhow!("stdin handle must be provided to Proc::Builder"))?;
+        let stdout =
+            stdout.ok_or_else(|| anyhow!("stdout handle must be provided to Proc::Builder"))?;
+        let stderr =
+            stderr.ok_or_else(|| anyhow!("stderr handle must be provided to Proc::Builder"))?;
 
         Proc::new(
-            env,
-            args,
-            wasm_debug,
-            bytecode,
-            loader,
-            stdin,
-            stdout,
-            stderr,
+            env, args, wasm_debug, bytecode, loader, stdin, stdout, stderr,
         )
         .await
     }
@@ -232,8 +227,7 @@ impl Proc {
 
         // Instantiate it as a normal component
         let component = Component::from_binary(&engine, &bytecode)?;
-        let command =
-            WasiCliCommand::instantiate_async(&mut store, &component, &linker).await?;
+        let command = WasiCliCommand::instantiate_async(&mut store, &component, &linker).await?;
 
         Ok(Self {
             command,

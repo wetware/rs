@@ -50,7 +50,6 @@ enum Commands {
         /// If not provided, uses WW_LOGLVL environment variable or defaults to info
         #[arg(long, value_name = "LEVEL")]
         loglvl: Option<config::LogLevel>,
-
     },
 }
 
