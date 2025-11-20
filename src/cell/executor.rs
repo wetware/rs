@@ -121,14 +121,9 @@ impl Command {
 
         // Construct the path to main.wasm: <path>/main.wasm
         let wasm_path = format!("{}/main.wasm", path.trim_end_matches('/'));
-        let bytecode = loader
-            .load(&wasm_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to load main.wasm from path: {path} (resolved to: {wasm_path})"
-                )
-            })?;
+        let bytecode = loader.load(&wasm_path).await.with_context(|| {
+            format!("Failed to load main.wasm from path: {path} (resolved to: {wasm_path})")
+        })?;
 
         let stdin_handle = stdin();
         let stdout_handle = stdout();
