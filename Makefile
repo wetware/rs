@@ -16,7 +16,13 @@ build:
 	cargo build --release
 
 clean:
+	cargo clean
 	rm -rf target
+	rm -rf tmp
+	@$(MAKE) -C $(DEFAULT_KERNEL) clean
+	@if [ -d "$(WASM_EXAMPLES)/echo" ]; then \
+		$(MAKE) -C $(WASM_EXAMPLES)/echo clean; \
+	fi
 
 examples: example-default-kernel
 	@if [ -d "$(WASM_EXAMPLES)/echo" ]; then \

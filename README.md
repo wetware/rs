@@ -1,6 +1,8 @@
-# Wetware Protocol Node
+# Wetware Runtime
 
-A Rust libp2p application that implements the Wetware Protocol (`/ww/0.1.0`) for peer-to-peer RPC communication with capability-based security. The node connects to IPFS DHT networks and provides secure remote execution capabilities through Cap'n Proto RPC.
+A Rust CLI that fetches WASM components (typically from IPFS) and executes them
+under WASI Preview 2. The `ww run` command wires host stdio directly to the
+guest, so operators can interact with components exactly as if they were local.
 
 ## Features
 
@@ -18,25 +20,11 @@ A Rust libp2p application that implements the Wetware Protocol (`/ww/0.1.0`) for
    kubo daemon
    ```
 
-2. **Cap'n Proto compiler (version 0.5.2 or higher)**
+2. **Rust toolchain**
    ```bash
-   # Ubuntu/Debian
-   sudo apt-get install capnproto
-   
-   # macOS
-   brew install capnp
-   
-   # Or build from source
-   # See https://capnproto.org/install.html
+   rustup install stable
+   rustup default stable
    ```
-
-3. **Rust toolchain (nightly required)**
-   ```bash
-   rustup install nightly
-   rustup default nightly
-   ```
-   
-   **Note**: This project requires Rust nightly due to dependencies that use `edition2024` features. The nightly toolchain provides access to these experimental features.
 
 ## Usage
 
@@ -93,6 +81,10 @@ The `run` subcommand supports the following options:
 ### Building and Running WASM Examples
 
 WASM examples are built automatically when you run `make` or `make examples`. The `default-kernel` example is included by default.
+
+> **Note:** The `wasm32-wasip2` target is currently nightly-only. Inside
+> `examples/default-kernel/`, run `rustup override set nightly` (once) and
+> `rustup target add wasm32-wasip2` before building the guest.
 
 **Quick start**:
 ```bash
