@@ -26,7 +26,7 @@ impl AsyncStdin {
 impl AsyncRead for AsyncStdin {
     fn poll_read(
         self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        _cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<std::io::Result<usize>> {
         // Non-blocking read: try to read available bytes.
