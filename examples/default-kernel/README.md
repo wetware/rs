@@ -58,8 +58,9 @@ Run `make clean` (in this directory or via the repo-level `make clean`) to wipe
 
 Feel free to edit `src/lib.rs` to experiment with other WASI Preview 2 APIs.
 The kernel uses the `wasip2` crate to access WASI Preview 2 streams directly,
-and `pollster` for async runtime support. The `AsyncStdin` and `AsyncStdout`
-wrappers implement `futures::io::AsyncRead` and `AsyncWrite` traits, enabling
-asynchronous I/O operations that leverage WASI Preview 2's native async stream
-capabilities. This pattern supports Cap'n Proto transports and other async I/O
-use cases. See https://mikel.xyz/posts/capnp-in-wasm/ for more details.
+and manual future polling with `futures::task::noop_waker` for async runtime
+support. The `AsyncStdin` and `AsyncStdout` wrappers implement `futures::io::AsyncRead`
+and `AsyncWrite` traits, enabling asynchronous I/O operations that leverage WASI
+Preview 2's native async stream capabilities. This pattern supports Cap'n Proto
+transports and other async I/O use cases. See https://mikel.xyz/posts/capnp-in-wasm/
+for more details.
