@@ -81,5 +81,6 @@ pub fn init_tracing(log_level: LogLevel, _explicit_level: Option<LogLevel>) {
     }
 
     // Initialize tracing (ignore error if already initialized)
+    #[cfg(not(target_arch = "wasm32"))]
     let _ = tracing_subscriber::fmt::try_init();
 }

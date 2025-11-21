@@ -1,100 +1,60 @@
 //! Loader implementations for resolving bytecode from various sources.
 //!
-//! This module provides loaders for IPFS (UnixFS), local filesystem, and a chain loader
+//! This module provides loaders for IPFS (UnixFS), host filesystem paths, and a chain loader
 //! that tries multiple loaders in sequence.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
 use crate::cell::Loader;
+use crate::ipfs::{is_ipfs_path, UnixFS};
+use std::path::Path;
 
 /// IPFS filesystem loader for IPFS-based bytecode resolution
 ///
 /// Handles IPFS paths: `/ipfs/...`, `/ipns/...`, `/ipld/...`
-pub struct IpfsFSLoader {
-    ipfs_url: String,
+pub struct IpfsUnixfsLoader {
+    unixfs: UnixFS,
 }
 
-impl IpfsFSLoader {
-    /// Create a new IPFS filesystem loader with the given IPFS HTTP API endpoint
-    pub fn new(ipfs_url: String) -> Self {
-        Self { ipfs_url }
+impl IpfsUnixfsLoader {
+    /// Create a new IPFS filesystem loader with the given IPFS client
+    pub fn new(ipfs: crate::ipfs::HttpClient) -> Self {
+        Self {
+            unixfs: ipfs.unixfs(),
+        }
     }
 }
 
 #[async_trait]
-impl Loader for IpfsFSLoader {
+impl Loader for IpfsUnixfsLoader {
     async fn load(&self, path: &str) -> Result<Vec<u8>> {
         // Only handle IPFS-family paths
         if !is_ipfs_path(path) {
-            return Err(anyhow::anyhow!("Not an IPFS path: {}", path));
+            return Err(anyhow::anyhow!("Not an IPFS path: {path}"));
         }
 
-        // Download from IPFS via HTTP API
-        let client = reqwest::Client::new();
-        let ipfs_url = &self.ipfs_url;
-        let url = format!("{ipfs_url}/api/v0/cat?arg={path}");
-        let response = client
-            .post(&url)
-            .send()
-            .await
-            .with_context(|| format!("Failed to connect to IPFS node at {ipfs_url}"))?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "Failed to download from IPFS: {}",
-                response.status()
-            ));
-        }
-
-        Ok(response.bytes().await?.to_vec())
+        // Download from IPFS using the Unixfs API
+        self.unixfs.get(path).await
     }
 }
 
-/// Local filesystem loader for resolving bytecode from local files
+/// Loader that reads directly from whatever host path is provided.
 ///
-/// Handles:
-/// - Absolute paths
-/// - Relative paths (`.` prefix)
-/// - `$PATH` lookup (via `which` command)
-/// - Current directory
-pub struct LocalFSLoader;
+/// This is a fallback used when no IPFS or mounted prefix handles the request.
+pub struct HostPathLoader;
 
 #[async_trait]
-impl Loader for LocalFSLoader {
+impl Loader for HostPathLoader {
     async fn load(&self, name: &str) -> Result<Vec<u8>> {
         use std::fs;
-        use std::path::Path;
-        use std::process::Command;
 
-        // Check if it's an absolute path
-        if Path::new(name).is_absolute() {
-            return fs::read(name).with_context(|| format!("Failed to read file: {name}"));
+        let path = Path::new(name);
+        if !path.exists() || !path.is_file() {
+            return Err(anyhow::anyhow!("File not found: {name}"));
         }
 
-        // Check if it's a relative path (starts with . or /)
-        if name.starts_with('.') || name.starts_with('/') {
-            return fs::read(name).with_context(|| format!("Failed to read file: {name}"));
-        }
-
-        // Check if it's in $PATH
-        if let Ok(resolved_path) = Command::new("which").arg(name).output() {
-            if resolved_path.status.success() {
-                let path_str = String::from_utf8(resolved_path.stdout)?;
-                let path_str = path_str.trim();
-                if !path_str.is_empty() {
-                    return fs::read(path_str)
-                        .with_context(|| format!("Failed to read resolved binary: {path_str}"));
-                }
-            }
-        }
-
-        // Try as a relative path in current directory
-        if Path::new(name).exists() {
-            return fs::read(name).with_context(|| format!("Failed to read file: {name}"));
-        }
-
-        Err(anyhow::anyhow!("Binary not found: {}", name))
+        fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))
     }
 }
 
@@ -131,12 +91,4 @@ impl Loader for ChainLoader {
             errors.join("; ")
         ))
     }
-}
-
-/// Check if a path is a valid IPFS-family path (IPFS, IPNS, or IPLD)
-///
-/// This centralizes IPFS path validation similar to Go's `path.NewPath(str)`.
-/// Returns true if the path starts with a valid IPFS namespace prefix.
-pub fn is_ipfs_path(path: &str) -> bool {
-    path.starts_with("/ipfs/") || path.starts_with("/ipns/") || path.starts_with("/ipld/")
 }

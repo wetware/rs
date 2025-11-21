@@ -1,8 +1,14 @@
 use anyhow::Result;
+use std::process;
 
 use clap::{Parser, Subcommand};
-use ww::{cell::executor, config, loaders};
+use ww::ipfs::HttpClient as IPFS;
+use ww::{cell, config, loaders};
 
+/// Parse a volume mount specification
+///
+/// Format: `hostpath:guestpath` or `hostpath:guestpath:ro` (or `rw`)
+/// Returns: `(host_path, guest_path)`
 #[derive(Parser)]
 #[command(name = "ww")]
 #[command(
@@ -18,8 +24,8 @@ struct Cli {
 enum Commands {
     /// Execute a binary (WASM or subprocess)
     Run {
-        /// Binary to execute
-        binary: String,
+        /// Path to root guest dir
+        path: String, // TODO:  Path type that is a union{ipfs, local}
 
         /// Arguments to pass to the binary
         args: Vec<String>,
@@ -48,42 +54,49 @@ enum Commands {
 }
 
 impl Commands {
-    async fn run(self) -> Result<()> {
+    async fn run(self) -> Result<i32> {
         match self {
             Commands::Run {
-                binary,
+                path,
                 args,
-                ipfs,
+                ipfs: ipfs_url,
                 env,
                 wasm_debug,
                 port,
                 loglvl,
             } => {
-                // Create chain of loaders: try IpfsFSLoader first, then LocalFSLoader
-                let loader = Box::new(loaders::ChainLoader::new(vec![
-                    Box::new(loaders::IpfsFSLoader::new(ipfs.clone())),
-                    Box::new(loaders::LocalFSLoader),
-                ]));
+                // Create IPFS clients (one for loader, one for cell)
+                let ipfs = IPFS::new(ipfs_url.clone());
 
-                executor::Command {
-                    binary,
-                    args,
-                    loader,
-                    ipfs,
-                    env,
-                    wasm_debug,
-                    port,
-                    loglvl,
-                }
-                .run()
-                .await
+                // Build loader chain: IPFS first
+                let mut loader_chain =
+                    vec![Box::new(loaders::IpfsUnixfsLoader::new(ipfs.clone()))
+                        as Box<dyn cell::Loader>];
+                // finally, allow host paths (relative or absolute) as a fallback
+                loader_chain.push(Box::new(loaders::HostPathLoader));
+                // finally, build the chain loader
+                let loader = Box::new(loaders::ChainLoader::new(loader_chain));
+
+                let cell = cell::CommandBuilder::new(path)
+                    .with_loader(loader)
+                    .with_args(args)
+                    .with_env(env.clone().unwrap_or_default())
+                    .with_wasm_debug(wasm_debug)
+                    .with_ipfs(ipfs)
+                    .with_port(port)
+                    .with_loglvl(loglvl)
+                    .build();
+                cell.spawn().await
             }
         }
     }
 }
 
 #[tokio::main]
+#[allow(unreachable_code)]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    cli.command.run().await
+    let exit_code = cli.command.run().await?;
+    process::exit(exit_code);
+    Ok(())
 }

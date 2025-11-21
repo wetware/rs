@@ -1,16 +1,25 @@
-use anyhow::Result;
-use wasmtime::component::{Component, Instance, Linker, ResourceTable};
+use anyhow::{anyhow, Context, Result};
+use tokio::io::{AsyncRead, AsyncWrite};
+use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config as WasmConfig, Engine, Store};
 use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
 use wasmtime_wasi::p2::add_to_linker_async;
+use wasmtime_wasi::p2::bindings::Command as WasiCliCommand;
+use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
+use super::Loader;
+
 pub const BUFFER_SIZE: usize = 1024;
+
+type BoxAsyncRead = Box<dyn AsyncRead + Send + Sync + Unpin + 'static>;
+type BoxAsyncWrite = Box<dyn AsyncWrite + Send + Sync + Unpin + 'static>;
 
 // Required for WASI IO to work.
 pub struct ComponentRunStates {
     pub wasi_ctx: WasiCtx,
     pub resource_table: ResourceTable,
+    pub loader: Option<Box<dyn Loader>>,
 }
 
 // Required for WASI IO to work.
@@ -23,29 +32,41 @@ impl WasiView for ComponentRunStates {
     }
 }
 
-/// Configuration for cell process creation
-pub struct Config {
-    /// Environment variables for the cell process
-    pub env: Vec<String>,
-    /// Command line arguments for the cell process
-    pub args: Vec<String>,
-    /// Whether to enable cell debug info
-    pub wasm_debug: bool,
+struct ProcInit {
+    env: Vec<String>,
+    args: Vec<String>,
+    wasm_debug: bool,
+    bytecode: Vec<u8>,
+    loader: Option<Box<dyn Loader>>,
+    stdin: BoxAsyncRead,
+    stdout: BoxAsyncWrite,
+    stderr: BoxAsyncWrite,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Builder for constructing a Proc configuration
+pub struct Builder {
+    env: Vec<String>,
+    args: Vec<String>,
+    wasm_debug: bool,
+    bytecode: Option<Vec<u8>>,
+    loader: Option<Box<dyn Loader>>,
+    stdin: Option<BoxAsyncRead>,
+    stdout: Option<BoxAsyncWrite>,
+    stderr: Option<BoxAsyncWrite>,
 }
 
-impl Config {
-    /// Create a new process configuration
+impl Builder {
+    /// Create a new Proc builder
     pub fn new() -> Self {
         Self {
             env: Vec::new(),
             args: Vec::new(),
             wasm_debug: false,
+            bytecode: None,
+            loader: None,
+            stdin: None,
+            stdout: None,
+            stderr: None,
         }
     }
 
@@ -66,6 +87,98 @@ impl Config {
         self.args = args;
         self
     }
+
+    /// Provide the component bytecode
+    pub fn with_bytecode(mut self, bytecode: Vec<u8>) -> Self {
+        self.bytecode = Some(bytecode);
+        self
+    }
+
+    /// Provide the optional loader used for host callbacks
+    pub fn with_loader(mut self, loader: Option<Box<dyn Loader>>) -> Self {
+        self.loader = loader;
+        self
+    }
+
+    /// Provide the stdin handle
+    pub fn with_stdin<R>(mut self, stdin: R) -> Self
+    where
+        R: AsyncRead + Send + Sync + Unpin + 'static,
+    {
+        self.stdin = Some(Box::new(stdin));
+        self
+    }
+
+    /// Provide the stdout handle
+    pub fn with_stdout<W>(mut self, stdout: W) -> Self
+    where
+        W: AsyncWrite + Send + Sync + Unpin + 'static,
+    {
+        self.stdout = Some(Box::new(stdout));
+        self
+    }
+
+    /// Provide the stderr handle
+    pub fn with_stderr<W>(mut self, stderr: W) -> Self
+    where
+        W: AsyncWrite + Send + Sync + Unpin + 'static,
+    {
+        self.stderr = Some(Box::new(stderr));
+        self
+    }
+
+    /// Convenience helper to set all stdio handles at once.
+    pub fn with_stdio<R, W1, W2>(self, stdin: R, stdout: W1, stderr: W2) -> Self
+    where
+        R: AsyncRead + Send + Sync + Unpin + 'static,
+        W1: AsyncWrite + Send + Sync + Unpin + 'static,
+        W2: AsyncWrite + Send + Sync + Unpin + 'static,
+    {
+        self.with_stdin(stdin)
+            .with_stdout(stdout)
+            .with_stderr(stderr)
+    }
+
+    /// Build a Proc instance. All required parameters must be supplied first.
+    pub async fn build(self) -> Result<Proc> {
+        let Builder {
+            env,
+            args,
+            wasm_debug,
+            bytecode,
+            loader,
+            stdin,
+            stdout,
+            stderr,
+        } = self;
+
+        let bytecode =
+            bytecode.ok_or_else(|| anyhow!("bytecode must be provided to Proc::Builder"))?;
+        let stdin =
+            stdin.ok_or_else(|| anyhow!("stdin handle must be provided to Proc::Builder"))?;
+        let stdout =
+            stdout.ok_or_else(|| anyhow!("stdout handle must be provided to Proc::Builder"))?;
+        let stderr =
+            stderr.ok_or_else(|| anyhow!("stderr handle must be provided to Proc::Builder"))?;
+
+        Proc::new(ProcInit {
+            env,
+            args,
+            wasm_debug,
+            bytecode,
+            loader,
+            stdin,
+            stdout,
+            stderr,
+        })
+        .await
+    }
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Cell process that encapsulates a WASM instance and its configuration.
@@ -73,61 +186,33 @@ impl Config {
 /// Designed for per-stream instantiation - each incoming stream gets its own Proc instance.
 /// This enables concurrent execution of multiple services.
 pub struct Proc {
-    /// Process configuration
-    #[allow(dead_code)]
-    pub config: Config,
-    /// Service metadata
-    #[allow(dead_code)]
-    pub service_info: ServiceInfo,
-    // /// Compiled cell module
-    // pub module: Module,
-    /// Cell runtime instance
-    #[allow(dead_code)]
-    pub instance: Instance,
+    /// Typed handle to the guest command world
+    pub command: WasiCliCommand,
     /// Cell runtime store
     #[allow(dead_code)]
     pub store: Store<ComponentRunStates>,
-    /// Host-side stdin handle for communication
+    /// Whether debug info was enabled
     #[allow(dead_code)]
-    pub host_stdin: tokio::io::DuplexStream,
-    /// Host-side stdout handle for communication
-    #[allow(dead_code)]
-    pub host_stdout: tokio::io::DuplexStream,
-}
-
-/// Service metadata for tracking per-stream instances
-#[derive(Debug, Clone)]
-pub struct ServiceInfo {
-    /// Service path (e.g., "/ww/0.1.0/echo")
-    #[allow(dead_code)]
-    pub service_path: String,
-    /// Version (e.g., "0.1.0")
-    #[allow(dead_code)]
-    pub version: String,
-    /// Service name (e.g., "echo")
-    #[allow(dead_code)]
-    pub service_name: String,
-    /// Protocol used for this service
-    #[allow(dead_code)]
-    pub protocol: String,
+    pub wasm_debug: bool,
 }
 
 impl Proc {
-    /// Create a new WASM process with duplex pipes for bidirectional communication
-    ///
-    /// Returns the Proc instance with service metadata and host-side handles.
-    /// The WASM instance gets the other end of the pipes.
-    pub async fn new_with_duplex_pipes(
-        config: Config,
-        bytecode: &[u8],
-        service_info: ServiceInfo,
-    ) -> Result<Self> {
-        // Create duplex pipes for bidirectional communication
-        let (host_stdin, wasm_stdin) = tokio::io::duplex(BUFFER_SIZE);
-        let (wasm_stdout, host_stdout) = tokio::io::duplex(BUFFER_SIZE);
+    /// Create a new WASM process with explicit stdio handles provided by the host.
+    async fn new(init: ProcInit) -> Result<Self> {
+        let ProcInit {
+            env,
+            args,
+            wasm_debug,
+            bytecode,
+            loader,
+            stdin,
+            stdout,
+            stderr,
+        } = init;
 
-        let wasm_stdin_async = AsyncStdinStream::new(wasm_stdin);
-        let wasm_stdout_async = AsyncStdoutStream::new(BUFFER_SIZE, wasm_stdout);
+        let stdin_stream = AsyncStdinStream::new(stdin);
+        let stdout_stream = AsyncStdoutStream::new(BUFFER_SIZE, stdout);
+        let stderr_stream = AsyncStdoutStream::new(BUFFER_SIZE, stderr);
 
         let mut wasm_config = WasmConfig::new();
         wasm_config.async_support(true);
@@ -135,41 +220,89 @@ impl Proc {
         let mut linker = Linker::new(&engine);
         add_to_linker_async(&mut linker)?;
 
-        // Prepare environment variables as key-value pairs
-        let envs: Vec<(&str, &str)> = config
-            .env
-            .iter()
-            .filter_map(|var| var.split_once('='))
-            .collect();
+        // Add loader host function if loader is provided
+        if loader.is_some() {
+            add_loader_to_linker(&mut linker)?;
+        }
 
-        // Wire the async stdio streams into WASI and inherit host args.
-        let wasi = WasiCtx::builder()
-            .stdin(wasm_stdin_async)
-            .stdout(wasm_stdout_async)
+        // Prepare environment variables as key-value pairs
+        let envs: Vec<(&str, &str)> = env.iter().filter_map(|var| var.split_once('=')).collect();
+
+        // Wire the guest to inherit the host stdio handles.
+        let mut wasi_builder = WasiCtxBuilder::new();
+        wasi_builder
+            .stdin(stdin_stream)
+            .stdout(stdout_stream)
+            .stderr(stderr_stream)
             .envs(&envs)
-            .args(&config.args)
-            .build();
+            .args(&args);
+        let wasi = wasi_builder.build();
 
         let state = ComponentRunStates {
             wasi_ctx: wasi,
             resource_table: ResourceTable::new(),
+            loader,
         };
         let mut store = Store::new(&engine, state);
 
         // Instantiate it as a normal component
-        let component = Component::from_binary(&engine, bytecode)?;
-        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let component = Component::from_binary(&engine, &bytecode)?;
+        let command = WasiCliCommand::instantiate_async(&mut store, &component, &linker).await?;
 
         Ok(Self {
-            config,
-            service_info,
-            // module,
-            instance,
+            command,
             store,
-            host_stdin,
-            host_stdout,
+            wasm_debug,
         })
     }
+
+    /// Invoke the guest's `wasi:cli/run#run` export and wait for completion.
+    pub async fn run(mut self) -> Result<()> {
+        self.command
+            .wasi_cli_run()
+            .call_run(&mut self.store)
+            .await
+            .context("failed to call `wasi:cli/run`")?
+            .map_err(|()| anyhow!("guest returned non-zero exit status"))
+    }
+}
+
+/// Add the loader host function to the Wasmtime linker
+///
+/// This exports a host function that allows WASM guests to call back into
+/// the host to load bytecode from various sources (IPFS, filesystem, etc.).
+///
+/// Note: This requires a WIT interface definition. For now, this is a
+/// placeholder that can be implemented once the WIT interface is defined.
+fn add_loader_to_linker<T>(_linker: &mut Linker<T>) -> Result<()> {
+    // TODO: Implement using WIT interface
+    // The WIT interface would look something like:
+    //
+    // package wetware:loader;
+    //
+    // interface loader {
+    //   load: func(path: string) -> result<list<u8>, string>;
+    // }
+    //
+    // world wetware {
+    //   import loader: self.loader;
+    // }
+    //
+    // Then we'd use wit-bindgen to generate bindings and implement:
+    // linker.root().func_wrap_async("wetware:loader/loader", "load", |mut store, (path,): (String,)| async move {
+    //     let state = store.data_mut();
+    //     if let Some(ref loader) = state.loader {
+    //         match loader.load(&path).await {
+    //             Ok(data) => Ok((data,)),
+    //             Err(e) => Err(e.to_string()),
+    //         }
+    //     } else {
+    //         Err("Loader not available".to_string())
+    //     }
+    // })?;
+
+    // For now, this is a no-op placeholder
+    Ok(())
 }
 
 #[cfg(test)]
@@ -177,37 +310,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_proc_config_creation() {
-        let config = Config::new();
-        assert!(!config.wasm_debug);
-        assert!(config.env.is_empty());
-        assert!(config.args.is_empty());
+    fn test_proc_builder_creation() {
+        let builder = Builder::new();
+        assert!(!builder.wasm_debug);
+        assert!(builder.env.is_empty());
+        assert!(builder.args.is_empty());
     }
 
     #[test]
-    fn test_proc_config_builder() {
-        let config = Config::new()
+    fn test_proc_builder() {
+        let builder = Builder::new()
             .with_wasm_debug(true)
             .with_env(vec!["TEST=1".to_string()])
             .with_args(vec!["arg1".to_string()]);
 
-        assert!(config.wasm_debug);
-        assert_eq!(config.env.len(), 1);
-        assert_eq!(config.args.len(), 1);
-    }
-
-    #[test]
-    fn test_service_info_creation() {
-        let service_info = ServiceInfo {
-            service_path: "/ww/0.1.0/echo".to_string(),
-            version: "0.1.0".to_string(),
-            service_name: "echo".to_string(),
-            protocol: "/ww/0.1.0/".to_string(),
-        };
-
-        assert_eq!(service_info.service_path, "/ww/0.1.0/echo");
-        assert_eq!(service_info.version, "0.1.0");
-        assert_eq!(service_info.service_name, "echo");
-        assert_eq!(service_info.protocol, "/ww/0.1.0/");
+        assert!(builder.wasm_debug);
+        assert_eq!(builder.env.len(), 1);
+        assert_eq!(builder.args.len(), 1);
     }
 }

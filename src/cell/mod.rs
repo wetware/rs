@@ -9,8 +9,8 @@ use async_trait::async_trait;
 pub mod executor;
 pub mod proc;
 
-pub use executor::Command;
-pub use proc::{Config, Proc, ServiceInfo};
+pub use executor::{Command, CommandBuilder};
+pub use proc::{Builder as ProcBuilder, Proc};
 
 /// Trait for loading bytecode from various sources (IPFS, filesystem, etc.)
 ///

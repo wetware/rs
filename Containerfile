@@ -5,8 +5,7 @@ FROM rust:alpine as builder
 RUN apk add --no-cache \
     pkgconfig \
     openssl-dev \
-    musl-dev \
-    capnproto-dev
+    musl-dev
 
 # Set working directory
 WORKDIR /usr/src/app

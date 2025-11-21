@@ -1,6 +1,8 @@
-# Wetware Protocol Node
+# Wetware Runtime
 
-A Rust libp2p application that implements the Wetware Protocol (`/ww/0.1.0`) for peer-to-peer RPC communication with capability-based security. The node connects to IPFS DHT networks and provides secure remote execution capabilities through Cap'n Proto RPC.
+A Rust CLI that fetches WASM components (typically from IPFS) and executes them
+under WASI Preview 2. The `ww run` command wires host stdio directly to the
+guest, so operators can interact with components exactly as if they were local.
 
 ## Features
 
@@ -18,25 +20,11 @@ A Rust libp2p application that implements the Wetware Protocol (`/ww/0.1.0`) for
    kubo daemon
    ```
 
-2. **Cap'n Proto compiler (version 0.5.2 or higher)**
+2. **Rust toolchain**
    ```bash
-   # Ubuntu/Debian
-   sudo apt-get install capnproto
-   
-   # macOS
-   brew install capnp
-   
-   # Or build from source
-   # See https://capnproto.org/install.html
+   rustup install stable
+   rustup default stable
    ```
-
-3. **Rust toolchain (nightly required)**
-   ```bash
-   rustup install nightly
-   rustup default nightly
-   ```
-   
-   **Note**: This project requires Rust nightly due to dependencies that use `edition2024` features. The nightly toolchain provides access to these experimental features.
 
 ## Usage
 
@@ -89,6 +77,58 @@ The `run` subcommand supports the following options:
 - `--loglvl <LEVEL>`: Log level (trace, debug, info, warn, error)
 - `--preset <PRESET>`: Use preset configuration (minimal, development, production)
 - `--env-config`: Use configuration from environment variables
+
+### Building and Running WASM Examples
+
+WASM examples are built automatically when you run `make` or `make examples`. The `default-kernel` example is included by default.
+
+> **Note:** The `wasm32-wasip2` target is currently nightly-only. Inside
+> `examples/default-kernel/`, run `rustup override set nightly` (once) and
+> `rustup target add wasm32-wasip2` before building the guest.
+
+**Quick start**:
+```bash
+# Build everything (including examples)
+make
+
+# Run the default-kernel example
+./target/release/ww run /boot --volume examples/default-kernel/target/wasm32-wasip2/release:/boot
+```
+
+To test `ww run` with the `default-kernel` example:
+
+1. **Build the WASM file** (already done if you ran `make`):
+   ```bash
+   make example-default-kernel
+   ```
+   
+   Or run directly from the example directory:
+   ```bash
+   make -C examples/default-kernel build
+   ```
+   
+   The example Makefile handles building and ensuring the output is named `main.wasm`.
+
+2. **Run with local filesystem mount**:
+   ```bash
+   cargo run -- run /app \
+     --volume examples/default-kernel/target/wasm32-wasip2/release:/app
+   ```
+
+3. **Export to IPFS and run from IPFS** (optional):
+   ```bash
+   # Build and export to IPFS
+   make example-default-kernel-ipfs
+   
+   # Or run directly:
+   make -C examples/default-kernel ipfs
+   
+   # This will output an IPFS hash like: /ipfs/QmHash...
+   # Then run with:
+   cargo run -- run /ipfs/QmHash...
+   ```
+
+**Note**: The `ww run` command expects `{path}/main.wasm`, so when using volume mounts, ensure `main.wasm` exists in the mounted directory. The example Makefiles handle this automatically.
 
 ## Docker Support
 
@@ -222,50 +262,6 @@ The application uses structured logging with the `tracing` crate. You can config
 - **`info`**: General information about application flow
 - **`debug`**: Detailed debugging information
 - **`trace`**: Very detailed tracing (very verbose)
-
-### Performance Metrics
-
-The application logs performance metrics for key operations:
-- Kubo peer discovery duration
-- Host setup time
-- DHT bootstrap duration
-- Provider announcement time
-- Provider query time
-- Total application runtime
-
-### Example Log Output
-
-```
-2024-01-15T10:30:00.123Z INFO  ww::main{thread_id=1 thread_name="tokio-runtime-worker"}: Starting basic-p2p application
-2024-01-15T10:30:00.124Z INFO  ww::main{thread_id=1 thread_name="tokio-runtime-worker"}: Bootstrap Kubo node kubo_url=http://127.0.0.1:5001
-2024-01-15T15T10:30:00.125Z INFO  ww::get_kubo_peers{thread_id=1 thread_name="tokio-runtime-worker"}: Querying Kubo node for peers url=http://127.0.0.1:5001/api/v0/swarm/peers
-2024-01-15T10:30:00.200Z INFO  ww::get_kubo_peers{thread_id=1 thread_name="tokio-runtime-worker"}: Found peer addresses from Kubo node peer_count=5 parse_errors=0
-2024-01-15T10:30:00.201Z INFO  ww::main{thread_id=1 thread_name="tokio-runtime-worker"}: Kubo peer discovery completed duration_ms=76
-```
-
-## Expected Output
-
-```
-Starting basic-p2p application...
-Bootstrap Kubo node kubo_url=http://127.0.0.1:5001
-Querying Kubo node for peers url=http://127.0.0.1:5001/api/v0/swarm/peers
-Found peer addresses from Kubo node peer_count=86 parse_errors=0
-Found peers from Kubo node peer_count=86
-Kubo peer discovery completed duration_ms=18
-Generated Ed25519 keypair peer_id=12D3KooWDmTwwTyjY7kwFvY3qPPJMLaZYrs62a4xqPRByu8rczoX
-Created Kademlia configuration
-Set Kademlia to client mode
-Built libp2p swarm
-Started listening on address listen_addr=/ip4/0.0.0.0/tcp/0
-Local PeerId peer_id=12D3KooWDmTwwTyjY7kwFvY3qPPJMLaZYrs62a4xqPRByu8rczoX
-Adding 86 IPFS peers to Kademlia routing table
-Bootstrapping DHT with IPFS peers
-DHT bootstrap completed
-Provider announcement completed
-Provider query completed
-Starting DHT event loop
-Application ready! Successfully joined the IPFS DHT network
-```
 
 ## How It Works
 
