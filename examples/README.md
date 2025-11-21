@@ -44,7 +44,9 @@ The `--volume` flag mounts the example's build directory to a path inside the WA
 
 ### default-kernel
 
-A minimal WASM component that demonstrates the basic setup for a Wetware Protocol guest. It initializes Cap'n Proto RPC over WASI streams and runs a simple event loop.
+A minimal WASM component that demonstrates async I/O using WASI Preview 2 streams.
+It pipes stdin to stdout asynchronously, implementing `AsyncRead` and `AsyncWrite`
+traits needed for Cap'n Proto transports and other async I/O use cases.
 
 See [default-kernel/README.md](default-kernel/README.md) for detailed documentation.
 
@@ -52,7 +54,7 @@ See [default-kernel/README.md](default-kernel/README.md) for detailed documentat
 
 - **Rust nightly toolchain**: Examples use `wasm32-wasip2` target which requires unstable features
 - **WASI Preview 2**: Examples use WASI Preview 2 APIs via the `wasip2` feature
-- **ww crate with guest feature**: Examples depend on `ww` with the `guest` feature enabled
+- **Example-specific dependencies**: Each example may have different dependencies (e.g., `default-kernel` uses `wasip2` and `futures`, but not `ww`)
 
 ## Project Structure
 
@@ -78,9 +80,8 @@ To create a new example:
 1. Create a new directory under `examples/`
 2. Add a `Cargo.toml` with:
    - `crate-type = ["cdylib"]`
-   - Dependency on `ww` with `features = ["guest"]`
-   - WASM-compatible dependencies (e.g., `tokio` with limited features)
-3. Add `#![feature(wasip2)]` to your `lib.rs`
+   - WASM-compatible dependencies (e.g., `wasip2`, `futures`, or `ww` with `features = ["guest"]` if needed)
+3. Add `#![feature(wasip2)]` to your `lib.rs` if using WASI Preview 2 APIs
 4. Create a `Makefile` similar to `default-kernel/Makefile`
 5. Update the top-level `Makefile` to include your example
 

@@ -6,12 +6,11 @@
 build:
 	@echo "Building default-kernel WASM..."
 	@PATH="$$(rustup which cargo | xargs dirname):$$PATH" cargo build --target wasm32-wasip2 --release
-	@WASM_FILE=$$(find target/wasm32-wasip2/release -name "*.wasm" -type f | head -1); \
-	if [ -n "$$WASM_FILE" ]; then \
-		cp "$$WASM_FILE" target/wasm32-wasip2/release/main.wasm; \
+	@if [ -f target/wasm32-wasip2/release/default_kernel.wasm ]; then \
+		cp target/wasm32-wasip2/release/default_kernel.wasm target/wasm32-wasip2/release/main.wasm; \
 		echo "Built: target/wasm32-wasip2/release/main.wasm"; \
 	else \
-		echo "Warning: No WASM file found. Ensure the build produces a .wasm file."; \
+		echo "Error: default_kernel.wasm not found. Build may have failed."; \
 		exit 1; \
 	fi
 
