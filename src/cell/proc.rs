@@ -414,8 +414,8 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
                 let (_host_to_guest_tx, host_to_guest_rx, guest_to_host_tx) = channels;
 
                 // Create stream adapters
-                let input_reader = streams::ChannelReader::new(host_to_guest_rx);
-                let output_writer = streams::ChannelWriter::new(guest_to_host_tx);
+                let input_reader = streams::Reader::new(host_to_guest_rx);
+                let output_writer = streams::Writer::new(guest_to_host_tx);
 
                 // Wrap in WASI stream types
                 let input_stream = AsyncStdinStream::new(Box::new(input_reader));

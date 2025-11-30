@@ -14,13 +14,13 @@ use tokio::sync::mpsc;
 ///
 /// This allows data from a channel to be read asynchronously, suitable for use
 /// as a WASI input stream.
-pub struct ChannelReader {
+pub struct Reader {
     receiver: mpsc::UnboundedReceiver<Vec<u8>>,
     buffer: Vec<u8>,
     buffer_pos: usize,
 }
 
-impl ChannelReader {
+impl Reader {
     /// Create a new ChannelReader from a receiver.
     pub fn new(receiver: mpsc::UnboundedReceiver<Vec<u8>>) -> Self {
         Self {
@@ -31,7 +31,7 @@ impl ChannelReader {
     }
 }
 
-impl AsyncRead for ChannelReader {
+impl AsyncRead for Reader {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -85,13 +85,13 @@ impl AsyncRead for ChannelReader {
 ///
 /// This allows data to be written asynchronously to a channel, suitable for use
 /// as a WASI output stream.
-pub struct ChannelWriter {
+pub struct Writer {
     sender: mpsc::UnboundedSender<Vec<u8>>,
     #[allow(dead_code)]
     pending: Vec<u8>,
 }
 
-impl ChannelWriter {
+impl Writer {
     /// Create a new ChannelWriter from a sender.
     pub fn new(sender: mpsc::UnboundedSender<Vec<u8>>) -> Self {
         Self {
@@ -101,7 +101,7 @@ impl ChannelWriter {
     }
 }
 
-impl AsyncWrite for ChannelWriter {
+impl AsyncWrite for Writer {
     fn poll_write(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
@@ -165,7 +165,7 @@ mod tests {
     #[tokio::test]
     async fn test_channel_reader() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut reader = ChannelReader::new(rx);
+        let mut reader = Reader::new(rx);
 
         // Send some data
         tx.send(b"hello".to_vec()).unwrap();
@@ -185,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn test_channel_writer() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut writer = ChannelWriter::new(tx);
+        let mut writer = Writer::new(tx);
 
         // Write some data
         writer.write_all(b"test").await.unwrap();

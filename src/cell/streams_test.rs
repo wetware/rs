@@ -10,8 +10,8 @@ async fn test_bidirectional_async_streaming() {
         streams::create_channel_pair();
 
     // Create stream adapters
-    let mut input_reader = streams::ChannelReader::new(host_to_guest_rx);
-    let mut output_writer = streams::ChannelWriter::new(guest_to_host_tx);
+    let mut input_reader = streams::Reader::new(host_to_guest_rx);
+    let mut output_writer = streams::Writer::new(guest_to_host_tx);
 
     // Test data
     let test_data = b"Hello, async world!";
@@ -64,8 +64,8 @@ async fn test_concurrent_async_streaming() {
     // Test multiple concurrent read/write operations
     let (host_tx, host_rx, guest_tx, mut guest_rx) = streams::create_channel_pair();
 
-    let mut reader = streams::ChannelReader::new(host_rx);
-    let mut writer = streams::ChannelWriter::new(guest_tx);
+    let mut reader = streams::Reader::new(host_rx);
+    let mut writer = streams::Writer::new(guest_tx);
 
     // Send multiple messages from host
     let messages = vec![
