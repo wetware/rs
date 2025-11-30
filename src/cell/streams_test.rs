@@ -68,7 +68,7 @@ async fn test_concurrent_async_streaming() {
     let mut writer = streams::Writer::new(guest_tx);
 
     // Send multiple messages from host
-    let messages = vec![
+    let messages = [
         b"Message 1".to_vec(),
         b"Message 2".to_vec(),
         b"Message 3".to_vec(),
@@ -95,14 +95,14 @@ async fn test_concurrent_async_streaming() {
                         break;
                     }
                 }
-                Err(e) => panic!("Read error: {:?}", e),
+                Err(e) => panic!("Read error: {e:?}"),
             }
         }
         received
     });
 
     // Write responses from guest
-    let responses = vec![
+    let responses = [
         b"Response 1".to_vec(),
         b"Response 2".to_vec(),
         b"Response 3".to_vec(),

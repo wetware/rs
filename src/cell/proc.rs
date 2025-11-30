@@ -32,6 +32,20 @@ type BoxAsyncWrite = Box<dyn AsyncWrite + Send + Sync + Unpin + 'static>;
 // Note: bindgen! generates a Connection type, but we'll use our own
 // to store the stream handles. The generated Connection is the resource type.
 
+// Type aliases for complex channel types
+type DataStreamChannel = (
+    mpsc::UnboundedSender<Vec<u8>>,   // host_to_guest_tx
+    mpsc::UnboundedReceiver<Vec<u8>>, // host_to_guest_rx (for guest input)
+    mpsc::UnboundedSender<Vec<u8>>,   // guest_to_host_tx (for guest output)
+);
+
+type DataStreamChannelPair = (
+    mpsc::UnboundedSender<Vec<u8>>,
+    mpsc::UnboundedReceiver<Vec<u8>>,
+    mpsc::UnboundedSender<Vec<u8>>,
+    mpsc::UnboundedReceiver<Vec<u8>>,
+);
+
 // Required for WASI IO to work.
 pub struct ComponentRunStates {
     pub wasi_ctx: WasiCtx,
@@ -41,11 +55,7 @@ pub struct ComponentRunStates {
     // Channels needed for creating guest streams (consumed by create-connection)
     // host_to_guest_tx/rx: Host writes -> Guest reads (guest needs input stream)
     // guest_to_host_tx: Guest writes -> Host reads (guest needs output stream)
-    pub data_stream_channels: Option<(
-        mpsc::UnboundedSender<Vec<u8>>,   // host_to_guest_tx
-        mpsc::UnboundedReceiver<Vec<u8>>, // host_to_guest_rx (for guest input)
-        mpsc::UnboundedSender<Vec<u8>>,   // guest_to_host_tx (for guest output)
-    )>,
+    pub data_stream_channels: Option<DataStreamChannel>,
     // Host-side receiver for reading data written by the guest
     // Stored separately so it's available to the host even after connection creation
     pub guest_to_host_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
@@ -76,12 +86,7 @@ struct ProcInit {
     stdin: BoxAsyncRead,
     stdout: BoxAsyncWrite,
     stderr: BoxAsyncWrite,
-    data_streams: Option<(
-        mpsc::UnboundedSender<Vec<u8>>,
-        mpsc::UnboundedReceiver<Vec<u8>>,
-        mpsc::UnboundedSender<Vec<u8>>,
-        mpsc::UnboundedReceiver<Vec<u8>>,
-    )>,
+    data_streams: Option<DataStreamChannelPair>,
 }
 
 /// Builder for constructing a Proc configuration
@@ -94,12 +99,7 @@ pub struct Builder {
     stdin: Option<BoxAsyncRead>,
     stdout: Option<BoxAsyncWrite>,
     stderr: Option<BoxAsyncWrite>,
-    data_streams: Option<(
-        mpsc::UnboundedSender<Vec<u8>>,
-        mpsc::UnboundedReceiver<Vec<u8>>,
-        mpsc::UnboundedSender<Vec<u8>>,
-        mpsc::UnboundedReceiver<Vec<u8>>,
-    )>,
+    data_streams: Option<DataStreamChannelPair>,
 }
 
 /// Handles for accessing the host-side of data streams.

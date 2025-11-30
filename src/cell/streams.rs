@@ -134,17 +134,20 @@ impl AsyncWrite for Writer {
     }
 }
 
+/// Channel pair type for bidirectional host-guest communication.
+pub type ChannelPair = (
+    mpsc::UnboundedSender<Vec<u8>>,
+    mpsc::UnboundedReceiver<Vec<u8>>,
+    mpsc::UnboundedSender<Vec<u8>>,
+    mpsc::UnboundedReceiver<Vec<u8>>,
+);
+
 /// Create a bidirectional channel pair for host-guest communication.
 ///
 /// Returns (host_sender, host_receiver, guest_sender, guest_receiver) where:
 /// - host_sender: Host can write to this, guest reads from guest_receiver
 /// - host_receiver: Host reads from this, guest writes to guest_sender
-pub fn create_channel_pair() -> (
-    mpsc::UnboundedSender<Vec<u8>>,
-    mpsc::UnboundedReceiver<Vec<u8>>,
-    mpsc::UnboundedSender<Vec<u8>>,
-    mpsc::UnboundedReceiver<Vec<u8>>,
-) {
+pub fn create_channel_pair() -> ChannelPair {
     let (host_to_guest_tx, host_to_guest_rx) = mpsc::unbounded_channel();
     let (guest_to_host_tx, guest_to_host_rx) = mpsc::unbounded_channel();
 
