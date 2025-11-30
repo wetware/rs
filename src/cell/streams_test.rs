@@ -102,7 +102,11 @@ async fn test_concurrent_async_streaming() {
     });
 
     // Write responses from guest
-    let responses = vec![b"Response 1".to_vec(), b"Response 2".to_vec(), b"Response 3".to_vec()];
+    let responses = vec![
+        b"Response 1".to_vec(),
+        b"Response 2".to_vec(),
+        b"Response 3".to_vec(),
+    ];
     let write_task = tokio::spawn(async move {
         for response in responses.iter() {
             writer.write_all(response).await.unwrap();
@@ -121,12 +125,8 @@ async fn test_concurrent_async_streaming() {
         received
     });
 
-    let (_, read_results, _, recv_results) = tokio::join!(
-        send_task,
-        read_task,
-        write_task,
-        recv_task
-    );
+    let (_, read_results, _, recv_results) =
+        tokio::join!(send_task, read_task, write_task, recv_task);
 
     let read_results = read_results.unwrap();
     assert_eq!(read_results.len(), 3);
@@ -149,4 +149,3 @@ async fn test_stream_handles_integration() {
     // Verify we can send data
     assert!(host_tx.send(b"test".to_vec()).is_ok());
 }
-

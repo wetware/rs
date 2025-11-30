@@ -1,10 +1,10 @@
 use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
+use wasmtime::component::bindgen;
 use wasmtime::component::{Component, Linker, Resource, ResourceTable};
 use wasmtime::StoreContextMut;
 use wasmtime::{Config as WasmConfig, Engine, Store};
-use wasmtime::component::bindgen;
 use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
 use wasmtime_wasi::p2::add_to_linker_async;
 use wasmtime_wasi::p2::bindings::Command as WasiCliCommand;
@@ -12,7 +12,7 @@ use wasmtime_wasi::p2::{InputStream, OutputStream};
 use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
-use super::{Loader, streams};
+use super::{streams, Loader};
 
 // Generate bindings from WIT file
 // Resources are defined within the interface
@@ -43,8 +43,8 @@ pub struct ComponentRunStates {
     // guest_to_host_tx: Guest writes -> Host reads (guest needs output stream)
     pub data_stream_channels: Option<(
         mpsc::UnboundedSender<Vec<u8>>,   // host_to_guest_tx
-        mpsc::UnboundedReceiver<Vec<u8>>,  // host_to_guest_rx (for guest input)
-        mpsc::UnboundedSender<Vec<u8>>,    // guest_to_host_tx (for guest output)
+        mpsc::UnboundedReceiver<Vec<u8>>, // host_to_guest_rx (for guest input)
+        mpsc::UnboundedSender<Vec<u8>>,   // guest_to_host_tx (for guest output)
     )>,
     // Host-side receiver for reading data written by the guest
     // Stored separately so it's available to the host even after connection creation
@@ -76,7 +76,12 @@ struct ProcInit {
     stdin: BoxAsyncRead,
     stdout: BoxAsyncWrite,
     stderr: BoxAsyncWrite,
-    data_streams: Option<(mpsc::UnboundedSender<Vec<u8>>, mpsc::UnboundedReceiver<Vec<u8>>, mpsc::UnboundedSender<Vec<u8>>, mpsc::UnboundedReceiver<Vec<u8>>)>,
+    data_streams: Option<(
+        mpsc::UnboundedSender<Vec<u8>>,
+        mpsc::UnboundedReceiver<Vec<u8>>,
+        mpsc::UnboundedSender<Vec<u8>>,
+        mpsc::UnboundedReceiver<Vec<u8>>,
+    )>,
 }
 
 /// Builder for constructing a Proc configuration
@@ -89,7 +94,12 @@ pub struct Builder {
     stdin: Option<BoxAsyncRead>,
     stdout: Option<BoxAsyncWrite>,
     stderr: Option<BoxAsyncWrite>,
-    data_streams: Option<(mpsc::UnboundedSender<Vec<u8>>, mpsc::UnboundedReceiver<Vec<u8>>, mpsc::UnboundedSender<Vec<u8>>, mpsc::UnboundedReceiver<Vec<u8>>)>,
+    data_streams: Option<(
+        mpsc::UnboundedSender<Vec<u8>>,
+        mpsc::UnboundedReceiver<Vec<u8>>,
+        mpsc::UnboundedSender<Vec<u8>>,
+        mpsc::UnboundedReceiver<Vec<u8>>,
+    )>,
 }
 
 /// Handles for accessing the host-side of data streams.
@@ -200,17 +210,22 @@ impl Builder {
     pub fn with_data_streams(mut self) -> (Self, DataStreamHandles) {
         let (host_to_guest_tx, host_to_guest_rx, guest_to_host_tx, guest_to_host_rx) =
             streams::create_channel_pair();
-        
+
         // Clone the sender for the handles (senders are cheap to clone)
         // The receiver will be available from Proc after building
         let handles = DataStreamHandles {
             host_to_guest_tx: host_to_guest_tx.clone(),
             guest_to_host_rx: None, // Available via Proc::guest_output_receiver() after building
         };
-        
+
         // Store all channels in the builder
-        self.data_streams = Some((host_to_guest_tx, host_to_guest_rx, guest_to_host_tx, guest_to_host_rx));
-        
+        self.data_streams = Some((
+            host_to_guest_tx,
+            host_to_guest_rx,
+            guest_to_host_tx,
+            guest_to_host_rx,
+        ));
+
         (self, handles)
     }
 
@@ -324,7 +339,7 @@ impl Proc {
             add_streams_to_linker(&mut linker)?;
             (
                 Some((host_to_guest_tx, host_to_guest_rx, guest_to_host_tx)),
-                Some(guest_to_host_rx),  // Store separately for host access
+                Some(guest_to_host_rx), // Store separately for host access
             )
         } else {
             (None, None)
@@ -337,7 +352,7 @@ impl Proc {
             data_stream_channels,
             guest_to_host_rx,
         };
-        
+
         let mut store = Store::new(&engine, state);
 
         // Instantiate it as a normal component
@@ -386,56 +401,62 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
         |mut store: StoreContextMut<'_, ComponentRunStates>, (): ()| {
             Box::new(async move {
                 let state = store.data_mut();
-                
+
                 // Extract channels - must exist if this is called
-                let channels = state.data_stream_channels.take()
+                let channels = state
+                    .data_stream_channels
+                    .take()
                     .ok_or_else(|| anyhow!("data streams not enabled"))?;
-                
+
                 // Extract only the channels needed for stream creation
                 // guest_to_host_rx is stored separately in ComponentRunStates for host access
                 // host_to_guest_tx is kept for potential future use (e.g., host writing to guest)
                 let (_host_to_guest_tx, host_to_guest_rx, guest_to_host_tx) = channels;
-                
+
                 // Create stream adapters
                 let input_reader = streams::ChannelReader::new(host_to_guest_rx);
                 let output_writer = streams::ChannelWriter::new(guest_to_host_tx);
-                
+
                 // Wrap in WASI stream types
                 let input_stream = AsyncStdinStream::new(Box::new(input_reader));
                 let output_stream = AsyncStdoutStream::new(BUFFER_SIZE, Box::new(output_writer));
-                
+
                 // Add streams to WASI resource table and get handles
                 // The WASI ResourceTable uses push() method which returns Resource<T>
                 let wasi_view = state.ctx();
-                let input_resource = wasi_view.table.push(Box::new(input_stream) as Box<dyn InputStream>)?;
-                let output_resource = wasi_view.table.push(Box::new(output_stream) as Box<dyn OutputStream>)?;
-                
+                let input_resource = wasi_view
+                    .table
+                    .push(Box::new(input_stream) as Box<dyn InputStream>)?;
+                let output_resource = wasi_view
+                    .table
+                    .push(Box::new(output_stream) as Box<dyn OutputStream>)?;
+
                 // Get u32 handles from resources
                 let input_handle = input_resource.rep();
                 let output_handle = output_resource.rep();
-                
+
                 // Create connection state with stream handles
                 let conn_state = ConnectionState {
                     input_stream_handle: input_handle,
                     output_stream_handle: output_handle,
                 };
-                
+
                 // Store in component resource table
                 let conn_resource = state.resource_table.push(conn_state)?;
-                
+
                 // Convert Resource<ConnectionState> to Connection (ResourceAny)
                 let connection = Connection::try_from_resource(conn_resource, &mut store)?;
                 Ok((connection,))
             })
         },
     )?;
-    
+
     // Implement get-input-stream-handle method
     // Resource methods use package-qualified names with resource type
     // Resource needs to be in a tuple to implement ComponentNamedList
     linker.root().func_wrap_async(
         "wetware:streams/streams#connection.get-input-stream-handle",
-        |store: StoreContextMut<'_, ComponentRunStates>, 
+        |store: StoreContextMut<'_, ComponentRunStates>,
          (connection,): (Resource<ConnectionState>,)| {
             Box::new(async move {
                 let conn_state = store.data().resource_table.get(&connection)?;
@@ -443,13 +464,13 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
             })
         },
     )?;
-    
+
     // Implement get-output-stream-handle method
     // Resource methods use package-qualified names with resource type
     // Resource needs to be in a tuple to implement ComponentNamedList
     linker.root().func_wrap_async(
         "wetware:streams/streams#connection.get-output-stream-handle",
-        |store: StoreContextMut<'_, ComponentRunStates>, 
+        |store: StoreContextMut<'_, ComponentRunStates>,
          (connection,): (Resource<ConnectionState>,)| {
             Box::new(async move {
                 let conn_state = store.data().resource_table.get(&connection)?;
@@ -457,7 +478,7 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
             })
         },
     )?;
-    
+
     Ok(())
 }
 

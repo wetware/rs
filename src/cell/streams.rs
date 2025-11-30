@@ -1,4 +1,5 @@
- //! Stream adapters for bridging tokio channels to WASI streams.
+
+//! Stream adapters for bridging tokio channels to WASI streams.
 //!
 //! This module provides adapters that convert tokio channels into AsyncRead/AsyncWrite
 //! implementations, which can then be wrapped by wasmtime-wasi's stream types.
@@ -42,13 +43,13 @@ impl AsyncRead for ChannelReader {
             let to_copy = available.len().min(buf.remaining());
             buf.put_slice(&available[..to_copy]);
             self.buffer_pos += to_copy;
-            
+
             // If we've consumed the entire buffer, clear it
             if self.buffer_pos >= self.buffer.len() {
                 self.buffer.clear();
                 self.buffer_pos = 0;
             }
-            
+
             return Poll::Ready(Ok(()));
         }
 
@@ -62,13 +63,13 @@ impl AsyncRead for ChannelReader {
                 }
                 self.buffer = data;
                 self.buffer_pos = 0;
-                
+
                 // Now read from the new buffer
                 let available = &self.buffer[self.buffer_pos..];
                 let to_copy = available.len().min(buf.remaining());
                 buf.put_slice(&available[..to_copy]);
                 self.buffer_pos += to_copy;
-                
+
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(None) => {
@@ -147,7 +148,7 @@ pub fn create_channel_pair() -> (
 ) {
     let (host_to_guest_tx, host_to_guest_rx) = mpsc::unbounded_channel();
     let (guest_to_host_tx, guest_to_host_rx) = mpsc::unbounded_channel();
-    
+
     (
         host_to_guest_tx,
         host_to_guest_rx,
@@ -195,4 +196,3 @@ mod tests {
         assert_eq!(data, b"test");
     }
 }
-
