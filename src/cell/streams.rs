@@ -1,4 +1,3 @@
-
 //! Stream adapters for bridging tokio channels to WASI streams.
 //!
 //! This module provides adapters that convert tokio channels into AsyncRead/AsyncWrite
