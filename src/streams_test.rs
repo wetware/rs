@@ -1,6 +1,6 @@
 //! Unit tests for async I/O streaming with data streams
 
-use crate::cell::streams;
+use crate::streams;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
@@ -149,3 +149,4 @@ async fn test_stream_handles_integration() {
     // Verify we can send data
     assert!(host_tx.send(b"test".to_vec()).is_ok());
 }
+

@@ -1,11 +1,31 @@
+//! Cell runtime implementation for Wetware
+//!
+//! A cell is a higher-level abstraction that orchestrates one or more procs.
+//! This module provides the Cell type and Loader trait for managing cell execution.
+
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use tokio::io::{stderr, stdin, stdout};
 use tracing::info;
 
-use crate::cell::{Loader, ProcBuilder};
+use crate::proc::Builder as ProcBuilder;
 
-/// Builder for constructing a cell Command
-pub struct CommandBuilder {
+/// Trait for loading bytecode from various sources (IPFS, filesystem, etc.)
+///
+/// This allows the cell package to be agnostic about how bytecode is resolved,
+/// following the Go pattern where packages declare interfaces and callers
+/// provide implementations.
+#[async_trait]
+pub trait Loader: Send + Sync {
+    /// Load bytecode from the given path
+    ///
+    /// The path can be an IPFS path (/ipfs/, /ipns/, /ipld/), filesystem path,
+    /// or any other format supported by the implementation.
+    async fn load(&self, path: &str) -> Result<Vec<u8>>;
+}
+
+/// Builder for constructing a cell
+pub struct CellBuilder {
     loader: Option<Box<dyn Loader>>,
     path: String,
     args: Vec<String>,
@@ -16,7 +36,7 @@ pub struct CommandBuilder {
     loglvl: Option<crate::config::LogLevel>,
 }
 
-impl CommandBuilder {
+impl CellBuilder {
     /// Create a new Builder with a path
     pub fn new(path: String) -> Self {
         Self {
@@ -73,9 +93,9 @@ impl CommandBuilder {
         self
     }
 
-    /// Build the Command
-    pub fn build(self) -> Command {
-        Command {
+    /// Build the Cell
+    pub fn build(self) -> Cell {
+        Cell {
             path: self.path,
             args: self.args,
             loader: self.loader.expect("loader must be set"),
@@ -88,8 +108,8 @@ impl CommandBuilder {
     }
 }
 
-/// Configuration for running a cell
-pub struct Command {
+/// A cell that orchestrates one or more procs
+pub struct Cell {
     pub path: String,
     pub args: Vec<String>,
     pub loader: Box<dyn Loader>,
@@ -100,10 +120,10 @@ pub struct Command {
     pub loglvl: Option<crate::config::LogLevel>,
 }
 
-impl Command {
-    /// Execute the cell command
+impl Cell {
+    /// Execute the cell by spawning a proc
     pub async fn spawn(self) -> Result<i32> {
-        let Command {
+        let Cell {
             path,
             args,
             loader,

@@ -10,6 +10,10 @@ pub mod cell;
 pub mod ipfs;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod loaders;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod proc;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod streams;
 
 // Modules available for both host and guest
 pub mod config;
@@ -17,5 +21,7 @@ pub mod default_kernel;
 
 // Re-export commonly used types for convenience
 #[cfg(not(target_arch = "wasm32"))]
-pub use cell::{Loader, Proc, ProcBuilder};
+pub use cell::{Cell, CellBuilder, Loader};
 pub use config::LogLevel;
+#[cfg(not(target_arch = "wasm32"))]
+pub use proc::{Builder as ProcBuilder, Proc};

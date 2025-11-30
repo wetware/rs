@@ -12,7 +12,7 @@ use wasmtime_wasi::p2::{InputStream, OutputStream};
 use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
-use super::{streams, Loader};
+use crate::{streams, Loader};
 
 // Generate bindings from WIT file
 // Resources are defined within the interface

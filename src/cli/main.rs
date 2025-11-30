@@ -77,7 +77,7 @@ impl Commands {
                 // finally, build the chain loader
                 let loader = Box::new(loaders::ChainLoader::new(loader_chain));
 
-                let cell = cell::CommandBuilder::new(path)
+                let cell = cell::CellBuilder::new(path)
                     .with_loader(loader)
                     .with_args(args)
                     .with_env(env.clone().unwrap_or_default())

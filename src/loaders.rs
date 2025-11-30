@@ -6,8 +6,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use crate::cell::Loader;
 use crate::ipfs::{is_ipfs_path, UnixFS};
+use crate::Loader;
 use std::path::Path;
 
 /// IPFS filesystem loader for IPFS-based bytecode resolution
