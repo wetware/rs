@@ -62,12 +62,23 @@ impl Loader for HostPath {
             return Err(anyhow::anyhow!("HostPath loader has no prefix set."));
         }
 
-        let path = Path::new(name);
-        if !path.starts_with(&self.prefix) {
+        let base = self
+            .prefix
+            .canonicalize()
+            .with_context(|| format!("Invalid host path prefix: {}", self.prefix.display()))?;
+        let path = if Path::new(name).is_absolute() {
+            PathBuf::from(name)
+        } else {
+            base.join(name)
+        };
+        let path = path
+            .canonicalize()
+            .with_context(|| format!("Failed to resolve host path: {name}"))?;
+        if !path.starts_with(&base) {
             return Err(anyhow::anyhow!(
                 "File '{}' does not match prefix '{}'",
                 name,
-                self.prefix.display()
+                base.display()
             ));
         }
 
@@ -75,7 +86,7 @@ impl Loader for HostPath {
             return Err(anyhow::anyhow!("File not found: {name}"));
         }
 
-        fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))
+        fs::read(&path).with_context(|| format!("Failed to read file: {}", path.display()))
     }
 }
 
