@@ -25,7 +25,7 @@ pub trait Loader: Send + Sync {
 }
 
 /// Builder for constructing a cell
-pub struct CellBuilder {
+pub struct Builder {
     loader: Option<Box<dyn Loader>>,
     path: String,
     args: Vec<String>,
@@ -36,9 +36,9 @@ pub struct CellBuilder {
     loglvl: Option<crate::config::LogLevel>,
 }
 
-impl CellBuilder {
+impl Builder {
     /// Create a new Builder with a path
-    pub fn new(path: String) -> Self {
+    pub fn with_path(path: String) -> Self {
         Self {
             loader: None,
             path,
