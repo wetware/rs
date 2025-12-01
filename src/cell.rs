@@ -124,7 +124,6 @@ pub struct Cell {
 impl Cell {
     /// Execute the cell by spawning a proc
     pub async fn start(self) -> Result<i32> {
-    pub async fn start(self) -> Result<i32> {
         let path = self.path.clone();
         let (join, mut handles) = self.spawn_with_streams().await?;
 
