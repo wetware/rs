@@ -85,7 +85,7 @@ impl Commands {
                     .with_port(port)
                     .with_loglvl(loglvl)
                     .build();
-                cell.spawn().await
+                cell.start().await
             }
         }
     }

@@ -122,7 +122,7 @@ pub struct Cell {
 
 impl Cell {
     /// Execute the cell by spawning a proc
-    pub async fn spawn(self) -> Result<i32> {
+    pub async fn start(self) -> Result<i32> {
         let Cell {
             path,
             args,
