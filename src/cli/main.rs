@@ -69,10 +69,9 @@ impl Commands {
                 let ipfs = IPFS::new(ipfs_url.clone());
                 let ipfs_loader = loaders::IpfsUnixfs::new(ipfs.clone());
 
-
                 // Build loader chain: IPFS first
                 let loader = Box::new(loaders::Chain::new(vec![
-                    Box::new(ipfs_loader) as Box<dyn cell::Loader>,   
+                    Box::new(ipfs_loader) as Box<dyn cell::Loader>,
                     Box::new(loaders::HostPath::new(std::path::PathBuf::from("."))),
                 ]));
 

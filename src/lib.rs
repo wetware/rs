@@ -21,7 +21,7 @@ pub mod default_kernel;
 
 // Re-export commonly used types for convenience
 #[cfg(not(target_arch = "wasm32"))]
-pub use cell::{Cell, Builder, Loader};
+pub use cell::{Builder, Cell, Loader};
 pub use config::LogLevel;
 #[cfg(not(target_arch = "wasm32"))]
 pub use proc::{Builder as ProcBuilder, Proc};
