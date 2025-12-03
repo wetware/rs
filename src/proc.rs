@@ -33,13 +33,13 @@ type BoxAsyncWrite = Box<dyn AsyncWrite + Send + Sync + Unpin + 'static>;
 // to store the stream handles. The generated Connection is the resource type.
 
 // Type aliases for complex channel types
-type DataStreamChannel = (
+type GuestChannels = (
     mpsc::UnboundedSender<Vec<u8>>,   // host_to_guest_tx
     mpsc::UnboundedReceiver<Vec<u8>>, // host_to_guest_rx (for guest input)
     mpsc::UnboundedSender<Vec<u8>>,   // guest_to_host_tx (for guest output)
 );
 
-type DataStreamChannelPair = (
+type ChannelSet = (
     mpsc::UnboundedSender<Vec<u8>>,
     mpsc::UnboundedReceiver<Vec<u8>>,
     mpsc::UnboundedSender<Vec<u8>>,
@@ -55,7 +55,7 @@ pub struct ComponentRunStates {
     // Channels needed for creating guest streams (consumed by create-connection)
     // host_to_guest_tx/rx: Host writes -> Guest reads (guest needs input stream)
     // guest_to_host_tx: Guest writes -> Host reads (guest needs output stream)
-    pub data_stream_channels: Option<DataStreamChannel>,
+    pub data_stream_channels: Option<GuestChannels>,
     // Host-side receiver for reading data written by the guest
     // Stored separately so it's available to the host even after connection creation
     pub guest_to_host_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
@@ -77,7 +77,7 @@ struct ConnectionState {
     output_stream_handle: u32,
 }
 
-struct ProcInit {
+struct Init {
     env: Vec<String>,
     args: Vec<String>,
     wasm_debug: bool,
@@ -86,7 +86,7 @@ struct ProcInit {
     stdin: BoxAsyncRead,
     stdout: BoxAsyncWrite,
     stderr: BoxAsyncWrite,
-    data_streams: Option<DataStreamChannelPair>,
+    data_streams: Option<ChannelSet>,
 }
 
 /// Builder for constructing a Proc configuration
@@ -99,7 +99,7 @@ pub struct Builder {
     stdin: Option<BoxAsyncRead>,
     stdout: Option<BoxAsyncWrite>,
     stderr: Option<BoxAsyncWrite>,
-    data_streams: Option<DataStreamChannelPair>,
+    data_streams: Option<ChannelSet>,
 }
 
 /// Handles for accessing the host-side of data streams.
@@ -252,7 +252,7 @@ impl Builder {
         let stderr =
             stderr.ok_or_else(|| anyhow!("stderr handle must be provided to Proc::Builder"))?;
 
-        Proc::new(ProcInit {
+        Proc::new(Init {
             env,
             args,
             wasm_debug,
@@ -290,8 +290,8 @@ pub struct Proc {
 
 impl Proc {
     /// Create a new WASM process with explicit stdio handles provided by the host.
-    async fn new(init: ProcInit) -> Result<Self> {
-        let ProcInit {
+    async fn new(init: Init) -> Result<Self> {
+        let Init {
             env,
             args,
             wasm_debug,
