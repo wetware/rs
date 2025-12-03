@@ -40,6 +40,7 @@ type GuestChannels = (
 );
 
 type ChannelSet = GuestChannels;
+type ChannelSet = GuestChannels;
 // Required for WASI IO to work.
 pub struct ComponentRunStates {
     pub wasi_ctx: WasiCtx,
@@ -212,7 +213,12 @@ impl Builder {
         };
 
         // Store all channels in the builder
-        self.data_streams = Some((host_to_guest_tx, host_to_guest_rx, guest_to_host_tx));
+        self.data_streams = Some((
+            host_to_guest_tx,
+            host_to_guest_rx,
+            guest_to_host_tx,
+            guest_to_host_rx,
+        ));
 
         (self, handles)
     }
@@ -321,7 +327,8 @@ impl Proc {
 
         // Set up data streams if enabled
         let data_stream_channels = if let Some(channels) = data_streams {
-            let (host_to_guest_tx, host_to_guest_rx, guest_to_host_tx) = channels;
+            let (host_to_guest_tx, host_to_guest_rx, guest_to_host_tx, _guest_to_host_rx) =
+                channels;
             // Add connection resource and host functions to linker
             add_streams_to_linker(&mut linker)?;
             Some((host_to_guest_tx, host_to_guest_rx, guest_to_host_tx))
@@ -521,10 +528,11 @@ mod tests {
         let (mut builder, mut handles) = Builder::new().with_data_streams();
 
         // Access the underlying channels to simulate guest behavior
-        let (_host_to_guest_tx_internal, host_to_guest_rx, guest_to_host_tx) = builder
-            .data_streams
-            .take()
-            .expect("data streams should be configured");
+        let (_host_to_guest_tx_internal, host_to_guest_rx, guest_to_host_tx, _guest_to_host_rx) =
+            builder
+                .data_streams
+                .take()
+                .expect("data streams should be configured");
 
         // Host -> guest: send through the handle and ensure the guest side receives it
         handles.host_to_guest_tx.send(b"ping".to_vec()).unwrap();
