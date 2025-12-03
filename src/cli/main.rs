@@ -67,17 +67,15 @@ impl Commands {
             } => {
                 // Create IPFS clients (one for loader, one for cell)
                 let ipfs = IPFS::new(ipfs_url.clone());
+                let ipfs_loader = loaders::IpfsUnixfs::new(ipfs.clone());
 
                 // Build loader chain: IPFS first
-                let mut loader_chain =
-                    vec![Box::new(loaders::IpfsUnixfsLoader::new(ipfs.clone()))
-                        as Box<dyn cell::Loader>];
-                // finally, allow host paths (relative or absolute) as a fallback
-                loader_chain.push(Box::new(loaders::HostPathLoader));
-                // finally, build the chain loader
-                let loader = Box::new(loaders::ChainLoader::new(loader_chain));
+                let loader = Box::new(loaders::Chain::new(vec![
+                    Box::new(ipfs_loader) as Box<dyn cell::Loader>,
+                    Box::new(loaders::HostPath::new(std::path::PathBuf::from("."))),
+                ]));
 
-                let cell = cell::CommandBuilder::new(path)
+                let cell = cell::Builder::with_path(path)
                     .with_loader(loader)
                     .with_args(args)
                     .with_env(env.clone().unwrap_or_default())
@@ -86,7 +84,7 @@ impl Commands {
                     .with_port(port)
                     .with_loglvl(loglvl)
                     .build();
-                cell.spawn().await
+                cell.start().await
             }
         }
     }
