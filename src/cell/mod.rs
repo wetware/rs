@@ -8,6 +8,10 @@ use async_trait::async_trait;
 
 pub mod executor;
 pub mod proc;
+pub mod streams;
+
+#[cfg(test)]
+mod streams_test;
 
 pub use executor::{Command, CommandBuilder};
 pub use proc::{Builder as ProcBuilder, Proc};
