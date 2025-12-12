@@ -39,13 +39,7 @@ type GuestChannels = (
     mpsc::UnboundedSender<Vec<u8>>,   // guest_to_host_tx (for guest output)
 );
 
-type ChannelSet = (
-    mpsc::UnboundedSender<Vec<u8>>,
-    mpsc::UnboundedReceiver<Vec<u8>>,
-    mpsc::UnboundedSender<Vec<u8>>,
-    mpsc::UnboundedReceiver<Vec<u8>>,
-);
-
+type ChannelSet = GuestChannels;
 // Required for WASI IO to work.
 pub struct ComponentRunStates {
     pub wasi_ctx: WasiCtx,
@@ -56,9 +50,6 @@ pub struct ComponentRunStates {
     // host_to_guest_tx/rx: Host writes -> Guest reads (guest needs input stream)
     // guest_to_host_tx: Guest writes -> Host reads (guest needs output stream)
     pub data_stream_channels: Option<GuestChannels>,
-    // Host-side receiver for reading data written by the guest
-    // Stored separately so it's available to the host even after connection creation
-    pub guest_to_host_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
 }
 
 // Required for WASI IO to work.
@@ -110,8 +101,14 @@ pub struct DataStreamHandles {
     /// Host can write to this, guest reads from it
     pub host_to_guest_tx: mpsc::UnboundedSender<Vec<u8>>,
     /// Host reads from this, guest writes to it
-    /// Note: The receiver is stored in the Proc and can be accessed via a method
-    pub guest_to_host_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    guest_to_host_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+}
+
+impl DataStreamHandles {
+    /// Move the guest-to-host receiver out so the host can read guest output.
+    pub fn take_guest_output_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<Vec<u8>>> {
+        self.guest_to_host_rx.take()
+    }
 }
 
 impl Builder {
@@ -204,27 +201,18 @@ impl Builder {
     /// This creates in-memory channels that are exposed to the guest via
     /// a custom connection resource. Returns handles that the host can use
     /// to communicate with the guest.
-    ///
-    /// The `guest_to_host_rx` receiver is stored in the `Proc` and can be
-    /// accessed via `Proc::guest_output_receiver()` after building.
     pub fn with_data_streams(mut self) -> (Self, DataStreamHandles) {
         let (host_to_guest_tx, host_to_guest_rx, guest_to_host_tx, guest_to_host_rx) =
             streams::create_channel_pair();
 
         // Clone the sender for the handles (senders are cheap to clone)
-        // The receiver will be available from Proc after building
         let handles = DataStreamHandles {
             host_to_guest_tx: host_to_guest_tx.clone(),
-            guest_to_host_rx: None, // Available via Proc::guest_output_receiver() after building
+            guest_to_host_rx: Some(guest_to_host_rx),
         };
 
         // Store all channels in the builder
-        self.data_streams = Some((
-            host_to_guest_tx,
-            host_to_guest_rx,
-            guest_to_host_tx,
-            guest_to_host_rx,
-        ));
+        self.data_streams = Some((host_to_guest_tx, host_to_guest_rx, guest_to_host_tx));
 
         (self, handles)
     }
@@ -332,17 +320,13 @@ impl Proc {
         let wasi = wasi_builder.build();
 
         // Set up data streams if enabled
-        // Extract guest_to_host_rx separately so host can access it
-        let (data_stream_channels, guest_to_host_rx) = if let Some(channels) = data_streams {
-            let (host_to_guest_tx, host_to_guest_rx, guest_to_host_tx, guest_to_host_rx) = channels;
+        let data_stream_channels = if let Some(channels) = data_streams {
+            let (host_to_guest_tx, host_to_guest_rx, guest_to_host_tx) = channels;
             // Add connection resource and host functions to linker
             add_streams_to_linker(&mut linker)?;
-            (
-                Some((host_to_guest_tx, host_to_guest_rx, guest_to_host_tx)),
-                Some(guest_to_host_rx), // Store separately for host access
-            )
+            Some((host_to_guest_tx, host_to_guest_rx, guest_to_host_tx))
         } else {
-            (None, None)
+            None
         };
 
         let state = ComponentRunStates {
@@ -350,7 +334,6 @@ impl Proc {
             resource_table: ResourceTable::new(),
             loader,
             data_stream_channels,
-            guest_to_host_rx,
         };
 
         let mut store = Store::new(&engine, state);
@@ -375,18 +358,6 @@ impl Proc {
             .context("failed to call `wasi:cli/run`")?
             .map_err(|()| anyhow!("guest returned non-zero exit status"))
     }
-
-    /// Get the receiver for reading data written by the guest.
-    ///
-    /// This returns a mutable reference to the receiver that allows the host
-    /// to read data that the guest writes to its output stream. The receiver
-    /// is available after the `Proc` is built, regardless of whether
-    /// `create-connection` has been called by the guest.
-    ///
-    /// Returns `None` if data streams were not enabled via `with_data_streams()`.
-    pub fn guest_output_receiver(&mut self) -> Option<&mut mpsc::UnboundedReceiver<Vec<u8>>> {
-        self.store.data_mut().guest_to_host_rx.as_mut()
-    }
 }
 
 /// Add the streams interface to the Wasmtime linker
@@ -409,7 +380,6 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
                     .ok_or_else(|| anyhow!("data streams not enabled"))?;
 
                 // Extract only the channels needed for stream creation
-                // guest_to_host_rx is stored separately in ComponentRunStates for host access
                 // host_to_guest_tx is kept for potential future use (e.g., host writing to guest)
                 let (_host_to_guest_tx, host_to_guest_rx, guest_to_host_tx) = channels;
 
@@ -523,6 +493,7 @@ fn add_loader_to_linker<T>(_linker: &mut Linker<T>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
 
     #[test]
     fn test_proc_builder_creation() {
@@ -542,5 +513,35 @@ mod tests {
         assert!(builder.wasm_debug);
         assert_eq!(builder.env.len(), 1);
         assert_eq!(builder.args.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_data_stream_handles_full_duplex() {
+        // Enable data streams and capture the returned handles
+        let (mut builder, mut handles) = Builder::new().with_data_streams();
+
+        // Access the underlying channels to simulate guest behavior
+        let (_host_to_guest_tx_internal, host_to_guest_rx, guest_to_host_tx) = builder
+            .data_streams
+            .take()
+            .expect("data streams should be configured");
+
+        // Host -> guest: send through the handle and ensure the guest side receives it
+        handles.host_to_guest_tx.send(b"ping".to_vec()).unwrap();
+        let mut guest_reader = streams::Reader::new(host_to_guest_rx);
+        let mut buf = vec![0u8; 4];
+        let n = guest_reader.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"ping");
+
+        // Guest -> host: simulate guest write and ensure host can receive via the handle
+        let mut guest_output_rx = handles
+            .take_guest_output_receiver()
+            .expect("guest output receiver should be returned to the host");
+        guest_to_host_tx.send(b"pong".to_vec()).unwrap();
+        let pong = guest_output_rx
+            .recv()
+            .await
+            .expect("host should receive guest output");
+        assert_eq!(pong, b"pong");
     }
 }

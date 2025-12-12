@@ -6,9 +6,10 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tokio::io::{stderr, stdin, stdout};
+use tokio::task::JoinHandle;
 use tracing::info;
 
-use crate::proc::Builder as ProcBuilder;
+use crate::proc::{Builder as ProcBuilder, DataStreamHandles};
 
 /// Trait for loading bytecode from various sources (IPFS, filesystem, etc.)
 ///
@@ -123,6 +124,31 @@ pub struct Cell {
 impl Cell {
     /// Execute the cell by spawning a proc
     pub async fn start(self) -> Result<i32> {
+        let path = self.path.clone();
+        let (join, mut handles) = self.spawn_with_streams().await?;
+
+        // If the caller doesn't consume guest output, drain it so guest writes don't break.
+        let drain_task = handles
+            .take_guest_output_receiver()
+            .map(|mut rx| tokio::spawn(async move { while rx.recv().await.is_some() {} }));
+
+        // Ensure the handles stay alive for the duration of the run
+        join.await
+            .context("cell task panicked")?
+            .context("cell execution failed")?;
+        drop(handles);
+        if let Some(task) = drain_task {
+            let _ = task.await;
+        }
+        info!(binary = %path, "Guest exited");
+        Ok(0)
+    }
+
+    /// Execute the cell command and return the join handle plus data stream handles.
+    ///
+    /// This enables bidirectional streams by default so the host can speak async
+    /// protocols (Capnp/Protobuf/etc.) while the guest boots.
+    pub async fn spawn_with_streams(self) -> Result<(JoinHandle<Result<()>>, DataStreamHandles)> {
         let Cell {
             path,
             args,
@@ -149,18 +175,18 @@ impl Cell {
         let stdout_handle = stdout();
         let stderr_handle = stderr();
 
-        ProcBuilder::new()
+        let (builder, handles) = ProcBuilder::new()
             .with_wasm_debug(wasm_debug)
             .with_env(env.unwrap_or_default())
             .with_args(args)
             .with_bytecode(bytecode)
             .with_loader(Some(loader))
             .with_stdio(stdin_handle, stdout_handle, stderr_handle)
-            .build()
-            .await?
-            .run()
-            .await?;
-        info!(binary = %path, "Guest exited");
-        Ok(0)
+            .with_data_streams();
+
+        let proc = builder.build().await?;
+        let join = tokio::spawn(async move { proc.run().await });
+
+        Ok((join, handles))
     }
 }
