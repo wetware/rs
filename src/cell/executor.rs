@@ -104,6 +104,7 @@ pub struct Command {
 impl Command {
     /// Execute the cell command
     pub async fn spawn(self) -> Result<i32> {
+        let path = self.path.clone();
         let (join, mut handles) = self.spawn_with_streams().await?;
 
         // If the caller doesn't consume guest output, drain it so guest writes don't break.
@@ -119,7 +120,7 @@ impl Command {
         if let Some(task) = drain_task {
             let _ = task.await;
         }
-        info!(binary = %self.path, "Guest exited");
+        info!(binary = %path, "Guest exited");
         Ok(0)
     }
 
