@@ -76,7 +76,6 @@ impl Commands {
                 ]));
 
                 let cell = cell::Builder::with_path(path)
-                let cell = cell::Builder::with_path(path)
                     .with_loader(loader)
                     .with_args(args)
                     .with_env(env.clone().unwrap_or_default())
