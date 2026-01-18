@@ -75,12 +75,16 @@ pub fn init_tracing(log_level: LogLevel, _explicit_level: Option<LogLevel>) {
         LogLevel::Error => "error",
     };
 
-    // Set the RUST_LOG environment variable if not already set
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", level_str);
-    }
+    let extra_filter = "capnp=trace,capnp_rpc=trace,wasmtime=trace,wasmtime_wasi=trace,wasmtime::runtime::type_registry=off,wasmtime_internal_cranelift=off,cranelift_codegen=off,cranelift_codegen::egraph=off,cranelift_codegen::context=off,cranelift_codegen::ir=off,cranelift_codegen::machinst=off,cranelift_frontend=off,cranelift_frontend::frontend=off,wasmtime_environ=off";
+    let rust_log = match std::env::var("RUST_LOG") {
+        Ok(existing) if !existing.is_empty() => format!("{existing},{extra_filter}"),
+        _ => format!("{level},{extra_filter}", level = level_str),
+    };
+    std::env::set_var("RUST_LOG", rust_log);
 
     // Initialize tracing (ignore error if already initialized)
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = tracing_subscriber::fmt::try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
 }

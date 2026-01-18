@@ -7,9 +7,17 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cell;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod host;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod ipfs;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod loaders;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod rpc;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod peer_capnp {
+    include!(concat!(env!("OUT_DIR"), "/capnp/peer_capnp.rs"));
+}
 
 // Modules available for both host and guest
 pub mod config;

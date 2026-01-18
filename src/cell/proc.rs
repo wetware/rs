@@ -1,13 +1,16 @@
 use anyhow::{anyhow, Context, Result};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use wasmtime::component::bindgen;
-use wasmtime::component::{Component, Linker, Resource, ResourceTable};
+use wasmtime::component::{
+    types::ComponentItem, Component, Linker, Resource, ResourceTable, ResourceType,
+};
 use wasmtime::StoreContextMut;
 use wasmtime::{Config as WasmConfig, Engine, Store};
 use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
 use wasmtime_wasi::p2::add_to_linker_async;
-use wasmtime_wasi::p2::bindings::Command as WasiCliCommand;
+use wasmtime_wasi::p2::bindings::{Command as WasiCliCommand, CommandPre as WasiCliCommandPre};
 use wasmtime_wasi::p2::{InputStream, OutputStream};
 use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -61,10 +64,20 @@ impl WasiView for ComponentRunStates {
     }
 }
 
-// Internal connection representation that stores stream handles in the component resource table
+// Wrapper for WASI InputStream that we can store as a resource
+struct WetwareInputStream {
+    inner: Option<Box<dyn InputStream>>,
+}
+
+// Wrapper for WASI OutputStream that we can store as a resource
+struct WetwareOutputStream {
+    inner: Option<Box<dyn OutputStream>>,
+}
+
+// Internal connection representation that stores stream wrappers
 struct ConnectionState {
-    input_stream_handle: u32,
-    output_stream_handle: u32,
+    input_stream: Option<WetwareInputStream>,
+    output_stream: Option<WetwareOutputStream>,
 }
 
 struct ProcInit {
@@ -73,6 +86,7 @@ struct ProcInit {
     wasm_debug: bool,
     bytecode: Vec<u8>,
     loader: Option<Box<dyn Loader>>,
+    engine: Option<Arc<Engine>>,
     stdin: BoxAsyncRead,
     stdout: BoxAsyncWrite,
     stderr: BoxAsyncWrite,
@@ -86,6 +100,7 @@ pub struct Builder {
     wasm_debug: bool,
     bytecode: Option<Vec<u8>>,
     loader: Option<Box<dyn Loader>>,
+    engine: Option<Arc<Engine>>,
     stdin: Option<BoxAsyncRead>,
     stdout: Option<BoxAsyncWrite>,
     stderr: Option<BoxAsyncWrite>,
@@ -119,6 +134,7 @@ impl Builder {
             wasm_debug: false,
             bytecode: None,
             loader: None,
+            engine: None,
             stdin: None,
             stdout: None,
             stderr: None,
@@ -153,6 +169,12 @@ impl Builder {
     /// Provide the optional loader used for host callbacks
     pub fn with_loader(mut self, loader: Option<Box<dyn Loader>>) -> Self {
         self.loader = loader;
+        self
+    }
+
+    /// Provide a shared Wasmtime engine to reuse across processes.
+    pub fn with_engine(mut self, engine: Arc<Engine>) -> Self {
+        self.engine = Some(engine);
         self
     }
 
@@ -224,6 +246,7 @@ impl Builder {
             wasm_debug,
             bytecode,
             loader,
+            engine,
             stdin,
             stdout,
             stderr,
@@ -245,6 +268,7 @@ impl Builder {
             wasm_debug,
             bytecode,
             loader,
+            engine,
             stdin,
             stdout,
             stderr,
@@ -284,6 +308,7 @@ impl Proc {
             wasm_debug,
             bytecode,
             loader,
+            engine,
             stdin,
             stdout,
             stderr,
@@ -294,15 +319,23 @@ impl Proc {
         let stdout_stream = AsyncStdoutStream::new(BUFFER_SIZE, stdout);
         let stderr_stream = AsyncStdoutStream::new(BUFFER_SIZE, stderr);
 
-        let mut wasm_config = WasmConfig::new();
-        wasm_config.async_support(true);
-        let engine = Engine::new(&wasm_config)?;
+        let engine = if let Some(engine) = engine {
+            engine
+        } else {
+            let mut wasm_config = WasmConfig::new();
+            wasm_config.async_support(true);
+            Arc::new(Engine::new(&wasm_config)?)
+        };
         let mut linker = Linker::new(&engine);
+        tracing::info!("Adding WASI bindings to linker");
         add_to_linker_async(&mut linker)?;
+        tracing::info!("WASI bindings added");
 
         // Add loader host function if loader is provided
         if loader.is_some() {
+            tracing::info!("Adding loader bindings to linker");
             add_loader_to_linker(&mut linker)?;
+            tracing::info!("Loader bindings added");
         }
 
         // Prepare environment variables as key-value pairs
@@ -322,7 +355,9 @@ impl Proc {
         let data_stream_channels = if let Some(channels) = data_streams {
             let (host_to_guest_tx, host_to_guest_rx, guest_to_host_tx) = channels;
             // Add connection resource and host functions to linker
+            tracing::info!("Adding streams bindings to linker");
             add_streams_to_linker(&mut linker)?;
+            tracing::info!("Streams bindings added");
             Some((host_to_guest_tx, host_to_guest_rx, guest_to_host_tx))
         } else {
             None
@@ -338,8 +373,65 @@ impl Proc {
         let mut store = Store::new(&engine, state);
 
         // Instantiate it as a normal component
+        let start = std::time::Instant::now();
+        tracing::info!("Compiling guest component");
         let component = Component::from_binary(&engine, &bytecode)?;
-        let command = WasiCliCommand::instantiate_async(&mut store, &component, &linker).await?;
+        tracing::info!(
+            elapsed_ms = start.elapsed().as_millis(),
+            "Guest component compiled"
+        );
+        let component_type = component.component_type();
+        tracing::trace!(
+            imports = component_type.imports(&engine).len(),
+            exports = component_type.exports(&engine).len(),
+            "Guest component type summary"
+        );
+        for (name, item) in component_type.imports(&engine) {
+            tracing::trace!(name, item = ?item, "Guest component import");
+            if name == "wetware:streams/streams" {
+                if let ComponentItem::ComponentInstance(instance) = item {
+                    for (export_name, export_item) in instance.exports(&engine) {
+                        tracing::trace!(
+                            name,
+                            export = export_name,
+                            item = ?export_item,
+                            "Guest streams instance export"
+                        );
+                    }
+                }
+            }
+        }
+        for (name, item) in component_type.exports(&engine) {
+            tracing::trace!(name, item = ?item, "Guest component export");
+        }
+
+        tracing::info!("Pre-instantiating guest component");
+        let pre_start = std::time::Instant::now();
+        let pre_instance = linker.instantiate_pre(&component)?;
+        let pre = WasiCliCommandPre::new(pre_instance)?;
+        tracing::info!(
+            elapsed_ms = pre_start.elapsed().as_millis(),
+            "Guest component pre-instantiated"
+        );
+
+        let start = std::time::Instant::now();
+        tracing::info!("Instantiating guest component");
+        let command = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pre.instantiate_async(&mut store),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                tracing::error!("Guest component instantiation timed out");
+                return Err(anyhow!("guest component instantiation timed out"));
+            }
+        };
+        tracing::info!(
+            elapsed_ms = start.elapsed().as_millis(),
+            "Guest component instantiated"
+        );
 
         Ok(Self {
             command,
@@ -364,12 +456,35 @@ impl Proc {
 /// This exports the wetware:streams interface, allowing guests to create
 /// connection resources and access bidirectional data streams.
 fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> {
-    // Implement create-connection function
-    // Use package-qualified name for exported interface
-    linker.root().func_wrap_async(
-        "wetware:streams/streams#create-connection",
+    let mut streams_instance = linker.instance("wetware:streams/streams")?;
+
+    // Define the imported connection resource type.
+    streams_instance.resource(
+        "connection",
+        ResourceType::host::<ConnectionState>(),
+        |_, _| Ok(()),
+    )?;
+
+    // Define the input-stream resource type that wraps WASI InputStream
+    streams_instance.resource(
+        "input-stream",
+        ResourceType::host::<WetwareInputStream>(),
+        |_, _| Ok(()),
+    )?;
+
+    // Define the output-stream resource type that wraps WASI OutputStream
+    streams_instance.resource(
+        "output-stream",
+        ResourceType::host::<WetwareOutputStream>(),
+        |_, _| Ok(()),
+    )?;
+
+    // Implement create-connection function.
+    streams_instance.func_wrap_async(
+        "create-connection",
         |mut store: StoreContextMut<'_, ComponentRunStates>, (): ()| {
             Box::new(async move {
+                tracing::info!("streams#create-connection invoked");
                 let state = store.data_mut();
 
                 // Extract channels - must exist if this is called
@@ -390,24 +505,18 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
                 let input_stream = AsyncStdinStream::new(Box::new(input_reader));
                 let output_stream = AsyncStdoutStream::new(BUFFER_SIZE, Box::new(output_writer));
 
-                // Add streams to WASI resource table and get handles
-                // The WASI ResourceTable uses push() method which returns Resource<T>
-                let wasi_view = state.ctx();
-                let input_resource = wasi_view
-                    .table
-                    .push(Box::new(input_stream) as Box<dyn InputStream>)?;
-                let output_resource = wasi_view
-                    .table
-                    .push(Box::new(output_stream) as Box<dyn OutputStream>)?;
+                // Create wrapper resources for the streams
+                let input_wrapper = WetwareInputStream {
+                    inner: Some(Box::new(input_stream) as Box<dyn InputStream>),
+                };
+                let output_wrapper = WetwareOutputStream {
+                    inner: Some(Box::new(output_stream) as Box<dyn OutputStream>),
+                };
 
-                // Get u32 handles from resources
-                let input_handle = input_resource.rep();
-                let output_handle = output_resource.rep();
-
-                // Create connection state with stream handles
+                // Store the stream wrappers in ConnectionState
                 let conn_state = ConnectionState {
-                    input_stream_handle: input_handle,
-                    output_stream_handle: output_handle,
+                    input_stream: Some(input_wrapper),
+                    output_stream: Some(output_wrapper),
                 };
 
                 // Store in component resource table
@@ -415,35 +524,60 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
 
                 // Convert Resource<ConnectionState> to Connection (ResourceAny)
                 let connection = Connection::try_from_resource(conn_resource, &mut store)?;
+                tracing::info!("streams#create-connection returning connection");
                 Ok((connection,))
             })
         },
     )?;
 
-    // Implement get-input-stream-handle method
-    // Resource methods use package-qualified names with resource type
-    // Resource needs to be in a tuple to implement ComponentNamedList
-    linker.root().func_wrap_async(
-        "wetware:streams/streams#connection.get-input-stream-handle",
-        |store: StoreContextMut<'_, ComponentRunStates>,
+    // Implement get-input-stream method.
+    streams_instance.func_wrap_async(
+        "[method]connection.get-input-stream",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
          (connection,): (Resource<ConnectionState>,)| {
             Box::new(async move {
-                let conn_state = store.data().resource_table.get(&connection)?;
-                Ok((conn_state.input_stream_handle,))
+                tracing::info!("streams#connection.get-input-stream invoked");
+
+                // Take the stream wrapper from ConnectionState
+                let stream_wrapper = {
+                    let conn_state = store.data_mut().resource_table.get_mut(&connection)?;
+                    conn_state
+                        .input_stream
+                        .take()
+                        .ok_or_else(|| anyhow!("input stream already taken"))?
+                };
+
+                // Push the wrapper as a resource and return it
+                let state = store.data_mut();
+                let resource = state.resource_table.push(stream_wrapper)?;
+                tracing::info!("streams#connection.get-input-stream returning resource");
+                Ok((resource,))
             })
         },
     )?;
 
-    // Implement get-output-stream-handle method
-    // Resource methods use package-qualified names with resource type
-    // Resource needs to be in a tuple to implement ComponentNamedList
-    linker.root().func_wrap_async(
-        "wetware:streams/streams#connection.get-output-stream-handle",
-        |store: StoreContextMut<'_, ComponentRunStates>,
+    // Implement get-output-stream method.
+    streams_instance.func_wrap_async(
+        "[method]connection.get-output-stream",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
          (connection,): (Resource<ConnectionState>,)| {
             Box::new(async move {
-                let conn_state = store.data().resource_table.get(&connection)?;
-                Ok((conn_state.output_stream_handle,))
+                tracing::info!("streams#connection.get-output-stream invoked");
+
+                // Take the stream wrapper from ConnectionState
+                let stream_wrapper = {
+                    let conn_state = store.data_mut().resource_table.get_mut(&connection)?;
+                    conn_state
+                        .output_stream
+                        .take()
+                        .ok_or_else(|| anyhow!("output stream already taken"))?
+                };
+
+                // Push the wrapper as a resource and return it
+                let state = store.data_mut();
+                let resource = state.resource_table.push(stream_wrapper)?;
+                tracing::info!("streams#connection.get-output-stream returning resource");
+                Ok((resource,))
             })
         },
     )?;

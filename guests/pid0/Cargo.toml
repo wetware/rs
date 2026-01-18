@@ -1,0 +1,15 @@
+[package]
+name = "pid0"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+capnp = "0.23.2"
+capnp-rpc = "0.23.0"
+futures = "0.3"
+log = "0.4.29"
+wasip2 = "1.0.2+wasi-0.2.6"
+wit-bindgen = "0.46.0"

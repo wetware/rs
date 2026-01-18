@@ -233,4 +233,3 @@ linker.root().func_wrap_async(
 - **Resource parameters must be wrapped in tuples** to satisfy trait bounds
 
 This approach provides type-safe, async-capable bidirectional communication between host and WASM guests while maintaining clear separation of concerns between component resources and WASI resources.
-

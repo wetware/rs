@@ -30,10 +30,14 @@ reqwest = { version = "0.12.24", features = ["json"] }
 clap = { version = "4.5.51", features = ["derive"] }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 nix = { version = "0.30.1", features = ["socket"] }
-wasmtime = "38.0.4"
-wasmtime-wasi = "38.0.4"
+wasmtime = "40.0.0"
+wasmtime-wasi = "40.0.0"
+capnp = "0.23.2"
+capnp-rpc = "0.23.0"
 
 [[bin]]
 name = "ww"
 path = "src/cli/main.rs"
 
+[build-dependencies]
+capnpc = "0.23.3"

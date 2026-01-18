@@ -3,7 +3,7 @@ use std::process;
 
 use clap::{Parser, Subcommand};
 use ww::ipfs::HttpClient as IPFS;
-use ww::{cell, config, loaders};
+use ww::{cell, config, host, loaders};
 
 /// Parse a volume mount specification
 ///
@@ -67,6 +67,9 @@ impl Commands {
             } => {
                 // Create IPFS clients (one for loader, one for cell)
                 let ipfs = IPFS::new(ipfs_url.clone());
+                let wetware_host = host::WetwareHost::new(port)?;
+                let wasmtime_engine = wetware_host.wasmtime_engine();
+                let host_task = tokio::spawn(wetware_host.run());
 
                 // Build loader chain: IPFS first
                 let mut loader_chain =
@@ -77,7 +80,7 @@ impl Commands {
                 // finally, build the chain loader
                 let loader = Box::new(loaders::ChainLoader::new(loader_chain));
 
-                let cell = cell::CommandBuilder::new(path)
+                let builder = cell::CommandBuilder::new(path)
                     .with_loader(loader)
                     .with_args(args)
                     .with_env(env.clone().unwrap_or_default())
@@ -85,8 +88,11 @@ impl Commands {
                     .with_ipfs(ipfs)
                     .with_port(port)
                     .with_loglvl(loglvl)
-                    .build();
-                cell.spawn().await
+                    .with_wasmtime_engine(wasmtime_engine);
+                let cell = builder.build();
+                let exit = cell.spawn().await;
+                host_task.abort();
+                exit
             }
         }
     }
