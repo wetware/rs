@@ -8,3 +8,15 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wasip2 = "1.0.2+wasi-0.2.6"
+capnp = "0.23.2"
+capnp-rpc = "0.23.0"
+futures = "0.3"
+log = "0.4"
+
+[build-dependencies]
+capnpc = "0.23.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

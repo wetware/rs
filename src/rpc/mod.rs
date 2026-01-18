@@ -8,6 +8,7 @@ use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
+use futures::FutureExt;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -273,6 +274,25 @@ fn read_data_result(data: capnp::Result<capnp::data::Reader<'_>>) -> Vec<u8> {
 }
 
 impl peer_capnp::executor::Server for ExecutorImpl {
+    fn echo(
+        self: capnp::capability::Rc<Self>,
+        params: peer_capnp::executor::EchoParams,
+        mut results: peer_capnp::executor::EchoResults,
+    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+        let message = match pry!(params.get()).get_message() {
+            Ok(s) => s.to_string().unwrap_or_else(|_| String::new()),
+            Err(_) => String::new(),
+        };
+        tracing::info!("Host: Received echo request: {}", message);
+        Promise::from_future(async move {
+            // Echo back the message with a prefix
+            let response = format!("Echo: {}", message);
+            tracing::info!("Host: Sending echo response: {}", response);
+            results.get().set_response(&response);
+            Ok(())
+        })
+    }
+
     fn run_bytes(
         self: capnp::capability::Rc<Self>,
         params: peer_capnp::executor::RunBytesParams,
@@ -285,8 +305,10 @@ impl peer_capnp::executor::Server for ExecutorImpl {
         let wasm_debug = self.wasm_debug;
         Promise::from_future(async move {
             let bytecode = wasm;
-            let (host_stdin, guest_stdin) = io::duplex(64 * 1024);
-            let (host_stdout, guest_stdout) = io::duplex(64 * 1024);
+            // Create duplex channels for child's stdio
+            // These will be used for RPC communication with the child
+            let (host_in, guest_in) = io::duplex(64 * 1024);
+            let (host_out, guest_out) = io::duplex(64 * 1024);
             let (host_stderr, guest_stderr) = io::duplex(64 * 1024);
 
             let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
@@ -296,25 +318,43 @@ impl peer_capnp::executor::Server for ExecutorImpl {
                 .with_args(args)
                 .with_wasm_debug(wasm_debug)
                 .with_bytecode(bytecode)
-                .with_stdio(guest_stdin, guest_stdout, guest_stderr);
+                .with_stdio(guest_in, guest_out, guest_stderr);
 
             let proc = builder
                 .build()
                 .await
                 .map_err(|err| capnp::Error::failed(err.to_string()))?;
 
-            tokio::spawn(async move {
-                let exit_code = match proc.run().await {
-                    Ok(()) => 0,
-                    Err(_) => 1,
-                };
-                let _ = exit_tx.send(exit_code);
+            // Serve RPC over child's stdin/stdout so child can make RPC calls
+            let child_rpc_system = build_peer_rpc(host_out, host_in, wasm_debug);
+
+            // Spawn both the child process and its RPC server in a LocalSet
+            tokio::task::spawn_local(async move {
+                let local = tokio::task::LocalSet::new();
+
+                // Spawn RPC system
+                local.spawn_local(child_rpc_system.map(|_| ()));
+
+                // Run child process and wait for exit
+                local
+                    .run_until(async move {
+                        let exit_code = match proc.run().await {
+                            Ok(()) => 0,
+                            Err(_) => 1,
+                        };
+                        let _ = exit_tx.send(exit_code);
+                    })
+                    .await;
             });
 
+            // For now, create dummy ByteStream capabilities for Process interface
+            // The child is using stdio for RPC, so these won't be used for normal I/O
+            let (dummy_stdin, _) = io::duplex(64);
+            let (_, dummy_stdout) = io::duplex(64);
             let stdin =
-                capnp_rpc::new_client(ByteStreamImpl::new(host_stdin, StreamMode::WriteOnly));
+                capnp_rpc::new_client(ByteStreamImpl::new(dummy_stdin, StreamMode::WriteOnly));
             let stdout =
-                capnp_rpc::new_client(ByteStreamImpl::new(host_stdout, StreamMode::ReadOnly));
+                capnp_rpc::new_client(ByteStreamImpl::new(dummy_stdout, StreamMode::ReadOnly));
             let stderr =
                 capnp_rpc::new_client(ByteStreamImpl::new(host_stderr, StreamMode::ReadOnly));
 

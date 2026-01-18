@@ -2,6 +2,7 @@
 
 interface Executor {
   runBytes @0 (wasm :Data, args :List(Text), env :List(Text)) -> (process :Process);
+  echo @1 (message :Text) -> (response :Text);
 }
 
 interface Process {
