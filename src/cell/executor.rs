@@ -16,7 +16,6 @@ pub struct CommandBuilder {
     wasm_debug: bool,
     ipfs: Option<crate::ipfs::HttpClient>,
     port: Option<u16>,
-    loglvl: Option<crate::config::LogLevel>,
     wasmtime_engine: Option<Arc<wasmtime::Engine>>,
 }
 
@@ -31,7 +30,6 @@ impl CommandBuilder {
             wasm_debug: false,
             ipfs: None,
             port: None,
-            loglvl: None,
             wasmtime_engine: None,
         }
     }
@@ -72,12 +70,6 @@ impl CommandBuilder {
         self
     }
 
-    /// Set the log level
-    pub fn with_loglvl(mut self, loglvl: Option<crate::config::LogLevel>) -> Self {
-        self.loglvl = loglvl;
-        self
-    }
-
     /// Provide a shared Wasmtime engine for the host runtime.
     pub fn with_wasmtime_engine(mut self, engine: Arc<wasmtime::Engine>) -> Self {
         self.wasmtime_engine = Some(engine);
@@ -94,7 +86,6 @@ impl CommandBuilder {
             env: Some(self.env),
             wasm_debug: self.wasm_debug,
             port: self.port.unwrap_or(2020),
-            loglvl: self.loglvl,
             wasmtime_engine: self.wasmtime_engine,
         }
     }
@@ -109,7 +100,6 @@ pub struct Command {
     pub env: Option<Vec<String>>,
     pub wasm_debug: bool,
     pub port: u16,
-    pub loglvl: Option<crate::config::LogLevel>,
     pub wasmtime_engine: Option<Arc<wasmtime::Engine>>,
 }
 
@@ -132,12 +122,10 @@ impl Command {
             env,
             wasm_debug,
             port: _,
-            loglvl,
             wasmtime_engine,
         } = self;
 
-        let log_level = loglvl.unwrap_or_else(crate::config::get_log_level);
-        crate::config::init_tracing(log_level, loglvl);
+        crate::config::init_tracing();
 
         info!(binary = %path, "Starting cell execution");
 
@@ -210,12 +198,10 @@ impl Command {
             env,
             wasm_debug,
             port: _,
-            loglvl,
             wasmtime_engine,
         } = self;
 
-        let log_level = loglvl.unwrap_or_else(crate::config::get_log_level);
-        crate::config::init_tracing(log_level, loglvl);
+        crate::config::init_tracing();
 
         info!(binary = %path, "Starting cell execution with RPC over stdio");
 

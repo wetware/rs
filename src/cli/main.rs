@@ -3,7 +3,7 @@ use std::process;
 
 use clap::{Parser, Subcommand};
 use ww::ipfs::HttpClient as IPFS;
-use ww::{cell, config, host, loaders};
+use ww::{cell, host, loaders};
 
 /// Parse a volume mount specification
 ///
@@ -45,11 +45,7 @@ enum Commands {
         /// Port to listen on
         #[arg(long, default_value = "2020")]
         port: u16,
-
-        /// Log level (trace, debug, info, warn, error)
-        /// If not provided, uses WW_LOGLVL environment variable or defaults to info
-        #[arg(long, value_name = "LEVEL")]
-        loglvl: Option<config::LogLevel>,
+        // Logging is configured via RUST_LOG.
     },
 }
 
@@ -63,7 +59,6 @@ impl Commands {
                 env,
                 wasm_debug,
                 port,
-                loglvl,
             } => {
                 // Create IPFS clients (one for loader, one for cell)
                 let ipfs = IPFS::new(ipfs_url.clone());
@@ -87,7 +82,6 @@ impl Commands {
                     .with_wasm_debug(wasm_debug)
                     .with_ipfs(ipfs)
                     .with_port(port)
-                    .with_loglvl(loglvl)
                     .with_wasmtime_engine(wasmtime_engine);
                 let cell = builder.build();
                 let exit = cell.spawn().await;
