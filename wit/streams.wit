@@ -84,6 +84,12 @@ interface streams {
     create-connection: func() -> connection;
 }
 
+/// World for host (exports streams to guests)
 world streams-world {
     export streams;
+}
+
+/// World for guests (imports streams from host)
+world guest-streams {
+    import streams;
 }

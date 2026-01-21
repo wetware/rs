@@ -14,6 +14,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::cell::proc::Builder as ProcBuilder;
+use crate::cell::streams;
 use crate::peer_capnp;
 
 #[derive(Clone, Debug)]
@@ -304,32 +305,48 @@ impl peer_capnp::executor::Server for ExecutorImpl {
         let wasm = read_data_result(params.get_wasm());
         let wasm_debug = self.wasm_debug;
         Promise::from_future(async move {
+            tracing::info!("run_bytes: starting child process spawn");
             let bytecode = wasm;
-            // Create duplex channels for child's stdio
-            // These will be used for RPC communication with the child
-            let (host_in, guest_in) = io::duplex(64 * 1024);
-            let (host_out, guest_out) = io::duplex(64 * 1024);
+
+            // Create stderr duplex for process interface
             let (host_stderr, guest_stderr) = io::duplex(64 * 1024);
+
+            // Create stdin/stdout duplex for guest's logging (not RPC)
+            let (_, guest_stdin) = io::duplex(64);
+            let (guest_stdout, _) = io::duplex(64);
 
             let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
 
-            let builder = ProcBuilder::new()
+            // Build guest with wetware streams enabled for RPC
+            let (builder, mut handles) = ProcBuilder::new()
                 .with_env(env)
                 .with_args(args)
                 .with_wasm_debug(wasm_debug)
                 .with_bytecode(bytecode)
-                .with_stdio(guest_in, guest_out, guest_stderr);
+                .with_stdio(guest_stdin, guest_stdout, guest_stderr)
+                .with_data_streams();
 
+            tracing::info!("run_bytes: building child process");
             let proc = builder
                 .build()
                 .await
                 .map_err(|err| capnp::Error::failed(err.to_string()))?;
+            tracing::info!("run_bytes: child process built");
 
-            // Serve RPC over child's stdin/stdout so child can make RPC calls
-            let child_rpc_system = build_peer_rpc(host_out, host_in, wasm_debug);
+            // Get the guest output receiver for host-side RPC
+            let guest_output_rx = handles
+                .take_guest_output_receiver()
+                .ok_or_else(|| capnp::Error::failed("guest output receiver missing".into()))?;
+
+            // Build RPC over the wetware streams channels
+            let reader = streams::Reader::new(guest_output_rx);
+            let writer = streams::Writer::new(handles.host_to_guest_tx);
+            let child_rpc_system = build_peer_rpc(reader, writer, wasm_debug);
 
             // Spawn both the child process and its RPC server in a LocalSet
+            tracing::info!("run_bytes: spawning child task");
             tokio::task::spawn_local(async move {
+                tracing::info!("run_bytes: child task started");
                 let local = tokio::task::LocalSet::new();
 
                 // Spawn RPC system
@@ -338,17 +355,26 @@ impl peer_capnp::executor::Server for ExecutorImpl {
                 // Run child process and wait for exit
                 local
                     .run_until(async move {
+                        tracing::info!("run_bytes: running child process");
                         let exit_code = match proc.run().await {
-                            Ok(()) => 0,
-                            Err(_) => 1,
+                            Ok(()) => {
+                                tracing::info!("run_bytes: child process exited successfully");
+                                0
+                            }
+                            Err(e) => {
+                                tracing::error!("run_bytes: child process failed: {}", e);
+                                1
+                            }
                         };
                         let _ = exit_tx.send(exit_code);
                     })
                     .await;
+                tracing::info!("run_bytes: child task completed");
             });
+            tracing::info!("run_bytes: returning process client");
 
-            // For now, create dummy ByteStream capabilities for Process interface
-            // The child is using stdio for RPC, so these won't be used for normal I/O
+            // Create dummy ByteStream capabilities for Process interface
+            // The child is using wetware streams for RPC, so these won't be used for normal I/O
             let (dummy_stdin, _) = io::duplex(64);
             let (_, dummy_stdout) = io::duplex(64);
             let stdin =
@@ -361,6 +387,7 @@ impl peer_capnp::executor::Server for ExecutorImpl {
             let process_client: peer_capnp::process::Client =
                 capnp_rpc::new_client(ProcessImpl::new(stdin, stdout, stderr, exit_rx));
             results.get().set_process(process_client);
+
             Ok(())
         })
     }

@@ -11,7 +11,7 @@ use wasmtime::{Config as WasmConfig, Engine, Store};
 use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
 use wasmtime_wasi::p2::add_to_linker_async;
 use wasmtime_wasi::p2::bindings::{Command as WasiCliCommand, CommandPre as WasiCliCommandPre};
-use wasmtime_wasi::p2::{InputStream, OutputStream};
+use wasmtime_wasi::p2::{InputStream, OutputStream, StreamError as WasiStreamError};
 use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
@@ -25,7 +25,7 @@ bindgen!({
 });
 
 // Import generated types - Connection is a Resource type alias
-use exports::wetware::streams::streams::Connection;
+use exports::wetware::streams::streams::{Connection, StreamError};
 
 pub const BUFFER_SIZE: usize = 1024;
 
@@ -73,6 +73,90 @@ struct WetwareInputStream {
 struct WetwareOutputStream {
     inner: Option<Box<dyn OutputStream>>,
 }
+
+// Direct channel-based input stream that bypasses AsyncStdinStream buffering
+struct ChannelInputStream {
+    receiver: mpsc::UnboundedReceiver<Vec<u8>>,
+    buffer: Vec<u8>,
+    offset: usize,
+}
+
+impl InputStream for ChannelInputStream {
+    fn read(&mut self, size: usize) -> Result<bytes::Bytes, WasiStreamError> {
+        // First, check if we have buffered data
+        if self.offset < self.buffer.len() {
+            let available = &self.buffer[self.offset..];
+            let to_read = available.len().min(size);
+            let data = bytes::Bytes::copy_from_slice(&available[..to_read]);
+            self.offset += to_read;
+            if self.offset >= self.buffer.len() {
+                self.buffer.clear();
+                self.offset = 0;
+            }
+            return Ok(data);
+        }
+
+        // Try to receive data non-blocking
+        match self.receiver.try_recv() {
+            Ok(data) => {
+                let to_read = data.len().min(size);
+                let result = bytes::Bytes::copy_from_slice(&data[..to_read]);
+                if to_read < data.len() {
+                    // Buffer the remainder
+                    self.buffer = data;
+                    self.offset = to_read;
+                }
+                Ok(result)
+            }
+            Err(mpsc::error::TryRecvError::Empty) => {
+                // No data available - return empty (non-blocking)
+                Ok(bytes::Bytes::new())
+            }
+            Err(mpsc::error::TryRecvError::Disconnected) => Err(WasiStreamError::Closed),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl wasmtime_wasi::p2::Pollable for ChannelInputStream {
+    async fn ready(&mut self) {
+        // Wait until data is available or channel is closed
+        // For simplicity, just return immediately - the read will handle it
+    }
+}
+
+// Direct channel-based output stream that bypasses AsyncStdoutStream buffering
+struct ChannelOutputStream {
+    sender: mpsc::UnboundedSender<Vec<u8>>,
+}
+
+impl OutputStream for ChannelOutputStream {
+    fn write(&mut self, bytes: bytes::Bytes) -> Result<(), WasiStreamError> {
+        self.sender
+            .send(bytes.to_vec())
+            .map_err(|_| WasiStreamError::Closed)
+    }
+
+    fn flush(&mut self) -> Result<(), WasiStreamError> {
+        // Unbounded channel doesn't need flushing
+        Ok(())
+    }
+
+    fn check_write(&mut self) -> Result<usize, WasiStreamError> {
+        // Always ready to write
+        Ok(usize::MAX)
+    }
+}
+
+#[async_trait::async_trait]
+impl wasmtime_wasi::p2::Pollable for ChannelOutputStream {
+    async fn ready(&mut self) {
+        // Always ready - unbounded channel never blocks
+    }
+}
+
+// Stub pollable resource - channels are always ready
+struct WetwarePollable;
 
 // Internal connection representation that stores stream wrappers
 struct ConnectionState {
@@ -456,7 +540,7 @@ impl Proc {
 /// This exports the wetware:streams interface, allowing guests to create
 /// connection resources and access bidirectional data streams.
 fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> {
-    let mut streams_instance = linker.instance("wetware:streams/streams")?;
+    let mut streams_instance = linker.instance("wetware:streams/streams@0.1.0")?;
 
     // Define the imported connection resource type.
     streams_instance.resource(
@@ -479,6 +563,13 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
         |_, _| Ok(()),
     )?;
 
+    // Define the pollable resource type (stub - channels are always ready)
+    streams_instance.resource(
+        "pollable",
+        ResourceType::host::<WetwarePollable>(),
+        |_, _| Ok(()),
+    )?;
+
     // Implement create-connection function.
     streams_instance.func_wrap_async(
         "create-connection",
@@ -497,13 +588,15 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
                 // host_to_guest_tx is kept for potential future use (e.g., host writing to guest)
                 let (_host_to_guest_tx, host_to_guest_rx, guest_to_host_tx) = channels;
 
-                // Create stream adapters
-                let input_reader = streams::Reader::new(host_to_guest_rx);
-                let output_writer = streams::Writer::new(guest_to_host_tx);
-
-                // Wrap in WASI stream types
-                let input_stream = AsyncStdinStream::new(Box::new(input_reader));
-                let output_stream = AsyncStdoutStream::new(BUFFER_SIZE, Box::new(output_writer));
+                // Use direct channel-based streams for unbuffered I/O
+                let input_stream = ChannelInputStream {
+                    receiver: host_to_guest_rx,
+                    buffer: Vec::new(),
+                    offset: 0,
+                };
+                let output_stream = ChannelOutputStream {
+                    sender: guest_to_host_tx,
+                };
 
                 // Create wrapper resources for the streams
                 let input_wrapper = WetwareInputStream {
@@ -578,6 +671,404 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
                 let resource = state.resource_table.push(stream_wrapper)?;
                 tracing::info!("streams#connection.get-output-stream returning resource");
                 Ok((resource,))
+            })
+        },
+    )?;
+
+    // =========================================================================
+    // Input Stream Methods
+    // =========================================================================
+
+    // [method]input-stream.read
+    streams_instance.func_wrap_async(
+        "[method]input-stream.read",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream, len): (Resource<WetwareInputStream>, u64)| {
+            Box::new(async move {
+                tracing::trace!("streams#input-stream.read invoked, len={}", len);
+                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
+                let inner = wrapper
+                    .inner
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("input stream already consumed"))?;
+
+                let result = inner.read(len as usize);
+                match result {
+                    Ok(bytes) => Ok((Ok::<Vec<u8>, StreamError>(bytes.to_vec()),)),
+                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
+                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
+                }
+            })
+        },
+    )?;
+
+    // [method]input-stream.blocking-read
+    streams_instance.func_wrap_async(
+        "[method]input-stream.blocking-read",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream, len): (Resource<WetwareInputStream>, u64)| {
+            Box::new(async move {
+                tracing::trace!("streams#input-stream.blocking-read invoked, len={}", len);
+                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
+                let inner = wrapper
+                    .inner
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("input stream already consumed"))?;
+
+                let result = inner.blocking_read(len as usize).await;
+                match result {
+                    Ok(bytes) => Ok((Ok::<Vec<u8>, StreamError>(bytes.to_vec()),)),
+                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
+                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
+                }
+            })
+        },
+    )?;
+
+    // [method]input-stream.skip
+    streams_instance.func_wrap_async(
+        "[method]input-stream.skip",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream, len): (Resource<WetwareInputStream>, u64)| {
+            Box::new(async move {
+                tracing::trace!("streams#input-stream.skip invoked, len={}", len);
+                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
+                let inner = wrapper
+                    .inner
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("input stream already consumed"))?;
+
+                let result = inner.skip(len as usize);
+                match result {
+                    Ok(skipped) => Ok((Ok::<u64, StreamError>(skipped as u64),)),
+                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
+                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
+                }
+            })
+        },
+    )?;
+
+    // [method]input-stream.blocking-skip
+    streams_instance.func_wrap_async(
+        "[method]input-stream.blocking-skip",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream, len): (Resource<WetwareInputStream>, u64)| {
+            Box::new(async move {
+                tracing::trace!("streams#input-stream.blocking-skip invoked, len={}", len);
+                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
+                let inner = wrapper
+                    .inner
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("input stream already consumed"))?;
+
+                let result = inner.blocking_skip(len as usize).await;
+                match result {
+                    Ok(skipped) => Ok((Ok::<u64, StreamError>(skipped as u64),)),
+                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
+                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
+                }
+            })
+        },
+    )?;
+
+    // [method]input-stream.subscribe - returns stub pollable
+    streams_instance.func_wrap_async(
+        "[method]input-stream.subscribe",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream,): (Resource<WetwareInputStream>,)| {
+            Box::new(async move {
+                tracing::trace!("streams#input-stream.subscribe invoked");
+                // Verify the stream exists
+                let _ = store.data().resource_table.get(&stream)?;
+                // Return a stub pollable - channels are always ready
+                let pollable = store.data_mut().resource_table.push(WetwarePollable)?;
+                Ok((pollable,))
+            })
+        },
+    )?;
+
+    // =========================================================================
+    // Output Stream Methods
+    // =========================================================================
+
+    // [method]output-stream.check-write
+    streams_instance.func_wrap_async(
+        "[method]output-stream.check-write",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream,): (Resource<WetwareOutputStream>,)| {
+            Box::new(async move {
+                tracing::trace!("streams#output-stream.check-write invoked");
+                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
+                let inner = wrapper
+                    .inner
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
+
+                let result = inner.check_write();
+                match result {
+                    Ok(n) => Ok((Ok::<u64, StreamError>(n as u64),)),
+                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
+                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
+                }
+            })
+        },
+    )?;
+
+    // [method]output-stream.write
+    streams_instance.func_wrap_async(
+        "[method]output-stream.write",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream, contents): (Resource<WetwareOutputStream>, Vec<u8>)| {
+            Box::new(async move {
+                tracing::trace!(
+                    "streams#output-stream.write invoked, len={}",
+                    contents.len()
+                );
+                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
+                let inner = wrapper
+                    .inner
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
+
+                let len = contents.len();
+                let result = inner.write(contents.into());
+                match result {
+                    Ok(()) => Ok((Ok::<u64, StreamError>(len as u64),)),
+                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
+                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
+                }
+            })
+        },
+    )?;
+
+    // [method]output-stream.blocking-write-and-flush
+    streams_instance.func_wrap_async(
+        "[method]output-stream.blocking-write-and-flush",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream, contents): (Resource<WetwareOutputStream>, Vec<u8>)| {
+            Box::new(async move {
+                tracing::trace!(
+                    "streams#output-stream.blocking-write-and-flush invoked, len={}",
+                    contents.len()
+                );
+                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
+                let inner = wrapper
+                    .inner
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
+
+                let result = inner.blocking_write_and_flush(contents.into()).await;
+                match result {
+                    Ok(()) => Ok((Ok::<(), StreamError>(()),)),
+                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
+                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
+                }
+            })
+        },
+    )?;
+
+    // [method]output-stream.flush
+    streams_instance.func_wrap_async(
+        "[method]output-stream.flush",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream,): (Resource<WetwareOutputStream>,)| {
+            Box::new(async move {
+                tracing::trace!("streams#output-stream.flush invoked");
+                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
+                let inner = wrapper
+                    .inner
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
+
+                let result = inner.flush();
+                match result {
+                    Ok(()) => Ok((Ok::<(), StreamError>(()),)),
+                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
+                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
+                }
+            })
+        },
+    )?;
+
+    // [method]output-stream.blocking-flush
+    streams_instance.func_wrap_async(
+        "[method]output-stream.blocking-flush",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream,): (Resource<WetwareOutputStream>,)| {
+            Box::new(async move {
+                tracing::trace!("streams#output-stream.blocking-flush invoked");
+                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
+                let inner = wrapper
+                    .inner
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
+
+                // Use write_ready to wait for flush to complete
+                let result = inner.write_ready().await;
+                match result {
+                    Ok(_) => Ok((Ok::<(), StreamError>(()),)),
+                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
+                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
+                }
+            })
+        },
+    )?;
+
+    // [method]output-stream.subscribe - returns stub pollable
+    streams_instance.func_wrap_async(
+        "[method]output-stream.subscribe",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream,): (Resource<WetwareOutputStream>,)| {
+            Box::new(async move {
+                tracing::trace!("streams#output-stream.subscribe invoked");
+                // Verify the stream exists
+                let _ = store.data().resource_table.get(&stream)?;
+                // Return a stub pollable - channels are always ready
+                let pollable = store.data_mut().resource_table.push(WetwarePollable)?;
+                Ok((pollable,))
+            })
+        },
+    )?;
+
+    // [method]output-stream.write-zeroes
+    streams_instance.func_wrap_async(
+        "[method]output-stream.write-zeroes",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream, len): (Resource<WetwareOutputStream>, u64)| {
+            Box::new(async move {
+                tracing::trace!("streams#output-stream.write-zeroes invoked, len={}", len);
+                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
+                let inner = wrapper
+                    .inner
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
+
+                let result = inner.write_zeroes(len as usize);
+                match result {
+                    Ok(()) => Ok((Ok::<u64, StreamError>(len),)),
+                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
+                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
+                }
+            })
+        },
+    )?;
+
+    // [method]output-stream.blocking-write-zeroes-and-flush
+    streams_instance.func_wrap_async(
+        "[method]output-stream.blocking-write-zeroes-and-flush",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream, len): (Resource<WetwareOutputStream>, u64)| {
+            Box::new(async move {
+                tracing::trace!(
+                    "streams#output-stream.blocking-write-zeroes-and-flush invoked, len={}",
+                    len
+                );
+                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
+                let inner = wrapper
+                    .inner
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
+
+                let result = inner.blocking_write_zeroes_and_flush(len as usize).await;
+                match result {
+                    Ok(()) => Ok((Ok::<(), StreamError>(()),)),
+                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
+                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
+                }
+            })
+        },
+    )?;
+
+    // [method]output-stream.splice
+    streams_instance.func_wrap_async(
+        "[method]output-stream.splice",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream, src, len): (
+            Resource<WetwareOutputStream>,
+            Resource<WetwareInputStream>,
+            u64,
+        )| {
+            Box::new(async move {
+                tracing::trace!("streams#output-stream.splice invoked, len={}", len);
+                // Read from input stream
+                let data = {
+                    let src_wrapper = store.data_mut().resource_table.get_mut(&src)?;
+                    let src_inner = src_wrapper
+                        .inner
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("input stream already consumed"))?;
+                    match src_inner.read(len as usize) {
+                        Ok(bytes) => bytes,
+                        Err(WasiStreamError::Closed) => {
+                            return Ok((Err(StreamError::Closed),));
+                        }
+                        Err(_) => {
+                            return Ok((Err(StreamError::LastOperationFailed),));
+                        }
+                    }
+                };
+
+                // Write to output stream
+                let written = data.len();
+                let dst_wrapper = store.data_mut().resource_table.get_mut(&stream)?;
+                let dst_inner = dst_wrapper
+                    .inner
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
+
+                let result = dst_inner.write(data);
+                match result {
+                    Ok(()) => Ok((Ok::<u64, StreamError>(written as u64),)),
+                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
+                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
+                }
+            })
+        },
+    )?;
+
+    // [method]output-stream.blocking-splice
+    streams_instance.func_wrap_async(
+        "[method]output-stream.blocking-splice",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
+         (stream, src, len): (
+            Resource<WetwareOutputStream>,
+            Resource<WetwareInputStream>,
+            u64,
+        )| {
+            Box::new(async move {
+                tracing::trace!("streams#output-stream.blocking-splice invoked, len={}", len);
+                // Blocking read from input stream
+                let data = {
+                    let src_wrapper = store.data_mut().resource_table.get_mut(&src)?;
+                    let src_inner = src_wrapper
+                        .inner
+                        .as_mut()
+                        .ok_or_else(|| anyhow!("input stream already consumed"))?;
+                    match src_inner.blocking_read(len as usize).await {
+                        Ok(bytes) => bytes,
+                        Err(WasiStreamError::Closed) => {
+                            return Ok((Err(StreamError::Closed),));
+                        }
+                        Err(_) => {
+                            return Ok((Err(StreamError::LastOperationFailed),));
+                        }
+                    }
+                };
+
+                // Blocking write to output stream
+                let written = data.len();
+                let dst_wrapper = store.data_mut().resource_table.get_mut(&stream)?;
+                let dst_inner = dst_wrapper
+                    .inner
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
+
+                let result = dst_inner.blocking_write_and_flush(data).await;
+                match result {
+                    Ok(()) => Ok((Ok::<u64, StreamError>(written as u64),)),
+                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
+                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
+                }
             })
         },
     )?;

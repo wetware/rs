@@ -6,11 +6,18 @@ use capnp_rpc::RpcSystem;
 use futures::future::FutureExt;
 use futures::task::noop_waker;
 use wasip2::cli::stderr::get_stderr;
-use wasip2::cli::stdin::get_stdin;
-use wasip2::cli::stdout::get_stdout;
 use wasip2::exports::cli::run::Guest;
-use wasip2::io::poll;
-use wasip2::io::streams::{InputStream, OutputStream, StreamError};
+
+// Generate bindings for wetware streams (guest imports from host)
+wit_bindgen::generate!({
+    path: "../../wit",
+    world: "guest-streams",
+});
+
+use wetware::streams::streams::{
+    create_connection, InputStream as WetwareInputStream, OutputStream as WetwareOutputStream,
+    Pollable as WetwarePollable, StreamError as WetwareStreamError,
+};
 
 mod peer_capnp;
 
@@ -43,13 +50,13 @@ fn init_logging() {
 }
 
 struct StreamReader {
-    stream: InputStream,
+    stream: WetwareInputStream,
     buffer: Vec<u8>,
     offset: usize,
 }
 
 impl StreamReader {
-    fn new(stream: InputStream) -> Self {
+    fn new(stream: WetwareInputStream) -> Self {
         Self {
             stream,
             buffer: Vec::new(),
@@ -59,7 +66,7 @@ impl StreamReader {
 }
 
 impl StreamReader {
-    fn pollable(&self) -> wasip2::io::poll::Pollable {
+    fn pollable(&self) -> WetwarePollable {
         self.stream.subscribe()
     }
 }
@@ -97,7 +104,7 @@ impl futures::io::AsyncRead for StreamReader {
                 self.offset += to_copy;
                 std::task::Poll::Ready(Ok(to_copy))
             }
-            Err(StreamError::Closed) => std::task::Poll::Ready(Ok(0)),
+            Err(WetwareStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
             Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("stream read error: {:?}", err),
@@ -107,15 +114,15 @@ impl futures::io::AsyncRead for StreamReader {
 }
 
 struct StreamWriter {
-    stream: OutputStream,
+    stream: WetwareOutputStream,
 }
 
 impl StreamWriter {
-    fn new(stream: OutputStream) -> Self {
+    fn new(stream: WetwareOutputStream) -> Self {
         Self { stream }
     }
 
-    fn pollable(&self) -> wasip2::io::poll::Pollable {
+    fn pollable(&self) -> WetwarePollable {
         self.stream.subscribe()
     }
 }
@@ -138,15 +145,15 @@ impl futures::io::AsyncWrite for StreamWriter {
                 // Only write up to the budget
                 let to_write = buf.len().min(budget as usize);
                 match self.stream.write(&buf[..to_write]) {
-                    Ok(()) => std::task::Poll::Ready(Ok(to_write)),
-                    Err(StreamError::Closed) => std::task::Poll::Ready(Ok(0)),
+                    Ok(_written) => std::task::Poll::Ready(Ok(to_write)),
+                    Err(WetwareStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
                     Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         format!("stream write error: {:?}", err),
                     ))),
                 }
             }
-            Err(StreamError::Closed) => std::task::Poll::Ready(Ok(0)),
+            Err(WetwareStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
             Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("stream write error: {:?}", err),
@@ -160,7 +167,7 @@ impl futures::io::AsyncWrite for StreamWriter {
     ) -> std::task::Poll<std::io::Result<()>> {
         match self.stream.flush() {
             Ok(()) => std::task::Poll::Ready(Ok(())),
-            Err(StreamError::Closed) => std::task::Poll::Ready(Ok(())),
+            Err(WetwareStreamError::Closed) => std::task::Poll::Ready(Ok(())),
             Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("stream flush error: {:?}", err),
@@ -174,7 +181,7 @@ impl futures::io::AsyncWrite for StreamWriter {
     ) -> std::task::Poll<std::io::Result<()>> {
         match self.stream.flush() {
             Ok(()) => std::task::Poll::Ready(Ok(())),
-            Err(StreamError::Closed) => std::task::Poll::Ready(Ok(())),
+            Err(WetwareStreamError::Closed) => std::task::Poll::Ready(Ok(())),
             Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("stream close error: {:?}", err),
@@ -198,13 +205,14 @@ fn run_impl() {
     const CHILD_WASM: &[u8] =
         include_bytes!("../../child-echo/target/wasm32-wasip2/release/child_echo.wasm");
 
-    // Use stdin/stdout for RPC instead of custom streams
-    let stdin = get_stdin();
-    let stdout = get_stdout();
-    log::trace!("pid0: got stdin/stdout");
+    // Create connection and get streams from wetware interface
+    let connection = create_connection();
+    let input_stream = connection.get_input_stream();
+    let output_stream = connection.get_output_stream();
+    log::trace!("pid0: got wetware streams");
 
-    let reader = StreamReader::new(stdin);
-    let writer = StreamWriter::new(stdout);
+    let reader = StreamReader::new(input_stream);
+    let writer = StreamWriter::new(output_stream);
     let reader_pollable = reader.pollable();
     let writer_pollable = writer.pollable();
 
@@ -260,6 +268,8 @@ fn run_impl() {
                     log::trace!("pid0: child exited");
                     // Leak Cap'n Proto resources to avoid "resource has children" error
                     // This is a workaround for complex resource cleanup dependencies
+                    std::mem::forget(reader_pollable);
+                    std::mem::forget(writer_pollable);
                     std::mem::forget(wait_promise);
                     std::mem::forget(response);
                     std::mem::forget(executor);
@@ -275,7 +285,10 @@ fn run_impl() {
         }
 
         if !made_progress {
-            let _ = poll::poll(&[&reader_pollable, &writer_pollable]);
+            // Note: We can't use wasip2::io::poll::poll with wetware pollables
+            // since they are different resource types. For now, just spin.
+            // The host's channel-based streams should respond quickly.
+            std::hint::spin_loop();
         }
     }
 }

@@ -104,9 +104,15 @@ pub struct Command {
 }
 
 impl Command {
-    /// Execute the cell command
+    /// Execute the cell command using wetware streams for RPC transport.
     pub async fn spawn(self) -> Result<i32> {
-        self.spawn_with_rpc().await
+        self.spawn_with_streams_rpc().await
+    }
+
+    /// Execute the cell command using stdio for RPC transport (legacy).
+    #[allow(dead_code)]
+    pub async fn spawn_with_stdio_rpc(self) -> Result<i32> {
+        self.spawn_with_rpc_internal().await
     }
 
     /// Execute the cell command and return the join handle plus data stream handles.
@@ -189,7 +195,7 @@ impl Command {
             .await
     }
 
-    async fn spawn_with_rpc(self) -> Result<i32> {
+    async fn spawn_with_rpc_internal(self) -> Result<i32> {
         let Command {
             path,
             args,
