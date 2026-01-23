@@ -49,23 +49,23 @@ Commands:
 
 2. **Run the application** using the `run` subcommand:
    ```bash
-   # Use defaults (http://localhost:5001, info log level)
+   # Use defaults (http://localhost:5001, ww=info)
    cargo run -- run
    
    # Custom IPFS endpoint
    cargo run -- run --ipfs http://127.0.0.1:5001
    cargo run -- run --ipfs http://192.168.1.100:5001
    
-   # Custom log level
-   cargo run -- run --loglvl debug
-   cargo run -- run --loglvl trace
+   # Configure logs with RUST_LOG
+   RUST_LOG=ww=debug cargo run -- run
+   RUST_LOG=ww=trace cargo run -- run
    
    # Combine both
-   cargo run -- run --ipfs http://192.168.1.100:5001 --loglvl debug
+   RUST_LOG=ww=debug cargo run -- run --ipfs http://192.168.1.100:5001
    
    # Or use environment variables
    export WW_IPFS=http://192.168.1.100:5001
-   export WW_LOGLVL=debug
+   export RUST_LOG=ww=debug
    cargo run -- run
    ```
 
@@ -74,7 +74,6 @@ Commands:
 The `run` subcommand supports the following options:
 
 - `--ipfs <IPFS>`: IPFS node HTTP API endpoint (e.g., http://127.0.0.1:5001)
-- `--loglvl <LEVEL>`: Log level (trace, debug, info, warn, error)
 - `--preset <PRESET>`: Use preset configuration (minimal, development, production)
 - `--env-config`: Use configuration from environment variables
 
@@ -164,7 +163,7 @@ make podman-clean
 podman run --rm -it wetware:latest run
 
 # With custom options
-podman run --rm -it wetware:latest run --ipfs http://host.docker.internal:5001 --loglvl debug
+RUST_LOG=ww=debug podman run --rm -it wetware:latest run --ipfs http://host.docker.internal:5001
 ```
 
 ### Podman Compose (Optional)
@@ -180,7 +179,7 @@ services:
       - "8080:8080"
     environment:
       - WW_IPFS=http://host.docker.internal:5001
-      - WW_LOGLVL=info
+      - RUST_LOG=ww=info
     volumes:
       - ./config:/app/config
     command: ["run"]  # Use the run subcommand
@@ -241,27 +240,22 @@ The application uses structured logging with the `tracing` crate. You can config
   export WW_IPFS=https://ipfs.example.com:5001
   ```
 
-- **`WW_LOGLVL`**: Controls the log level (trace, debug, info, warn, error)
+- **`RUST_LOG`**: Controls tracing output using standard `tracing-subscriber` filters.
   ```bash
-  # Set log level for all components
-  export WW_LOGLVL=info
-  
-  # More verbose logging
-  export WW_LOGLVL=debug
-  export WW_LOGLVL=trace
-  
-  # Only show warnings and errors
-  export WW_LOGLVL=warn
-  export WW_LOGLVL=error
+  # No logs, only printed output
+  export RUST_LOG=off
+
+  # Only Wetware logs
+  export RUST_LOG=ww=info
+  export RUST_LOG=ww=debug
+  export RUST_LOG=ww=trace
+
+  # Debug streams + wasmtime
+  export RUST_LOG=ww=debug,ww::cell::streams=trace,ww::cell::proc=debug,capnp=debug,capnp_rpc=debug,wasmtime=info,wasmtime_wasi=info
+
+  # Debug libp2p
+  export RUST_LOG=ww=info,libp2p=debug,libp2p_swarm=debug,libp2p_kad=debug,libp2p_gossipsub=debug
   ```
-
-### Log Levels
-
-- **`error`**: Errors that need immediate attention
-- **`warn`**: Warnings about potential issues
-- **`info`**: General information about application flow
-- **`debug`**: Detailed debugging information
-- **`trace`**: Very detailed tracing (very verbose)
 
 ## How It Works
 
@@ -305,7 +299,7 @@ This ensures the application can communicate with any IPFS node in the network, 
 - **Protocol compatibility**: The application uses standard IPFS protocols for full compatibility
 - **RSA connection errors**: RSA support is included for legacy IPFS peers
 - **Configuration issues**: Check `WW_IPFS` environment variable for correct IPFS endpoint
-- **Logging issues**: Check `WW_LOGLVL` environment variable and ensure tracing is properly initialized
+- **Logging issues**: Check `RUST_LOG` and ensure tracing is properly initialized
 
 ## Dependencies
 

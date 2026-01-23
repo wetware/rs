@@ -3,7 +3,7 @@ use std::process;
 
 use clap::{Parser, Subcommand};
 use ww::ipfs::HttpClient as IPFS;
-use ww::{cell, config, loaders};
+use ww::{cell, host, loaders};
 
 /// Parse a volume mount specification
 ///
@@ -45,11 +45,7 @@ enum Commands {
         /// Port to listen on
         #[arg(long, default_value = "2020")]
         port: u16,
-
-        /// Log level (trace, debug, info, warn, error)
-        /// If not provided, uses WW_LOGLVL environment variable or defaults to info
-        #[arg(long, value_name = "LEVEL")]
-        loglvl: Option<config::LogLevel>,
+        // Logging is configured via RUST_LOG.
     },
 }
 
@@ -63,10 +59,12 @@ impl Commands {
                 env,
                 wasm_debug,
                 port,
-                loglvl,
             } => {
                 // Create IPFS clients (one for loader, one for cell)
                 let ipfs = IPFS::new(ipfs_url.clone());
+                let wetware_host = host::WetwareHost::new(port)?;
+                let wasmtime_engine = wetware_host.wasmtime_engine();
+                let host_task = tokio::spawn(wetware_host.run());
 
                 // Build loader chain: IPFS first
                 let mut loader_chain =
@@ -77,16 +75,18 @@ impl Commands {
                 // finally, build the chain loader
                 let loader = Box::new(loaders::ChainLoader::new(loader_chain));
 
-                let cell = cell::CommandBuilder::new(path)
+                let builder = cell::CommandBuilder::new(path)
                     .with_loader(loader)
                     .with_args(args)
                     .with_env(env.clone().unwrap_or_default())
                     .with_wasm_debug(wasm_debug)
                     .with_ipfs(ipfs)
                     .with_port(port)
-                    .with_loglvl(loglvl)
-                    .build();
-                cell.spawn().await
+                    .with_wasmtime_engine(wasmtime_engine);
+                let cell = builder.build();
+                let exit = cell.spawn().await;
+                host_task.abort();
+                exit
             }
         }
     }
