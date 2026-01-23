@@ -88,7 +88,7 @@ dependencies = [
  "futures",
  "log",
  "wasip2",
- "wit-bindgen 0.41.0",
+ "wetware-guest",
 ]
 
 [[package]]
@@ -681,6 +681,16 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap",
  "semver",
+]
+
+[[package]]
+name = "wetware-guest"
+version = "0.1.0"
+dependencies = [
+ "capnp",
+ "capnp-rpc",
+ "futures",
+ "wit-bindgen 0.41.0",
 ]
 
 [[package]]
