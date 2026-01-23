@@ -690,6 +690,7 @@ dependencies = [
  "capnp",
  "capnp-rpc",
  "futures",
+ "wasip2",
  "wit-bindgen 0.41.0",
 ]
 

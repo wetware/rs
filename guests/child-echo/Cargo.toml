@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-wasip2 = "1.0.2+wasi-0.2.6"
+wasip2 = "1.0.2+wasi-0.2.9"
 capnp = "0.23.2"
 capnp-rpc = "0.23.0"
 futures = "0.3"

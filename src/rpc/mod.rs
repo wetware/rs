@@ -14,7 +14,6 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::cell::proc::Builder as ProcBuilder;
-use crate::cell::streams;
 use crate::peer_capnp;
 
 #[derive(Clone, Debug)]
@@ -333,14 +332,9 @@ impl peer_capnp::executor::Server for ExecutorImpl {
                 .map_err(|err| capnp::Error::failed(err.to_string()))?;
             tracing::info!("run_bytes: child process built");
 
-            // Get the guest output receiver for host-side RPC
-            let guest_output_rx = handles
-                .take_guest_output_receiver()
-                .ok_or_else(|| capnp::Error::failed("guest output receiver missing".into()))?;
-
-            // Build RPC over the wetware streams channels
-            let reader = streams::Reader::new(guest_output_rx);
-            let writer = streams::Writer::new(handles.host_to_guest_tx);
+            let (reader, writer) = handles
+                .take_host_split()
+                .ok_or_else(|| capnp::Error::failed("host stream missing".into()))?;
             let child_rpc_system = build_peer_rpc(reader, writer, wasm_debug);
 
             // Spawn both the child process and its RPC server in a LocalSet

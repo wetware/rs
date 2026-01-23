@@ -66,7 +66,7 @@ pub extern "C" fn _start() {
     let mut response1_done = false;
     let mut response2_done = false;
 
-    driver.spin_until(&mut session.rpc_system, |cx| {
+    driver.drive_until(&mut session.rpc_system, &session.pollables, |cx| {
         let mut progressed = false;
 
         if !response1_done {

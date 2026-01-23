@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
 use wasmtime::component::bindgen;
 use wasmtime::component::{
     types::ComponentItem, Component, Linker, Resource, ResourceTable, ResourceType,
@@ -11,47 +10,40 @@ use wasmtime::{Config as WasmConfig, Engine, Store};
 use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
 use wasmtime_wasi::p2::add_to_linker_async;
 use wasmtime_wasi::p2::bindings::{Command as WasiCliCommand, CommandPre as WasiCliCommandPre};
-use wasmtime_wasi::p2::{InputStream, OutputStream, StreamError as WasiStreamError};
+use wasmtime_wasi::p2::pipe::{AsyncReadStream, AsyncWriteStream};
 use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
 
-use super::{streams, Loader};
+use super::Loader;
 
 // Generate bindings from WIT file
 // Resources are defined within the interface
 bindgen!({
     world: "streams-world",
     path: "wit",
+    with: {
+        "wasi:io/streams@0.2.9.input-stream": wasmtime_wasi_io::streams::DynInputStream,
+        "wasi:io/streams@0.2.9.output-stream": wasmtime_wasi_io::streams::DynOutputStream,
+    },
 });
 
 // Import generated types - Connection is a Resource type alias
-use exports::wetware::streams::streams::{Connection, StreamError};
+use exports::wetware::streams::streams::Connection;
 
 pub const BUFFER_SIZE: usize = 1024;
+const PIPE_BUFFER_SIZE: usize = 64 * 1024;
 
 type BoxAsyncRead = Box<dyn AsyncRead + Send + Sync + Unpin + 'static>;
 type BoxAsyncWrite = Box<dyn AsyncWrite + Send + Sync + Unpin + 'static>;
-
-// Note: bindgen! generates a Connection type, but we'll use our own
-// to store the stream handles. The generated Connection is the resource type.
-
-// Type aliases for complex channel types
-type DataStreamChannel = (
-    mpsc::UnboundedSender<Vec<u8>>,   // host_to_guest_tx
-    mpsc::UnboundedReceiver<Vec<u8>>, // host_to_guest_rx (for guest input)
-    mpsc::UnboundedSender<Vec<u8>>,   // guest_to_host_tx (for guest output)
-);
 
 // Required for WASI IO to work.
 pub struct ComponentRunStates {
     pub wasi_ctx: WasiCtx,
     pub resource_table: ResourceTable,
     pub loader: Option<Box<dyn Loader>>,
-    // Data stream channels for bidirectional host-guest communication
-    // Channels needed for creating guest streams (consumed by create-connection)
-    // host_to_guest_tx/rx: Host writes -> Guest reads (guest needs input stream)
-    // guest_to_host_tx: Guest writes -> Host reads (guest needs output stream)
-    pub data_stream_channels: Option<DataStreamChannel>,
+    // Guest-side bidirectional stream used to build WASI io/streams resources.
+    pub data_stream: Option<tokio::io::DuplexStream>,
 }
 
 // Required for WASI IO to work.
@@ -64,104 +56,10 @@ impl WasiView for ComponentRunStates {
     }
 }
 
-// Wrapper for WASI InputStream that we can store as a resource
-struct WetwareInputStream {
-    inner: Option<Box<dyn InputStream>>,
-}
-
-// Wrapper for WASI OutputStream that we can store as a resource
-struct WetwareOutputStream {
-    inner: Option<Box<dyn OutputStream>>,
-}
-
-// Direct channel-based input stream that bypasses AsyncStdinStream buffering
-struct ChannelInputStream {
-    receiver: mpsc::UnboundedReceiver<Vec<u8>>,
-    buffer: Vec<u8>,
-    offset: usize,
-}
-
-impl InputStream for ChannelInputStream {
-    fn read(&mut self, size: usize) -> Result<bytes::Bytes, WasiStreamError> {
-        // First, check if we have buffered data
-        if self.offset < self.buffer.len() {
-            let available = &self.buffer[self.offset..];
-            let to_read = available.len().min(size);
-            let data = bytes::Bytes::copy_from_slice(&available[..to_read]);
-            self.offset += to_read;
-            if self.offset >= self.buffer.len() {
-                self.buffer.clear();
-                self.offset = 0;
-            }
-            return Ok(data);
-        }
-
-        // Try to receive data non-blocking
-        match self.receiver.try_recv() {
-            Ok(data) => {
-                let to_read = data.len().min(size);
-                let result = bytes::Bytes::copy_from_slice(&data[..to_read]);
-                if to_read < data.len() {
-                    // Buffer the remainder
-                    self.buffer = data;
-                    self.offset = to_read;
-                }
-                Ok(result)
-            }
-            Err(mpsc::error::TryRecvError::Empty) => {
-                // No data available - return empty (non-blocking)
-                Ok(bytes::Bytes::new())
-            }
-            Err(mpsc::error::TryRecvError::Disconnected) => Err(WasiStreamError::Closed),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl wasmtime_wasi::p2::Pollable for ChannelInputStream {
-    async fn ready(&mut self) {
-        // Wait until data is available or channel is closed
-        // For simplicity, just return immediately - the read will handle it
-    }
-}
-
-// Direct channel-based output stream that bypasses AsyncStdoutStream buffering
-struct ChannelOutputStream {
-    sender: mpsc::UnboundedSender<Vec<u8>>,
-}
-
-impl OutputStream for ChannelOutputStream {
-    fn write(&mut self, bytes: bytes::Bytes) -> Result<(), WasiStreamError> {
-        self.sender
-            .send(bytes.to_vec())
-            .map_err(|_| WasiStreamError::Closed)
-    }
-
-    fn flush(&mut self) -> Result<(), WasiStreamError> {
-        // Unbounded channel doesn't need flushing
-        Ok(())
-    }
-
-    fn check_write(&mut self) -> Result<usize, WasiStreamError> {
-        // Always ready to write
-        Ok(usize::MAX)
-    }
-}
-
-#[async_trait::async_trait]
-impl wasmtime_wasi::p2::Pollable for ChannelOutputStream {
-    async fn ready(&mut self) {
-        // Always ready - unbounded channel never blocks
-    }
-}
-
-// Stub pollable resource - channels are always ready
-struct WetwarePollable;
-
 // Internal connection representation that stores stream wrappers
 struct ConnectionState {
-    input_stream: Option<WetwareInputStream>,
-    output_stream: Option<WetwareOutputStream>,
+    input_stream: Option<DynInputStream>,
+    output_stream: Option<DynOutputStream>,
 }
 
 struct ProcInit {
@@ -174,7 +72,7 @@ struct ProcInit {
     stdin: BoxAsyncRead,
     stdout: BoxAsyncWrite,
     stderr: BoxAsyncWrite,
-    data_streams: Option<DataStreamChannel>,
+    data_streams: Option<tokio::io::DuplexStream>,
 }
 
 /// Builder for constructing a Proc configuration
@@ -188,7 +86,7 @@ pub struct Builder {
     stdin: Option<BoxAsyncRead>,
     stdout: Option<BoxAsyncWrite>,
     stderr: Option<BoxAsyncWrite>,
-    data_streams: Option<DataStreamChannel>,
+    data_streams: Option<tokio::io::DuplexStream>,
 }
 
 /// Handles for accessing the host-side of data streams.
@@ -196,16 +94,22 @@ pub struct Builder {
 /// These allow the host to read from and write to the data streams
 /// that are exposed to the guest via the connection resource.
 pub struct DataStreamHandles {
-    /// Host can write to this, guest reads from it
-    pub host_to_guest_tx: mpsc::UnboundedSender<Vec<u8>>,
-    /// Host reads from this, guest writes to it
-    guest_to_host_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    /// Host-side duplex stream for RPC transport.
+    host_stream: Option<tokio::io::DuplexStream>,
 }
 
 impl DataStreamHandles {
-    /// Move the guest-to-host receiver out so the host can read guest output.
-    pub fn take_guest_output_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<Vec<u8>>> {
-        self.guest_to_host_rx.take()
+    pub fn take_host_stream(&mut self) -> Option<tokio::io::DuplexStream> {
+        self.host_stream.take()
+    }
+
+    pub fn take_host_split(
+        &mut self,
+    ) -> Option<(
+        tokio::io::ReadHalf<tokio::io::DuplexStream>,
+        tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    )> {
+        self.host_stream.take().map(tokio::io::split)
     }
 }
 
@@ -303,21 +207,16 @@ impl Builder {
 
     /// Enable bidirectional data streams for host-guest communication.
     ///
-    /// This creates in-memory channels that are exposed to the guest via
+    /// This creates in-memory pipes that are exposed to the guest via
     /// a custom connection resource. Returns handles that the host can use
     /// to communicate with the guest.
     pub fn with_data_streams(mut self) -> (Self, DataStreamHandles) {
-        let (host_to_guest_tx, host_to_guest_rx, guest_to_host_tx, guest_to_host_rx) =
-            streams::create_channel_pair();
-
-        // Clone the sender for the handles (senders are cheap to clone)
+        let (host_stream, guest_stream) = tokio::io::duplex(PIPE_BUFFER_SIZE);
         let handles = DataStreamHandles {
-            host_to_guest_tx: host_to_guest_tx.clone(),
-            guest_to_host_rx: Some(guest_to_host_rx),
+            host_stream: Some(host_stream),
         };
 
-        // Store all channels in the builder
-        self.data_streams = Some((host_to_guest_tx, host_to_guest_rx, guest_to_host_tx));
+        self.data_streams = Some(guest_stream);
 
         (self, handles)
     }
@@ -436,13 +335,11 @@ impl Proc {
         let wasi = wasi_builder.build();
 
         // Set up data streams if enabled
-        let data_stream_channels = if let Some(channels) = data_streams {
-            let (host_to_guest_tx, host_to_guest_rx, guest_to_host_tx) = channels;
-            // Add connection resource and host functions to linker
+        let data_stream = if let Some(stream) = data_streams {
             tracing::info!("Adding streams bindings to linker");
             add_streams_to_linker(&mut linker)?;
             tracing::info!("Streams bindings added");
-            Some((host_to_guest_tx, host_to_guest_rx, guest_to_host_tx))
+            Some(stream)
         } else {
             None
         };
@@ -451,7 +348,7 @@ impl Proc {
             wasi_ctx: wasi,
             resource_table: ResourceTable::new(),
             loader,
-            data_stream_channels,
+            data_stream,
         };
 
         let mut store = Store::new(&engine, state);
@@ -542,80 +439,34 @@ impl Proc {
 fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> {
     let mut streams_instance = linker.instance("wetware:streams/streams@0.1.0")?;
 
-    // Define the imported connection resource type.
     streams_instance.resource(
         "connection",
         ResourceType::host::<ConnectionState>(),
         |_, _| Ok(()),
     )?;
 
-    // Define the input-stream resource type that wraps WASI InputStream
-    streams_instance.resource(
-        "input-stream",
-        ResourceType::host::<WetwareInputStream>(),
-        |_, _| Ok(()),
-    )?;
-
-    // Define the output-stream resource type that wraps WASI OutputStream
-    streams_instance.resource(
-        "output-stream",
-        ResourceType::host::<WetwareOutputStream>(),
-        |_, _| Ok(()),
-    )?;
-
-    // Define the pollable resource type (stub - channels are always ready)
-    streams_instance.resource(
-        "pollable",
-        ResourceType::host::<WetwarePollable>(),
-        |_, _| Ok(()),
-    )?;
-
-    // Implement create-connection function.
     streams_instance.func_wrap_async(
         "create-connection",
         |mut store: StoreContextMut<'_, ComponentRunStates>, (): ()| {
             Box::new(async move {
                 tracing::info!("streams#create-connection invoked");
                 let state = store.data_mut();
-
-                // Extract channels - must exist if this is called
-                let channels = state
-                    .data_stream_channels
+                let guest_stream = state
+                    .data_stream
                     .take()
                     .ok_or_else(|| anyhow!("data streams not enabled"))?;
 
-                // Extract only the channels needed for stream creation
-                // host_to_guest_tx is kept for potential future use (e.g., host writing to guest)
-                let (_host_to_guest_tx, host_to_guest_rx, guest_to_host_tx) = channels;
+                let (guest_read, guest_write) = tokio::io::split(guest_stream);
+                let input_stream: DynInputStream = Box::new(AsyncReadStream::new(guest_read));
+                let output_stream: DynOutputStream =
+                    Box::new(AsyncWriteStream::new(PIPE_BUFFER_SIZE, guest_write));
 
-                // Use direct channel-based streams for unbuffered I/O
-                let input_stream = ChannelInputStream {
-                    receiver: host_to_guest_rx,
-                    buffer: Vec::new(),
-                    offset: 0,
-                };
-                let output_stream = ChannelOutputStream {
-                    sender: guest_to_host_tx,
-                };
-
-                // Create wrapper resources for the streams
-                let input_wrapper = WetwareInputStream {
-                    inner: Some(Box::new(input_stream) as Box<dyn InputStream>),
-                };
-                let output_wrapper = WetwareOutputStream {
-                    inner: Some(Box::new(output_stream) as Box<dyn OutputStream>),
-                };
-
-                // Store the stream wrappers in ConnectionState
                 let conn_state = ConnectionState {
-                    input_stream: Some(input_wrapper),
-                    output_stream: Some(output_wrapper),
+                    input_stream: Some(input_stream),
+                    output_stream: Some(output_stream),
                 };
 
-                // Store in component resource table
                 let conn_resource = state.resource_table.push(conn_state)?;
-
-                // Convert Resource<ConnectionState> to Connection (ResourceAny)
                 let connection = Connection::try_from_resource(conn_resource, &mut store)?;
                 tracing::info!("streams#create-connection returning connection");
                 Ok((connection,))
@@ -623,16 +474,13 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
         },
     )?;
 
-    // Implement get-input-stream method.
     streams_instance.func_wrap_async(
         "[method]connection.get-input-stream",
         |mut store: StoreContextMut<'_, ComponentRunStates>,
          (connection,): (Resource<ConnectionState>,)| {
             Box::new(async move {
                 tracing::info!("streams#connection.get-input-stream invoked");
-
-                // Take the stream wrapper from ConnectionState
-                let stream_wrapper = {
+                let stream = {
                     let conn_state = store.data_mut().resource_table.get_mut(&connection)?;
                     conn_state
                         .input_stream
@@ -640,25 +488,21 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
                         .ok_or_else(|| anyhow!("input stream already taken"))?
                 };
 
-                // Push the wrapper as a resource and return it
                 let state = store.data_mut();
-                let resource = state.resource_table.push(stream_wrapper)?;
+                let resource = state.resource_table.push(stream)?;
                 tracing::info!("streams#connection.get-input-stream returning resource");
                 Ok((resource,))
             })
         },
     )?;
 
-    // Implement get-output-stream method.
     streams_instance.func_wrap_async(
         "[method]connection.get-output-stream",
         |mut store: StoreContextMut<'_, ComponentRunStates>,
          (connection,): (Resource<ConnectionState>,)| {
             Box::new(async move {
                 tracing::info!("streams#connection.get-output-stream invoked");
-
-                // Take the stream wrapper from ConnectionState
-                let stream_wrapper = {
+                let stream = {
                     let conn_state = store.data_mut().resource_table.get_mut(&connection)?;
                     conn_state
                         .output_stream
@@ -666,409 +510,10 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
                         .ok_or_else(|| anyhow!("output stream already taken"))?
                 };
 
-                // Push the wrapper as a resource and return it
                 let state = store.data_mut();
-                let resource = state.resource_table.push(stream_wrapper)?;
+                let resource = state.resource_table.push(stream)?;
                 tracing::info!("streams#connection.get-output-stream returning resource");
                 Ok((resource,))
-            })
-        },
-    )?;
-
-    // =========================================================================
-    // Input Stream Methods
-    // =========================================================================
-
-    // [method]input-stream.read
-    streams_instance.func_wrap_async(
-        "[method]input-stream.read",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream, len): (Resource<WetwareInputStream>, u64)| {
-            Box::new(async move {
-                tracing::trace!("streams#input-stream.read invoked, len={}", len);
-                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
-                let inner = wrapper
-                    .inner
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("input stream already consumed"))?;
-
-                let result = inner.read(len as usize);
-                match result {
-                    Ok(bytes) => Ok((Ok::<Vec<u8>, StreamError>(bytes.to_vec()),)),
-                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
-                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
-                }
-            })
-        },
-    )?;
-
-    // [method]input-stream.blocking-read
-    streams_instance.func_wrap_async(
-        "[method]input-stream.blocking-read",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream, len): (Resource<WetwareInputStream>, u64)| {
-            Box::new(async move {
-                tracing::trace!("streams#input-stream.blocking-read invoked, len={}", len);
-                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
-                let inner = wrapper
-                    .inner
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("input stream already consumed"))?;
-
-                let result = inner.blocking_read(len as usize).await;
-                match result {
-                    Ok(bytes) => Ok((Ok::<Vec<u8>, StreamError>(bytes.to_vec()),)),
-                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
-                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
-                }
-            })
-        },
-    )?;
-
-    // [method]input-stream.skip
-    streams_instance.func_wrap_async(
-        "[method]input-stream.skip",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream, len): (Resource<WetwareInputStream>, u64)| {
-            Box::new(async move {
-                tracing::trace!("streams#input-stream.skip invoked, len={}", len);
-                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
-                let inner = wrapper
-                    .inner
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("input stream already consumed"))?;
-
-                let result = inner.skip(len as usize);
-                match result {
-                    Ok(skipped) => Ok((Ok::<u64, StreamError>(skipped as u64),)),
-                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
-                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
-                }
-            })
-        },
-    )?;
-
-    // [method]input-stream.blocking-skip
-    streams_instance.func_wrap_async(
-        "[method]input-stream.blocking-skip",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream, len): (Resource<WetwareInputStream>, u64)| {
-            Box::new(async move {
-                tracing::trace!("streams#input-stream.blocking-skip invoked, len={}", len);
-                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
-                let inner = wrapper
-                    .inner
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("input stream already consumed"))?;
-
-                let result = inner.blocking_skip(len as usize).await;
-                match result {
-                    Ok(skipped) => Ok((Ok::<u64, StreamError>(skipped as u64),)),
-                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
-                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
-                }
-            })
-        },
-    )?;
-
-    // [method]input-stream.subscribe - returns stub pollable
-    streams_instance.func_wrap_async(
-        "[method]input-stream.subscribe",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream,): (Resource<WetwareInputStream>,)| {
-            Box::new(async move {
-                tracing::trace!("streams#input-stream.subscribe invoked");
-                // Verify the stream exists
-                let _ = store.data().resource_table.get(&stream)?;
-                // Return a stub pollable - channels are always ready
-                let pollable = store.data_mut().resource_table.push(WetwarePollable)?;
-                Ok((pollable,))
-            })
-        },
-    )?;
-
-    // =========================================================================
-    // Output Stream Methods
-    // =========================================================================
-
-    // [method]output-stream.check-write
-    streams_instance.func_wrap_async(
-        "[method]output-stream.check-write",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream,): (Resource<WetwareOutputStream>,)| {
-            Box::new(async move {
-                tracing::trace!("streams#output-stream.check-write invoked");
-                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
-                let inner = wrapper
-                    .inner
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
-
-                let result = inner.check_write();
-                match result {
-                    Ok(n) => Ok((Ok::<u64, StreamError>(n as u64),)),
-                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
-                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
-                }
-            })
-        },
-    )?;
-
-    // [method]output-stream.write
-    streams_instance.func_wrap_async(
-        "[method]output-stream.write",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream, contents): (Resource<WetwareOutputStream>, Vec<u8>)| {
-            Box::new(async move {
-                tracing::trace!(
-                    "streams#output-stream.write invoked, len={}",
-                    contents.len()
-                );
-                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
-                let inner = wrapper
-                    .inner
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
-
-                let len = contents.len();
-                let result = inner.write(contents.into());
-                match result {
-                    Ok(()) => Ok((Ok::<u64, StreamError>(len as u64),)),
-                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
-                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
-                }
-            })
-        },
-    )?;
-
-    // [method]output-stream.blocking-write-and-flush
-    streams_instance.func_wrap_async(
-        "[method]output-stream.blocking-write-and-flush",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream, contents): (Resource<WetwareOutputStream>, Vec<u8>)| {
-            Box::new(async move {
-                tracing::trace!(
-                    "streams#output-stream.blocking-write-and-flush invoked, len={}",
-                    contents.len()
-                );
-                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
-                let inner = wrapper
-                    .inner
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
-
-                let result = inner.blocking_write_and_flush(contents.into()).await;
-                match result {
-                    Ok(()) => Ok((Ok::<(), StreamError>(()),)),
-                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
-                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
-                }
-            })
-        },
-    )?;
-
-    // [method]output-stream.flush
-    streams_instance.func_wrap_async(
-        "[method]output-stream.flush",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream,): (Resource<WetwareOutputStream>,)| {
-            Box::new(async move {
-                tracing::trace!("streams#output-stream.flush invoked");
-                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
-                let inner = wrapper
-                    .inner
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
-
-                let result = inner.flush();
-                match result {
-                    Ok(()) => Ok((Ok::<(), StreamError>(()),)),
-                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
-                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
-                }
-            })
-        },
-    )?;
-
-    // [method]output-stream.blocking-flush
-    streams_instance.func_wrap_async(
-        "[method]output-stream.blocking-flush",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream,): (Resource<WetwareOutputStream>,)| {
-            Box::new(async move {
-                tracing::trace!("streams#output-stream.blocking-flush invoked");
-                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
-                let inner = wrapper
-                    .inner
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
-
-                // Use write_ready to wait for flush to complete
-                let result = inner.write_ready().await;
-                match result {
-                    Ok(_) => Ok((Ok::<(), StreamError>(()),)),
-                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
-                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
-                }
-            })
-        },
-    )?;
-
-    // [method]output-stream.subscribe - returns stub pollable
-    streams_instance.func_wrap_async(
-        "[method]output-stream.subscribe",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream,): (Resource<WetwareOutputStream>,)| {
-            Box::new(async move {
-                tracing::trace!("streams#output-stream.subscribe invoked");
-                // Verify the stream exists
-                let _ = store.data().resource_table.get(&stream)?;
-                // Return a stub pollable - channels are always ready
-                let pollable = store.data_mut().resource_table.push(WetwarePollable)?;
-                Ok((pollable,))
-            })
-        },
-    )?;
-
-    // [method]output-stream.write-zeroes
-    streams_instance.func_wrap_async(
-        "[method]output-stream.write-zeroes",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream, len): (Resource<WetwareOutputStream>, u64)| {
-            Box::new(async move {
-                tracing::trace!("streams#output-stream.write-zeroes invoked, len={}", len);
-                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
-                let inner = wrapper
-                    .inner
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
-
-                let result = inner.write_zeroes(len as usize);
-                match result {
-                    Ok(()) => Ok((Ok::<u64, StreamError>(len),)),
-                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
-                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
-                }
-            })
-        },
-    )?;
-
-    // [method]output-stream.blocking-write-zeroes-and-flush
-    streams_instance.func_wrap_async(
-        "[method]output-stream.blocking-write-zeroes-and-flush",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream, len): (Resource<WetwareOutputStream>, u64)| {
-            Box::new(async move {
-                tracing::trace!(
-                    "streams#output-stream.blocking-write-zeroes-and-flush invoked, len={}",
-                    len
-                );
-                let wrapper = store.data_mut().resource_table.get_mut(&stream)?;
-                let inner = wrapper
-                    .inner
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
-
-                let result = inner.blocking_write_zeroes_and_flush(len as usize).await;
-                match result {
-                    Ok(()) => Ok((Ok::<(), StreamError>(()),)),
-                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
-                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
-                }
-            })
-        },
-    )?;
-
-    // [method]output-stream.splice
-    streams_instance.func_wrap_async(
-        "[method]output-stream.splice",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream, src, len): (
-            Resource<WetwareOutputStream>,
-            Resource<WetwareInputStream>,
-            u64,
-        )| {
-            Box::new(async move {
-                tracing::trace!("streams#output-stream.splice invoked, len={}", len);
-                // Read from input stream
-                let data = {
-                    let src_wrapper = store.data_mut().resource_table.get_mut(&src)?;
-                    let src_inner = src_wrapper
-                        .inner
-                        .as_mut()
-                        .ok_or_else(|| anyhow!("input stream already consumed"))?;
-                    match src_inner.read(len as usize) {
-                        Ok(bytes) => bytes,
-                        Err(WasiStreamError::Closed) => {
-                            return Ok((Err(StreamError::Closed),));
-                        }
-                        Err(_) => {
-                            return Ok((Err(StreamError::LastOperationFailed),));
-                        }
-                    }
-                };
-
-                // Write to output stream
-                let written = data.len();
-                let dst_wrapper = store.data_mut().resource_table.get_mut(&stream)?;
-                let dst_inner = dst_wrapper
-                    .inner
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
-
-                let result = dst_inner.write(data);
-                match result {
-                    Ok(()) => Ok((Ok::<u64, StreamError>(written as u64),)),
-                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
-                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
-                }
-            })
-        },
-    )?;
-
-    // [method]output-stream.blocking-splice
-    streams_instance.func_wrap_async(
-        "[method]output-stream.blocking-splice",
-        |mut store: StoreContextMut<'_, ComponentRunStates>,
-         (stream, src, len): (
-            Resource<WetwareOutputStream>,
-            Resource<WetwareInputStream>,
-            u64,
-        )| {
-            Box::new(async move {
-                tracing::trace!("streams#output-stream.blocking-splice invoked, len={}", len);
-                // Blocking read from input stream
-                let data = {
-                    let src_wrapper = store.data_mut().resource_table.get_mut(&src)?;
-                    let src_inner = src_wrapper
-                        .inner
-                        .as_mut()
-                        .ok_or_else(|| anyhow!("input stream already consumed"))?;
-                    match src_inner.blocking_read(len as usize).await {
-                        Ok(bytes) => bytes,
-                        Err(WasiStreamError::Closed) => {
-                            return Ok((Err(StreamError::Closed),));
-                        }
-                        Err(_) => {
-                            return Ok((Err(StreamError::LastOperationFailed),));
-                        }
-                    }
-                };
-
-                // Blocking write to output stream
-                let written = data.len();
-                let dst_wrapper = store.data_mut().resource_table.get_mut(&stream)?;
-                let dst_inner = dst_wrapper
-                    .inner
-                    .as_mut()
-                    .ok_or_else(|| anyhow!("output stream already consumed"))?;
-
-                let result = dst_inner.blocking_write_and_flush(data).await;
-                match result {
-                    Ok(()) => Ok((Ok::<u64, StreamError>(written as u64),)),
-                    Err(WasiStreamError::Closed) => Ok((Err(StreamError::Closed),)),
-                    Err(_) => Ok((Err(StreamError::LastOperationFailed),)),
-                }
             })
         },
     )?;
@@ -1117,7 +562,7 @@ fn add_loader_to_linker<T>(_linker: &mut Linker<T>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn test_proc_builder_creation() {
@@ -1144,28 +589,25 @@ mod tests {
         // Enable data streams and capture the returned handles
         let (mut builder, mut handles) = Builder::new().with_data_streams();
 
-        // Access the underlying channels to simulate guest behavior
-        let (_host_to_guest_tx_internal, host_to_guest_rx, guest_to_host_tx) = builder
+        let guest_stream = builder
             .data_streams
             .take()
             .expect("data streams should be configured");
+        let host_stream = handles
+            .take_host_stream()
+            .expect("host stream should be configured");
 
-        // Host -> guest: send through the handle and ensure the guest side receives it
-        handles.host_to_guest_tx.send(b"ping".to_vec()).unwrap();
-        let mut guest_reader = streams::Reader::new(host_to_guest_rx);
-        let mut buf = vec![0u8; 4];
-        let n = guest_reader.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"ping");
+        let (mut host_read, mut host_write) = tokio::io::split(host_stream);
+        let (mut guest_read, mut guest_write) = tokio::io::split(guest_stream);
 
-        // Guest -> host: simulate guest write and ensure host can receive via the handle
-        let mut guest_output_rx = handles
-            .take_guest_output_receiver()
-            .expect("guest output receiver should be returned to the host");
-        guest_to_host_tx.send(b"pong".to_vec()).unwrap();
-        let pong = guest_output_rx
-            .recv()
-            .await
-            .expect("host should receive guest output");
-        assert_eq!(pong, b"pong");
+        host_write.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        guest_read.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
+
+        guest_write.write_all(b"pong").await.unwrap();
+        let mut buf = [0u8; 4];
+        host_read.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"pong");
     }
 }

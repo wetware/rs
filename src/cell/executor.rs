@@ -5,7 +5,7 @@ use tokio::io::{stderr, stdin, stdout};
 use tokio::task::JoinHandle;
 use tracing::info;
 
-use crate::cell::{proc::DataStreamHandles, streams, Loader, ProcBuilder};
+use crate::cell::{proc::DataStreamHandles, Loader, ProcBuilder};
 
 /// Builder for constructing a cell Command
 pub struct CommandBuilder {
@@ -173,11 +173,9 @@ impl Command {
         let wasm_debug = self.wasm_debug;
         let (join, handles) = self.spawn_with_streams().await?;
         let mut handles = handles;
-        let guest_output_rx = handles.take_guest_output_receiver().ok_or_else(|| {
-            anyhow::anyhow!("guest output receiver missing; RPC streams already consumed")
-        })?;
-        let reader = streams::Reader::new(guest_output_rx);
-        let writer = streams::Writer::new(handles.host_to_guest_tx);
+        let (reader, writer) = handles
+            .take_host_split()
+            .ok_or_else(|| anyhow::anyhow!("host stream missing; RPC streams already consumed"))?;
         let rpc_system = crate::rpc::build_peer_rpc(reader, writer, wasm_debug);
 
         info!("Starting streams RPC server for guest");

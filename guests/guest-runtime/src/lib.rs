@@ -10,22 +10,29 @@ mod bindings {
     wit_bindgen::generate!({
         path: "../../wit",
         world: "guest-streams",
+        with: {
+            "wasi:io/error@0.2.9": wasip2::io::error,
+            "wasi:io/poll@0.2.9": wasip2::io::poll,
+            "wasi:io/streams@0.2.9": wasip2::io::streams,
+        },
     });
 }
 
-use bindings::wetware::streams::streams::{
-    create_connection, InputStream as WetwareInputStream, OutputStream as WetwareOutputStream,
-    Pollable as WetwarePollable, StreamError as WetwareStreamError,
+use bindings::wetware::streams::streams::create_connection;
+use wasip2::io::poll as wasi_poll;
+use wasip2::io::streams::{
+    InputStream as WasiInputStream, OutputStream as WasiOutputStream, Pollable as WasiPollable,
+    StreamError as WasiStreamError,
 };
 
 pub struct StreamReader {
-    stream: WetwareInputStream,
+    stream: WasiInputStream,
     buffer: Vec<u8>,
     offset: usize,
 }
 
 impl StreamReader {
-    pub fn new(stream: WetwareInputStream) -> Self {
+    pub fn new(stream: WasiInputStream) -> Self {
         Self {
             stream,
             buffer: Vec::new(),
@@ -33,7 +40,7 @@ impl StreamReader {
         }
     }
 
-    pub fn pollable(&self) -> WetwarePollable {
+    pub fn pollable(&self) -> WasiPollable {
         self.stream.subscribe()
     }
 }
@@ -71,7 +78,7 @@ impl futures::io::AsyncRead for StreamReader {
                 self.offset += to_copy;
                 std::task::Poll::Ready(Ok(to_copy))
             }
-            Err(WetwareStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
+            Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
             Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("stream read error: {:?}", err),
@@ -81,15 +88,15 @@ impl futures::io::AsyncRead for StreamReader {
 }
 
 pub struct StreamWriter {
-    stream: WetwareOutputStream,
+    stream: WasiOutputStream,
 }
 
 impl StreamWriter {
-    pub fn new(stream: WetwareOutputStream) -> Self {
+    pub fn new(stream: WasiOutputStream) -> Self {
         Self { stream }
     }
 
-    pub fn pollable(&self) -> WetwarePollable {
+    pub fn pollable(&self) -> WasiPollable {
         self.stream.subscribe()
     }
 }
@@ -112,14 +119,14 @@ impl futures::io::AsyncWrite for StreamWriter {
                 let to_write = buf.len().min(budget as usize);
                 match self.stream.write(&buf[..to_write]) {
                     Ok(_written) => std::task::Poll::Ready(Ok(to_write)),
-                    Err(WetwareStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
+                    Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
                     Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         format!("stream write error: {:?}", err),
                     ))),
                 }
             }
-            Err(WetwareStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
+            Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
             Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("stream write error: {:?}", err),
@@ -133,7 +140,7 @@ impl futures::io::AsyncWrite for StreamWriter {
     ) -> std::task::Poll<std::io::Result<()>> {
         match self.stream.flush() {
             Ok(()) => std::task::Poll::Ready(Ok(())),
-            Err(WetwareStreamError::Closed) => std::task::Poll::Ready(Ok(())),
+            Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(())),
             Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("stream flush error: {:?}", err),
@@ -147,7 +154,7 @@ impl futures::io::AsyncWrite for StreamWriter {
     ) -> std::task::Poll<std::io::Result<()>> {
         match self.stream.flush() {
             Ok(()) => std::task::Poll::Ready(Ok(())),
-            Err(WetwareStreamError::Closed) => std::task::Poll::Ready(Ok(())),
+            Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(())),
             Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("stream close error: {:?}", err),
@@ -157,8 +164,8 @@ impl futures::io::AsyncWrite for StreamWriter {
 }
 
 pub struct StreamPollables {
-    pub reader: WetwarePollable,
-    pub writer: WetwarePollable,
+    pub reader: WasiPollable,
+    pub writer: WasiPollable,
 }
 
 pub struct GuestStreams {
@@ -258,8 +265,12 @@ impl RpcDriver {
         }
     }
 
-    pub fn spin_until<F>(&self, rpc_system: &mut RpcSystem<Side>, mut poll: F)
-    where
+    pub fn drive_until<F>(
+        &self,
+        rpc_system: &mut RpcSystem<Side>,
+        pollables: &StreamPollables,
+        mut poll: F,
+    ) where
         F: FnMut(&mut Context<'_>) -> DriveOutcome,
     {
         loop {
@@ -281,7 +292,11 @@ impl RpcDriver {
             }
 
             if !made_progress {
-                std::hint::spin_loop();
+                if pollables.writer.ready() {
+                    wasi_poll::poll(&[&pollables.reader]);
+                } else {
+                    wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
+                }
             }
         }
     }

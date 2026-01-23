@@ -68,7 +68,7 @@ fn run_impl() {
     let driver = RpcDriver::new();
     let mut wait_promise = None;
 
-    driver.spin_until(&mut session.rpc_system, |cx| {
+    driver.drive_until(&mut session.rpc_system, &session.pollables, |cx| {
         let mut progressed = false;
 
         if wait_promise.is_none() {

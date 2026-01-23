@@ -2,72 +2,7 @@ package wetware:streams@0.1.0;
 
 /// Interface for managing bidirectional data streams between host and guest.
 interface streams {
-    /// Error type for stream operations.
-    enum stream-error {
-        /// The stream is closed.
-        closed,
-        /// Last operation failed.
-        last-operation-failed,
-    }
-
-    /// A pollable resource for waiting on I/O readiness.
-    /// This is a simplified version that doesn't require actual pollable implementation.
-    resource pollable;
-
-    /// A readable stream resource for receiving data from the host.
-    resource input-stream {
-        /// Read up to len bytes from the stream.
-        /// Returns the bytes read, or empty list on EOF.
-        /// On error, returns stream-error.
-        read: func(len: u64) -> result<list<u8>, stream-error>;
-
-        /// Blocking read that fills the buffer.
-        /// Returns number of bytes read, 0 on EOF.
-        blocking-read: func(len: u64) -> result<list<u8>, stream-error>;
-
-        /// Skip bytes in the stream.
-        skip: func(len: u64) -> result<u64, stream-error>;
-
-        /// Blocking skip.
-        blocking-skip: func(len: u64) -> result<u64, stream-error>;
-
-        /// Subscribe to readiness notifications.
-        subscribe: func() -> pollable;
-    }
-
-    /// A writable stream resource for sending data to the host.
-    resource output-stream {
-        /// Check how many bytes can be written without blocking.
-        check-write: func() -> result<u64, stream-error>;
-
-        /// Write bytes to the stream.
-        /// Returns number of bytes written, or error.
-        write: func(contents: list<u8>) -> result<u64, stream-error>;
-
-        /// Blocking write that writes all bytes.
-        blocking-write-and-flush: func(contents: list<u8>) -> result<_, stream-error>;
-
-        /// Flush any buffered data.
-        flush: func() -> result<_, stream-error>;
-
-        /// Blocking flush.
-        blocking-flush: func() -> result<_, stream-error>;
-
-        /// Subscribe to readiness notifications.
-        subscribe: func() -> pollable;
-
-        /// Write data from a list with zero copies.
-        write-zeroes: func(len: u64) -> result<u64, stream-error>;
-
-        /// Blocking write of zeroes.
-        blocking-write-zeroes-and-flush: func(len: u64) -> result<_, stream-error>;
-
-        /// Request that all data be sent over the network before returning.
-        splice: func(src: borrow<input-stream>, len: u64) -> result<u64, stream-error>;
-
-        /// Blocking splice.
-        blocking-splice: func(src: borrow<input-stream>, len: u64) -> result<u64, stream-error>;
-    }
+    use wasi:io/streams@0.2.9.{input-stream, output-stream};
 
     /// A bidirectional connection resource that provides access to input and output streams.
     resource connection {
