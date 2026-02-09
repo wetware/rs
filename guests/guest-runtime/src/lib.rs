@@ -347,3 +347,73 @@ where
         }
     }
 }
+
+/// Run a guest program with an async entry point.
+///
+/// Sets up the RPC session, bootstraps the host capability, and drives
+/// the provided async closure to completion alongside the RPC system.
+/// Handles all resource cleanup automatically.
+///
+/// # Example
+///
+/// ```no_run
+/// wetware_guest::run(|host| async move {
+///     let executor = host.executor_request().send().pipeline.get_executor();
+///     let resp = executor.echo_request().send().promise.await?;
+///     let text = resp.get()?.get_response()?.to_str()?;
+///     Ok(())
+/// });
+/// ```
+pub fn run<C, F, Fut>(f: F)
+where
+    C: FromClientHook + Clone,
+    F: FnOnce(C) -> Fut,
+    Fut: Future<Output = Result<(), capnp::Error>>,
+{
+    let mut session = RpcSession::<C>::connect();
+    let client = session.client.clone();
+    let future = f(client);
+    let mut future = Box::pin(future);
+
+    let waker = noop_waker();
+    let mut rpc_done = false;
+    loop {
+        let mut cx = Context::from_waker(&waker);
+        let mut made_progress = false;
+
+        if !rpc_done {
+            match session.rpc_system.poll_unpin(&mut cx) {
+                Poll::Ready(_) => {
+                    rpc_done = true;
+                    made_progress = true;
+                }
+                Poll::Pending => {}
+            }
+        }
+
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(_) => {
+                // Forget the future to avoid dropping Cap'n Proto objects
+                // which would trigger WASI resource cleanup errors.
+                std::mem::forget(future);
+                session.forget();
+                return;
+            }
+            Poll::Pending => {}
+        }
+
+        if rpc_done {
+            std::mem::forget(future);
+            session.forget();
+            return;
+        }
+
+        if !made_progress {
+            if session.pollables.writer.ready() {
+                wasi_poll::poll(&[&session.pollables.reader]);
+            } else {
+                wasi_poll::poll(&[&session.pollables.reader, &session.pollables.writer]);
+            }
+        }
+    }
+}
