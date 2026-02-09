@@ -4,6 +4,8 @@ use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
 use futures::task::noop_waker;
 use futures::FutureExt;
+use std::future::Future;
+use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
 mod bindings {
@@ -297,6 +299,50 @@ impl RpcDriver {
                 } else {
                     wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
                 }
+            }
+        }
+    }
+}
+
+/// Drive the RPC system and poll a single future to completion.
+///
+/// Returns `Some(value)` if the future resolves, or `None` if the
+/// RPC system terminates before the future completes.
+pub fn block_on<C, F>(session: &mut RpcSession<C>, mut future: F) -> Option<F::Output>
+where
+    C: FromClientHook,
+    F: Future + Unpin,
+{
+    let waker = noop_waker();
+    let mut rpc_done = false;
+    loop {
+        let mut cx = Context::from_waker(&waker);
+        let mut made_progress = false;
+
+        if !rpc_done {
+            match session.rpc_system.poll_unpin(&mut cx) {
+                Poll::Ready(_) => {
+                    rpc_done = true;
+                    made_progress = true;
+                }
+                Poll::Pending => {}
+            }
+        }
+
+        match Pin::new(&mut future).poll(&mut cx) {
+            Poll::Ready(value) => return Some(value),
+            Poll::Pending => {}
+        }
+
+        if rpc_done {
+            return None;
+        }
+
+        if !made_progress {
+            if session.pollables.writer.ready() {
+                wasi_poll::poll(&[&session.pollables.reader]);
+            } else {
+                wasi_poll::poll(&[&session.pollables.reader, &session.pollables.writer]);
             }
         }
     }

@@ -1,11 +1,8 @@
 #![feature(wasip2)]
 
-use futures::future::FutureExt;
 use wasip2::cli::stderr::get_stderr;
 use wasip2::exports::cli::run::Guest;
-use wetware_guest::{DriveOutcome, RpcDriver, RpcSession};
-
-use std::task::Poll;
+use wetware_guest::{block_on, RpcSession};
 
 #[allow(dead_code)]
 mod peer_capnp {
@@ -72,55 +69,27 @@ fn run_impl() {
         params.reborrow().init_args(0);
         params.reborrow().init_env(0);
     }
-    let mut response = request.send().promise;
     log::trace!("pid0: runBytes sent");
-    let driver = RpcDriver::new();
-    let mut wait_promise = None;
 
-    driver.drive_until(&mut session.rpc_system, &session.pollables, |cx| {
-        let mut progressed = false;
+    let run_resp = block_on(&mut session, request.send().promise)
+        .expect("RPC system terminated")
+        .expect("runBytes failed");
+    let process = run_resp
+        .get()
+        .expect("missing executor response")
+        .get_process()
+        .expect("missing process");
+    log::trace!("pid0: got process");
 
-        if wait_promise.is_none() {
-            match response.poll_unpin(cx) {
-                Poll::Ready(Ok(resp)) => {
-                    let process = resp
-                        .get()
-                        .expect("missing executor response")
-                        .get_process()
-                        .expect("missing process");
-                    wait_promise = Some(process.wait_request().send().promise);
-                    log::trace!("pid0: got process");
-                    progressed = true;
-                }
-                Poll::Ready(Err(err)) => {
-                    panic!("executor call failed: {err}");
-                }
-                Poll::Pending => {}
-            }
-        } else if let Some(wait) = wait_promise.as_mut() {
-            match wait.poll_unpin(cx) {
-                Poll::Ready(Ok(_)) => {
-                    log::trace!("pid0: child exited");
-                    return DriveOutcome::done();
-                }
-                Poll::Ready(Err(err)) => {
-                    panic!("wait failed: {err}");
-                }
-                Poll::Pending => {}
-            }
-        }
+    let wait_resp = block_on(&mut session, process.wait_request().send().promise)
+        .expect("RPC system terminated")
+        .expect("wait failed");
+    let exit_code = wait_resp.get().unwrap().get_exit_code();
+    log::trace!("pid0: child exited with code {}", exit_code);
 
-        if progressed {
-            DriveOutcome::progress()
-        } else {
-            DriveOutcome::pending()
-        }
-    });
-
-    if let Some(promise) = wait_promise {
-        std::mem::forget(promise);
-    }
-    std::mem::forget(response);
+    std::mem::forget(wait_resp);
+    std::mem::forget(run_resp);
+    std::mem::forget(process);
     std::mem::forget(executor);
     std::mem::forget(host);
     session.forget();

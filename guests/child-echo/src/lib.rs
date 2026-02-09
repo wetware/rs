@@ -1,10 +1,7 @@
 #![feature(wasip2)]
 
-use futures::future::FutureExt;
 use wasip2::cli::stderr::get_stderr;
-use wetware_guest::{DriveOutcome, RpcDriver, RpcSession};
-
-use std::task::Poll;
+use wetware_guest::{block_on, RpcSession};
 
 #[allow(dead_code)]
 mod peer_capnp {
@@ -54,120 +51,44 @@ pub extern "C" fn _start() {
     // Get executor via pipelining
     let executor = host.executor_request().send().pipeline.get_executor();
 
-    // Make TWO concurrent echo calls
-    let mut request1 = executor.echo_request();
-    request1.get().set_message("Hello from call 1");
-    let mut promise1 = request1.send().promise;
+    // Echo call 1
+    let mut req1 = executor.echo_request();
+    req1.get().set_message("Hello from call 1");
+    log::trace!("child-echo: sending echo request 1");
+    let resp1 = block_on(&mut session, req1.send().promise)
+        .expect("RPC system terminated")
+        .expect("echo call 1 failed");
+    let text1 = resp1
+        .get()
+        .expect("resp1.get() failed")
+        .get_response()
+        .expect("get_response failed")
+        .to_str()
+        .expect("to_str failed");
+    log::trace!("child-echo: call 1 response: {}", text1);
 
-    let mut request2 = executor.echo_request();
-    request2.get().set_message("Hello from call 2");
-    let mut promise2 = request2.send().promise;
+    // Echo call 2
+    let mut req2 = executor.echo_request();
+    req2.get().set_message("Hello from call 2");
+    log::trace!("child-echo: sending echo request 2");
+    let resp2 = block_on(&mut session, req2.send().promise)
+        .expect("RPC system terminated")
+        .expect("echo call 2 failed");
+    let text2 = resp2
+        .get()
+        .expect("resp2.get() failed")
+        .get_response()
+        .expect("get_response failed")
+        .to_str()
+        .expect("to_str failed");
+    log::trace!("child-echo: call 2 response: {}", text2);
 
-    log::trace!("child-echo: sent both echo requests");
+    log::trace!("child-echo: both calls complete, exiting");
 
-    let driver = RpcDriver::new();
-    let mut response1_done = false;
-    let mut response2_done = false;
-
-    driver.drive_until(&mut session.rpc_system, &session.pollables, |cx| {
-        let mut progressed = false;
-
-        if !response1_done {
-            log::trace!("child-echo: polling promise1");
-            match promise1.poll_unpin(cx) {
-                Poll::Ready(Ok(resp)) => {
-                    log::trace!("child-echo: promise1 Ready(Ok)");
-                    match resp.get() {
-                        Ok(reader) => match reader.get_response() {
-                            Ok(text) => match text.to_str() {
-                                Ok(s) => {
-                                    log::trace!("child-echo: call 1 response: {}", s);
-                                    response1_done = true;
-                                    progressed = true;
-                                }
-                                Err(e) => {
-                                    log::error!("child-echo: call 1 to_str failed: {:?}", e);
-                                    return DriveOutcome::done();
-                                }
-                            },
-                            Err(e) => {
-                                log::error!("child-echo: call 1 get_response failed: {:?}", e);
-                                return DriveOutcome::done();
-                            }
-                        },
-                        Err(e) => {
-                            log::error!("child-echo: call 1 resp.get() failed: {:?}", e);
-                            return DriveOutcome::done();
-                        }
-                    }
-                }
-                Poll::Ready(Err(err)) => {
-                    log::error!("child-echo: call 1 failed: {}", err);
-                    return DriveOutcome::done();
-                }
-                Poll::Pending => {
-                    log::trace!("child-echo: promise1 Pending");
-                }
-            }
-        }
-
-        if !response2_done {
-            log::trace!("child-echo: polling promise2");
-            match promise2.poll_unpin(cx) {
-                Poll::Ready(Ok(resp)) => {
-                    log::trace!("child-echo: promise2 Ready(Ok)");
-                    match resp.get() {
-                        Ok(reader) => match reader.get_response() {
-                            Ok(text) => match text.to_str() {
-                                Ok(s) => {
-                                    log::trace!("child-echo: call 2 response: {}", s);
-                                    response2_done = true;
-                                    progressed = true;
-                                }
-                                Err(e) => {
-                                    log::error!("child-echo: call 2 to_str failed: {:?}", e);
-                                    return DriveOutcome::done();
-                                }
-                            },
-                            Err(e) => {
-                                log::error!("child-echo: call 2 get_response failed: {:?}", e);
-                                return DriveOutcome::done();
-                            }
-                        },
-                        Err(e) => {
-                            log::error!("child-echo: call 2 resp.get() failed: {:?}", e);
-                            return DriveOutcome::done();
-                        }
-                    }
-                }
-                Poll::Ready(Err(err)) => {
-                    log::error!("child-echo: call 2 failed: {}", err);
-                    return DriveOutcome::done();
-                }
-                Poll::Pending => {
-                    log::trace!("child-echo: promise2 Pending");
-                }
-            }
-        }
-
-        if response1_done && response2_done {
-            log::trace!("child-echo: both calls complete, exiting");
-            return DriveOutcome::done();
-        }
-
-        if progressed {
-            DriveOutcome::progress()
-        } else {
-            DriveOutcome::pending()
-        }
-    });
-
-    // Cleanup - forget resources to avoid "resource has children" errors
-    std::mem::forget(promise1);
-    std::mem::forget(promise2);
+    std::mem::forget(resp1);
+    std::mem::forget(resp2);
     std::mem::forget(executor);
     std::mem::forget(host);
     session.forget();
-
     log::trace!("child-echo: cleanup complete");
 }

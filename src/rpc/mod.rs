@@ -466,9 +466,9 @@ impl peer_capnp::executor::Server for ExecutorImpl {
             // Create stderr duplex for process interface
             let (host_stderr, guest_stderr) = io::duplex(64 * 1024);
 
-            // Create stdin/stdout duplex for guest's logging (not RPC)
-            let (_, guest_stdin) = io::duplex(64);
-            let (guest_stdout, _) = io::duplex(64);
+            // Create real stdin/stdout duplexes for Process interface
+            let (host_stdin, guest_stdin) = io::duplex(64 * 1024);
+            let (host_stdout, guest_stdout) = io::duplex(64 * 1024);
 
             let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
 
@@ -524,13 +524,10 @@ impl peer_capnp::executor::Server for ExecutorImpl {
             });
             tracing::info!("run_bytes: returning process client");
 
-            // Create dummy ByteStream capabilities for Process interface
-            let (dummy_stdin, _) = io::duplex(64);
-            let (_, dummy_stdout) = io::duplex(64);
             let stdin =
-                capnp_rpc::new_client(ByteStreamImpl::new(dummy_stdin, StreamMode::WriteOnly));
+                capnp_rpc::new_client(ByteStreamImpl::new(host_stdin, StreamMode::WriteOnly));
             let stdout =
-                capnp_rpc::new_client(ByteStreamImpl::new(dummy_stdout, StreamMode::ReadOnly));
+                capnp_rpc::new_client(ByteStreamImpl::new(host_stdout, StreamMode::ReadOnly));
             let stderr =
                 capnp_rpc::new_client(ByteStreamImpl::new(host_stderr, StreamMode::ReadOnly));
 
