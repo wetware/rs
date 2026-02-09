@@ -2,10 +2,13 @@ use anyhow::{Context, Result};
 use futures::FutureExt;
 use std::sync::Arc;
 use tokio::io::{stderr, stdin, stdout};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::info;
 
 use crate::cell::{proc::DataStreamHandles, Loader, ProcBuilder};
+use crate::host::SwarmCommand;
+use crate::rpc::NetworkState;
 
 /// Builder for constructing a cell Command
 pub struct CommandBuilder {
@@ -17,6 +20,8 @@ pub struct CommandBuilder {
     ipfs: Option<crate::ipfs::HttpClient>,
     port: Option<u16>,
     wasmtime_engine: Option<Arc<wasmtime::Engine>>,
+    network_state: Option<NetworkState>,
+    swarm_cmd_tx: Option<mpsc::Sender<SwarmCommand>>,
 }
 
 impl CommandBuilder {
@@ -31,6 +36,8 @@ impl CommandBuilder {
             ipfs: None,
             port: None,
             wasmtime_engine: None,
+            network_state: None,
+            swarm_cmd_tx: None,
         }
     }
 
@@ -76,6 +83,18 @@ impl CommandBuilder {
         self
     }
 
+    /// Set the network state for RPC Host capability.
+    pub fn with_network_state(mut self, network_state: NetworkState) -> Self {
+        self.network_state = Some(network_state);
+        self
+    }
+
+    /// Set the swarm command sender for RPC Host capability.
+    pub fn with_swarm_cmd_tx(mut self, tx: mpsc::Sender<SwarmCommand>) -> Self {
+        self.swarm_cmd_tx = Some(tx);
+        self
+    }
+
     /// Build the Command
     pub fn build(self) -> Command {
         Command {
@@ -87,6 +106,8 @@ impl CommandBuilder {
             wasm_debug: self.wasm_debug,
             port: self.port.unwrap_or(2020),
             wasmtime_engine: self.wasmtime_engine,
+            network_state: self.network_state.expect("network_state must be set"),
+            swarm_cmd_tx: self.swarm_cmd_tx.expect("swarm_cmd_tx must be set"),
         }
     }
 }
@@ -101,6 +122,8 @@ pub struct Command {
     pub wasm_debug: bool,
     pub port: u16,
     pub wasmtime_engine: Option<Arc<wasmtime::Engine>>,
+    pub network_state: NetworkState,
+    pub swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
 }
 
 impl Command {
@@ -129,6 +152,8 @@ impl Command {
             wasm_debug,
             port: _,
             wasmtime_engine,
+            network_state: _,
+            swarm_cmd_tx: _,
         } = self;
 
         crate::config::init_tracing();
@@ -171,12 +196,15 @@ impl Command {
     /// Execute the cell command and serve Cap'n Proto RPC over wetware streams.
     pub async fn spawn_with_streams_rpc(self) -> Result<i32> {
         let wasm_debug = self.wasm_debug;
+        let network_state = self.network_state.clone();
+        let swarm_cmd_tx = self.swarm_cmd_tx.clone();
         let (join, handles) = self.spawn_with_streams().await?;
         let mut handles = handles;
         let (reader, writer) = handles
             .take_host_split()
             .ok_or_else(|| anyhow::anyhow!("host stream missing; RPC streams already consumed"))?;
-        let rpc_system = crate::rpc::build_peer_rpc(reader, writer, wasm_debug);
+        let rpc_system =
+            crate::rpc::build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug);
 
         info!("Starting streams RPC server for guest");
         let local = tokio::task::LocalSet::new();
@@ -203,6 +231,8 @@ impl Command {
             wasm_debug,
             port: _,
             wasmtime_engine,
+            network_state,
+            swarm_cmd_tx,
         } = self;
 
         crate::config::init_tracing();
@@ -217,7 +247,8 @@ impl Command {
         let (host_in, guest_in) = tokio::io::duplex(64 * 1024);
         let (host_out, guest_out) = tokio::io::duplex(64 * 1024);
 
-        let rpc_system = crate::rpc::build_peer_rpc(host_out, host_in, wasm_debug);
+        let rpc_system =
+            crate::rpc::build_peer_rpc(host_out, host_in, network_state, swarm_cmd_tx, wasm_debug);
 
         let stderr_handle = stderr();
         let builder = if let Some(engine) = wasmtime_engine {

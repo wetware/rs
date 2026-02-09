@@ -10,9 +10,19 @@ use futures::StreamExt;
 use libp2p::core::connection::ConnectedPoint;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{identity, Multiaddr, PeerId, SwarmBuilder};
+use tokio::sync::{mpsc, oneshot};
 use wasmtime::{Config as WasmConfig, Engine};
 
 use crate::rpc::{NetworkState, PeerInfo};
+
+/// Commands sent from RPC handlers to the swarm event loop.
+pub enum SwarmCommand {
+    Connect {
+        peer_id: PeerId,
+        addrs: Vec<Multiaddr>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+}
 
 /// Network behavior for Wetware hosts.
 #[derive(libp2p::swarm::NetworkBehaviour)]
@@ -67,42 +77,104 @@ impl Libp2pHost {
         self.local_peer_id
     }
 
-    pub async fn run(mut self, network_state: NetworkState) -> Result<()> {
+    pub async fn run(
+        mut self,
+        network_state: NetworkState,
+        mut cmd_rx: mpsc::Receiver<SwarmCommand>,
+    ) -> Result<()> {
         let mut known_peers: HashMap<PeerId, PeerInfo> = HashMap::new();
+        let mut pending_connects: HashMap<PeerId, Vec<oneshot::Sender<Result<(), String>>>> =
+            HashMap::new();
 
         loop {
-            match self.swarm.select_next_some().await {
-                SwarmEvent::ConnectionEstablished {
-                    peer_id,
-                    endpoint,
-                    ..
-                } => {
-                    let addrs = match endpoint {
-                        ConnectedPoint::Dialer { address, .. } => vec![address.to_string()],
-                        ConnectedPoint::Listener { send_back_addr, .. } => {
-                            vec![send_back_addr.to_string()]
+            tokio::select! {
+                event = self.swarm.select_next_some() => {
+                    match event {
+                        SwarmEvent::NewListenAddr { address, .. } => {
+                            network_state.add_listen_addr(address.to_vec()).await;
                         }
-                    };
-                    known_peers.insert(
-                        peer_id,
-                        PeerInfo {
-                            peer_id: peer_id.to_bytes(),
-                            addrs,
-                        },
-                    );
-                    network_state
-                        .set_known_peers(known_peers.values().cloned().collect())
-                        .await;
+                        SwarmEvent::ExpiredListenAddr { address, .. } => {
+                            network_state.remove_listen_addr(&address.to_vec()).await;
+                        }
+                        SwarmEvent::ConnectionEstablished {
+                            peer_id,
+                            endpoint,
+                            ..
+                        } => {
+                            let addrs = match endpoint {
+                                ConnectedPoint::Dialer { address, .. } => vec![address.to_vec()],
+                                ConnectedPoint::Listener { send_back_addr, .. } => {
+                                    vec![send_back_addr.to_vec()]
+                                }
+                            };
+                            known_peers.insert(
+                                peer_id,
+                                PeerInfo {
+                                    peer_id: peer_id.to_bytes(),
+                                    addrs,
+                                },
+                            );
+                            network_state
+                                .set_known_peers(known_peers.values().cloned().collect())
+                                .await;
+
+                            // Reply to pending connect requests
+                            if let Some(senders) = pending_connects.remove(&peer_id) {
+                                for sender in senders {
+                                    let _ = sender.send(Ok(()));
+                                }
+                            }
+                        }
+                        SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                            known_peers.remove(&peer_id);
+                            network_state
+                                .set_known_peers(known_peers.values().cloned().collect())
+                                .await;
+                        }
+                        SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                            if let Some(peer_id) = peer_id {
+                                if let Some(senders) = pending_connects.remove(&peer_id) {
+                                    for sender in senders {
+                                        let _ = sender.send(Err(error.to_string()));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                    known_peers.remove(&peer_id);
-                    network_state
-                        .set_known_peers(known_peers.values().cloned().collect())
-                        .await;
+                cmd = cmd_rx.recv() => {
+                    match cmd {
+                        Some(SwarmCommand::Connect { peer_id, addrs, reply }) => {
+                            // If already connected, reply immediately
+                            if self.swarm.is_connected(&peer_id) {
+                                let _ = reply.send(Ok(()));
+                                continue;
+                            }
+
+                            for addr in &addrs {
+                                self.swarm.add_peer_address(peer_id, addr.clone());
+                            }
+
+                            match self.swarm.dial(peer_id) {
+                                Ok(()) => {
+                                    pending_connects.entry(peer_id).or_default().push(reply);
+                                }
+                                Err(e) => {
+                                    let _ = reply.send(Err(e.to_string()));
+                                }
+                            }
+                        }
+                        None => {
+                            // Channel closed, shut down
+                            break;
+                        }
+                    }
                 }
-                _ => {}
             }
         }
+
+        Ok(())
     }
 }
 
@@ -131,6 +203,8 @@ pub struct WetwareHost {
     libp2p: Libp2pHost,
     wasmtime: WasmtimeHost,
     network_state: NetworkState,
+    swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
+    swarm_cmd_rx: Option<mpsc::Receiver<SwarmCommand>>,
 }
 
 impl WetwareHost {
@@ -138,10 +212,13 @@ impl WetwareHost {
         let libp2p = Libp2pHost::new(port)?;
         let wasmtime = WasmtimeHost::new()?;
         let network_state = NetworkState::from_peer_id(libp2p.local_peer_id().to_bytes());
+        let (swarm_cmd_tx, swarm_cmd_rx) = mpsc::channel(64);
         Ok(Self {
             libp2p,
             wasmtime,
             network_state,
+            swarm_cmd_tx,
+            swarm_cmd_rx: Some(swarm_cmd_rx),
         })
     }
 
@@ -149,11 +226,19 @@ impl WetwareHost {
         self.network_state.clone()
     }
 
+    pub fn swarm_cmd_tx(&self) -> mpsc::Sender<SwarmCommand> {
+        self.swarm_cmd_tx.clone()
+    }
+
     pub fn wasmtime_engine(&self) -> Arc<Engine> {
         self.wasmtime.engine()
     }
 
-    pub async fn run(self) -> Result<()> {
-        self.libp2p.run(self.network_state).await
+    pub async fn run(mut self) -> Result<()> {
+        let cmd_rx = self
+            .swarm_cmd_rx
+            .take()
+            .expect("run() called more than once");
+        self.libp2p.run(self.network_state, cmd_rx).await
     }
 }

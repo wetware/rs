@@ -64,6 +64,8 @@ impl Commands {
                 let ipfs = IPFS::new(ipfs_url.clone());
                 let wetware_host = host::WetwareHost::new(port)?;
                 let wasmtime_engine = wetware_host.wasmtime_engine();
+                let network_state = wetware_host.network_state();
+                let swarm_cmd_tx = wetware_host.swarm_cmd_tx();
                 let host_task = tokio::spawn(wetware_host.run());
 
                 // Build loader chain: IPFS first
@@ -82,7 +84,9 @@ impl Commands {
                     .with_wasm_debug(wasm_debug)
                     .with_ipfs(ipfs)
                     .with_port(port)
-                    .with_wasmtime_engine(wasmtime_engine);
+                    .with_wasmtime_engine(wasmtime_engine)
+                    .with_network_state(network_state)
+                    .with_swarm_cmd_tx(swarm_cmd_tx);
                 let cell = builder.build();
                 let exit = cell.spawn().await;
                 host_task.abort();

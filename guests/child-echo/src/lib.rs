@@ -47,9 +47,12 @@ pub extern "C" fn _start() {
     init_logging();
     log::trace!("child-echo: start");
 
-    let mut session = RpcSession::<peer_capnp::executor::Client>::connect();
-    let executor = session.client.clone();
+    let mut session = RpcSession::<peer_capnp::host::Client>::connect();
+    let host = session.client.clone();
     log::trace!("child-echo: rpc bootstrapped");
+
+    // Get executor via pipelining
+    let executor = host.executor_request().send().pipeline.get_executor();
 
     // Make TWO concurrent echo calls
     let mut request1 = executor.echo_request();
@@ -162,6 +165,8 @@ pub extern "C" fn _start() {
     // Cleanup - forget resources to avoid "resource has children" errors
     std::mem::forget(promise1);
     std::mem::forget(promise2);
+    std::mem::forget(executor);
+    std::mem::forget(host);
     session.forget();
 
     log::trace!("child-echo: cleanup complete");

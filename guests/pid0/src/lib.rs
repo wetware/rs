@@ -7,7 +7,13 @@ use wetware_guest::{DriveOutcome, RpcDriver, RpcSession};
 
 use std::task::Poll;
 
-mod peer_capnp;
+#[allow(dead_code)]
+mod peer_capnp {
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/Users/mikel/Code/github.com/wetware/rs/capnp/peer_capnp.rs"
+    ));
+}
 
 struct StderrLogger;
 
@@ -52,9 +58,12 @@ fn run_impl() {
     const CHILD_WASM: &[u8] =
         include_bytes!("../../child-echo/target/wasm32-wasip2/release/child_echo.wasm");
 
-    let mut session = RpcSession::<peer_capnp::executor::Client>::connect();
-    let executor = session.client.clone();
+    let mut session = RpcSession::<peer_capnp::host::Client>::connect();
+    let host = session.client.clone();
     log::trace!("pid0: rpc bootstrapped");
+
+    // Get executor via pipelining
+    let executor = host.executor_request().send().pipeline.get_executor();
 
     let mut request = executor.run_bytes_request();
     {
@@ -113,6 +122,7 @@ fn run_impl() {
     }
     std::mem::forget(response);
     std::mem::forget(executor);
+    std::mem::forget(host);
     session.forget();
     log::trace!("pid0: cleanup complete");
 }
