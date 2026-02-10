@@ -1,0 +1,16 @@
+[package]
+name = "shell"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasip2 = "1.0.2+wasi-0.2.9"
+log = "0.4"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

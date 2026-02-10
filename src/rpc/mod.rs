@@ -1,6 +1,8 @@
 //! Cap'n Proto RPC server for host-provided capabilities.
 #![cfg(not(target_arch = "wasm32"))]
 
+pub mod server;
+
 use std::sync::Arc;
 
 use capnp::capability::Promise;
