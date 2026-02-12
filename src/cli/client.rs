@@ -9,12 +9,12 @@ use futures::FutureExt;
 use multiaddr::Multiaddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::{timeout, Duration};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use ww::peer_capnp;
 
-const SHELL_WASM: &[u8] =
-    include_bytes!("../../guests/shell/target/wasm32-wasip2/release/shell.wasm");
+const SHELL_WASM: &[u8] = include_bytes!("../../target/wasm32-wasip2/release/shell.wasm");
 
 #[derive(Parser)]
 #[command(name = "ww-cli")]
@@ -77,6 +77,36 @@ async fn pump_bytestream_to_stdout(stream: peer_capnp::byte_stream::Client) -> R
     Ok(())
 }
 
+async fn pump_bytestream_to_stderr(stream: peer_capnp::byte_stream::Client) -> Result<()> {
+    let mut stderr = tokio::io::stderr();
+    loop {
+        let mut req = stream.read_request();
+        req.get().set_max_bytes(4096);
+        let resp = req.send().promise.await?;
+        let data = resp.get()?.get_data()?;
+        if data.is_empty() {
+            break;
+        }
+        stderr.write_all(data).await?;
+        stderr.flush().await?;
+    }
+    Ok(())
+}
+
+async fn wait_for_output_task(task: tokio::task::JoinHandle<Result<()>>) {
+    let abort_handle = task.abort_handle();
+    match timeout(Duration::from_secs(1), task).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(err))) => eprintln!("stream pump failed: {err}"),
+        Ok(Err(err)) => {
+            if !err.is_cancelled() {
+                eprintln!("stream pump join error: {err}");
+            }
+        }
+        Err(_) => abort_handle.abort(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     ww::config::init_tracing();
@@ -123,14 +153,20 @@ async fn main() -> Result<()> {
             let stdout_resp = process.stdout_request().send().promise.await?;
             let proc_stdout = stdout_resp.get()?.get_stream()?;
 
+            let stderr_resp = process.stderr_request().send().promise.await?;
+            let proc_stderr = stderr_resp.get()?.get_stream()?;
+
             let stdin_task = tokio::task::spawn_local(pump_stdin_to_bytestream(proc_stdin));
             let stdout_task = tokio::task::spawn_local(pump_bytestream_to_stdout(proc_stdout));
+            let stderr_task = tokio::task::spawn_local(pump_bytestream_to_stderr(proc_stderr));
 
             let wait_resp = process.wait_request().send().promise.await?;
             let exit_code = wait_resp.get()?.get_exit_code();
 
             stdin_task.abort();
-            stdout_task.abort();
+            let _ = stdin_task.await;
+            wait_for_output_task(stdout_task).await;
+            wait_for_output_task(stderr_task).await;
 
             Ok::<i32, anyhow::Error>(exit_code)
         })

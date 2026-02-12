@@ -1,3 +1,12 @@
+[workspace]
+members = [
+    ".",
+    "guests/child-echo",
+    "guests/guest-runtime",
+    "guests/pid0",
+    "guests/shell",
+]
+
 [package]
 name = "ww"
 version = "0.1.0"
