@@ -4,18 +4,17 @@
 //! `Session(WetwareSession)` containing `Host`, `Executor`, and `StatusPoller`.
 //! All capabilities fail with `staleEpoch` when the epoch advances.
 //!
-//! We re-implement the Membrane and StatusPoller servers here against
-//! `crate::stem_capnp` (rs's own codegen) because stem's `MembraneServer`
-//! implements `stem::stem_capnp::membrane::Server` — a distinct trait from
-//! `crate::stem_capnp::membrane::Server` even though both are generated from
-//! the same schema. We reuse stem's `Epoch` and `EpochGuard` (plain Rust types).
+//! stem owns the Membrane server, StatusPoller, and epoch machinery. rs provides
+//! only the `SessionExtensionBuilder` impl that injects wetware-specific
+//! capabilities (Host + Executor) into the session, plus the epoch-guarded
+//! wrappers for those capabilities.
 
 use capnp::capability::Promise;
 use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
-use stem::membrane::{Epoch, EpochGuard};
+use stem::membrane::{Epoch, EpochGuard, MembraneServer, SessionExtensionBuilder};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -23,7 +22,6 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::host::SwarmCommand;
 use crate::membrane_capnp;
 use crate::peer_capnp;
-use crate::stem_capnp;
 use crate::rpc::{
     read_data_result, read_text_list_result, ByteStreamImpl, NetworkState, ProcessImpl, StreamMode,
 };
@@ -31,61 +29,23 @@ use crate::rpc::{
 use super::ProcBuilder;
 
 // ---------------------------------------------------------------------------
-// Helpers
+// WetwareSessionBuilder — SessionExtensionBuilder for WetwareSession
 // ---------------------------------------------------------------------------
 
-/// Fill an epoch builder from our crate's stem_capnp (not stem's).
-fn fill_epoch(builder: &mut stem_capnp::epoch::Builder<'_>, epoch: &Epoch) {
-    builder.set_seq(epoch.seq);
-    builder.set_adopted_block(epoch.adopted_block);
-    let head_builder = builder.reborrow().init_head(epoch.head.len() as u32);
-    head_builder.copy_from_slice(epoch.head.as_slice());
-}
-
-// ---------------------------------------------------------------------------
-// StatusPoller (local impl against crate::stem_capnp)
-// ---------------------------------------------------------------------------
-
-struct StatusPollerImpl {
-    guard: EpochGuard,
-}
-
-#[allow(refining_impl_trait)]
-impl stem_capnp::status_poller::Server for StatusPollerImpl {
-    fn poll_status(
-        self: capnp::capability::Rc<Self>,
-        _: stem_capnp::status_poller::PollStatusParams,
-        mut results: stem_capnp::status_poller::PollStatusResults,
-    ) -> Promise<(), capnp::Error> {
-        if let Err(e) = self.guard.check() {
-            return Promise::err(e);
-        }
-        results.get().set_status(stem_capnp::Status::Ok);
-        Promise::ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// WetwareMembraneServer
-// ---------------------------------------------------------------------------
-
-/// Membrane server that issues sessions containing epoch-guarded Host + Executor.
-pub struct WetwareMembraneServer {
-    epoch_rx: watch::Receiver<Epoch>,
+/// Fills the WetwareSession extension with epoch-guarded Host and Executor.
+pub struct WetwareSessionBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
 }
 
-impl WetwareMembraneServer {
+impl WetwareSessionBuilder {
     pub fn new(
-        epoch_rx: watch::Receiver<Epoch>,
         network_state: NetworkState,
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
         wasm_debug: bool,
     ) -> Self {
         Self {
-            epoch_rx,
             network_state,
             swarm_cmd_tx,
             wasm_debug,
@@ -93,53 +53,30 @@ impl WetwareMembraneServer {
     }
 }
 
-#[allow(refining_impl_trait)]
-impl stem_capnp::membrane::Server<membrane_capnp::wetware_session::Owned>
-    for WetwareMembraneServer
-{
-    fn graft(
-        self: capnp::capability::Rc<Self>,
-        _params: stem_capnp::membrane::GraftParams<membrane_capnp::wetware_session::Owned>,
-        mut results: stem_capnp::membrane::GraftResults<membrane_capnp::wetware_session::Owned>,
-    ) -> Promise<(), capnp::Error> {
-        let epoch = self.epoch_rx.borrow().clone();
-        let guard = EpochGuard {
-            issued_seq: epoch.seq,
-            receiver: self.epoch_rx.clone(),
-        };
-
-        let mut session = results.get().init_session();
-
-        // Fill issued epoch
-        fill_epoch(&mut session.reborrow().init_issued_epoch(), &epoch);
-
-        // Set status poller
-        let poller: stem_capnp::status_poller::Client =
-            capnp_rpc::new_client(StatusPollerImpl {
-                guard: guard.clone(),
-            });
-        session.reborrow().set_status_poller(poller);
-
-        // Fill extension (WetwareSession: Host + Executor)
-        let mut ext = session.reborrow().init_extension();
+impl SessionExtensionBuilder<membrane_capnp::wetware_session::Owned> for WetwareSessionBuilder {
+    fn build(
+        &self,
+        guard: &EpochGuard,
+        mut builder: membrane_capnp::wetware_session::Builder<'_>,
+    ) -> Result<(), capnp::Error> {
         let host: peer_capnp::host::Client = capnp_rpc::new_client(EpochGuardedHost::new(
             self.network_state.clone(),
             self.swarm_cmd_tx.clone(),
             self.wasm_debug,
             guard.clone(),
         ));
-        ext.set_host(host);
+        builder.set_host(host);
 
         let executor: peer_capnp::executor::Client =
             capnp_rpc::new_client(EpochGuardedExecutor::new(
                 self.network_state.clone(),
                 self.swarm_cmd_tx.clone(),
                 self.wasm_debug,
-                guard,
+                guard.clone(),
             ));
-        ext.set_executor(executor);
+        builder.set_executor(executor);
 
-        Promise::ok(())
+        Ok(())
     }
 }
 
@@ -438,13 +375,9 @@ where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
 {
-    let membrane: stem_capnp::membrane::Client<membrane_capnp::wetware_session::Owned> =
-        capnp_rpc::new_client(WetwareMembraneServer::new(
-            epoch_rx,
-            network_state,
-            swarm_cmd_tx,
-            wasm_debug,
-        ));
+    let ext_builder = WetwareSessionBuilder::new(network_state, swarm_cmd_tx, wasm_debug);
+    let membrane: stem::stem_capnp::membrane::Client<membrane_capnp::wetware_session::Owned> =
+        capnp_rpc::new_client(MembraneServer::new(epoch_rx, ext_builder));
 
     let rpc_network = VatNetwork::new(
         reader.compat(),

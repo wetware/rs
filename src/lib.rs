@@ -24,11 +24,6 @@ pub mod peer_capnp {
 pub mod membrane_capnp {
     include!(concat!(env!("OUT_DIR"), "/capnp/membrane_capnp.rs"));
 }
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(unused_parens)]
-pub mod stem_capnp {
-    include!(concat!(env!("OUT_DIR"), "/capnp/stem_capnp.rs"));
-}
 
 // Modules available for both host and guest
 pub mod config;

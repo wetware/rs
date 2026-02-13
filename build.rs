@@ -39,14 +39,12 @@ fn main() {
     println!("cargo:rustc-env=DEFAULT_KERNEL_CID={cid_value}");
     println!("cargo:rerun-if-changed={}", cid_file.display());
 
-    let stem_file = capnp_dir.join("stem.capnp");
     capnpc::CompilerCommand::new()
         .file(&capnp_file)
         .file(&membrane_file)
-        .file(&stem_file)
+        .crate_provides("stem", [0x9bce094a026970c4_u64]) // stem.capnp types live in the stem crate
         .run()
         .expect("failed to compile capnp schemas");
     println!("cargo:rerun-if-changed={}", capnp_file.display());
     println!("cargo:rerun-if-changed={}", membrane_file.display());
-    println!("cargo:rerun-if-changed={}", stem_file.display());
 }
