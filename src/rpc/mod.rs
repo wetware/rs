@@ -1,6 +1,7 @@
 //! Cap'n Proto RPC server for host-provided capabilities.
 #![cfg(not(target_arch = "wasm32"))]
 
+pub mod membrane;
 pub mod server;
 
 use std::sync::Arc;
@@ -86,7 +87,7 @@ impl NetworkState {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum StreamMode {
+pub(crate) enum StreamMode {
     ReadOnly,
     WriteOnly,
 }
@@ -97,7 +98,7 @@ pub struct ByteStreamImpl {
 }
 
 impl ByteStreamImpl {
-    fn new(stream: io::DuplexStream, mode: StreamMode) -> Self {
+    pub(crate) fn new(stream: io::DuplexStream, mode: StreamMode) -> Self {
         Self {
             stream: Arc::new(Mutex::new(stream)),
             mode,
@@ -193,7 +194,7 @@ pub struct ProcessImpl {
 }
 
 impl ProcessImpl {
-    fn new(
+    pub(crate) fn new(
         stdin: peer_capnp::byte_stream::Client,
         stdout: peer_capnp::byte_stream::Client,
         stderr: peer_capnp::byte_stream::Client,

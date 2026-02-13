@@ -6,7 +6,9 @@ fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let target_dir = Path::new(&manifest_dir).join("target");
     let cid_file = target_dir.join("default-config.cid");
-    let capnp_file = Path::new(&manifest_dir).join("capnp").join("peer.capnp");
+    let capnp_dir = Path::new(&manifest_dir).join("capnp");
+    let capnp_file = capnp_dir.join("peer.capnp");
+    let membrane_file = capnp_dir.join("membrane.capnp");
 
     // Read CID from the generated .cid file in target directory
     let cid_value = if cid_file.exists() {
@@ -37,9 +39,14 @@ fn main() {
     println!("cargo:rustc-env=DEFAULT_KERNEL_CID={cid_value}");
     println!("cargo:rerun-if-changed={}", cid_file.display());
 
+    let stem_file = capnp_dir.join("stem.capnp");
     capnpc::CompilerCommand::new()
         .file(&capnp_file)
+        .file(&membrane_file)
+        .file(&stem_file)
         .run()
-        .expect("failed to compile capnp schema");
+        .expect("failed to compile capnp schemas");
     println!("cargo:rerun-if-changed={}", capnp_file.display());
+    println!("cargo:rerun-if-changed={}", membrane_file.display());
+    println!("cargo:rerun-if-changed={}", stem_file.display());
 }
