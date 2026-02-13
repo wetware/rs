@@ -1,138 +1,321 @@
-# Wetware Runtime (`ww`)
+# Wetware Runtime
 
-Wetware is a peer-to-peer WASM sandbox. The `ww` CLI runs WASM components
-under WASI Preview 2, connecting them to a libp2p swarm and exposing host
-capabilities via Cap'n Proto RPC.
+A Rust CLI that fetches WASM components (typically from IPFS) and executes them
+under WASI Preview 2. The `ww run` command wires host stdio directly to the
+guest, so operators can interact with components exactly as if they were local.
 
-## Architecture
+## Features
 
-```
-                        ┌──────────────────────────┐
-  operator ──stdio──>   │  ww run <path>           │
-                        │                          │
-                        │  libp2p swarm            │
-                        │    ├─ Kademlia DHT       │
-                        │    ├─ Identify            │
-                        │    └─ TCP/Noise/Yamux    │
-                        │                          │
-                        │  Cap'n Proto RPC         │
-                        │    └─ Membrane bootstrap │
-                        │        ├─ Host           │
-                        │        ├─ Executor       │
-                        │        └─ StatusPoller   │
-                        │                          │
-                        │  Wasmtime (WASI P2)      │
-                        │    └─ guest.wasm         │
-                        └──────────────────────────┘
-```
-
-**Membrane** (from [stem](https://github.com/wetware/stem)) is the RPC
-bootstrap capability. Guests graft onto it and receive an epoch-scoped
-**Session** containing **Host**, **Executor**, and **StatusPoller**. When the
-on-chain epoch advances, all capabilities from the previous session fail with
-`staleEpoch`.
-
-### Key Modules
-
-| Module | Description |
-|--------|-------------|
-| `cell`   | WASM component loading and execution via Wasmtime |
-| `host`   | libp2p swarm lifecycle and peer management |
-| `rpc`    | Cap'n Proto RPC servers (Host, Executor, Membrane) |
-| `ipfs`   | Kubo API client for IPFS peer discovery |
-| `loaders`| WASM bytecode loaders (filesystem, IPFS) |
-| `config` | Runtime configuration and presets |
-
-### Cap'n Proto Schemas
-
-Schemas live in `capnp/`:
-
-- **peer.capnp** — Host, Executor, Process, ByteStream interfaces
-- **membrane.capnp** — WetwareSession (Host + Executor extension for stem's generic Session)
-- **stem.capnp** — Vendored from stem for import resolution (no code generated; see [capnp-cross-crate.md](doc/capnp-cross-crate.md))
-
-### Workspace
-
-The workspace includes host-side code and several WASM guest crates:
-
-- `.` — the `ww` host binary and library
-- `guests/pid0` — init process (bootstrap guest)
-- `guests/shell` — interactive shell guest
-- `guests/child-echo` — echo child process for testing
-- `guests/guest-runtime` — shared guest-side runtime utilities
+- **IPFS DHT Bootstrap**: Automatically discovers and connects to IPFS peers from local Kubo node
+- **Protocol Compatibility**: Uses standard IPFS protocols (`/ipfs/kad/1.0.0`, `/ipfs/id/1.0.0`) for full network compatibility
+- **RSA Key Support**: Includes RSA support for connecting to legacy IPFS peers
+- **Creates libp2p Host**: Generates Ed25519 identity and listens on TCP with IPFS-compatible protocols
+- **DHT Operations**: Participates in IPFS DHT operations (provide/query) after bootstrap
+- **Structured Logging**: Comprehensive logging with configurable levels and performance metrics
 
 ## Prerequisites
 
-1. **Rust toolchain** (stable + nightly for guest builds)
-   ```bash
-   rustup install stable
-   rustup target add wasm32-wasip2 --toolchain nightly
-   ```
-
-2. **Kubo (IPFS) daemon** for peer discovery
+1. **Kubo (IPFS) daemon running locally**
    ```bash
    kubo daemon
    ```
 
-3. **Cap'n Proto compiler** (`capnp`) for schema compilation
-
-## Quick Start
-
-```bash
-# Build everything
-make
-
-# Run with a local WASM volume
-cargo run -- run /boot \
-  --volume examples/default-kernel/target/wasm32-wasip2/release:/boot
-```
+2. **Rust toolchain**
+   ```bash
+   rustup install stable
+   rustup default stable
+   ```
 
 ## Usage
 
-```
+The application now uses a subcommand structure. The main command is `ww` with a `run` subcommand for starting a wetware node.
+
+### Command Structure
+
+```bash
 ww <COMMAND>
 
 Commands:
   run     Run a wetware node
-  help    Print help
+  help    Print this message or the help of the given subcommand(s)
 ```
 
-### `ww run` Options
+### Running a Wetware Node
 
-- `--ipfs <URL>` — Kubo HTTP API endpoint (default: `http://localhost:5001`)
-- `--preset <PRESET>` — Configuration preset (`minimal`, `development`, `production`)
-- `--env-config` — Load configuration from environment variables
+1. **Start Kubo daemon** (in a separate terminal):
+   ```bash
+   kubo daemon
+   ```
+
+2. **Run the application** using the `run` subcommand:
+   ```bash
+   # Use defaults (http://localhost:5001, ww=info)
+   cargo run -- run
+   
+   # Custom IPFS endpoint
+   cargo run -- run --ipfs http://127.0.0.1:5001
+   cargo run -- run --ipfs http://192.168.1.100:5001
+   
+   # Configure logs with RUST_LOG
+   RUST_LOG=ww=debug cargo run -- run
+   RUST_LOG=ww=trace cargo run -- run
+   
+   # Combine both
+   RUST_LOG=ww=debug cargo run -- run --ipfs http://192.168.1.100:5001
+   
+   # Or use environment variables
+   export WW_IPFS=http://192.168.1.100:5001
+   export RUST_LOG=ww=debug
+   cargo run -- run
+   ```
+
+### Command Options
+
+The `run` subcommand supports the following options:
+
+- `--ipfs <IPFS>`: IPFS node HTTP API endpoint (e.g., http://127.0.0.1:5001)
+- `--preset <PRESET>`: Use preset configuration (minimal, development, production)
+- `--env-config`: Use configuration from environment variables
+
+### Building and Running WASM Examples
+
+WASM examples are built automatically when you run `make` or `make examples`. The `default-kernel` example is included by default.
+
+> **Note:** The `wasm32-wasip2` target is currently nightly-only. Inside
+> `examples/default-kernel/`, run `rustup override set nightly` (once) and
+> `rustup target add wasm32-wasip2` before building the guest.
+
+**Quick start**:
+```bash
+# Build everything (including examples)
+make
+
+# Run the default-kernel example
+./target/release/ww run /boot --volume examples/default-kernel/target/wasm32-wasip2/release:/boot
+```
+
+To test `ww run` with the `default-kernel` example:
+
+1. **Build the WASM file** (already done if you ran `make`):
+   ```bash
+   make example-default-kernel
+   ```
+   
+   Or run directly from the example directory:
+   ```bash
+   make -C examples/default-kernel build
+   ```
+   
+   The example Makefile handles building and ensuring the output is named `main.wasm`.
+
+2. **Run with local filesystem mount**:
+   ```bash
+   cargo run -- run /app \
+     --volume examples/default-kernel/target/wasm32-wasip2/release:/app
+   ```
+
+3. **Export to IPFS and run from IPFS** (optional):
+   ```bash
+   # Build and export to IPFS
+   make example-default-kernel-ipfs
+   
+   # Or run directly:
+   make -C examples/default-kernel ipfs
+   
+   # This will output an IPFS hash like: /ipfs/QmHash...
+   # Then run with:
+   cargo run -- run /ipfs/QmHash...
+   ```
+
+**Note**: The `ww run` command expects `{path}/main.wasm`, so when using volume mounts, ensure `main.wasm` exists in the mounted directory. The example Makefiles handle this automatically.
+
+## Docker Support
+
+The project includes a multi-stage Docker build for containerized deployment and distribution.
+
+### Building with Podman
+
+```bash
+# Build the container image
+make podman-build
+# or
+podman build -t wetware:latest .
+
+# Run the container
+make podman-run
+# or
+podman run --rm -it wetware:latest
+
+# Clean up container images
+make podman-clean
+```
+
+### Container Features
+
+- **Multi-stage build**: Optimizes image size by separating build and runtime stages
+- **Security**: Runs as non-root user (`wetware`)
+- **Efficient caching**: Leverages container layer caching for faster builds
+- **Minimal runtime**: Based on Debian Bookworm slim for smaller footprint
+
+**Note**: When running the container, you'll need to use the `run` subcommand:
+```bash
+# Run the container with the run subcommand
+podman run --rm -it wetware:latest run
+
+# With custom options
+RUST_LOG=ww=debug podman run --rm -it wetware:latest run --ipfs http://host.docker.internal:5001
+```
+
+### Podman Compose (Optional)
+
+Create a `docker-compose.yml` for easy development (works with both Docker and Podman):
+
+```yaml
+version: '3.8'
+services:
+  wetware:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - WW_IPFS=http://host.docker.internal:5001
+      - RUST_LOG=ww=info
+    volumes:
+      - ./config:/app/config
+    command: ["run"]  # Use the run subcommand
+```
+
+## CI/CD Pipeline
+
+The project includes GitHub Actions workflows for automated testing, building, and publishing.
+
+### Workflow Features
+
+- **Automated Testing**: Runs on every push and pull request
+- **Code Quality**: Includes formatting checks and clippy linting
+- **Release Automation**: Automatically builds and publishes artifacts on releases
+- **Docker Integration**: Builds and pushes Docker images to registry
+- **Artifact Publishing**: Creates distributable binaries and archives
+
+### Triggering Releases
+
+1. **Create a GitHub release** with a semantic version tag (e.g., `v1.0.0`)
+2. **Workflow automatically**:
+   - Builds the Rust application
+   - Creates release artifacts (binary + tarball)
+   - Builds and pushes Docker images
+   - Uploads artifacts to GitHub releases
+
+### Required Secrets
+
+For Docker publishing, set these repository secrets:
+- `DOCKER_USERNAME`: Your Docker Hub username
+- `DOCKER_PASSWORD`: Your Docker Hub access token
+
+### Manual Workflow Triggers
+
+```bash
+# Test only
+gh workflow run rust.yml --ref main
+
+# Build Docker image (on main branch)
+gh workflow run rust.yml --ref main
+```
+
+## Logging Configuration
+
+The application uses structured logging with the `tracing` crate. You can configure log levels using environment variables:
 
 ### Environment Variables
 
-- **`WW_IPFS`** — Kubo HTTP API endpoint
-- **`RUST_LOG`** — Tracing filter (e.g. `ww=debug`, `ww=info,libp2p=debug`)
+- **`WW_IPFS`**: IPFS node HTTP API endpoint (defaults to http://localhost:5001)
+  ```bash
+  # Use default localhost endpoint
+  export WW_IPFS=http://localhost:5001
+  
+  # Use custom IPFS node
+  export WW_IPFS=http://192.168.1.100:5001
+  
+  # Use remote IPFS node
+  export WW_IPFS=https://ipfs.example.com:5001
+  ```
 
-## Building WASM Guests
+- **`RUST_LOG`**: Controls tracing output using standard `tracing-subscriber` filters.
+  ```bash
+  # No logs, only printed output
+  export RUST_LOG=off
 
-Guest crates target `wasm32-wasip2` (nightly-only):
+  # Only Wetware logs
+  export RUST_LOG=ww=info
+  export RUST_LOG=ww=debug
+  export RUST_LOG=ww=trace
 
-```bash
-# Build all guests
-make
+  # Debug streams + wasmtime
+  export RUST_LOG=ww=debug,ww::cell::streams=trace,ww::cell::proc=debug,capnp=debug,capnp_rpc=debug,wasmtime=info,wasmtime_wasi=info
 
-# Build a specific guest
-make -C examples/default-kernel build
-```
+  # Debug libp2p
+  export RUST_LOG=ww=info,libp2p=debug,libp2p_swarm=debug,libp2p_kad=debug,libp2p_gossipsub=debug
+  ```
 
-The `ww run` command expects `{path}/main.wasm` in the mounted directory.
+## How It Works
 
-## Docker
+1. **Configuration**: Determines IPFS endpoint from command line, environment variable, or default
+2. **Peer Discovery**: Queries the configured IPFS node's HTTP API to discover connected peers
+3. **Host Creation**: Generates Ed25519 keypair and creates libp2p swarm with IPFS-compatible protocols
+4. **DHT Bootstrap**: Adds discovered peers to Kademlia routing table and establishes connections
+5. **Network Integration**: Joins the IPFS DHT network and participates in DHT operations
+6. **DHT Operations**: Can provide content and query for providers in the IPFS network
 
-```bash
-make podman-build    # Build image
-make podman-run      # Run container
-make podman-clean    # Clean up
-```
+## DHT Bootstrap Process
+
+The application implements a sophisticated DHT bootstrap process:
+
+1. **Peer Discovery**: Queries the local Kubo node's `/api/v0/swarm/peers` endpoint to discover connected peers
+2. **Routing Table Population**: Adds discovered peers to the Kademlia routing table before establishing connections
+3. **Connection Establishment**: Dials discovered peers to establish TCP connections
+4. **Protocol Handshake**: Performs identify and Kademlia protocol handshakes using standard IPFS protocols
+5. **Bootstrap Trigger**: Triggers the Kademlia bootstrap process to populate the routing table
+6. **Network Participation**: Begins participating in DHT operations (provide/query)
+
+This approach ensures rapid integration into the IPFS network by leveraging the local Kubo node's peer knowledge.
+
+## Protocol Compatibility
+
+The application is designed for full IPFS network compatibility:
+
+- **Kademlia DHT**: Uses `/ipfs/kad/1.0.0` protocol for DHT operations
+- **Identify**: Uses `/ipfs/id/1.0.0` protocol for peer identification
+- **Transport**: Supports TCP with Noise encryption and Yamux multiplexing
+- **Key Types**: Supports both Ed25519 (modern) and RSA (legacy) key types
+- **Multiaddr**: Handles standard IPFS multiaddresses with peer IDs
+
+This ensures the application can communicate with any IPFS node in the network, regardless of their specific configuration.
+
+## Troubleshooting
+
+- **"IPFS API file not found"**: Make sure Kubo is running (`kubo daemon`)
+- **Connection errors**: Check if Kubo is listening on the expected port and endpoint
+- **DHT bootstrap failures**: Ensure Kubo has peers and the API endpoint is correct
+- **Protocol compatibility**: The application uses standard IPFS protocols for full compatibility
+- **RSA connection errors**: RSA support is included for legacy IPFS peers
+- **Configuration issues**: Check `WW_IPFS` environment variable for correct IPFS endpoint
+- **Logging issues**: Check `RUST_LOG` and ensure tracing is properly initialized
 
 ## Documentation
 
-Design docs live in [`doc/`](doc/):
+Additional design docs live in [`doc/`](doc/):
 
-- [**capnp-cross-crate.md**](doc/capnp-cross-crate.md) — Cross-crate Cap'n Proto type sharing via `crate_provides`
+- [**capnp-cross-crate.md**](doc/capnp-cross-crate.md) — How `crate_provides` shares Cap'n Proto types between stem and rs
 - [**rpc-transport.md**](doc/rpc-transport.md) — RPC transport architecture
+
+## Dependencies
+
+- `libp2p`: P2P networking stack with IPFS protocol support
+- `libp2p-kad`: Kademlia DHT implementation for IPFS compatibility
+- `libp2p-identify`: Peer identification protocol for IPFS compatibility
+- `reqwest`: HTTP client for Kubo API integration
+- `tokio`: Async runtime for concurrent operations
+- `anyhow`: Error handling and propagation
+- `serde`: JSON serialization/deserialization for API responses
+- `tracing`: Structured logging framework with performance metrics
+- `tracing-subscriber`: Logging subscriber with environment-based configuration
