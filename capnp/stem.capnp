@@ -1,3 +1,9 @@
+# Vendored from github.com/wetware/stem.  This file MUST stay in sync with
+# stem's canonical copy.  No Rust code is generated for it — build.rs uses
+# capnpc::CompilerCommand::crate_provides("stem", [...]) so that downstream
+# schemas can import it for type resolution while referencing the stem crate's
+# generated types at compile time.  See doc/capnp-cross-crate.md.
+
 @0x9bce094a026970c4;
 
 struct Epoch {
