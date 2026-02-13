@@ -18,6 +18,9 @@ mod membrane_capnp {
     include!(concat!(env!("OUT_DIR"), "/membrane_capnp.rs"));
 }
 
+/// Bootstrap capability: a Membrane whose sessions carry our WetwareSession extension.
+type Membrane = stem_capnp::membrane::Client<membrane_capnp::wetware_session::Owned>;
+
 struct StderrLogger;
 
 impl log::Log for StderrLogger {
@@ -62,7 +65,7 @@ fn run_impl() {
     // Bootstrap a Membrane(WetwareSession) instead of a bare Host.
     // The membrane provides epoch-scoped sessions with Host + Executor.
     wetware_guest::run(
-        |membrane: stem_capnp::membrane::Client<membrane_capnp::wetware_session::Owned>| async move {
+        |membrane: Membrane| async move {
             log::trace!("pid0: rpc bootstrapped, grafting onto membrane");
 
             // Graft onto the membrane to get an epoch-scoped session.
