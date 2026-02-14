@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-wasip2 = "1.0.2+wasi-0.2.9"
+wasip2 = "1.0.2"
 capnp = "0.23.2"
 capnp-rpc = "0.23.0"
 futures = "0.3"
@@ -16,8 +16,3 @@ wetware-guest = { path = "../guest-runtime" }
 
 [build-dependencies]
 capnpc = "0.23.3"
-
-[profile.release]
-opt-level = "z"
-lto = true
-strip = true

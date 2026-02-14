@@ -51,3 +51,9 @@ path = "src/cli/main.rs"
 
 [build-dependencies]
 capnpc = "0.23.3"
+
+# Optimise WASM guests for size (previously in per-crate Cargo.toml)
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
