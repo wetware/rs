@@ -39,6 +39,10 @@ lives on local disk or is fetched from IPFS:
     main.wasm          # guest entrypoint (required)
   boot/                # bootstrap peer hints (optional)
     <peerID>           # one file per peer; contents = multiaddrs, one per line
+  svc/                 # background services (optional)
+    <name>/            # each service is a nested image
+      bin/main.wasm
+      ...
   etc/                 # reserved — configuration files
   usr/
     lib/               # reserved — shared WASM libraries
@@ -67,6 +71,31 @@ filename via `PeerId::from_str()` and dials the listed addresses.
 
 > **Not yet wired up** — `boot/` is specced here but not read by the runtime
 > yet. For now, peer discovery happens via the local Kubo daemon's swarm.
+
+### `svc/` — background services
+
+The `svc/` directory contains background services that the runtime spawns
+automatically at boot, after `bin/main.wasm` starts. Each entry is a nested
+image with its own FHS layout:
+
+```
+<image>/svc/
+  echo/
+    bin/main.wasm      # the echo service
+  metrics/
+    bin/main.wasm      # a metrics collector
+    etc/...            # its own config
+```
+
+Services run in the background without owning stdio. The directory name is the
+service name. Since each service is a full image, it can carry its own `boot/`,
+`etc/`, and even nested `svc/` — it's images all the way down.
+
+On IPFS, each `svc/<name>/` subtree is its own DAG node. You can publish and
+reference a service image independently, and the parent image just links to it.
+Updating a service means publishing a new service CID and re-linking.
+
+> **Not yet wired up** — `svc/` is specced here but not read by the runtime yet.
 
 ### Reserved directories
 

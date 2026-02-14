@@ -27,6 +27,7 @@ enum Commands {
     ///
     ///   <image>/bin/main.wasm   — guest entrypoint (required)
     ///   <image>/boot/<peerID>   — bootstrap peers (optional, one addr per line)
+    ///   <image>/svc/<name>/     — background services (optional, nested images)
     ///   <image>/etc/            — reserved for configuration
     ///   <image>/usr/lib/        — reserved for shared libraries
     Run {
