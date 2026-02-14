@@ -49,9 +49,5 @@ capnp-rpc = "0.23.0"
 name = "ww"
 path = "src/cli/main.rs"
 
-[[bin]]
-name = "ww-cli"
-path = "src/cli/client.rs"
-
 [build-dependencies]
 capnpc = "0.23.3"
