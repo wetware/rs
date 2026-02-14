@@ -14,8 +14,6 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use ww::peer_capnp;
 
-const SHELL_WASM: &[u8] = include_bytes!("../../target/wasm32-wasip2/release/shell.wasm");
-
 #[derive(Parser)]
 #[command(name = "ww-cli")]
 #[command(about = "Connect to a wetware node")]
@@ -23,8 +21,8 @@ struct Cli {
     /// Multiaddr of the node's RPC port (e.g. /ip4/127.0.0.1/tcp/2021)
     addr: String,
 
-    /// Path to a WASM binary to execute. If omitted, spawns the embedded shell.
-    wasm: Option<String>,
+    /// Path to a WASM binary to execute
+    wasm: String,
 }
 
 fn parse_tcp_multiaddr(addr_str: &str) -> Result<(String, u16)> {
@@ -132,10 +130,7 @@ async fn main() -> Result<()> {
         .run_until(async {
             let executor = host.executor_request().send().pipeline.get_executor();
 
-            let wasm_bytes = match &cli.wasm {
-                Some(path) => std::fs::read(path)?,
-                None => SHELL_WASM.to_vec(),
-            };
+            let wasm_bytes = std::fs::read(&cli.wasm)?;
 
             let mut request = executor.run_bytes_request();
             {
