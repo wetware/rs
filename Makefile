@@ -24,21 +24,21 @@ host:
 	cargo build --release
 
 # --- Guests ------------------------------------------------------------------
-# Each guest is built with `cd guests/<name> && cargo build` so that artifacts
-# land in the per-crate target/ dir.  This matters for pid0, which uses
-# include_bytes! pointing at guests/child-echo/target/.
+# Each guest is built with --target-dir target so that artifacts land in
+# the per-crate target/ dir instead of the workspace root.  This matters
+# for pid0, which uses include_bytes! pointing at guests/child-echo/target/.
 
 guests: guest-child-echo guest-shell guest-pid0
 
 guest-child-echo:
-	cd guests/child-echo && cargo build --target $(WASM_TARGET) --release
+	cd guests/child-echo && cargo build --target $(WASM_TARGET) --release --target-dir target
 
 guest-shell:
-	cd guests/shell && cargo build --target $(WASM_TARGET) --release
+	cd guests/shell && cargo build --target $(WASM_TARGET) --release --target-dir target
 
 # pid0 depends on child-echo (include_bytes! references its wasm)
 guest-pid0: guest-child-echo
-	cd guests/pid0 && cargo build --target $(WASM_TARGET) --release
+	cd guests/pid0 && cargo build --target $(WASM_TARGET) --release --target-dir target
 
 # --- Images ------------------------------------------------------------------
 # Assemble FHS-style image directories:
