@@ -37,13 +37,38 @@ lives on local disk or is fetched from IPFS:
 <image>/
   bin/
     main.wasm          # guest entrypoint (required)
+  boot/                # bootstrap peer hints (optional)
+    <peerID>           # one file per peer; contents = multiaddrs, one per line
   etc/                 # reserved — configuration files
   usr/
     lib/               # reserved — shared WASM libraries
 ```
 
-Today only `bin/main.wasm` is required. The reserved directories are placeholders
-for future capabilities:
+Today only `bin/main.wasm` is required.
+
+### `boot/` — bootstrap peers
+
+The `boot/` directory contains peer discovery hints. Each file is named after a
+libp2p peer ID and contains that peer's multiaddrs, one per line:
+
+```
+<image>/boot/
+  12D3KooWRmFc...     # /ip4/104.131.131.82/tcp/4001
+                       # /ip6/::1/tcp/4001
+  QmaCpDMGvV2B...     # /dnsaddr/bootstrap.libp2p.io
+```
+
+This convention is content-addressable-friendly — on IPFS the entire `boot/`
+directory is a single DAG node, so updating the bootstrap set just means
+publishing a new image CID. Filenames are base58btc-encoded peer IDs (the
+standard `12D3KooW...` / `Qm...` format used by libp2p) and file contents are
+plain-text multiaddrs (trivial to read). At load time the runtime decodes each
+filename via `PeerId::from_str()` and dials the listed addresses.
+
+> **Not yet wired up** — `boot/` is specced here but not read by the runtime
+> yet. For now, peer discovery happens via the local Kubo daemon's swarm.
+
+### Reserved directories
 
 - **`etc/`** — guest configuration (capability grants, resource limits, etc.)
 - **`usr/lib/`** — shared WASM libraries that guests can link against

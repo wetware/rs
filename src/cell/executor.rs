@@ -20,6 +20,8 @@ use crate::rpc::NetworkState;
 /// <image>/
 ///   bin/
 ///     main.wasm      # guest entrypoint (required)
+///   boot/            # bootstrap peer hints (optional)
+///     <peerID>       # file per peer; contents = multiaddrs, one per line
 ///   etc/             # reserved for configuration
 ///   usr/lib/         # reserved for shared libraries
 /// ```

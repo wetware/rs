@@ -26,6 +26,7 @@ enum Commands {
     /// (/ipfs/Qm...) pointing to an image directory with FHS layout:
     ///
     ///   <image>/bin/main.wasm   — guest entrypoint (required)
+    ///   <image>/boot/<peerID>   — bootstrap peers (optional, one addr per line)
     ///   <image>/etc/            — reserved for configuration
     ///   <image>/usr/lib/        — reserved for shared libraries
     Run {
