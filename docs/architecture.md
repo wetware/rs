@@ -7,15 +7,13 @@ see [rpc-transport.md](rpc-transport.md).
 ## Overview
 
 Wetware is a peer-to-peer runtime that loads WASM guest images and executes
-them inside sandboxed cells. `ww run <image>` does three things:
+them inside sandboxed cells. `ww run` resolves one or more image layers into
+a unified FHS root, loads `bin/main.wasm` from the result, and spawns the
+guest with a `Host` capability served over in-memory Cap'n Proto RPC.
 
-1. Starts a libp2p swarm
-2. Loads `<image>/bin/main.wasm` via a chain loader (IPFS, then host filesystem)
-3. Spawns the guest with a `Host` capability served over in-memory Cap'n Proto RPC
-
-The runtime is deliberately simple. It loads a binary and hands it a capability.
-Everything else — peer discovery, service management, access control — is the
-guest's job.
+The runtime is deliberately simple. It merges layers, loads a binary, and
+hands it a capability. Everything else — peer discovery, service management,
+access control — is the guest's job.
 
 ## No ambient authority
 
@@ -151,47 +149,87 @@ This is how pid0 controls access. The runtime doesn't decide what remote
 peers can do — pid0 does, by choosing what to export. The runtime is just
 the transport.
 
-## Two-layer configuration
+## Configuration
 
-There are two distinct kinds of configuration, and they don't mix.
+There is one configuration model: FHS. An image is an FHS directory tree.
+pid0 interprets it. The runtime only reads `bin/main.wasm`; everything
+else (`boot/`, `svc/`, `etc/`) is between the image author and pid0.
 
-**Image config** (what to run) lives inside the image:
-
-- `boot/` — which peers to connect to
-- `svc/` — which services to start
-- `etc/` — application configuration
-
-Image config is content-addressed on IPFS. It's portable across nodes.
-The same image CID produces the same behavior everywhere.
-
-**Node config** (how to run it here) lives outside the image:
-
-- `--port` — which port to listen on
-- `--wasm-debug` — whether to enable debug info
-- IPFS daemon address, log levels, resource limits
-
-Node config is specific to this machine. It's set via CLI flags, env vars,
-or (in the future) a local config file.
-
-The runtime owns node config. pid0 owns image config. This separation
-keeps images portable and reproducible.
-
-## FHS image layout
-
-Images follow a simplified Filesystem Hierarchy Standard. See the
-[README](../README.md) for the full spec. In brief:
+See the [README](../README.md) for the full FHS spec. In brief:
 
 ```
 <image>/
-  bin/main.wasm     # guest entrypoint (required) — consumed by runtime
-  boot/<peerID>     # bootstrap peers (optional)  — consumed by pid0
-  svc/<name>/       # nested service images        — consumed by pid0
-  etc/              # configuration                — consumed by pid0
-  usr/lib/          # shared WASM libraries        — reserved
+  bin/main.wasm     # guest entrypoint — consumed by runtime
+  boot/<peerID>     # bootstrap peers  — consumed by pid0
+  svc/<name>/       # nested service images — consumed by pid0
+  etc/              # configuration    — consumed by pid0
+  usr/lib/          # shared WASM libraries — reserved
 ```
 
-Only `bin/main.wasm` is consumed by the runtime. Everything else is
-convention between the image author and pid0.
+The FHS root that pid0 sees can be assembled from multiple **layers**
+via per-file union:
+
+```
+ww run [--stem <contract>] [<path> ...]
+```
+
+The Stem contract's head CID (if provided) forms the base layer.
+Positional arguments are stacked on top in order. Later layers override
+earlier layers at the file level. There are no deletes — you can add
+and override, but not remove.
+
+```
+ww run --stem 0xABC... /ipfs/QmOverlay ./local-tweaks
+        │                │                │
+        ▼                ▼                ▼
+   base layer       middle layer      top layer
+   (from chain)     (from IPFS)       (local fs)
+```
+
+No single layer needs to be complete. A Stem CID might provide `etc/`
+and `boot/` but no `bin/main.wasm`, expecting an overlay to supply the
+code. The only requirement is that the **union** contains `bin/main.wasm`.
+
+```sh
+# Standalone: fully self-contained local image
+ww run ./my-image
+
+# Cluster provides everything, run as-is
+ww run --stem 0xABC...
+
+# Cluster provides authority + bootstrap, you provide the code
+ww run --stem 0xABC... ./my-app
+
+# Cluster base, IPFS plugin, local dev config
+ww run --stem 0xABC... /ipfs/QmPlugin ./local-config
+```
+
+### Layer resolution
+
+- **Per-file union.** Each layer contributes files. If two layers provide
+  the same path, the later layer wins.
+- **No deletes.** To remove something from a lower layer, publish a new
+  version of that layer without it.
+- **Directories merge, files replace.** If layer A has `boot/QmPeerA` and
+  layer B has `boot/QmPeerB`, the result has both. If layer B also has
+  `boot/QmPeerA`, layer B's version wins.
+
+### Stem integration
+
+When `--stem` is provided, the runtime reads the head CID from the
+contract, fetches it from IPFS as the base layer, and boots pid0 with
+an epoch-scoped Membrane. When the on-chain head advances, capabilities
+are revoked and the runtime reloads with the new base.
+
+Without `--stem`, pid0 gets a bare `Host` capability with no epoch
+lifecycle. The process exits when pid0 exits.
+
+### Node config
+
+Orthogonal to the image, **node config** controls how the runtime
+behaves on this particular machine: `--port`, `--wasm-debug`, IPFS
+daemon address, log levels, resource limits. Node config is set via CLI
+flags or env vars — it never lives inside image layers.
 
 ## Network architecture (future)
 
