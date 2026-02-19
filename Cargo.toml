@@ -1,6 +1,7 @@
 [workspace]
 members = [
     ".",
+    "crates/membrane",
     "guests/child-echo",
     "guests/guest-runtime",
     "guests/pid0",

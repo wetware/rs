@@ -1,0 +1,16 @@
+[package]
+name = "membrane"
+version = "0.1.0"
+edition = "2021"
+description = "Epoch-scoped capability primitives over Cap'n Proto RPC"
+
+[build-dependencies]
+capnpc = "0.23.3"
+
+[dependencies]
+capnp = "0.23.2"
+capnp-rpc = "0.23.0"
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
