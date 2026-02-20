@@ -1,54 +1,49 @@
 use anyhow::{anyhow, Context, Result};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
 use wasmtime::component::bindgen;
-use wasmtime::component::{Component, Linker, Resource, ResourceTable};
+use wasmtime::component::{
+    types::ComponentItem, Component, Linker, Resource, ResourceTable, ResourceType,
+};
 use wasmtime::StoreContextMut;
 use wasmtime::{Config as WasmConfig, Engine, Store};
 use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
 use wasmtime_wasi::p2::add_to_linker_async;
-use wasmtime_wasi::p2::bindings::Command as WasiCliCommand;
-use wasmtime_wasi::p2::{InputStream, OutputStream};
+use wasmtime_wasi::p2::bindings::{Command as WasiCliCommand, CommandPre as WasiCliCommandPre};
+use wasmtime_wasi::p2::pipe::{AsyncReadStream, AsyncWriteStream};
 use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
 
-use super::{streams, Loader};
+use super::Loader;
 
 // Generate bindings from WIT file
 // Resources are defined within the interface
 bindgen!({
     world: "streams-world",
     path: "wit",
+    with: {
+        "wasi:io/streams@0.2.9.input-stream": wasmtime_wasi_io::streams::DynInputStream,
+        "wasi:io/streams@0.2.9.output-stream": wasmtime_wasi_io::streams::DynOutputStream,
+    },
 });
 
 // Import generated types - Connection is a Resource type alias
 use exports::wetware::streams::streams::Connection;
 
 pub const BUFFER_SIZE: usize = 1024;
+const PIPE_BUFFER_SIZE: usize = 64 * 1024;
 
 type BoxAsyncRead = Box<dyn AsyncRead + Send + Sync + Unpin + 'static>;
 type BoxAsyncWrite = Box<dyn AsyncWrite + Send + Sync + Unpin + 'static>;
-
-// Note: bindgen! generates a Connection type, but we'll use our own
-// to store the stream handles. The generated Connection is the resource type.
-
-// Type aliases for complex channel types
-type DataStreamChannel = (
-    mpsc::UnboundedSender<Vec<u8>>,   // host_to_guest_tx
-    mpsc::UnboundedReceiver<Vec<u8>>, // host_to_guest_rx (for guest input)
-    mpsc::UnboundedSender<Vec<u8>>,   // guest_to_host_tx (for guest output)
-);
 
 // Required for WASI IO to work.
 pub struct ComponentRunStates {
     pub wasi_ctx: WasiCtx,
     pub resource_table: ResourceTable,
     pub loader: Option<Box<dyn Loader>>,
-    // Data stream channels for bidirectional host-guest communication
-    // Channels needed for creating guest streams (consumed by create-connection)
-    // host_to_guest_tx/rx: Host writes -> Guest reads (guest needs input stream)
-    // guest_to_host_tx: Guest writes -> Host reads (guest needs output stream)
-    pub data_stream_channels: Option<DataStreamChannel>,
+    // Guest-side bidirectional stream used to build WASI io/streams resources.
+    pub data_stream: Option<tokio::io::DuplexStream>,
 }
 
 // Required for WASI IO to work.
@@ -61,10 +56,10 @@ impl WasiView for ComponentRunStates {
     }
 }
 
-// Internal connection representation that stores stream handles in the component resource table
+// Internal connection representation that stores stream wrappers
 struct ConnectionState {
-    input_stream_handle: u32,
-    output_stream_handle: u32,
+    input_stream: Option<DynInputStream>,
+    output_stream: Option<DynOutputStream>,
 }
 
 struct ProcInit {
@@ -73,10 +68,11 @@ struct ProcInit {
     wasm_debug: bool,
     bytecode: Vec<u8>,
     loader: Option<Box<dyn Loader>>,
+    engine: Option<Arc<Engine>>,
     stdin: BoxAsyncRead,
     stdout: BoxAsyncWrite,
     stderr: BoxAsyncWrite,
-    data_streams: Option<DataStreamChannel>,
+    data_streams: Option<tokio::io::DuplexStream>,
 }
 
 /// Builder for constructing a Proc configuration
@@ -86,10 +82,11 @@ pub struct Builder {
     wasm_debug: bool,
     bytecode: Option<Vec<u8>>,
     loader: Option<Box<dyn Loader>>,
+    engine: Option<Arc<Engine>>,
     stdin: Option<BoxAsyncRead>,
     stdout: Option<BoxAsyncWrite>,
     stderr: Option<BoxAsyncWrite>,
-    data_streams: Option<DataStreamChannel>,
+    data_streams: Option<tokio::io::DuplexStream>,
 }
 
 /// Handles for accessing the host-side of data streams.
@@ -97,16 +94,22 @@ pub struct Builder {
 /// These allow the host to read from and write to the data streams
 /// that are exposed to the guest via the connection resource.
 pub struct DataStreamHandles {
-    /// Host can write to this, guest reads from it
-    pub host_to_guest_tx: mpsc::UnboundedSender<Vec<u8>>,
-    /// Host reads from this, guest writes to it
-    guest_to_host_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    /// Host-side duplex stream for RPC transport.
+    host_stream: Option<tokio::io::DuplexStream>,
 }
 
 impl DataStreamHandles {
-    /// Move the guest-to-host receiver out so the host can read guest output.
-    pub fn take_guest_output_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<Vec<u8>>> {
-        self.guest_to_host_rx.take()
+    pub fn take_host_stream(&mut self) -> Option<tokio::io::DuplexStream> {
+        self.host_stream.take()
+    }
+
+    pub fn take_host_split(
+        &mut self,
+    ) -> Option<(
+        tokio::io::ReadHalf<tokio::io::DuplexStream>,
+        tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    )> {
+        self.host_stream.take().map(tokio::io::split)
     }
 }
 
@@ -119,6 +122,7 @@ impl Builder {
             wasm_debug: false,
             bytecode: None,
             loader: None,
+            engine: None,
             stdin: None,
             stdout: None,
             stderr: None,
@@ -153,6 +157,12 @@ impl Builder {
     /// Provide the optional loader used for host callbacks
     pub fn with_loader(mut self, loader: Option<Box<dyn Loader>>) -> Self {
         self.loader = loader;
+        self
+    }
+
+    /// Provide a shared Wasmtime engine to reuse across processes.
+    pub fn with_engine(mut self, engine: Arc<Engine>) -> Self {
+        self.engine = Some(engine);
         self
     }
 
@@ -197,21 +207,16 @@ impl Builder {
 
     /// Enable bidirectional data streams for host-guest communication.
     ///
-    /// This creates in-memory channels that are exposed to the guest via
+    /// This creates in-memory pipes that are exposed to the guest via
     /// a custom connection resource. Returns handles that the host can use
     /// to communicate with the guest.
     pub fn with_data_streams(mut self) -> (Self, DataStreamHandles) {
-        let (host_to_guest_tx, host_to_guest_rx, guest_to_host_tx, guest_to_host_rx) =
-            streams::create_channel_pair();
-
-        // Clone the sender for the handles (senders are cheap to clone)
+        let (host_stream, guest_stream) = tokio::io::duplex(PIPE_BUFFER_SIZE);
         let handles = DataStreamHandles {
-            host_to_guest_tx: host_to_guest_tx.clone(),
-            guest_to_host_rx: Some(guest_to_host_rx),
+            host_stream: Some(host_stream),
         };
 
-        // Store all channels in the builder
-        self.data_streams = Some((host_to_guest_tx, host_to_guest_rx, guest_to_host_tx));
+        self.data_streams = Some(guest_stream);
 
         (self, handles)
     }
@@ -224,6 +229,7 @@ impl Builder {
             wasm_debug,
             bytecode,
             loader,
+            engine,
             stdin,
             stdout,
             stderr,
@@ -245,6 +251,7 @@ impl Builder {
             wasm_debug,
             bytecode,
             loader,
+            engine,
             stdin,
             stdout,
             stderr,
@@ -284,6 +291,7 @@ impl Proc {
             wasm_debug,
             bytecode,
             loader,
+            engine,
             stdin,
             stdout,
             stderr,
@@ -294,15 +302,23 @@ impl Proc {
         let stdout_stream = AsyncStdoutStream::new(BUFFER_SIZE, stdout);
         let stderr_stream = AsyncStdoutStream::new(BUFFER_SIZE, stderr);
 
-        let mut wasm_config = WasmConfig::new();
-        wasm_config.async_support(true);
-        let engine = Engine::new(&wasm_config)?;
+        let engine = if let Some(engine) = engine {
+            engine
+        } else {
+            let mut wasm_config = WasmConfig::new();
+            wasm_config.async_support(true);
+            Arc::new(Engine::new(&wasm_config)?)
+        };
         let mut linker = Linker::new(&engine);
+        tracing::info!("Adding WASI bindings to linker");
         add_to_linker_async(&mut linker)?;
+        tracing::info!("WASI bindings added");
 
         // Add loader host function if loader is provided
         if loader.is_some() {
+            tracing::info!("Adding loader bindings to linker");
             add_loader_to_linker(&mut linker)?;
+            tracing::info!("Loader bindings added");
         }
 
         // Prepare environment variables as key-value pairs
@@ -319,11 +335,11 @@ impl Proc {
         let wasi = wasi_builder.build();
 
         // Set up data streams if enabled
-        let data_stream_channels = if let Some(channels) = data_streams {
-            let (host_to_guest_tx, host_to_guest_rx, guest_to_host_tx) = channels;
-            // Add connection resource and host functions to linker
+        let data_stream = if let Some(stream) = data_streams {
+            tracing::info!("Adding streams bindings to linker");
             add_streams_to_linker(&mut linker)?;
-            Some((host_to_guest_tx, host_to_guest_rx, guest_to_host_tx))
+            tracing::info!("Streams bindings added");
+            Some(stream)
         } else {
             None
         };
@@ -332,14 +348,71 @@ impl Proc {
             wasi_ctx: wasi,
             resource_table: ResourceTable::new(),
             loader,
-            data_stream_channels,
+            data_stream,
         };
 
         let mut store = Store::new(&engine, state);
 
         // Instantiate it as a normal component
+        let start = std::time::Instant::now();
+        tracing::info!("Compiling guest component");
         let component = Component::from_binary(&engine, &bytecode)?;
-        let command = WasiCliCommand::instantiate_async(&mut store, &component, &linker).await?;
+        tracing::info!(
+            elapsed_ms = start.elapsed().as_millis(),
+            "Guest component compiled"
+        );
+        let component_type = component.component_type();
+        tracing::trace!(
+            imports = component_type.imports(&engine).len(),
+            exports = component_type.exports(&engine).len(),
+            "Guest component type summary"
+        );
+        for (name, item) in component_type.imports(&engine) {
+            tracing::trace!(name, item = ?item, "Guest component import");
+            if name == "wetware:streams/streams" {
+                if let ComponentItem::ComponentInstance(instance) = item {
+                    for (export_name, export_item) in instance.exports(&engine) {
+                        tracing::trace!(
+                            name,
+                            export = export_name,
+                            item = ?export_item,
+                            "Guest streams instance export"
+                        );
+                    }
+                }
+            }
+        }
+        for (name, item) in component_type.exports(&engine) {
+            tracing::trace!(name, item = ?item, "Guest component export");
+        }
+
+        tracing::info!("Pre-instantiating guest component");
+        let pre_start = std::time::Instant::now();
+        let pre_instance = linker.instantiate_pre(&component)?;
+        let pre = WasiCliCommandPre::new(pre_instance)?;
+        tracing::info!(
+            elapsed_ms = pre_start.elapsed().as_millis(),
+            "Guest component pre-instantiated"
+        );
+
+        let start = std::time::Instant::now();
+        tracing::info!("Instantiating guest component");
+        let command = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pre.instantiate_async(&mut store),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                tracing::error!("Guest component instantiation timed out");
+                return Err(anyhow!("guest component instantiation timed out"));
+            }
+        };
+        tracing::info!(
+            elapsed_ms = start.elapsed().as_millis(),
+            "Guest component instantiated"
+        );
 
         Ok(Self {
             command,
@@ -364,86 +437,83 @@ impl Proc {
 /// This exports the wetware:streams interface, allowing guests to create
 /// connection resources and access bidirectional data streams.
 fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> {
-    // Implement create-connection function
-    // Use package-qualified name for exported interface
-    linker.root().func_wrap_async(
-        "wetware:streams/streams#create-connection",
+    let mut streams_instance = linker.instance("wetware:streams/streams@0.1.0")?;
+
+    streams_instance.resource(
+        "connection",
+        ResourceType::host::<ConnectionState>(),
+        |_, _| Ok(()),
+    )?;
+
+    streams_instance.func_wrap_async(
+        "create-connection",
         |mut store: StoreContextMut<'_, ComponentRunStates>, (): ()| {
             Box::new(async move {
+                tracing::info!("streams#create-connection invoked");
                 let state = store.data_mut();
-
-                // Extract channels - must exist if this is called
-                let channels = state
-                    .data_stream_channels
+                let guest_stream = state
+                    .data_stream
                     .take()
                     .ok_or_else(|| anyhow!("data streams not enabled"))?;
 
-                // Extract only the channels needed for stream creation
-                // host_to_guest_tx is kept for potential future use (e.g., host writing to guest)
-                let (_host_to_guest_tx, host_to_guest_rx, guest_to_host_tx) = channels;
+                let (guest_read, guest_write) = tokio::io::split(guest_stream);
+                let input_stream: DynInputStream = Box::new(AsyncReadStream::new(guest_read));
+                let output_stream: DynOutputStream =
+                    Box::new(AsyncWriteStream::new(PIPE_BUFFER_SIZE, guest_write));
 
-                // Create stream adapters
-                let input_reader = streams::Reader::new(host_to_guest_rx);
-                let output_writer = streams::Writer::new(guest_to_host_tx);
-
-                // Wrap in WASI stream types
-                let input_stream = AsyncStdinStream::new(Box::new(input_reader));
-                let output_stream = AsyncStdoutStream::new(BUFFER_SIZE, Box::new(output_writer));
-
-                // Add streams to WASI resource table and get handles
-                // The WASI ResourceTable uses push() method which returns Resource<T>
-                let wasi_view = state.ctx();
-                let input_resource = wasi_view
-                    .table
-                    .push(Box::new(input_stream) as Box<dyn InputStream>)?;
-                let output_resource = wasi_view
-                    .table
-                    .push(Box::new(output_stream) as Box<dyn OutputStream>)?;
-
-                // Get u32 handles from resources
-                let input_handle = input_resource.rep();
-                let output_handle = output_resource.rep();
-
-                // Create connection state with stream handles
                 let conn_state = ConnectionState {
-                    input_stream_handle: input_handle,
-                    output_stream_handle: output_handle,
+                    input_stream: Some(input_stream),
+                    output_stream: Some(output_stream),
                 };
 
-                // Store in component resource table
                 let conn_resource = state.resource_table.push(conn_state)?;
-
-                // Convert Resource<ConnectionState> to Connection (ResourceAny)
                 let connection = Connection::try_from_resource(conn_resource, &mut store)?;
+                tracing::info!("streams#create-connection returning connection");
                 Ok((connection,))
             })
         },
     )?;
 
-    // Implement get-input-stream-handle method
-    // Resource methods use package-qualified names with resource type
-    // Resource needs to be in a tuple to implement ComponentNamedList
-    linker.root().func_wrap_async(
-        "wetware:streams/streams#connection.get-input-stream-handle",
-        |store: StoreContextMut<'_, ComponentRunStates>,
+    streams_instance.func_wrap_async(
+        "[method]connection.get-input-stream",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
          (connection,): (Resource<ConnectionState>,)| {
             Box::new(async move {
-                let conn_state = store.data().resource_table.get(&connection)?;
-                Ok((conn_state.input_stream_handle,))
+                tracing::info!("streams#connection.get-input-stream invoked");
+                let stream = {
+                    let conn_state = store.data_mut().resource_table.get_mut(&connection)?;
+                    conn_state
+                        .input_stream
+                        .take()
+                        .ok_or_else(|| anyhow!("input stream already taken"))?
+                };
+
+                let state = store.data_mut();
+                let resource = state.resource_table.push(stream)?;
+                tracing::info!("streams#connection.get-input-stream returning resource");
+                Ok((resource,))
             })
         },
     )?;
 
-    // Implement get-output-stream-handle method
-    // Resource methods use package-qualified names with resource type
-    // Resource needs to be in a tuple to implement ComponentNamedList
-    linker.root().func_wrap_async(
-        "wetware:streams/streams#connection.get-output-stream-handle",
-        |store: StoreContextMut<'_, ComponentRunStates>,
+    streams_instance.func_wrap_async(
+        "[method]connection.get-output-stream",
+        |mut store: StoreContextMut<'_, ComponentRunStates>,
          (connection,): (Resource<ConnectionState>,)| {
             Box::new(async move {
-                let conn_state = store.data().resource_table.get(&connection)?;
-                Ok((conn_state.output_stream_handle,))
+                tracing::info!("streams#connection.get-output-stream invoked");
+                let stream = {
+                    let conn_state = store.data_mut().resource_table.get_mut(&connection)?;
+                    conn_state
+                        .output_stream
+                        .take()
+                        .ok_or_else(|| anyhow!("output stream already taken"))?
+                };
+
+                let state = store.data_mut();
+                let resource = state.resource_table.push(stream)?;
+                tracing::info!("streams#connection.get-output-stream returning resource");
+                Ok((resource,))
             })
         },
     )?;
@@ -492,7 +562,7 @@ fn add_loader_to_linker<T>(_linker: &mut Linker<T>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn test_proc_builder_creation() {
@@ -519,28 +589,96 @@ mod tests {
         // Enable data streams and capture the returned handles
         let (mut builder, mut handles) = Builder::new().with_data_streams();
 
-        // Access the underlying channels to simulate guest behavior
-        let (_host_to_guest_tx_internal, host_to_guest_rx, guest_to_host_tx) = builder
+        let guest_stream = builder
             .data_streams
             .take()
             .expect("data streams should be configured");
+        let host_stream = handles
+            .take_host_stream()
+            .expect("host stream should be configured");
 
-        // Host -> guest: send through the handle and ensure the guest side receives it
-        handles.host_to_guest_tx.send(b"ping".to_vec()).unwrap();
-        let mut guest_reader = streams::Reader::new(host_to_guest_rx);
-        let mut buf = vec![0u8; 4];
-        let n = guest_reader.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"ping");
+        let (mut host_read, mut host_write) = tokio::io::split(host_stream);
+        let (mut guest_read, mut guest_write) = tokio::io::split(guest_stream);
 
-        // Guest -> host: simulate guest write and ensure host can receive via the handle
-        let mut guest_output_rx = handles
-            .take_guest_output_receiver()
-            .expect("guest output receiver should be returned to the host");
-        guest_to_host_tx.send(b"pong".to_vec()).unwrap();
-        let pong = guest_output_rx
-            .recv()
+        host_write.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        guest_read.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
+
+        guest_write.write_all(b"pong").await.unwrap();
+        let mut buf = [0u8; 4];
+        host_read.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"pong");
+    }
+
+    #[tokio::test]
+    async fn test_builder_fails_without_bytecode() {
+        let err = Builder::new()
+            .with_stdio(tokio::io::empty(), tokio::io::sink(), tokio::io::sink())
+            .build()
             .await
-            .expect("host should receive guest output");
-        assert_eq!(pong, b"pong");
+            .err()
+            .expect("should fail");
+        assert!(err.to_string().contains("bytecode"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_fails_without_stdin() {
+        let err = Builder::new()
+            .with_bytecode(vec![0])
+            .with_stdout(tokio::io::sink())
+            .with_stderr(tokio::io::sink())
+            .build()
+            .await
+            .err()
+            .expect("should fail");
+        assert!(err.to_string().contains("stdin"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_fails_without_stdout() {
+        let err = Builder::new()
+            .with_bytecode(vec![0])
+            .with_stdin(tokio::io::empty())
+            .with_stderr(tokio::io::sink())
+            .build()
+            .await
+            .err()
+            .expect("should fail");
+        assert!(err.to_string().contains("stdout"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_fails_without_stderr() {
+        let err = Builder::new()
+            .with_bytecode(vec![0])
+            .with_stdin(tokio::io::empty())
+            .with_stdout(tokio::io::sink())
+            .build()
+            .await
+            .err()
+            .expect("should fail");
+        assert!(err.to_string().contains("stderr"));
+    }
+
+    #[tokio::test]
+    async fn test_data_stream_handles_take_host_split() {
+        let (_builder, mut handles) = Builder::new().with_data_streams();
+
+        let split = handles.take_host_split();
+        assert!(split.is_some());
+
+        // Second take returns None
+        let split2 = handles.take_host_split();
+        assert!(split2.is_none());
+    }
+
+    #[test]
+    fn test_builder_default() {
+        let builder = Builder::default();
+        assert!(!builder.wasm_debug);
+        assert!(builder.bytecode.is_none());
+        assert!(builder.engine.is_none());
+        assert!(builder.loader.is_none());
     }
 }

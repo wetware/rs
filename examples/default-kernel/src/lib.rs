@@ -1,14 +1,14 @@
 #![feature(wasip2)]
 
-use wasip2::cli::stdin::get_stdin;
-use wasip2::cli::stdout::get_stdout;
-use wasip2::io::streams::{InputStream, OutputStream};
-use wasip2::io::poll;
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::task::{noop_waker, Context};
 use futures::Future;
 use std::pin::Pin;
 use std::task::Poll;
+use wasip2::cli::stdin::get_stdin;
+use wasip2::cli::stdout::get_stdout;
+use wasip2::io::poll;
+use wasip2::io::streams::{InputStream, OutputStream};
 
 /// Wrapper around WASI Preview 2 stdin stream for async I/O
 /// This enables implementing AsyncRead/AsyncWrite traits needed for Cap'n Proto transports.
@@ -114,37 +114,29 @@ impl AsyncWrite for AsyncStdout {
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         // Ensure any pending output is committed before proceeding.
-        Poll::Ready(
-            self.stream
-                .blocking_flush()
-                .map_err(|err| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("stream flush error: {:?}", err),
-                    )
-                }),
-        )
+        Poll::Ready(self.stream.blocking_flush().map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("stream flush error: {:?}", err),
+            )
+        }))
     }
 
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         // Ensure all pending output is committed before close.
-        Poll::Ready(
-            self.stream
-                .blocking_flush()
-                .map_err(|err| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("stream close error: {:?}", err),
-                    )
-                }),
-        )
+        Poll::Ready(self.stream.blocking_flush().map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("stream close error: {:?}", err),
+            )
+        }))
     }
 }
 
 /// The default kernel pipes stdin to stdout asynchronously using WASI Preview 2 async streams.
 /// This implementation uses WASI Preview 2's native async I/O APIs, enabling support for
 /// async transports like Cap'n Proto. Based on: https://mikel.xyz/posts/capnp-in-wasm/
-/// 
+///
 /// This implementation uses manual future polling with WASI polling for non-blocking execution.
 /// When `poll_read` returns `Poll::Pending`, it uses `wasi:io/poll::poll` to wait for stream
 /// readiness. This WASI call allows wasmtime to yield back to the host's Tokio runtime at the
@@ -154,15 +146,15 @@ impl AsyncWrite for AsyncStdout {
 pub extern "C" fn _start() {
     use futures::io::AsyncReadExt;
     use futures::io::AsyncWriteExt;
-    
+
     // Get stdin and stdout as WASI Preview 2 async streams
     let stdin_stream = get_stdin();
     let stdout_stream = get_stdout();
-    
+
     let mut stdin = AsyncStdin::new(stdin_stream);
     let mut stdout = AsyncStdout::new(stdout_stream);
     let mut buffer = [0u8; 8192];
-    
+
     // Create the async echo future
     let echo_future = async move {
         loop {
@@ -176,14 +168,14 @@ pub extern "C" fn _start() {
             }
         }
     };
-    
+
     // Use manual future polling with noop waker.
     // Actual waiting happens in WASI polling calls within poll_read,
     // which allows wasmtime to yield at WASI function call boundaries.
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     let mut pinned = std::pin::pin!(echo_future);
-    
+
     loop {
         match pinned.as_mut().poll(&mut cx) {
             Poll::Ready(()) => break,

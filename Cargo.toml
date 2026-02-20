@@ -1,3 +1,13 @@
+[workspace]
+members = [
+    ".",
+    "crates/membrane",
+    "guests/child-echo",
+    "guests/guest-runtime",
+    "guests/pid0",
+    "guests/shell",
+]
+
 [package]
 name = "ww"
 version = "0.1.0"
@@ -30,10 +40,22 @@ reqwest = { version = "0.12.24", features = ["json"] }
 clap = { version = "4.5.51", features = ["derive"] }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 nix = { version = "0.30.1", features = ["socket"] }
-wasmtime = "38.0.4"
-wasmtime-wasi = "38.0.4"
+wasmtime = "40.0.0"
+wasmtime-wasi = "40.0.0"
+wasmtime-wasi-io = "40.0.0"
+capnp = "0.23.2"
+capnp-rpc = "0.23.0"
+stem = { path = "../stem/crates/stem" }
 
 [[bin]]
 name = "ww"
 path = "src/cli/main.rs"
 
+[build-dependencies]
+capnpc = "0.23.3"
+
+# Optimise WASM guests for size (previously in per-crate Cargo.toml)
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
