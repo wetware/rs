@@ -1,70 +1,72 @@
-.PHONY: clean examples podman-build podman-run podman-clean default-config
-WASM_EXAMPLES := examples/wasm
-DEFAULT_KERNEL := examples/default-kernel
-DEFAULT_KERNEL_WASM := $(DEFAULT_KERNEL)/target/wasm32-wasip2/release/main.wasm
-DEFAULT_CONFIG_CID := target/default-config.cid
+# Wetware build system
+#
+# Guest builds are staged: child-echo must be built before pid0
+# (pid0 embeds child-echo via include_bytes!).
+#
+# `make images` assembles FHS-style image directories under examples/images/.
+# Each image has bin/main.wasm as its entrypoint, consumable by `ww exec`.
 
-all: examples default-config build
+WASM_TARGET := wasm32-wasip2
+RELEASE_DIR  = target/$(WASM_TARGET)/release
 
-build:
-	@# Ensure target directory and default-config.cid exists (create empty if missing)
-	@mkdir -p target
-	@if [ ! -f $(DEFAULT_CONFIG_CID) ]; then \
-		echo "Info: Creating empty $(DEFAULT_CONFIG_CID) (run 'make default-config' to populate it)"; \
-		touch $(DEFAULT_CONFIG_CID); \
-	fi
+IMAGES_DIR := examples/images
+
+.PHONY: all host guests images clean
+.PHONY: guest-child-echo guest-shell guest-pid0
+.PHONY: image-child-echo image-shell image-pid0
+.PHONY: podman-build podman-run podman-clean podman-dev
+
+all: guests images host
+
+# --- Host -------------------------------------------------------------------
+
+host:
 	cargo build --release
+
+# --- Guests ------------------------------------------------------------------
+# Each guest is built with --target-dir target so that artifacts land in
+# the per-crate target/ dir instead of the workspace root.  This matters
+# for pid0, which uses include_bytes! pointing at guests/child-echo/target/.
+
+guests: guest-child-echo guest-shell guest-pid0
+
+guest-child-echo:
+	cd guests/child-echo && cargo build --target $(WASM_TARGET) --release --target-dir target
+
+guest-shell:
+	cd guests/shell && cargo build --target $(WASM_TARGET) --release --target-dir target
+
+# pid0 depends on child-echo (include_bytes! references its wasm)
+guest-pid0: guest-child-echo
+	cd guests/pid0 && cargo build --target $(WASM_TARGET) --release --target-dir target
+
+# --- Images ------------------------------------------------------------------
+# Assemble FHS-style image directories:
+#   <image>/bin/main.wasm   — guest entrypoint
+
+images: image-child-echo image-shell image-pid0
+
+image-child-echo: guest-child-echo
+	@mkdir -p $(IMAGES_DIR)/child-echo/bin
+	cp guests/child-echo/$(RELEASE_DIR)/child_echo.wasm $(IMAGES_DIR)/child-echo/bin/main.wasm
+
+image-shell: guest-shell
+	@mkdir -p $(IMAGES_DIR)/shell/bin
+	cp guests/shell/$(RELEASE_DIR)/shell.wasm $(IMAGES_DIR)/shell/bin/main.wasm
+
+image-pid0: guest-pid0
+	@mkdir -p $(IMAGES_DIR)/pid0/bin
+	cp guests/pid0/$(RELEASE_DIR)/pid0.wasm $(IMAGES_DIR)/pid0/bin/main.wasm
+
+# --- Clean -------------------------------------------------------------------
 
 clean:
 	cargo clean
-	rm -rf target
+	rm -rf $(IMAGES_DIR)/*/bin/*.wasm
 	rm -rf tmp
-	@$(MAKE) -C $(DEFAULT_KERNEL) clean
-	@if [ -d "$(WASM_EXAMPLES)/echo" ]; then \
-		$(MAKE) -C $(WASM_EXAMPLES)/echo clean; \
-	fi
 
-examples: example-default-kernel
-	@if [ -d "$(WASM_EXAMPLES)/echo" ]; then \
-		$(MAKE) -C $(WASM_EXAMPLES)/echo; \
-	fi
+# --- Podman ------------------------------------------------------------------
 
-# Build default-kernel WASM example
-# Can also be run directly: make -C examples/default-kernel build
-example-default-kernel:
-	@$(MAKE) -C $(DEFAULT_KERNEL) build
-
-# Rebuild the default config
-# This builds the default-kernel WASM, adds it to IPFS as a UnixFS directory,
-# and writes the root CID to target/default-config.cid.
-# Side effect: pushes the default config directory to IPFS.
-# Runs automatically as part of 'make all', but only warns if IPFS is unavailable.
-default-config:
-	@echo "Rebuilding default config..."
-	@$(MAKE) -C $(DEFAULT_KERNEL) build
-	@if ! command -v ipfs >/dev/null 2>&1; then \
-		echo "Warning: ipfs CLI not found. Skipping CID generation."; \
-		echo "  Install Kubo (IPFS) and run 'make default-config' to generate the CID."; \
-		exit 0; \
-	fi
-	@if ! ipfs swarm peers >/dev/null 2>&1; then \
-		echo "Warning: IPFS daemon may not be running. Attempting export anyway..."; \
-	fi
-	@mkdir -p target
-	@cd $(DEFAULT_KERNEL)/target/wasm32-wasip2/release && \
-		IPFS_HASH=$$(ipfs add -r -Q . 2>/dev/null) && \
-		if [ -n "$$IPFS_HASH" ]; then \
-			echo "$$IPFS_HASH" > ../../../../../$(DEFAULT_CONFIG_CID) && \
-			echo "" && \
-			echo "✓ Successfully updated default config" && \
-			echo "  CID: /ipfs/$$IPFS_HASH" && \
-			echo "  File: $(DEFAULT_CONFIG_CID)"; \
-		else \
-			echo "Warning: Failed to add to IPFS. CID not updated."; \
-			echo "  Ensure IPFS daemon is running: ipfs daemon"; \
-		fi
-
-# Podman targets
 podman-build:
 	podman build -t wetware:latest .
 
@@ -75,6 +77,5 @@ podman-clean:
 	podman rmi wetware:latest || true
 	podman system prune -f
 
-# Development with Podman
 podman-dev: podman-build
 	podman run --rm -it -v $(PWD):/app wetware:latest
