@@ -9,6 +9,8 @@ pub mod cell;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod host;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod image;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod ipfs;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod loaders;

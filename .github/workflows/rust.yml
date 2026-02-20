@@ -15,17 +15,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    
+      with:
+        submodules: recursive
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: x86_64-unknown-linux-gnu
-        
+
     - name: Install Cap'n Proto compiler
       run: |
         sudo apt-get update
         sudo apt-get install -y capnproto
-        
+
     - name: Cache dependencies
       uses: actions/cache@v3
       with:
@@ -36,18 +38,41 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
           ${{ runner.os }}-cargo-
-          
+
     - name: Check formatting
       run: cargo fmt --all -- --check
-      
+
     - name: Run clippy
       run: cargo clippy -- -D warnings
-      
+
     - name: Run tests
       run: cargo test --verbose
-      
+
     - name: Build release
       run: cargo build --release
+
+  solidity:
+    name: Solidity (Foundry)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install Foundry
+      uses: foundry-rs/foundry-toolchain@v1
+
+    - name: Check formatting
+      working-directory: contracts/stem
+      run: forge fmt --check
+
+    - name: Build contracts
+      working-directory: contracts/stem
+      run: forge build --sizes
+
+    - name: Run tests
+      working-directory: contracts/stem
+      run: forge test -vvv
 
   build-and-publish:
     name: Build and Publish

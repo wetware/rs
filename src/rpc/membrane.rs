@@ -4,8 +4,8 @@
 //! `Session(WetwareSession)` containing `Host`, `Executor`, and `StatusPoller`.
 //! All capabilities fail with `staleEpoch` when the epoch advances.
 //!
-//! stem owns the Membrane server, StatusPoller, and epoch machinery. rs provides
-//! only the `SessionExtensionBuilder` impl that injects wetware-specific
+//! The `membrane` crate owns the Membrane server, StatusPoller, and epoch machinery.
+//! This module provides the `SessionExtensionBuilder` impl that injects wetware-specific
 //! capabilities (Host + Executor) into the session, plus the epoch-guarded
 //! wrappers for those capabilities.
 
@@ -14,7 +14,7 @@ use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
-use stem::membrane::{Epoch, EpochGuard, MembraneServer, SessionExtensionBuilder};
+use membrane::{Epoch, EpochGuard, MembraneServer, SessionExtensionBuilder};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -376,7 +376,7 @@ where
     W: AsyncWrite + Unpin + 'static,
 {
     let ext_builder = WetwareSessionBuilder::new(network_state, swarm_cmd_tx, wasm_debug);
-    let membrane: stem::stem_capnp::membrane::Client<membrane_capnp::wetware_session::Owned> =
+    let membrane: membrane::stem_capnp::membrane::Client<membrane_capnp::wetware_session::Owned> =
         capnp_rpc::new_client(MembraneServer::new(epoch_rx, ext_builder));
 
     let rpc_network = VatNetwork::new(

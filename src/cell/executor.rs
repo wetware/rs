@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use futures::FutureExt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{stderr, stdin, stdout};
 use tokio::sync::mpsc;
@@ -55,6 +56,7 @@ pub struct CellBuilder {
     wasmtime_engine: Option<Arc<wasmtime::Engine>>,
     network_state: Option<NetworkState>,
     swarm_cmd_tx: Option<mpsc::Sender<SwarmCommand>>,
+    image_root: Option<PathBuf>,
 }
 
 impl CellBuilder {
@@ -72,6 +74,7 @@ impl CellBuilder {
             wasmtime_engine: None,
             network_state: None,
             swarm_cmd_tx: None,
+            image_root: None,
         }
     }
 
@@ -117,6 +120,16 @@ impl CellBuilder {
         self
     }
 
+    /// Set the FHS image root for WASI preopen.
+    ///
+    /// When set, the merged image directory is mounted read-only at `/`
+    /// in the guest's WASI filesystem, giving guests access to `boot/`,
+    /// `svc/`, `etc/`, and other FHS paths.
+    pub fn with_image_root(mut self, root: PathBuf) -> Self {
+        self.image_root = Some(root);
+        self
+    }
+
     /// Build the Cell.
     ///
     /// # Panics
@@ -132,6 +145,7 @@ impl CellBuilder {
             wasmtime_engine: self.wasmtime_engine,
             network_state: self.network_state.expect("network_state must be set"),
             swarm_cmd_tx: self.swarm_cmd_tx.expect("swarm_cmd_tx must be set"),
+            image_root: self.image_root,
         }
     }
 }
@@ -153,6 +167,7 @@ pub struct Cell {
     pub wasmtime_engine: Option<Arc<wasmtime::Engine>>,
     pub network_state: NetworkState,
     pub swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
+    pub image_root: Option<PathBuf>,
 }
 
 impl Cell {
@@ -176,6 +191,7 @@ impl Cell {
             wasmtime_engine,
             network_state: _,
             swarm_cmd_tx: _,
+            image_root,
         } = self;
 
         crate::config::init_tracing();
@@ -199,14 +215,15 @@ impl Cell {
             ProcBuilder::new()
         };
 
-        let (builder, handles) = builder
+        let builder = builder
             .with_wasm_debug(wasm_debug)
             .with_env(env.unwrap_or_default())
             .with_args(args)
             .with_bytecode(bytecode)
             .with_loader(Some(loader))
             .with_stdio(stdin_handle, stdout_handle, stderr_handle)
-            .with_data_streams();
+            .with_image_root(image_root);
+        let (builder, handles) = builder.with_data_streams();
 
         let proc = builder.build().await?;
         info!(binary = %path, "Built guest process");
@@ -226,7 +243,7 @@ impl Cell {
             .take_host_split()
             .ok_or_else(|| anyhow::anyhow!("host stream missing; RPC streams already consumed"))?;
         // Static epoch (never advances) — real epoch wiring is a future concern.
-        let initial_epoch = stem::membrane::Epoch {
+        let initial_epoch = membrane::Epoch {
             seq: 0,
             head: vec![],
             adopted_block: 0,
