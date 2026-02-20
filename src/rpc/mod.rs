@@ -4,6 +4,8 @@
 //! streams (no TCP listener). See [`build_peer_rpc`] for the entry point.
 #![cfg(not(target_arch = "wasm32"))]
 
+pub mod membrane;
+
 use std::sync::Arc;
 
 use capnp::capability::Promise;

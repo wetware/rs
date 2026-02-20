@@ -225,8 +225,21 @@ impl Cell {
         let (reader, writer) = handles
             .take_host_split()
             .ok_or_else(|| anyhow::anyhow!("host stream missing; RPC streams already consumed"))?;
-        let rpc_system =
-            crate::rpc::build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug);
+        // Static epoch (never advances) — real epoch wiring is a future concern.
+        let initial_epoch = stem::membrane::Epoch {
+            seq: 0,
+            head: vec![],
+            adopted_block: 0,
+        };
+        let (_epoch_tx, epoch_rx) = tokio::sync::watch::channel(initial_epoch);
+        let rpc_system = crate::rpc::membrane::build_membrane_rpc(
+            reader,
+            writer,
+            network_state,
+            swarm_cmd_tx,
+            wasm_debug,
+            epoch_rx,
+        );
 
         info!("Starting streams RPC server for guest");
         let local = tokio::task::LocalSet::new();
