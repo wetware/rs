@@ -92,3 +92,93 @@ impl Loader for ChainLoader {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[tokio::test]
+    async fn test_host_path_loader_reads_file() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"wasm-bytes").unwrap();
+
+        let loader = HostPathLoader;
+        let data = loader.load(tmp.path().to_str().unwrap()).await.unwrap();
+        assert_eq!(data, b"wasm-bytes");
+    }
+
+    #[tokio::test]
+    async fn test_host_path_loader_missing_file() {
+        let loader = HostPathLoader;
+        let err = loader.load("/no/such/file.wasm").await;
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("File not found"));
+    }
+
+    #[tokio::test]
+    async fn test_host_path_loader_rejects_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let loader = HostPathLoader;
+        let err = loader.load(dir.path().to_str().unwrap()).await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_chain_loader_first_success_wins() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"data").unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+
+        let chain = ChainLoader::new(vec![Box::new(HostPathLoader)]);
+        let data = chain.load(&path).await.unwrap();
+        assert_eq!(data, b"data");
+    }
+
+    #[tokio::test]
+    async fn test_chain_loader_falls_through() {
+        // First loader fails (bad path), second succeeds
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"fallback").unwrap();
+        let good_path = tmp.path().to_str().unwrap().to_string();
+
+        struct FailLoader;
+        #[async_trait]
+        impl Loader for FailLoader {
+            async fn load(&self, _path: &str) -> Result<Vec<u8>> {
+                Err(anyhow::anyhow!("always fails"))
+            }
+        }
+
+        // FailLoader first, then HostPathLoader
+        let chain = ChainLoader::new(vec![Box::new(FailLoader), Box::new(HostPathLoader)]);
+        let data = chain.load(&good_path).await.unwrap();
+        assert_eq!(data, b"fallback");
+    }
+
+    #[tokio::test]
+    async fn test_chain_loader_all_fail() {
+        struct FailLoader;
+        #[async_trait]
+        impl Loader for FailLoader {
+            async fn load(&self, _path: &str) -> Result<Vec<u8>> {
+                Err(anyhow::anyhow!("nope"))
+            }
+        }
+
+        let chain = ChainLoader::new(vec![Box::new(FailLoader), Box::new(FailLoader)]);
+        let err = chain.load("anything").await;
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("All loaders failed"));
+        assert!(msg.contains("Loader 0"));
+        assert!(msg.contains("Loader 1"));
+    }
+
+    #[tokio::test]
+    async fn test_chain_loader_empty_chain_fails() {
+        let chain = ChainLoader::new(vec![]);
+        let err = chain.load("any").await;
+        assert!(err.is_err());
+    }
+}

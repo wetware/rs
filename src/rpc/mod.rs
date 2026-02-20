@@ -565,3 +565,233 @@ where
     );
     RpcSystem::new(Box::new(rpc_network), Some(host.client))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+    /// Helper: spin up server + client over in-memory duplex, return Host client.
+    fn setup_rpc() -> (
+        peer_capnp::host::Client,
+        tokio::task::JoinHandle<()>,
+        mpsc::Receiver<SwarmCommand>,
+    ) {
+        let (client_stream, server_stream) = io::duplex(64 * 1024);
+        let (client_read, client_write) = io::split(client_stream);
+        let (server_read, server_write) = io::split(server_stream);
+
+        let peer_id = vec![1, 2, 3, 4];
+        let network_state = NetworkState::from_peer_id(peer_id);
+        let (swarm_tx, swarm_rx) = mpsc::channel(16);
+
+        let server_rpc =
+            build_peer_rpc(server_read, server_write, network_state, swarm_tx, false);
+
+        let server_handle = tokio::task::spawn_local(async move {
+            let _ = server_rpc.await;
+        });
+
+        let client_network = VatNetwork::new(
+            client_read.compat(),
+            client_write.compat_write(),
+            Side::Client,
+            Default::default(),
+        );
+        let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
+        let host: peer_capnp::host::Client = client_rpc.bootstrap(Side::Server);
+        tokio::task::spawn_local(async move {
+            let _ = client_rpc.await;
+        });
+
+        (host, server_handle, swarm_rx)
+    }
+
+    #[tokio::test]
+    async fn test_host_id_returns_peer_id() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+
+                let resp = host.id_request().send().promise.await.unwrap();
+                let peer_id = resp.get().unwrap().get_peer_id().unwrap();
+                assert_eq!(peer_id, &[1, 2, 3, 4]);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_host_addrs_initially_empty() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+
+                let resp = host.addrs_request().send().promise.await.unwrap();
+                let addrs = resp.get().unwrap().get_addrs().unwrap();
+                assert_eq!(addrs.len(), 0);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_host_peers_initially_empty() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+
+                let resp = host.peers_request().send().promise.await.unwrap();
+                let peers = resp.get().unwrap().get_peers().unwrap();
+                assert_eq!(peers.len(), 0);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_executor_echo() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+
+                let executor = host
+                    .executor_request()
+                    .send()
+                    .pipeline
+                    .get_executor();
+
+                let mut req = executor.echo_request();
+                req.get().set_message("hello world");
+                let resp = req.send().promise.await.unwrap();
+                let response = resp.get().unwrap().get_response().unwrap().to_str().unwrap();
+                assert_eq!(response, "Echo: hello world");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_executor_echo_empty_message() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+
+                let executor = host
+                    .executor_request()
+                    .send()
+                    .pipeline
+                    .get_executor();
+
+                let req = executor.echo_request();
+                let resp = req.send().promise.await.unwrap();
+                let response = resp.get().unwrap().get_response().unwrap().to_str().unwrap();
+                assert_eq!(response, "Echo: ");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_executor_echo_concurrent() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+
+                let executor = host
+                    .executor_request()
+                    .send()
+                    .pipeline
+                    .get_executor();
+
+                let mut futures = Vec::new();
+                for i in 0..5 {
+                    let mut req = executor.echo_request();
+                    req.get().set_message(&format!("msg-{i}"));
+                    futures.push(req.send().promise);
+                }
+
+                for (i, fut) in futures.into_iter().enumerate() {
+                    let resp = fut.await.unwrap();
+                    let response = resp.get().unwrap().get_response().unwrap().to_str().unwrap();
+                    assert_eq!(response, format!("Echo: msg-{i}"));
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_network_state_snapshot() {
+        let state = NetworkState::from_peer_id(vec![42]);
+
+        let snap = state.snapshot().await;
+        assert_eq!(snap.local_peer_id, vec![42]);
+        assert!(snap.listen_addrs.is_empty());
+        assert!(snap.known_peers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_network_state_add_remove_addr() {
+        let state = NetworkState::from_peer_id(vec![1]);
+
+        state.add_listen_addr(vec![10, 20]).await;
+        state.add_listen_addr(vec![30, 40]).await;
+
+        let snap = state.snapshot().await;
+        assert_eq!(snap.listen_addrs.len(), 2);
+
+        // Duplicate add is a no-op
+        state.add_listen_addr(vec![10, 20]).await;
+        let snap = state.snapshot().await;
+        assert_eq!(snap.listen_addrs.len(), 2);
+
+        // Remove
+        state.remove_listen_addr(&[10, 20]).await;
+        let snap = state.snapshot().await;
+        assert_eq!(snap.listen_addrs.len(), 1);
+        assert_eq!(snap.listen_addrs[0], vec![30, 40]);
+    }
+
+    #[tokio::test]
+    async fn test_network_state_set_known_peers() {
+        let state = NetworkState::from_peer_id(vec![1]);
+
+        let peers = vec![
+            PeerInfo {
+                peer_id: vec![2],
+                addrs: vec![vec![10]],
+            },
+            PeerInfo {
+                peer_id: vec![3],
+                addrs: vec![vec![20], vec![30]],
+            },
+        ];
+        state.set_known_peers(peers).await;
+
+        let snap = state.snapshot().await;
+        assert_eq!(snap.known_peers.len(), 2);
+        assert_eq!(snap.known_peers[0].peer_id, vec![2]);
+        assert_eq!(snap.known_peers[1].addrs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_network_state_set_peer_id() {
+        let state = NetworkState::from_peer_id(vec![1]);
+        state.set_local_peer_id(vec![99]).await;
+
+        let snap = state.snapshot().await;
+        assert_eq!(snap.local_peer_id, vec![99]);
+    }
+
+    #[tokio::test]
+    async fn test_network_state_clone_shares_state() {
+        let state1 = NetworkState::from_peer_id(vec![1]);
+        let state2 = state1.clone();
+
+        state1.add_listen_addr(vec![10]).await;
+
+        let snap = state2.snapshot().await;
+        assert_eq!(snap.listen_addrs.len(), 1);
+    }
+}

@@ -10,8 +10,8 @@ use crate::cell::{proc::DataStreamHandles, Loader, ProcBuilder};
 use crate::host::SwarmCommand;
 use crate::rpc::NetworkState;
 
-/// Builder for constructing a cell Command
-pub struct CommandBuilder {
+/// Builder for constructing a Cell
+pub struct CellBuilder {
     loader: Option<Box<dyn Loader>>,
     path: String,
     args: Vec<String>,
@@ -24,7 +24,7 @@ pub struct CommandBuilder {
     swarm_cmd_tx: Option<mpsc::Sender<SwarmCommand>>,
 }
 
-impl CommandBuilder {
+impl CellBuilder {
     /// Create a new Builder with a path
     pub fn new(path: String) -> Self {
         Self {
@@ -95,9 +95,9 @@ impl CommandBuilder {
         self
     }
 
-    /// Build the Command
-    pub fn build(self) -> Command {
-        Command {
+    /// Build the Cell
+    pub fn build(self) -> Cell {
+        Cell {
             path: self.path,
             args: self.args,
             loader: self.loader.expect("loader must be set"),
@@ -113,7 +113,7 @@ impl CommandBuilder {
 }
 
 /// Configuration for running a cell
-pub struct Command {
+pub struct Cell {
     pub path: String,
     pub args: Vec<String>,
     pub loader: Box<dyn Loader>,
@@ -126,7 +126,7 @@ pub struct Command {
     pub swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
 }
 
-impl Command {
+impl Cell {
     /// Execute the cell command using wetware streams for RPC transport.
     pub async fn spawn(self) -> Result<i32> {
         self.spawn_with_streams_rpc().await
@@ -143,7 +143,7 @@ impl Command {
     /// This enables bidirectional streams by default so the host can speak async
     /// protocols (Capnp/Protobuf/etc.) while the guest boots.
     pub async fn spawn_with_streams(self) -> Result<(JoinHandle<Result<()>>, DataStreamHandles)> {
-        let Command {
+        let Cell {
             path,
             args,
             loader,
@@ -235,7 +235,7 @@ impl Command {
     }
 
     async fn spawn_with_rpc_internal(self) -> Result<i32> {
-        let Command {
+        let Cell {
             path,
             args,
             loader,

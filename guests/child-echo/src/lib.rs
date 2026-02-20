@@ -4,10 +4,7 @@ use wasip2::cli::stderr::get_stderr;
 
 #[allow(dead_code)]
 mod peer_capnp {
-    include!(concat!(
-        env!("OUT_DIR"),
-        "/Users/mikel/Code/github.com/wetware/rs/capnp/peer_capnp.rs"
-    ));
+    include!(concat!(env!("OUT_DIR"), "/peer_capnp.rs"));
 }
 
 struct StderrLogger;
