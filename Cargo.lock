@@ -1360,6 +1360,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cid"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3147d8272e8fa0ccd29ce51194dd98f79ddfb8191ba9e3409884e751798acf3a"
+dependencies = [
+ "core2",
+ "multibase",
+ "multihash 0.19.3",
+ "unsigned-varint 0.8.0",
+]
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4406,6 +4418,7 @@ dependencies = [
  "capnp-rpc",
  "capnpc",
  "futures",
+ "hex",
  "log",
  "wasip2",
  "wetware-guest",
@@ -7575,6 +7588,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "atom",
  "base58",
  "base64 0.22.1",
  "bytes",
@@ -7582,8 +7596,10 @@ dependencies = [
  "capnp-rpc",
  "capnpc",
  "chrono",
+ "cid",
  "clap",
  "futures",
+ "hex",
  "ipfs-api-backend-hyper",
  "libc",
  "libp2p",

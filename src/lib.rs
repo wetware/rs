@@ -7,6 +7,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cell;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod epoch;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod host;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod image;
@@ -20,6 +22,11 @@ pub mod rpc;
 #[allow(unused_parens)]
 pub mod peer_capnp {
     include!(concat!(env!("OUT_DIR"), "/capnp/peer_capnp.rs"));
+}
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(unused_parens)]
+pub mod ipfs_capnp {
+    include!(concat!(env!("OUT_DIR"), "/capnp/ipfs_capnp.rs"));
 }
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(unused_parens)]

@@ -1,7 +1,7 @@
 //! Membrane-based RPC bootstrap: epoch-scoped Host + Executor capabilities.
 //!
 //! Instead of bootstrapping a bare `Host`, the membrane provides an epoch-scoped
-//! `Session(WetwareSession)` containing `Host`, `Executor`, and `StatusPoller`.
+//! `Session` containing `Host`, `Executor`, and `StatusPoller`.
 //! All capabilities fail with `staleEpoch` when the epoch advances.
 //!
 //! The `membrane` crate owns the Membrane server, StatusPoller, and epoch machinery.
@@ -20,6 +20,8 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::host::SwarmCommand;
+use crate::ipfs;
+use crate::ipfs_capnp;
 use crate::membrane_capnp;
 use crate::peer_capnp;
 use crate::rpc::{
@@ -29,35 +31,38 @@ use crate::rpc::{
 use super::ProcBuilder;
 
 // ---------------------------------------------------------------------------
-// WetwareSessionBuilder — SessionExtensionBuilder for WetwareSession
+// SessionBuilder — SessionExtensionBuilder for Session
 // ---------------------------------------------------------------------------
 
-/// Fills the WetwareSession extension with epoch-guarded Host and Executor.
-pub struct WetwareSessionBuilder {
+/// Fills the Session extension with epoch-guarded Host, Executor, and IPFS Client.
+pub struct SessionBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
+    ipfs_client: ipfs::HttpClient,
 }
 
-impl WetwareSessionBuilder {
+impl SessionBuilder {
     pub fn new(
         network_state: NetworkState,
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
         wasm_debug: bool,
+        ipfs_client: ipfs::HttpClient,
     ) -> Self {
         Self {
             network_state,
             swarm_cmd_tx,
             wasm_debug,
+            ipfs_client,
         }
     }
 }
 
-impl SessionExtensionBuilder<membrane_capnp::wetware_session::Owned> for WetwareSessionBuilder {
+impl SessionExtensionBuilder<membrane_capnp::session::Owned> for SessionBuilder {
     fn build(
         &self,
         guard: &EpochGuard,
-        mut builder: membrane_capnp::wetware_session::Builder<'_>,
+        mut builder: membrane_capnp::session::Builder<'_>,
     ) -> Result<(), capnp::Error> {
         let host: peer_capnp::host::Client = capnp_rpc::new_client(EpochGuardedHost::new(
             self.network_state.clone(),
@@ -75,6 +80,13 @@ impl SessionExtensionBuilder<membrane_capnp::wetware_session::Owned> for Wetware
                 guard.clone(),
             ));
         builder.set_executor(executor);
+
+        let ipfs_client: ipfs_capnp::client::Client =
+            capnp_rpc::new_client(EpochGuardedIpfsClient::new(
+                self.ipfs_client.clone(),
+                guard.clone(),
+            ));
+        builder.set_ipfs(ipfs_client);
 
         Ok(())
     }
@@ -355,6 +367,195 @@ impl peer_capnp::executor::Server for EpochGuardedExecutor {
 }
 
 // ---------------------------------------------------------------------------
+// EpochGuardedIpfsClient — CoreAPI-style IPFS client
+// ---------------------------------------------------------------------------
+
+/// IPFS Client capability that checks epoch validity and delegates to sub-APIs.
+struct EpochGuardedIpfsClient {
+    ipfs_client: ipfs::HttpClient,
+    guard: EpochGuard,
+}
+
+impl EpochGuardedIpfsClient {
+    fn new(ipfs_client: ipfs::HttpClient, guard: EpochGuard) -> Self {
+        Self { ipfs_client, guard }
+    }
+}
+
+#[allow(refining_impl_trait)]
+impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
+    fn unixfs(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::client::UnixfsParams,
+        mut results: ipfs_capnp::client::UnixfsResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.guard.check());
+        let api: ipfs_capnp::unix_f_s::Client =
+            capnp_rpc::new_client(EpochGuardedUnixFS::new(
+                self.ipfs_client.clone(),
+                self.guard.clone(),
+            ));
+        results.get().set_api(api);
+        Promise::ok(())
+    }
+
+    fn block(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::client::BlockParams,
+        _results: ipfs_capnp::client::BlockResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::err(capnp::Error::unimplemented("block API not yet implemented".into()))
+    }
+
+    fn dag(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::client::DagParams,
+        _results: ipfs_capnp::client::DagResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::err(capnp::Error::unimplemented("dag API not yet implemented".into()))
+    }
+
+    fn name(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::client::NameParams,
+        _results: ipfs_capnp::client::NameResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::err(capnp::Error::unimplemented("name API not yet implemented".into()))
+    }
+
+    fn key(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::client::KeyParams,
+        _results: ipfs_capnp::client::KeyResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::err(capnp::Error::unimplemented("key API not yet implemented".into()))
+    }
+
+    fn pin(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::client::PinParams,
+        _results: ipfs_capnp::client::PinResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::err(capnp::Error::unimplemented("pin API not yet implemented".into()))
+    }
+
+    fn object(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::client::ObjectParams,
+        _results: ipfs_capnp::client::ObjectResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::err(capnp::Error::unimplemented("object API not yet implemented".into()))
+    }
+
+    fn swarm(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::client::SwarmParams,
+        _results: ipfs_capnp::client::SwarmResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::err(capnp::Error::unimplemented("swarm API not yet implemented".into()))
+    }
+
+    fn pub_sub(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::client::PubSubParams,
+        _results: ipfs_capnp::client::PubSubResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::err(capnp::Error::unimplemented("pubsub API not yet implemented".into()))
+    }
+
+    fn routing(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::client::RoutingParams,
+        _results: ipfs_capnp::client::RoutingResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::err(capnp::Error::unimplemented("routing API not yet implemented".into()))
+    }
+
+    fn resolve_path(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::client::ResolvePathParams,
+        _results: ipfs_capnp::client::ResolvePathResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::err(capnp::Error::unimplemented("resolvePath not yet implemented".into()))
+    }
+
+    fn resolve_node(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::client::ResolveNodeParams,
+        _results: ipfs_capnp::client::ResolveNodeResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::err(capnp::Error::unimplemented("resolveNode not yet implemented".into()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EpochGuardedUnixFS
+// ---------------------------------------------------------------------------
+
+/// UnixFS capability backed by Kubo HTTP API.
+struct EpochGuardedUnixFS {
+    ipfs_client: ipfs::HttpClient,
+    guard: EpochGuard,
+}
+
+impl EpochGuardedUnixFS {
+    fn new(ipfs_client: ipfs::HttpClient, guard: EpochGuard) -> Self {
+        Self { ipfs_client, guard }
+    }
+}
+
+#[allow(refining_impl_trait)]
+impl ipfs_capnp::unix_f_s::Server for EpochGuardedUnixFS {
+    fn cat(
+        self: capnp::capability::Rc<Self>,
+        params: ipfs_capnp::unix_f_s::CatParams,
+        mut results: ipfs_capnp::unix_f_s::CatResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.guard.check());
+        let path = pry!(pry!(params.get()).get_path()).to_string().unwrap_or_default();
+        let client = self.ipfs_client.clone();
+        Promise::from_future(async move {
+            let data = client
+                .unixfs()
+                .get(&path)
+                .await
+                .map_err(|e| capnp::Error::failed(format!("ipfs cat failed: {e}")))?;
+            results.get().set_data(&data);
+            Ok(())
+        })
+    }
+
+    fn ls(
+        self: capnp::capability::Rc<Self>,
+        params: ipfs_capnp::unix_f_s::LsParams,
+        mut results: ipfs_capnp::unix_f_s::LsResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.guard.check());
+        let path = pry!(pry!(params.get()).get_path()).to_string().unwrap_or_default();
+        let client = self.ipfs_client.clone();
+        Promise::from_future(async move {
+            let entries = client
+                .ls(&path)
+                .await
+                .map_err(|e| capnp::Error::failed(format!("ipfs ls failed: {e}")))?;
+            let mut list = results.get().init_entries(entries.len() as u32);
+            for (i, entry) in entries.iter().enumerate() {
+                let mut builder = list.reborrow().get(i as u32);
+                builder.set_name(&entry.name);
+                builder.set_size(entry.size);
+                builder.set_type(if entry.entry_type == 1 {
+                    ipfs_capnp::unix_f_s::entry::EntryType::Directory
+                } else {
+                    ipfs_capnp::unix_f_s::entry::EntryType::File
+                });
+                builder.set_cid(entry.hash.as_bytes());
+            }
+            Ok(())
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // build_membrane_rpc — bootstrap Membrane instead of Host
 // ---------------------------------------------------------------------------
 
@@ -364,9 +565,9 @@ impl peer_capnp::executor::Server for EpochGuardedExecutor {
 /// captures it here.  The host can then re-serve it to external peers,
 /// allowing the guest to attenuate or enrich the capability surface it exposes.
 pub type GuestMembrane =
-    membrane::stem_capnp::membrane::Client<membrane_capnp::wetware_session::Owned>;
+    membrane::stem_capnp::membrane::Client<membrane_capnp::session::Owned>;
 
-/// Build an RPC system that bootstraps a `Membrane(WetwareSession)` instead of
+/// Build an RPC system that bootstraps a `Membrane(Session)` instead of
 /// a bare `Host`. The membrane provides epoch-scoped sessions containing
 /// `Host`, `Executor`, and `StatusPoller`.
 ///
@@ -380,12 +581,13 @@ pub fn build_membrane_rpc<R, W>(
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
     epoch_rx: watch::Receiver<Epoch>,
+    ipfs_client: ipfs::HttpClient,
 ) -> (RpcSystem<Side>, GuestMembrane)
 where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
 {
-    let ext_builder = WetwareSessionBuilder::new(network_state, swarm_cmd_tx, wasm_debug);
+    let ext_builder = SessionBuilder::new(network_state, swarm_cmd_tx, wasm_debug, ipfs_client);
     let membrane: GuestMembrane =
         capnp_rpc::new_client(MembraneServer::new(epoch_rx, ext_builder));
 

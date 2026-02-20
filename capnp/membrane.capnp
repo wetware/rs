@@ -1,7 +1,7 @@
 # Wetware session extension for stem's generic Membrane.
 #
 # The RPC bootstrap capability for wetware guests is
-# Stem.Membrane(WetwareSession).  Guests call graft() and receive a
+# Stem.Membrane(Session).  Guests call graft() and receive a
 # Session whose extension field carries epoch-scoped Host and Executor
 # capabilities.  When the on-chain epoch advances, all capabilities from
 # the previous session are revoked.
@@ -14,10 +14,14 @@ using Stem = import "stem.capnp";
 using Peer = import "peer.capnp";
 # Local peer interfaces: Host, Executor, Process, ByteStream.
 
-struct WetwareSession {
-  host     @0 :Peer.Host;     # Swarm-level operations (id, addrs, peers, connect).
-  executor @1 :Peer.Executor; # WASM execution (runBytes, echo).
+using Ipfs = import "ipfs.capnp";
+# IPFS CoreAPI-style client capability.
+
+struct Session {
+  host     @0 :Peer.Host;      # Swarm-level operations (id, addrs, peers, connect).
+  executor @1 :Peer.Executor;  # WASM execution (runBytes, echo).
+  ipfs     @2 :Ipfs.Client;    # IPFS CoreAPI (unixfs, block, dag, ...).
 }
 
-# The bootstrap type for wetware guests is Stem.Membrane(WetwareSession).
-# No new interface needed — we use stem's generic Membrane directly.
+# The bootstrap type for wetware guests is Stem.Membrane(Session).
+# No new interface needed — we reuse stem's generic Membrane directly.

@@ -181,6 +181,96 @@ impl UnixFSRef<'_> {
     }
 }
 
+/// Directory listing entry from Kubo's `/api/v0/ls` endpoint.
+#[derive(Debug, Clone)]
+pub struct LsEntry {
+    pub name: String,
+    pub hash: String,
+    pub size: u64,
+    pub entry_type: u32, // 1 = directory, 2 = file
+}
+
+impl HttpClient {
+    /// List directory entries at an IPFS path.
+    ///
+    /// Calls Kubo's `/api/v0/ls?arg=<path>` and parses the JSON response.
+    pub async fn ls(&self, path: &str) -> Result<Vec<LsEntry>> {
+        let url = format!("{}/api/v0/ls?arg={}", self.base_url, path);
+        let response = self
+            .http_client
+            .post(&url)
+            .send()
+            .await
+            .with_context(|| format!("Failed to ls IPFS path {path}"))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("IPFS ls failed: {} (path: {})", response.status(), path);
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .with_context(|| format!("Failed to parse IPFS ls response for {path}"))?;
+
+        let links = body["Objects"]
+            .as_array()
+            .and_then(|objs| objs.first())
+            .and_then(|obj| obj["Links"].as_array())
+            .unwrap_or(&Vec::new())
+            .clone();
+
+        let entries = links
+            .iter()
+            .map(|link| LsEntry {
+                name: link["Name"].as_str().unwrap_or("").to_string(),
+                hash: link["Hash"].as_str().unwrap_or("").to_string(),
+                size: link["Size"].as_u64().unwrap_or(0),
+                entry_type: link["Type"].as_u64().unwrap_or(0) as u32,
+            })
+            .collect();
+
+        Ok(entries)
+    }
+
+    /// Pin a CID on the IPFS node.
+    ///
+    /// Calls Kubo's `/api/v0/pin/add?arg=<cid>`.
+    pub async fn pin_add(&self, cid: &str) -> Result<()> {
+        let url = format!("{}/api/v0/pin/add?arg={}", self.base_url, cid);
+        let response = self
+            .http_client
+            .post(&url)
+            .send()
+            .await
+            .with_context(|| format!("Failed to pin {cid}"))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("IPFS pin add failed: {} (cid: {})", response.status(), cid);
+        }
+
+        Ok(())
+    }
+
+    /// Unpin a CID from the IPFS node.
+    ///
+    /// Calls Kubo's `/api/v0/pin/rm?arg=<cid>`.
+    pub async fn pin_rm(&self, cid: &str) -> Result<()> {
+        let url = format!("{}/api/v0/pin/rm?arg={}", self.base_url, cid);
+        let response = self
+            .http_client
+            .post(&url)
+            .send()
+            .await
+            .with_context(|| format!("Failed to unpin {cid}"))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("IPFS pin rm failed: {} (cid: {})", response.status(), cid);
+        }
+
+        Ok(())
+    }
+}
+
 /// Check if a path is a valid IPFS-family path (IPFS, IPNS, or IPLD)
 ///
 /// This centralizes IPFS path validation similar to Go's `path.NewPath(str)`.

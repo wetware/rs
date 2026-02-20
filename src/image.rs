@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use cid::Cid;
 use tempfile::TempDir;
 use walkdir::WalkDir;
 
@@ -151,6 +152,66 @@ async fn apply_ipfs_layer(ipfs_path: &str, dst: &Path, client: &ipfs::HttpClient
     client.unixfs_ref().get_dir(ipfs_path, dst).await
 }
 
+/// Read the current head from an Atom contract via one-shot `eth_call`.
+///
+/// Returns `CurrentHead { seq, cid }` where `cid` is raw binary bytes
+/// from the contract's `head()` view function.
+pub async fn read_contract_head(
+    rpc_url: &str,
+    contract: &[u8; 20],
+) -> Result<atom::CurrentHead> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .context("Failed to build HTTP client")?;
+
+    let params = serde_json::json!([{
+        "to": format!("0x{}", hex::encode(contract)),
+        "data": format!("0x{}", hex::encode(atom::abi::HEAD_SELECTOR)),
+    }, "latest"]);
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": params,
+    });
+
+    let resp = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .context("eth_call request failed")?;
+
+    let json: serde_json::Value = resp.json().await.context("Failed to parse RPC response")?;
+
+    if let Some(err) = json.get("error") {
+        bail!("RPC error: {err}");
+    }
+
+    let result_str = json
+        .get("result")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing result in RPC response"))?;
+
+    let bytes = hex::decode(result_str.strip_prefix("0x").unwrap_or(result_str))
+        .context("Failed to decode hex from eth_call result")?;
+
+    atom::abi::decode_head_return(&bytes).context("Failed to decode head() return data")
+}
+
+/// Convert raw binary CID bytes to an IPFS path string.
+///
+/// CIDv0 renders as `/ipfs/Qm...` (base58btc), CIDv1 as `/ipfs/bafy...` (base32lower).
+pub fn cid_bytes_to_ipfs_path(cid_bytes: &[u8]) -> Result<String> {
+    if cid_bytes.is_empty() {
+        bail!("Empty CID bytes");
+    }
+    let cid = Cid::read_bytes(cid_bytes).context("Failed to parse CID from bytes")?;
+    Ok(format!("/ipfs/{cid}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +335,40 @@ mod tests {
         let client = stub_ipfs_client();
         let result = merge_layers(&["/nonexistent/path/abc123".into()], &client).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cid_bytes_to_ipfs_path_v0() {
+        // CIDv0: raw sha2-256 multihash (0x12 = sha2-256, 0x20 = 32 bytes)
+        let mut cid_bytes = vec![0x12, 0x20];
+        cid_bytes.extend_from_slice(&[0xAB; 32]); // 32 bytes of dummy hash
+        let path = cid_bytes_to_ipfs_path(&cid_bytes).unwrap();
+        assert!(
+            path.starts_with("/ipfs/Qm"),
+            "CIDv0 should start with /ipfs/Qm, got: {path}"
+        );
+    }
+
+    #[test]
+    fn test_cid_bytes_to_ipfs_path_v1() {
+        // CIDv1: version(1) + codec(dag-pb=0x70) + sha2-256 multihash
+        // Construct the multihash manually: 0x12 = sha2-256, 0x20 = 32 bytes
+        let mut mh_bytes = vec![0x12, 0x20];
+        mh_bytes.extend_from_slice(&[0xAB; 32]);
+        let mh = cid::multihash::Multihash::from_bytes(&mh_bytes).unwrap();
+        let cid = Cid::new_v1(0x70, mh);
+        let cid_bytes = cid.to_bytes();
+        let path = cid_bytes_to_ipfs_path(&cid_bytes).unwrap();
+        assert!(
+            path.starts_with("/ipfs/bafy"),
+            "CIDv1 should start with /ipfs/bafy, got: {path}"
+        );
+    }
+
+    #[test]
+    fn test_cid_bytes_to_ipfs_path_empty_errors() {
+        let result = cid_bytes_to_ipfs_path(&[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Empty CID bytes"));
     }
 }

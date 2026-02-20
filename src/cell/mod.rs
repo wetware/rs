@@ -13,7 +13,7 @@ pub mod streams;
 #[cfg(test)]
 mod streams_test;
 
-pub use executor::{Cell, CellBuilder};
+pub use executor::{Cell, CellBuilder, SpawnResult};
 pub use proc::{Builder as ProcBuilder, Proc};
 
 /// Trait for loading bytecode from various sources (IPFS, filesystem, etc.)

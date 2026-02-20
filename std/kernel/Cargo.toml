@@ -12,6 +12,7 @@ capnp-rpc = "0.23.0"
 futures = "0.3"
 log = "0.4.29"
 wasip2 = "1.0.2"
+hex = "0.4"
 wetware-guest = { path = "../runtime" }
 
 [build-dependencies]

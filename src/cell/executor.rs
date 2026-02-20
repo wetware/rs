@@ -4,10 +4,12 @@ use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
 use futures::FutureExt;
 use libp2p::StreamProtocol;
+use membrane::Epoch;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{stderr, stdin, stdout};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::info;
 
@@ -64,6 +66,9 @@ pub struct CellBuilder {
     network_state: Option<NetworkState>,
     swarm_cmd_tx: Option<mpsc::Sender<SwarmCommand>>,
     image_root: Option<PathBuf>,
+    initial_epoch: Option<Epoch>,
+    ipfs_client: Option<crate::ipfs::HttpClient>,
+    epoch_rx: Option<watch::Receiver<Epoch>>,
 }
 
 impl CellBuilder {
@@ -82,6 +87,9 @@ impl CellBuilder {
             network_state: None,
             swarm_cmd_tx: None,
             image_root: None,
+            initial_epoch: None,
+            ipfs_client: None,
+            epoch_rx: None,
         }
     }
 
@@ -137,6 +145,32 @@ impl CellBuilder {
         self
     }
 
+    /// Set the initial epoch from on-chain state.
+    ///
+    /// When set, this epoch seeds the watch channel instead of the default
+    /// zero epoch. The epoch pipeline can later advance it via the returned
+    /// `watch::Sender<Epoch>`.
+    pub fn with_initial_epoch(mut self, epoch: Epoch) -> Self {
+        self.initial_epoch = Some(epoch);
+        self
+    }
+
+    /// Provide a pre-created epoch receiver.
+    ///
+    /// When set, `spawn_rpc_inner` uses this receiver instead of creating
+    /// a new channel. The caller retains the corresponding `watch::Sender`
+    /// and is responsible for advancing epochs (e.g. via the epoch pipeline).
+    pub fn with_epoch_rx(mut self, rx: watch::Receiver<Epoch>) -> Self {
+        self.epoch_rx = Some(rx);
+        self
+    }
+
+    /// Set the IPFS HTTP client for the CoreAPI capability.
+    pub fn with_ipfs_client(mut self, client: crate::ipfs::HttpClient) -> Self {
+        self.ipfs_client = Some(client);
+        self
+    }
+
     /// Build the Cell.
     ///
     /// # Panics
@@ -153,6 +187,11 @@ impl CellBuilder {
             network_state: self.network_state.expect("network_state must be set"),
             swarm_cmd_tx: self.swarm_cmd_tx.expect("swarm_cmd_tx must be set"),
             image_root: self.image_root,
+            initial_epoch: self.initial_epoch,
+            ipfs_client: self
+                .ipfs_client
+                .unwrap_or_else(|| crate::ipfs::HttpClient::new("http://localhost:5001".into())),
+            epoch_rx: self.epoch_rx,
         }
     }
 }
@@ -175,17 +214,28 @@ pub struct Cell {
     pub network_state: NetworkState,
     pub swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     pub image_root: Option<PathBuf>,
+    pub initial_epoch: Option<Epoch>,
+    pub ipfs_client: crate::ipfs::HttpClient,
+    pub epoch_rx: Option<watch::Receiver<Epoch>>,
+}
+
+/// Result of spawning a cell with RPC: exit code, guest membrane, and optional epoch sender.
+///
+/// `epoch_tx` is `Some` when the cell created its own epoch channel (no external
+/// receiver was provided). It is `None` when the caller supplied a pre-created
+/// receiver via [`CellBuilder::with_epoch_rx`].
+pub struct SpawnResult {
+    pub exit_code: i32,
+    pub guest_membrane: GuestMembrane,
+    pub epoch_tx: Option<watch::Sender<Epoch>>,
 }
 
 impl Cell {
     /// Execute the cell command using wetware streams for RPC transport.
     ///
-    /// Returns the guest's exit code and its exported [`GuestMembrane`] capability.
-    /// The membrane is valid while the guest is running; callers that need to serve
-    /// it to external peers (see issue #42) should act on it before awaiting the
-    /// exit code.  If the guest called `wetware_guest::run()` rather than `serve()`,
-    /// the returned membrane is broken and attempts to use it will fail gracefully.
-    pub async fn spawn(self) -> Result<(i32, GuestMembrane)> {
+    /// Returns a [`SpawnResult`] containing the guest's exit code, its exported
+    /// [`GuestMembrane`], and the epoch sender for advancing epochs.
+    pub async fn spawn(self) -> Result<SpawnResult> {
         self.spawn_rpc_inner(None).await
     }
 
@@ -199,7 +249,7 @@ impl Cell {
     pub async fn spawn_serving(
         self,
         control: libp2p_stream::Control,
-    ) -> Result<(i32, GuestMembrane)> {
+    ) -> Result<SpawnResult> {
         self.spawn_rpc_inner(Some(control)).await
     }
 
@@ -219,6 +269,9 @@ impl Cell {
             network_state: _,
             swarm_cmd_tx: _,
             image_root,
+            initial_epoch: _,
+            ipfs_client: _,
+            epoch_rx: _,
         } = self;
 
         crate::config::init_tracing();
@@ -242,9 +295,18 @@ impl Cell {
             ProcBuilder::new()
         };
 
+        // Inject host-side environment signals for the guest.
+        let mut guest_env = env.unwrap_or_default();
+        if std::io::stdin().is_terminal() {
+            guest_env.push("WW_TTY=1".to_string());
+        }
+        if !guest_env.iter().any(|v| v.starts_with("PATH=")) {
+            guest_env.push("PATH=/bin".to_string());
+        }
+
         let builder = builder
             .with_wasm_debug(wasm_debug)
-            .with_env(env.unwrap_or_default())
+            .with_env(guest_env)
             .with_args(args)
             .with_bytecode(bytecode)
             .with_loader(Some(loader))
@@ -260,29 +322,39 @@ impl Cell {
     }
 
     /// Execute the cell command and serve Cap'n Proto RPC over wetware streams.
-    pub async fn spawn_with_streams_rpc(self) -> Result<(i32, GuestMembrane)> {
+    pub async fn spawn_with_streams_rpc(self) -> Result<SpawnResult> {
         self.spawn_rpc_inner(None).await
     }
 
     async fn spawn_rpc_inner(
-        self,
+        mut self,
         stream_control: Option<libp2p_stream::Control>,
-    ) -> Result<(i32, GuestMembrane)> {
+    ) -> Result<SpawnResult> {
         let wasm_debug = self.wasm_debug;
         let network_state = self.network_state.clone();
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
+        let ipfs_client = self.ipfs_client.clone();
+        let pre_epoch_rx = self.epoch_rx.take();
+        let initial_epoch = self.initial_epoch.clone().unwrap_or(Epoch {
+            seq: 0,
+            head: vec![],
+            adopted_block: 0,
+        });
         let (join, handles) = self.spawn_with_streams().await?;
         let mut handles = handles;
         let (reader, writer) = handles
             .take_host_split()
             .ok_or_else(|| anyhow::anyhow!("host stream missing; RPC streams already consumed"))?;
-        // Static epoch (never advances) — real epoch wiring is a future concern.
-        let initial_epoch = membrane::Epoch {
-            seq: 0,
-            head: vec![],
-            adopted_block: 0,
+
+        // Use the externally-provided epoch receiver if available,
+        // otherwise create a new channel.
+        let (epoch_tx, epoch_rx) = if let Some(rx) = pre_epoch_rx {
+            (None, rx)
+        } else {
+            let (tx, rx) = watch::channel(initial_epoch);
+            (Some(tx), rx)
         };
-        let (_epoch_tx, epoch_rx) = tokio::sync::watch::channel(initial_epoch);
+
         let (rpc_system, guest_membrane) = crate::rpc::membrane::build_membrane_rpc(
             reader,
             writer,
@@ -290,6 +362,7 @@ impl Cell {
             swarm_cmd_tx,
             wasm_debug,
             epoch_rx,
+            ipfs_client,
         );
 
         tracing::debug!("Starting streams RPC server for guest");
@@ -312,7 +385,11 @@ impl Cell {
             })
             .await?;
 
-        Ok((exit_code, guest_membrane))
+        Ok(SpawnResult {
+            exit_code,
+            guest_membrane,
+            epoch_tx,
+        })
     }
 }
 
