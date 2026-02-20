@@ -1,6 +1,7 @@
 [workspace]
 members = [
     ".",
+    "crates/membrane",
     "guests/child-echo",
     "guests/guest-runtime",
     "guests/pid0",
@@ -49,9 +50,11 @@ capnp-rpc = "0.23.0"
 name = "ww"
 path = "src/cli/main.rs"
 
-[[bin]]
-name = "ww-cli"
-path = "src/cli/client.rs"
-
 [build-dependencies]
 capnpc = "0.23.3"
+
+# Optimise WASM guests for size (previously in per-crate Cargo.toml)
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

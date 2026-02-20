@@ -610,4 +610,75 @@ mod tests {
         host_read.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"pong");
     }
+
+    #[tokio::test]
+    async fn test_builder_fails_without_bytecode() {
+        let err = Builder::new()
+            .with_stdio(tokio::io::empty(), tokio::io::sink(), tokio::io::sink())
+            .build()
+            .await
+            .err()
+            .expect("should fail");
+        assert!(err.to_string().contains("bytecode"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_fails_without_stdin() {
+        let err = Builder::new()
+            .with_bytecode(vec![0])
+            .with_stdout(tokio::io::sink())
+            .with_stderr(tokio::io::sink())
+            .build()
+            .await
+            .err()
+            .expect("should fail");
+        assert!(err.to_string().contains("stdin"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_fails_without_stdout() {
+        let err = Builder::new()
+            .with_bytecode(vec![0])
+            .with_stdin(tokio::io::empty())
+            .with_stderr(tokio::io::sink())
+            .build()
+            .await
+            .err()
+            .expect("should fail");
+        assert!(err.to_string().contains("stdout"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_fails_without_stderr() {
+        let err = Builder::new()
+            .with_bytecode(vec![0])
+            .with_stdin(tokio::io::empty())
+            .with_stdout(tokio::io::sink())
+            .build()
+            .await
+            .err()
+            .expect("should fail");
+        assert!(err.to_string().contains("stderr"));
+    }
+
+    #[tokio::test]
+    async fn test_data_stream_handles_take_host_split() {
+        let (_builder, mut handles) = Builder::new().with_data_streams();
+
+        let split = handles.take_host_split();
+        assert!(split.is_some());
+
+        // Second take returns None
+        let split2 = handles.take_host_split();
+        assert!(split2.is_none());
+    }
+
+    #[test]
+    fn test_builder_default() {
+        let builder = Builder::default();
+        assert!(!builder.wasm_debug);
+        assert!(builder.bytecode.is_none());
+        assert!(builder.engine.is_none());
+        assert!(builder.loader.is_none());
+    }
 }
