@@ -210,7 +210,7 @@ impl Cell {
         let bytecode = loader.load(&wasm_path).await.with_context(|| {
             format!("Failed to load bin/main.wasm from image: {path} (resolved to: {wasm_path})")
         })?;
-        info!(binary = %path, "Loaded guest bytecode");
+        tracing::debug!(binary = %path, "Loaded guest bytecode");
 
         let stdin_handle = stdin();
         let stdout_handle = stdout();
@@ -233,7 +233,7 @@ impl Cell {
         let (builder, handles) = builder.with_data_streams();
 
         let proc = builder.build().await?;
-        info!(binary = %path, "Built guest process");
+        tracing::debug!(binary = %path, "Guest process ready");
         let join = tokio::spawn(async move { proc.run().await });
 
         Ok((join, handles))
@@ -265,7 +265,7 @@ impl Cell {
             epoch_rx,
         );
 
-        info!("Starting streams RPC server for guest");
+        tracing::debug!("Starting streams RPC server for guest");
         let local = tokio::task::LocalSet::new();
         local.spawn_local(rpc_system.map(|_| ()));
         let exit_code = local
@@ -274,7 +274,7 @@ impl Cell {
                     Ok(Ok(())) => 0,
                     Ok(Err(_)) | Err(_) => 1,
                 };
-                info!(code = exit_code, "Guest exited (streams RPC)");
+                tracing::debug!(code = exit_code, "Guest exited (streams RPC)");
                 Ok::<i32, anyhow::Error>(exit_code)
             })
             .await?;

@@ -266,7 +266,7 @@ impl peer_capnp::executor::Server for EpochGuardedExecutor {
             Ok(s) => s.to_string().unwrap_or_else(|_| String::new()),
             Err(_) => String::new(),
         };
-        tracing::info!("EpochGuardedExecutor: echo request: {}", message);
+        tracing::debug!(message, "echo");
         let response = format!("Echo: {}", message);
         results.get().set_response(&response);
         Promise::ok(())

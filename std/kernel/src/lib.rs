@@ -62,16 +62,12 @@ impl Guest for Pid0 {
 
 fn run_impl() {
     init_logging();
-    log::trace!("kernel: start");
 
     wetware_guest::run(
         |membrane: Membrane| async move {
-            log::trace!("kernel: rpc bootstrapped, grafting onto membrane");
-
             let graft_resp = membrane.graft_request().send().promise.await?;
             let session = graft_resp.get()?.get_session()?;
             let ext = session.get_extension()?;
-            log::trace!("kernel: grafted, got session");
 
             let executor = ext.get_executor()?;
             let stdin = get_stdin();
@@ -130,7 +126,6 @@ fn run_impl() {
         },
     );
 
-    log::trace!("kernel: cleanup complete");
 }
 
 wasip2::cli::command::export!(Pid0);

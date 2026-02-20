@@ -326,15 +326,11 @@ impl Proc {
             Arc::new(Engine::new(&wasm_config)?)
         };
         let mut linker = Linker::new(&engine);
-        tracing::info!("Adding WASI bindings to linker");
         add_to_linker_async(&mut linker)?;
-        tracing::info!("WASI bindings added");
 
         // Add loader host function if loader is provided
         if loader.is_some() {
-            tracing::info!("Adding loader bindings to linker");
             add_loader_to_linker(&mut linker)?;
-            tracing::info!("Loader bindings added");
         }
 
         // Prepare environment variables as key-value pairs
@@ -354,16 +350,14 @@ impl Proc {
             wasi_builder
                 .preopened_dir(root, "/", DirPerms::READ, FilePerms::READ)
                 .context("failed to preopen image root at /")?;
-            tracing::info!(root = %root.display(), "Mounted image root at /");
+            tracing::debug!(root = %root.display(), "Mounted image root at /");
         }
 
         let wasi = wasi_builder.build();
 
         // Set up data streams if enabled
         let data_stream = if let Some(stream) = data_streams {
-            tracing::info!("Adding streams bindings to linker");
             add_streams_to_linker(&mut linker)?;
-            tracing::info!("Streams bindings added");
             Some(stream)
         } else {
             None
@@ -380,9 +374,9 @@ impl Proc {
 
         // Instantiate it as a normal component
         let start = std::time::Instant::now();
-        tracing::info!("Compiling guest component");
+        tracing::debug!("Compiling guest component");
         let component = Component::from_binary(&engine, &bytecode)?;
-        tracing::info!(
+        tracing::debug!(
             elapsed_ms = start.elapsed().as_millis(),
             "Guest component compiled"
         );
@@ -411,17 +405,15 @@ impl Proc {
             tracing::trace!(name, item = ?item, "Guest component export");
         }
 
-        tracing::info!("Pre-instantiating guest component");
         let pre_start = std::time::Instant::now();
         let pre_instance = linker.instantiate_pre(&component)?;
         let pre = WasiCliCommandPre::new(pre_instance)?;
-        tracing::info!(
+        tracing::trace!(
             elapsed_ms = pre_start.elapsed().as_millis(),
             "Guest component pre-instantiated"
         );
 
         let start = std::time::Instant::now();
-        tracing::info!("Instantiating guest component");
         let command = match tokio::time::timeout(
             std::time::Duration::from_secs(5),
             pre.instantiate_async(&mut store),
@@ -434,7 +426,7 @@ impl Proc {
                 return Err(anyhow!("guest component instantiation timed out"));
             }
         };
-        tracing::info!(
+        tracing::trace!(
             elapsed_ms = start.elapsed().as_millis(),
             "Guest component instantiated"
         );
@@ -474,7 +466,7 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
         "create-connection",
         |mut store: StoreContextMut<'_, ComponentRunStates>, (): ()| {
             Box::new(async move {
-                tracing::info!("streams#create-connection invoked");
+                tracing::debug!("streams#create-connection invoked");
                 let state = store.data_mut();
                 let guest_stream = state
                     .data_stream
@@ -493,7 +485,7 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
 
                 let conn_resource = state.resource_table.push(conn_state)?;
                 let connection = Connection::try_from_resource(conn_resource, &mut store)?;
-                tracing::info!("streams#create-connection returning connection");
+                tracing::debug!("streams#create-connection: connection ready");
                 Ok((connection,))
             })
         },
@@ -504,7 +496,7 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
         |mut store: StoreContextMut<'_, ComponentRunStates>,
          (connection,): (Resource<ConnectionState>,)| {
             Box::new(async move {
-                tracing::info!("streams#connection.get-input-stream invoked");
+                tracing::debug!("streams#connection.get-input-stream invoked");
                 let stream = {
                     let conn_state = store.data_mut().resource_table.get_mut(&connection)?;
                     conn_state
@@ -515,7 +507,7 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
 
                 let state = store.data_mut();
                 let resource = state.resource_table.push(stream)?;
-                tracing::info!("streams#connection.get-input-stream returning resource");
+                tracing::debug!("streams#connection.get-input-stream: resource ready");
                 Ok((resource,))
             })
         },
@@ -526,7 +518,7 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
         |mut store: StoreContextMut<'_, ComponentRunStates>,
          (connection,): (Resource<ConnectionState>,)| {
             Box::new(async move {
-                tracing::info!("streams#connection.get-output-stream invoked");
+                tracing::debug!("streams#connection.get-output-stream invoked");
                 let stream = {
                     let conn_state = store.data_mut().resource_table.get_mut(&connection)?;
                     conn_state
@@ -537,7 +529,7 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
 
                 let state = store.data_mut();
                 let resource = state.resource_table.push(stream)?;
-                tracing::info!("streams#connection.get-output-stream returning resource");
+                tracing::debug!("streams#connection.get-output-stream: resource ready");
                 Ok((resource,))
             })
         },
