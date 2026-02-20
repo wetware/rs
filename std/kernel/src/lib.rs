@@ -1,6 +1,8 @@
 #![feature(wasip2)]
 
 use wasip2::cli::stderr::get_stderr;
+use wasip2::cli::stdin::get_stdin;
+use wasip2::cli::stdout::get_stdout;
 use wasip2::exports::cli::run::Guest;
 
 #[allow(dead_code)]
@@ -72,14 +74,57 @@ fn run_impl() {
             log::trace!("kernel: grafted, got session");
 
             let executor = ext.get_executor()?;
+            let stdin = get_stdin();
+            let stdout = get_stdout();
+            let mut buf: Vec<u8> = Vec::new();
 
-            let mut req = executor.echo_request();
-            req.get().set_message("hello from kernel");
-            log::trace!("kernel: sending echo request");
+            'outer: loop {
+                // Fill buffer until we have a newline or EOF.
+                loop {
+                    if buf.contains(&b'\n') {
+                        break;
+                    }
+                    match stdin.blocking_read(4096) {
+                        Ok(b) if b.is_empty() => break 'outer,
+                        Ok(b) => buf.extend_from_slice(&b),
+                        Err(_) => break 'outer,
+                    }
+                }
 
-            let resp = req.send().promise.await?;
-            let text = resp.get()?.get_response()?.to_str()?;
-            log::trace!("kernel: echo response: {}", text);
+                // Drain complete lines from the buffer.
+                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    let line_bytes = buf.drain(..=pos).collect::<Vec<_>>();
+                    let line = match std::str::from_utf8(&line_bytes) {
+                        Ok(s) => s.trim_end_matches('\n').trim_end_matches('\r'),
+                        Err(_) => continue,
+                    };
+
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    let mut req = executor.echo_request();
+                    req.get().set_message(line);
+                    let resp = req.send().promise.await?;
+                    let text = resp.get()?.get_response()?.to_str()?;
+                    let _ = stdout.blocking_write_and_flush(format!("{text}\n").as_bytes());
+                }
+            }
+
+            // Flush any partial line left in the buffer.
+            if !buf.is_empty() {
+                let line = match std::str::from_utf8(&buf) {
+                    Ok(s) => s.trim_end_matches('\r'),
+                    Err(_) => "",
+                };
+                if !line.is_empty() {
+                    let mut req = executor.echo_request();
+                    req.get().set_message(line);
+                    let resp = req.send().promise.await?;
+                    let text = resp.get()?.get_response()?.to_str()?;
+                    let _ = stdout.blocking_write_and_flush(format!("{text}\n").as_bytes());
+                }
+            }
 
             Ok(())
         },
