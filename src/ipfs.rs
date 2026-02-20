@@ -5,8 +5,9 @@
 //!
 //! Currently implements only the methods needed for file retrieval operations.
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
-use reqwest;
 
 /// IPFS client for interacting with an IPFS node via HTTP API
 ///
@@ -38,6 +39,11 @@ impl HttpClient {
     /// operations for reading and writing files and directories.
     pub fn unixfs(self) -> UnixFS {
         UnixFS { client: self }
+    }
+
+    /// Get a borrowing reference to the Unixfs API.
+    pub fn unixfs_ref(&self) -> UnixFSRef<'_> {
+        UnixFSRef { client: self }
     }
 }
 
@@ -99,6 +105,79 @@ impl UnixFS {
             .await
             .with_context(|| format!("Failed to read IPFS content from {path}"))
             .map(|b| b.to_vec())
+    }
+}
+
+/// Borrowing reference to the Unixfs API.
+pub struct UnixFSRef<'a> {
+    client: &'a HttpClient,
+}
+
+impl UnixFSRef<'_> {
+    /// Fetch an IPFS directory and extract it to a local path.
+    ///
+    /// Uses kubo's `/api/v0/get?arg=<path>&archive=true` which returns
+    /// the directory contents as a TAR archive. The top-level CID
+    /// directory in the TAR is stripped so files land directly under `dst`.
+    pub async fn get_dir(&self, ipfs_path: &str, dst: &Path) -> Result<()> {
+        let url = format!(
+            "{}/api/v0/get?arg={}&archive=true",
+            self.client.base_url, ipfs_path
+        );
+        let response = self
+            .client
+            .http_client
+            .post(&url)
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to fetch IPFS directory from {}",
+                    self.client.base_url
+                )
+            })?;
+
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "Failed to fetch IPFS directory: {} (path: {})",
+                response.status(),
+                ipfs_path
+            );
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .with_context(|| format!("Failed to read IPFS archive from {ipfs_path}"))?;
+
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive = tar::Archive::new(cursor);
+
+        // Kubo wraps the directory in a top-level entry named after the CID.
+        // Strip that prefix so files land directly under dst.
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?.into_owned();
+
+            // Strip the first component (the CID directory).
+            let stripped: std::path::PathBuf = path.components().skip(1).collect();
+            if stripped.as_os_str().is_empty() {
+                continue; // skip the root CID entry itself
+            }
+
+            let target = dst.join(&stripped);
+            if entry.header().entry_type().is_dir() {
+                std::fs::create_dir_all(&target)?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut file = std::fs::File::create(&target)?;
+                std::io::copy(&mut entry, &mut file)?;
+            }
+        }
+
+        Ok(())
     }
 }
 

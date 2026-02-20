@@ -42,7 +42,7 @@ fn main() {
     capnpc::CompilerCommand::new()
         .file(&capnp_file)
         .file(&membrane_file)
-        .crate_provides("stem", [0x9bce094a026970c4_u64]) // stem.capnp types live in the stem crate
+        .crate_provides("membrane", [0x9bce094a026970c4_u64]) // stem.capnp types live in the membrane crate
         .run()
         .expect("failed to compile capnp schemas");
     println!("cargo:rerun-if-changed={}", capnp_file.display());

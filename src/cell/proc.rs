@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use wasmtime::component::bindgen;
@@ -12,7 +13,7 @@ use wasmtime_wasi::p2::add_to_linker_async;
 use wasmtime_wasi::p2::bindings::{Command as WasiCliCommand, CommandPre as WasiCliCommandPre};
 use wasmtime_wasi::p2::pipe::{AsyncReadStream, AsyncWriteStream};
 use wasmtime_wasi::WasiCtxBuilder;
-use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
 
 use super::Loader;
@@ -73,6 +74,7 @@ struct ProcInit {
     stdout: BoxAsyncWrite,
     stderr: BoxAsyncWrite,
     data_streams: Option<tokio::io::DuplexStream>,
+    image_root: Option<PathBuf>,
 }
 
 /// Builder for constructing a Proc configuration
@@ -87,6 +89,7 @@ pub struct Builder {
     stdout: Option<BoxAsyncWrite>,
     stderr: Option<BoxAsyncWrite>,
     data_streams: Option<tokio::io::DuplexStream>,
+    image_root: Option<PathBuf>,
 }
 
 /// Handles for accessing the host-side of data streams.
@@ -127,6 +130,7 @@ impl Builder {
             stdout: None,
             stderr: None,
             data_streams: None,
+            image_root: None,
         }
     }
 
@@ -221,6 +225,15 @@ impl Builder {
         (self, handles)
     }
 
+    /// Set the FHS image root for WASI preopen.
+    ///
+    /// When set, the merged image directory is mounted read-only at `/`
+    /// in the guest's WASI filesystem.
+    pub fn with_image_root(mut self, root: Option<PathBuf>) -> Self {
+        self.image_root = root;
+        self
+    }
+
     /// Build a Proc instance. All required parameters must be supplied first.
     pub async fn build(self) -> Result<Proc> {
         let Builder {
@@ -234,6 +247,7 @@ impl Builder {
             stdout,
             stderr,
             data_streams,
+            image_root,
         } = self;
 
         let bytecode =
@@ -256,6 +270,7 @@ impl Builder {
             stdout,
             stderr,
             data_streams,
+            image_root,
         })
         .await
     }
@@ -296,6 +311,7 @@ impl Proc {
             stdout,
             stderr,
             data_streams,
+            image_root,
         } = init;
 
         let stdin_stream = AsyncStdinStream::new(stdin);
@@ -332,6 +348,15 @@ impl Proc {
             .stderr(stderr_stream)
             .envs(&envs)
             .args(&args);
+
+        // Mount the merged FHS image root read-only at `/` in the guest.
+        if let Some(ref root) = image_root {
+            wasi_builder
+                .preopened_dir(root, "/", DirPerms::READ, FilePerms::READ)
+                .context("failed to preopen image root at /")?;
+            tracing::info!(root = %root.display(), "Mounted image root at /");
+        }
+
         let wasi = wasi_builder.build();
 
         // Set up data streams if enabled

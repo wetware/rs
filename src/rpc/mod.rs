@@ -5,7 +5,6 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 pub mod membrane;
-pub mod server;
 
 use std::sync::Arc;
 
