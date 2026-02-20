@@ -1,7 +1,8 @@
-//! Cap'n Proto RPC server for host-provided capabilities.
+//! Cap'n Proto RPC for host-provided capabilities.
+//!
+//! The Host capability is served to each WASM guest over in-memory duplex
+//! streams (no TCP listener). See [`build_peer_rpc`] for the entry point.
 #![cfg(not(target_arch = "wasm32"))]
-
-pub mod server;
 
 use std::sync::Arc;
 
