@@ -203,6 +203,14 @@ pub struct RpcSession<C> {
 
 impl<C: FromClientHook> RpcSession<C> {
     pub fn connect() -> Self {
+        Self::connect_with_export(None)
+    }
+
+    /// Connect and export `bootstrap` as this vat's bootstrap capability.
+    ///
+    /// The host can retrieve the exported cap via `rpc_system.bootstrap(Side::Client)`.
+    /// Pass `None` for guests that do not export a capability (equivalent to `connect()`).
+    pub fn connect_with_export(bootstrap: Option<capnp::capability::Client>) -> Self {
         let streams = connect_streams();
         let pollables = streams.pollables;
         let network = VatNetwork::new(
@@ -211,7 +219,7 @@ impl<C: FromClientHook> RpcSession<C> {
             Side::Client,
             Default::default(),
         );
-        let mut rpc_system = RpcSystem::new(Box::new(network), None);
+        let mut rpc_system = RpcSystem::new(Box::new(network), bootstrap);
         let client = rpc_system.bootstrap(Side::Server);
         Self {
             rpc_system,
@@ -348,6 +356,34 @@ where
     }
 }
 
+/// Run a guest program with an async entry point, exporting a bootstrap capability.
+///
+/// Like [`run`], but the guest also provides `bootstrap` as its own bootstrap
+/// capability on the RPC connection.  The host can retrieve it via
+/// `rpc_system.bootstrap(Side::Client)`.
+///
+/// Use this when the guest needs to export a capability back to the host —
+/// for example, a pid0 that wraps and attenuates the host's Membrane before
+/// re-exporting it to external peers.
+///
+/// # Example
+///
+/// ```no_run
+/// let my_membrane: capnp::capability::Client = capnp_rpc::new_client(MyMembraneImpl).client;
+/// wetware_guest::serve(my_membrane, |host| async move {
+///     // ... use host capabilities, export my_membrane to host ...
+///     Ok(())
+/// });
+/// ```
+pub fn serve<C, F, Fut>(bootstrap: capnp::capability::Client, f: F)
+where
+    C: FromClientHook + Clone,
+    F: FnOnce(C) -> Fut,
+    Fut: Future<Output = Result<(), capnp::Error>>,
+{
+    run_with_session(RpcSession::<C>::connect_with_export(Some(bootstrap)), f)
+}
+
 /// Run a guest program with an async entry point.
 ///
 /// Sets up the RPC session, bootstraps the host capability, and drives
@@ -370,7 +406,15 @@ where
     F: FnOnce(C) -> Fut,
     Fut: Future<Output = Result<(), capnp::Error>>,
 {
-    let mut session = RpcSession::<C>::connect();
+    run_with_session(RpcSession::<C>::connect(), f)
+}
+
+fn run_with_session<C, F, Fut>(mut session: RpcSession<C>, f: F)
+where
+    C: FromClientHook + Clone,
+    F: FnOnce(C) -> Fut,
+    Fut: Future<Output = Result<(), capnp::Error>>,
+{
     let client = session.client.clone();
     let future = f(client);
     let mut future = Box::pin(future);

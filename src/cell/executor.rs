@@ -9,6 +9,7 @@ use tracing::info;
 
 use crate::cell::{proc::DataStreamHandles, Loader, ProcBuilder};
 use crate::host::SwarmCommand;
+use crate::rpc::membrane::GuestMembrane;
 use crate::rpc::NetworkState;
 
 /// Builder for constructing a [`Cell`].
@@ -172,7 +173,13 @@ pub struct Cell {
 
 impl Cell {
     /// Execute the cell command using wetware streams for RPC transport.
-    pub async fn spawn(self) -> Result<i32> {
+    ///
+    /// Returns the guest's exit code and its exported [`GuestMembrane`] capability.
+    /// The membrane is valid while the guest is running; callers that need to serve
+    /// it to external peers (see issue #42) should act on it before awaiting the
+    /// exit code.  If the guest called `wetware_guest::run()` rather than `serve()`,
+    /// the returned membrane is broken and attempts to use it will fail gracefully.
+    pub async fn spawn(self) -> Result<(i32, GuestMembrane)> {
         self.spawn_with_streams_rpc().await
     }
 
@@ -233,7 +240,7 @@ impl Cell {
     }
 
     /// Execute the cell command and serve Cap'n Proto RPC over wetware streams.
-    pub async fn spawn_with_streams_rpc(self) -> Result<i32> {
+    pub async fn spawn_with_streams_rpc(self) -> Result<(i32, GuestMembrane)> {
         let wasm_debug = self.wasm_debug;
         let network_state = self.network_state.clone();
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
@@ -249,7 +256,7 @@ impl Cell {
             adopted_block: 0,
         };
         let (_epoch_tx, epoch_rx) = tokio::sync::watch::channel(initial_epoch);
-        let rpc_system = crate::rpc::membrane::build_membrane_rpc(
+        let (rpc_system, guest_membrane) = crate::rpc::membrane::build_membrane_rpc(
             reader,
             writer,
             network_state,
@@ -261,7 +268,7 @@ impl Cell {
         info!("Starting streams RPC server for guest");
         let local = tokio::task::LocalSet::new();
         local.spawn_local(rpc_system.map(|_| ()));
-        local
+        let exit_code = local
             .run_until(async move {
                 let exit_code = match join.await {
                     Ok(Ok(())) => 0,
@@ -270,7 +277,9 @@ impl Cell {
                 info!(code = exit_code, "Guest exited (streams RPC)");
                 Ok::<i32, anyhow::Error>(exit_code)
             })
-            .await
+            .await?;
+
+        Ok((exit_code, guest_membrane))
     }
 
 }

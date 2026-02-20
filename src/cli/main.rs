@@ -91,7 +91,9 @@ impl Commands {
                     .with_image_root(merged.path().into())
                     .build();
 
-                let exit_code = cell.spawn().await?;
+                // guest_membrane is the capability pid0 exported via serve().
+                // It is valid while the guest runs; #42 will wire it to the TCP listener.
+                let (exit_code, _guest_membrane) = cell.spawn().await?;
                 tracing::info!(code = exit_code, "Guest exited");
 
                 // Hold `merged` alive until after guest exits.
