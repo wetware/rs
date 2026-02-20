@@ -29,12 +29,14 @@ pub enum SwarmCommand {
 pub struct WetwareBehaviour {
     pub kad: libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>,
     pub identify: libp2p::identify::Behaviour,
+    pub stream: libp2p_stream::Behaviour,
 }
 
 /// Libp2p host wrapper for Wetware.
 pub struct Libp2pHost {
     swarm: libp2p::swarm::Swarm<WetwareBehaviour>,
     local_peer_id: PeerId,
+    stream_control: libp2p_stream::Control,
 }
 
 impl Libp2pHost {
@@ -45,12 +47,16 @@ impl Libp2pHost {
         let kad =
             libp2p::kad::Behaviour::new(peer_id, libp2p::kad::store::MemoryStore::new(peer_id));
 
+        let stream_behaviour = libp2p_stream::Behaviour::new();
+        let stream_control = stream_behaviour.new_control();
+
         let behaviour = WetwareBehaviour {
             kad,
             identify: libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
                 "wetware/0.1.0".to_string(),
                 keypair.public(),
             )),
+            stream: stream_behaviour,
         };
 
         let mut swarm = SwarmBuilder::with_existing_identity(keypair)
@@ -70,11 +76,16 @@ impl Libp2pHost {
         Ok(Self {
             swarm,
             local_peer_id: peer_id,
+            stream_control,
         })
     }
 
     pub fn local_peer_id(&self) -> PeerId {
         self.local_peer_id
+    }
+
+    pub fn stream_control(&self) -> libp2p_stream::Control {
+        self.stream_control.clone()
     }
 
     pub async fn run(
@@ -232,6 +243,10 @@ impl WetwareHost {
 
     pub fn wasmtime_engine(&self) -> Arc<Engine> {
         self.wasmtime.engine()
+    }
+
+    pub fn stream_control(&self) -> libp2p_stream::Control {
+        self.libp2p.stream_control()
     }
 
     pub async fn run(mut self) -> Result<()> {
