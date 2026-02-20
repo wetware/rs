@@ -1,6 +1,7 @@
 #![feature(wasip2)]
 
 use wasip2::cli::stderr::get_stderr;
+use wasip2::exports::cli::run::Guest;
 
 #[allow(dead_code)]
 mod peer_capnp {
@@ -35,8 +36,16 @@ fn init_logging() {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn _start() {
+struct ChildEcho;
+
+impl Guest for ChildEcho {
+    fn run() -> Result<(), ()> {
+        run_impl();
+        Ok(())
+    }
+}
+
+fn run_impl() {
     init_logging();
     log::trace!("child-echo: start");
 
@@ -67,3 +76,5 @@ pub extern "C" fn _start() {
 
     log::trace!("child-echo: cleanup complete");
 }
+
+wasip2::cli::command::export!(ChildEcho);

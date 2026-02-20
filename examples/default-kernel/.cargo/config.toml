@@ -1,5 +1,0 @@
-# Enable wasip2 feature for dependencies when building for wasm32-wasip2
-# This allows dependencies like io-lifetimes to use unstable wasip2 features
-[target.wasm32-wasip2]
-rustflags = ["-Z", "unstable-options", "-Z", "allow-features=wasip2"]
-

@@ -78,7 +78,7 @@ fn run_impl() {
             let executor = ext.get_executor()?;
 
             const CHILD_WASM: &[u8] =
-                include_bytes!("../../child-echo/target/wasm32-wasip2/release/child_echo.wasm");
+                include_bytes!("../../../guests/child-echo/target/wasm32-wasip2/release/child_echo.wasm");
 
             let mut request = executor.run_bytes_request();
             {
