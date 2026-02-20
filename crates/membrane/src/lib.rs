@@ -5,7 +5,7 @@
 //! - **MembraneServer** -- generic server that issues epoch-scoped sessions via `graft()`
 //! - **SessionExtensionBuilder** -- trait for injecting domain-specific capabilities into sessions
 
-#[allow(unused_parens)]
+#[allow(unused_parens, clippy::extra_unused_type_parameters)]
 pub mod stem_capnp {
     include!(concat!(env!("OUT_DIR"), "/capnp/stem_capnp.rs"));
 }

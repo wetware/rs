@@ -1,6 +1,7 @@
 [workspace]
 members = [
     ".",
+    "crates/atom",
     "crates/membrane",
     "guests/child-echo",
     "guests/guest-runtime",

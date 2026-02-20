@@ -21,3 +21,4 @@ tmp/
 
 # Stale WIT file — superseded by streams.wit
 wit/cell.wit
+.DS_Store
