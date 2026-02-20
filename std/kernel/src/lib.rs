@@ -60,48 +60,32 @@ impl Guest for Pid0 {
 
 fn run_impl() {
     init_logging();
-    log::trace!("pid0: start");
+    log::trace!("kernel: start");
 
-    // Bootstrap a Membrane(WetwareSession) instead of a bare Host.
-    // The membrane provides epoch-scoped sessions with Host + Executor.
     wetware_guest::run(
         |membrane: Membrane| async move {
-            log::trace!("pid0: rpc bootstrapped, grafting onto membrane");
+            log::trace!("kernel: rpc bootstrapped, grafting onto membrane");
 
-            // Graft onto the membrane to get an epoch-scoped session.
-            // No signer needed — stem's graft() currently ignores it.
             let graft_resp = membrane.graft_request().send().promise.await?;
             let session = graft_resp.get()?.get_session()?;
             let ext = session.get_extension()?;
-            log::trace!("pid0: grafted, got session");
+            log::trace!("kernel: grafted, got session");
 
             let executor = ext.get_executor()?;
 
-            const CHILD_WASM: &[u8] =
-                include_bytes!("../../../guests/child-echo/target/wasm32-wasip2/release/child_echo.wasm");
+            let mut req = executor.echo_request();
+            req.get().set_message("hello from kernel");
+            log::trace!("kernel: sending echo request");
 
-            let mut request = executor.run_bytes_request();
-            {
-                let mut params = request.get();
-                params.set_wasm(CHILD_WASM);
-                params.reborrow().init_args(0);
-                params.reborrow().init_env(0);
-            }
-            log::trace!("pid0: runBytes sent");
-
-            let run_resp = request.send().promise.await?;
-            let process = run_resp.get()?.get_process()?;
-            log::trace!("pid0: got process");
-
-            let wait_resp = process.wait_request().send().promise.await?;
-            let exit_code = wait_resp.get()?.get_exit_code();
-            log::trace!("pid0: child exited with code {}", exit_code);
+            let resp = req.send().promise.await?;
+            let text = resp.get()?.get_response()?.to_str()?;
+            log::trace!("kernel: echo response: {}", text);
 
             Ok(())
         },
     );
 
-    log::trace!("pid0: cleanup complete");
+    log::trace!("kernel: cleanup complete");
 }
 
 wasip2::cli::command::export!(Pid0);

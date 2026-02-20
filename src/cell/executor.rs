@@ -41,7 +41,7 @@ use crate::rpc::NetworkState;
 /// # Example
 ///
 /// ```ignore
-/// let cell = CellBuilder::new("examples/images/pid0".into())
+/// let cell = CellBuilder::new("images/kernel".into())
 ///     .with_loader(Box::new(HostPathLoader))
 ///     .with_network_state(network_state)
 ///     .with_swarm_cmd_tx(swarm_cmd_tx)

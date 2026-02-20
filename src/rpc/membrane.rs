@@ -267,11 +267,9 @@ impl peer_capnp::executor::Server for EpochGuardedExecutor {
             Err(_) => String::new(),
         };
         tracing::info!("EpochGuardedExecutor: echo request: {}", message);
-        Promise::from_future(async move {
-            let response = format!("Echo: {}", message);
-            results.get().set_response(&response);
-            Ok(())
-        })
+        let response = format!("Echo: {}", message);
+        results.get().set_response(&response);
+        Promise::ok(())
     }
 
     fn run_bytes(

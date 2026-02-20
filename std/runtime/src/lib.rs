@@ -301,6 +301,14 @@ impl RpcDriver {
                 break;
             }
 
+            // Flush any writes queued by the poll closure before blocking.
+            match rpc_system.poll_unpin(&mut cx) {
+                Poll::Ready(Ok(())) | Poll::Ready(Err(_)) => {
+                    made_progress = true;
+                }
+                Poll::Pending => {}
+            }
+
             if !made_progress {
                 if pollables.writer.ready() {
                     wasi_poll::poll(&[&pollables.reader]);
@@ -340,6 +348,17 @@ where
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(value) => return Some(value),
             Poll::Pending => {}
+        }
+
+        // Flush any writes queued by the future before blocking in wasi_poll.
+        if !rpc_done {
+            match session.rpc_system.poll_unpin(&mut cx) {
+                Poll::Ready(_) => {
+                    rpc_done = true;
+                    made_progress = true;
+                }
+                Poll::Pending => {}
+            }
         }
 
         if rpc_done {
@@ -444,6 +463,20 @@ where
                 return;
             }
             Poll::Pending => {}
+        }
+
+        // Flush any writes queued by the future before blocking in wasi_poll.
+        // Without this, an RPC call queued during future.poll (e.g. echo after
+        // graft resolves) is never sent, and wasi_poll blocks forever waiting
+        // for a response that the host never received.
+        if !rpc_done {
+            match session.rpc_system.poll_unpin(&mut cx) {
+                Poll::Ready(_) => {
+                    rpc_done = true;
+                    made_progress = true;
+                }
+                Poll::Pending => {}
+            }
         }
 
         if rpc_done {

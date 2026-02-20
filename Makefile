@@ -3,13 +3,13 @@
 # Guest builds are staged: child-echo must be built before the kernel
 # (kernel embeds child-echo via include_bytes!).
 #
-# `make images` assembles FHS-style image directories under examples/images/.
-# Each image has bin/main.wasm as its entrypoint, consumable by `ww exec`.
+# `make images` assembles FHS-style image directories under images/.
+# Each image has bin/main.wasm as its entrypoint, consumable by `ww run`.
 
 WASM_TARGET := wasm32-wasip2
 RELEASE_DIR  = target/$(WASM_TARGET)/release
 
-IMAGES_DIR := examples/images
+IMAGES_DIR := images
 
 .PHONY: all host guests images clean
 .PHONY: guest-child-echo guest-shell guest-kernel
