@@ -57,6 +57,7 @@ pub struct CellBuilder {
     network_state: Option<NetworkState>,
     swarm_cmd_tx: Option<mpsc::Sender<SwarmCommand>>,
     image_root: Option<PathBuf>,
+    initial_epoch: Option<membrane::Epoch>,
 }
 
 impl CellBuilder {
@@ -75,6 +76,7 @@ impl CellBuilder {
             network_state: None,
             swarm_cmd_tx: None,
             image_root: None,
+            initial_epoch: None,
         }
     }
 
@@ -130,6 +132,15 @@ impl CellBuilder {
         self
     }
 
+    /// Set the initial epoch from on-chain state.
+    ///
+    /// When set, this epoch is used instead of the default zero epoch.
+    /// Full epoch lifecycle (watch + revoke + reload) is a future concern.
+    pub fn with_initial_epoch(mut self, epoch: membrane::Epoch) -> Self {
+        self.initial_epoch = Some(epoch);
+        self
+    }
+
     /// Build the Cell.
     ///
     /// # Panics
@@ -146,6 +157,7 @@ impl CellBuilder {
             network_state: self.network_state.expect("network_state must be set"),
             swarm_cmd_tx: self.swarm_cmd_tx.expect("swarm_cmd_tx must be set"),
             image_root: self.image_root,
+            initial_epoch: self.initial_epoch,
         }
     }
 }
@@ -168,6 +180,7 @@ pub struct Cell {
     pub network_state: NetworkState,
     pub swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     pub image_root: Option<PathBuf>,
+    pub initial_epoch: Option<membrane::Epoch>,
 }
 
 impl Cell {
@@ -192,6 +205,7 @@ impl Cell {
             network_state: _,
             swarm_cmd_tx: _,
             image_root,
+            initial_epoch: _,
         } = self;
 
         crate::config::init_tracing();
@@ -237,17 +251,16 @@ impl Cell {
         let wasm_debug = self.wasm_debug;
         let network_state = self.network_state.clone();
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
+        let initial_epoch = self.initial_epoch.clone().unwrap_or(membrane::Epoch {
+            seq: 0,
+            head: vec![],
+            adopted_block: 0,
+        });
         let (join, handles) = self.spawn_with_streams().await?;
         let mut handles = handles;
         let (reader, writer) = handles
             .take_host_split()
             .ok_or_else(|| anyhow::anyhow!("host stream missing; RPC streams already consumed"))?;
-        // Static epoch (never advances) — real epoch wiring is a future concern.
-        let initial_epoch = membrane::Epoch {
-            seq: 0,
-            head: vec![],
-            adopted_block: 0,
-        };
         let (_epoch_tx, epoch_rx) = tokio::sync::watch::channel(initial_epoch);
         let rpc_system = crate::rpc::membrane::build_membrane_rpc(
             reader,

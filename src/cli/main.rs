@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use clap::{Parser, Subcommand};
 
@@ -36,8 +36,18 @@ enum Commands {
         /// Image layers: local directories or IPFS paths.
         /// Later layers override earlier layers (per-file union).
         /// The merged result must contain bin/main.wasm.
-        #[arg(required = true)]
+        /// Optional when --stem provides a base layer.
+        #[arg(required_unless_present = "stem")]
         images: Vec<String>,
+
+        /// Atom contract address (hex, e.g. 0xABC...).
+        /// Reads head CID from the contract and prepends it as the base IPFS layer.
+        #[arg(long)]
+        stem: Option<String>,
+
+        /// Ethereum JSON-RPC endpoint for reading the Atom contract.
+        #[arg(long, default_value = "http://localhost:8545")]
+        rpc_url: String,
 
         /// libp2p swarm port
         #[arg(long, default_value = "2020")]
@@ -53,11 +63,47 @@ impl Commands {
     async fn run(self) -> Result<()> {
         match self {
             Commands::Run {
-                images,
+                mut images,
+                stem,
+                rpc_url,
                 port,
                 wasm_debug,
             } => {
                 ww::config::init_tracing();
+
+                // If --stem is provided, read the head CID from the Atom contract
+                // and prepend it as the base IPFS layer.
+                let mut initial_epoch = None;
+                if let Some(ref stem_addr) = stem {
+                    let addr_hex = stem_addr.strip_prefix("0x").unwrap_or(stem_addr);
+                    let addr_bytes: [u8; 20] = hex::decode(addr_hex)
+                        .context("Invalid contract address hex")?
+                        .try_into()
+                        .map_err(|v: Vec<u8>| {
+                            anyhow::anyhow!(
+                                "Contract address must be 20 bytes, got {}",
+                                v.len()
+                            )
+                        })?;
+
+                    let head = image::read_contract_head(&rpc_url, &addr_bytes).await?;
+                    let ipfs_path = image::cid_bytes_to_ipfs_path(&head.cid)?;
+
+                    tracing::info!(
+                        seq = head.seq,
+                        cid = %ipfs_path,
+                        "Read head from Atom contract"
+                    );
+
+                    // Stem layer is the base; positional args are overlays on top.
+                    images.insert(0, ipfs_path);
+
+                    initial_epoch = Some(membrane::Epoch {
+                        seq: head.seq,
+                        head: head.cid,
+                        adopted_block: 0,
+                    });
+                }
 
                 // Start the libp2p swarm.
                 let wetware_host = host::WetwareHost::new(port)?;
@@ -83,13 +129,18 @@ impl Commands {
                     "Booting merged image"
                 );
 
-                let cell = CellBuilder::new(image_path)
+                let mut builder = CellBuilder::new(image_path)
                     .with_loader(Box::new(loader))
                     .with_network_state(network_state)
                     .with_swarm_cmd_tx(swarm_cmd_tx)
                     .with_wasm_debug(wasm_debug)
-                    .with_image_root(merged.path().into())
-                    .build();
+                    .with_image_root(merged.path().into());
+
+                if let Some(epoch) = initial_epoch {
+                    builder = builder.with_initial_epoch(epoch);
+                }
+
+                let cell = builder.build();
 
                 let exit_code = cell.spawn().await?;
                 tracing::info!(code = exit_code, "Guest exited");
