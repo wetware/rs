@@ -301,6 +301,13 @@ This ensures the application can communicate with any IPFS node in the network, 
 - **Configuration issues**: Check `WW_IPFS` environment variable for correct IPFS endpoint
 - **Logging issues**: Check `RUST_LOG` and ensure tracing is properly initialized
 
+## Documentation
+
+Additional design docs live in [`doc/`](doc/):
+
+- [**capnp-cross-crate.md**](doc/capnp-cross-crate.md) — How `crate_provides` shares Cap'n Proto types between stem and rs
+- [**rpc-transport.md**](doc/rpc-transport.md) — RPC transport architecture
+
 ## Dependencies
 
 - `libp2p`: P2P networking stack with IPFS protocol support

@@ -44,6 +44,7 @@ wasmtime-wasi = "40.0.0"
 wasmtime-wasi-io = "40.0.0"
 capnp = "0.23.2"
 capnp-rpc = "0.23.0"
+stem = { path = "../stem/crates/stem" }
 
 [[bin]]
 name = "ww"
