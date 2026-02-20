@@ -266,12 +266,10 @@ impl peer_capnp::executor::Server for EpochGuardedExecutor {
             Ok(s) => s.to_string().unwrap_or_else(|_| String::new()),
             Err(_) => String::new(),
         };
-        tracing::info!("EpochGuardedExecutor: echo request: {}", message);
-        Promise::from_future(async move {
-            let response = format!("Echo: {}", message);
-            results.get().set_response(&response);
-            Ok(())
-        })
+        tracing::debug!(message, "echo");
+        let response = format!("Echo: {}", message);
+        results.get().set_response(&response);
+        Promise::ok(())
     }
 
     fn run_bytes(
@@ -360,9 +358,21 @@ impl peer_capnp::executor::Server for EpochGuardedExecutor {
 // build_membrane_rpc — bootstrap Membrane instead of Host
 // ---------------------------------------------------------------------------
 
+/// The Membrane type exported by WASM guests back to the host.
+///
+/// When a guest calls `wetware_guest::serve(my_membrane, ...)`, the host
+/// captures it here.  The host can then re-serve it to external peers,
+/// allowing the guest to attenuate or enrich the capability surface it exposes.
+pub type GuestMembrane =
+    membrane::stem_capnp::membrane::Client<membrane_capnp::wetware_session::Owned>;
+
 /// Build an RPC system that bootstraps a `Membrane(WetwareSession)` instead of
 /// a bare `Host`. The membrane provides epoch-scoped sessions containing
 /// `Host`, `Executor`, and `StatusPoller`.
+///
+/// Returns both the RPC system and the guest's exported [`GuestMembrane`], if
+/// the guest called `wetware_guest::serve()`.  If the guest called `run()`
+/// instead, the returned capability is broken and attempts to use it will fail.
 pub fn build_membrane_rpc<R, W>(
     reader: R,
     writer: W,
@@ -370,13 +380,13 @@ pub fn build_membrane_rpc<R, W>(
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
     epoch_rx: watch::Receiver<Epoch>,
-) -> RpcSystem<Side>
+) -> (RpcSystem<Side>, GuestMembrane)
 where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
 {
     let ext_builder = WetwareSessionBuilder::new(network_state, swarm_cmd_tx, wasm_debug);
-    let membrane: membrane::stem_capnp::membrane::Client<membrane_capnp::wetware_session::Owned> =
+    let membrane: GuestMembrane =
         capnp_rpc::new_client(MembraneServer::new(epoch_rx, ext_builder));
 
     let rpc_network = VatNetwork::new(
@@ -385,5 +395,7 @@ where
         Side::Server,
         Default::default(),
     );
-    RpcSystem::new(Box::new(rpc_network), Some(membrane.client))
+    let mut rpc_system = RpcSystem::new(Box::new(rpc_network), Some(membrane.client));
+    let guest_membrane: GuestMembrane = rpc_system.bootstrap(Side::Client);
+    (rpc_system, guest_membrane)
 }

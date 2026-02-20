@@ -2,7 +2,7 @@
 
 build:
 	@echo "Building pid0 WASM..."
-	@$(MAKE) -C ../child-echo build
+	@$(MAKE) -C ../../guests/child-echo build
 	@PATH="$$(rustup which cargo | xargs dirname):$$PATH" cargo build --target wasm32-wasip2 --release
 	@if [ -f target/wasm32-wasip2/release/pid0.wasm ]; then \
 		cp target/wasm32-wasip2/release/pid0.wasm target/wasm32-wasip2/release/main.wasm; \

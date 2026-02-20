@@ -63,6 +63,7 @@ impl Commands {
                 let wetware_host = host::WetwareHost::new(port)?;
                 let network_state = wetware_host.network_state();
                 let swarm_cmd_tx = wetware_host.swarm_cmd_tx();
+                let stream_control = wetware_host.stream_control();
                 tokio::spawn(wetware_host.run());
 
                 // Build a chain loader: try IPFS first (if reachable), fall back to host FS.
@@ -91,7 +92,11 @@ impl Commands {
                     .with_image_root(merged.path().into())
                     .build();
 
-                let exit_code = cell.spawn().await?;
+                // spawn_serving registers a /wetware/capnp/1.0.0 libp2p stream
+                // handler that bootstraps each incoming connection with the
+                // membrane exported by the kernel (pid0).
+                let (exit_code, _guest_membrane) =
+                    cell.spawn_serving(stream_control).await?;
                 tracing::info!(code = exit_code, "Guest exited");
 
                 // Hold `merged` alive until after guest exits.

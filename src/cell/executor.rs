@@ -1,5 +1,9 @@
 use anyhow::{Context, Result};
+use capnp_rpc::rpc_twoparty_capnp::Side;
+use capnp_rpc::twoparty::VatNetwork;
+use capnp_rpc::RpcSystem;
 use futures::FutureExt;
+use libp2p::StreamProtocol;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{stderr, stdin, stdout};
@@ -9,7 +13,10 @@ use tracing::info;
 
 use crate::cell::{proc::DataStreamHandles, Loader, ProcBuilder};
 use crate::host::SwarmCommand;
+use crate::rpc::membrane::GuestMembrane;
 use crate::rpc::NetworkState;
+
+const CAPNP_PROTOCOL: StreamProtocol = StreamProtocol::new("/wetware/capnp/1.0.0");
 
 /// Builder for constructing a [`Cell`].
 ///
@@ -40,7 +47,7 @@ use crate::rpc::NetworkState;
 /// # Example
 ///
 /// ```ignore
-/// let cell = CellBuilder::new("examples/images/pid0".into())
+/// let cell = CellBuilder::new("images/kernel".into())
 ///     .with_loader(Box::new(HostPathLoader))
 ///     .with_network_state(network_state)
 ///     .with_swarm_cmd_tx(swarm_cmd_tx)
@@ -172,8 +179,28 @@ pub struct Cell {
 
 impl Cell {
     /// Execute the cell command using wetware streams for RPC transport.
-    pub async fn spawn(self) -> Result<i32> {
-        self.spawn_with_streams_rpc().await
+    ///
+    /// Returns the guest's exit code and its exported [`GuestMembrane`] capability.
+    /// The membrane is valid while the guest is running; callers that need to serve
+    /// it to external peers (see issue #42) should act on it before awaiting the
+    /// exit code.  If the guest called `wetware_guest::run()` rather than `serve()`,
+    /// the returned membrane is broken and attempts to use it will fail gracefully.
+    pub async fn spawn(self) -> Result<(i32, GuestMembrane)> {
+        self.spawn_rpc_inner(None).await
+    }
+
+    /// Like [`spawn`], but also accepts incoming libp2p streams for
+    /// `/wetware/capnp/1.0.0` and bootstraps each one with the guest's
+    /// exported [`GuestMembrane`].
+    ///
+    /// This is the production entry point: Ganglion (and other peers) connect
+    /// to the host's libp2p swarm and open a stream on this protocol to obtain
+    /// the kernel's capability surface.
+    pub async fn spawn_serving(
+        self,
+        control: libp2p_stream::Control,
+    ) -> Result<(i32, GuestMembrane)> {
+        self.spawn_rpc_inner(Some(control)).await
     }
 
     /// Execute the cell command and return the join handle plus data stream handles.
@@ -203,7 +230,7 @@ impl Cell {
         let bytecode = loader.load(&wasm_path).await.with_context(|| {
             format!("Failed to load bin/main.wasm from image: {path} (resolved to: {wasm_path})")
         })?;
-        info!(binary = %path, "Loaded guest bytecode");
+        tracing::debug!(binary = %path, "Loaded guest bytecode");
 
         let stdin_handle = stdin();
         let stdout_handle = stdout();
@@ -226,14 +253,21 @@ impl Cell {
         let (builder, handles) = builder.with_data_streams();
 
         let proc = builder.build().await?;
-        info!(binary = %path, "Built guest process");
+        tracing::debug!(binary = %path, "Guest process ready");
         let join = tokio::spawn(async move { proc.run().await });
 
         Ok((join, handles))
     }
 
     /// Execute the cell command and serve Cap'n Proto RPC over wetware streams.
-    pub async fn spawn_with_streams_rpc(self) -> Result<i32> {
+    pub async fn spawn_with_streams_rpc(self) -> Result<(i32, GuestMembrane)> {
+        self.spawn_rpc_inner(None).await
+    }
+
+    async fn spawn_rpc_inner(
+        self,
+        stream_control: Option<libp2p_stream::Control>,
+    ) -> Result<(i32, GuestMembrane)> {
         let wasm_debug = self.wasm_debug;
         let network_state = self.network_state.clone();
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
@@ -249,7 +283,7 @@ impl Cell {
             adopted_block: 0,
         };
         let (_epoch_tx, epoch_rx) = tokio::sync::watch::channel(initial_epoch);
-        let rpc_system = crate::rpc::membrane::build_membrane_rpc(
+        let (rpc_system, guest_membrane) = crate::rpc::membrane::build_membrane_rpc(
             reader,
             writer,
             network_state,
@@ -258,19 +292,57 @@ impl Cell {
             epoch_rx,
         );
 
-        info!("Starting streams RPC server for guest");
+        tracing::debug!("Starting streams RPC server for guest");
         let local = tokio::task::LocalSet::new();
         local.spawn_local(rpc_system.map(|_| ()));
-        local
+
+        if let Some(control) = stream_control {
+            let membrane = guest_membrane.clone();
+            local.spawn_local(accept_capnp_streams(control, membrane));
+        }
+
+        let exit_code = local
             .run_until(async move {
                 let exit_code = match join.await {
                     Ok(Ok(())) => 0,
                     Ok(Err(_)) | Err(_) => 1,
                 };
-                info!(code = exit_code, "Guest exited (streams RPC)");
+                tracing::debug!(code = exit_code, "Guest exited (streams RPC)");
                 Ok::<i32, anyhow::Error>(exit_code)
             })
-            .await
-    }
+            .await?;
 
+        Ok((exit_code, guest_membrane))
+    }
+}
+
+/// Accept incoming libp2p streams for the capnp protocol and serve each with
+/// the guest's exported membrane.  Runs inside the cell's `LocalSet` so that
+/// `spawn_local` is available for per-connection tasks.
+async fn accept_capnp_streams(mut control: libp2p_stream::Control, membrane: GuestMembrane) {
+    let mut incoming = match control.accept(CAPNP_PROTOCOL) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("failed to register capnp stream handler: {}", e);
+            return;
+        }
+    };
+    tracing::info!(protocol = %CAPNP_PROTOCOL, "Accepting capnp streams");
+    use futures::StreamExt;
+    while let Some((_peer_id, stream)) = incoming.next().await {
+        let m = membrane.clone();
+        tokio::task::spawn_local(serve_one_capnp_stream(stream, m));
+    }
+}
+
+/// Serve a single libp2p stream as a Cap'n Proto RPC connection, bootstrapping
+/// the remote peer with the guest's exported membrane.
+async fn serve_one_capnp_stream(stream: libp2p::Stream, membrane: GuestMembrane) {
+    // Box::pin(stream) → Pin<Box<Stream>>: AsyncRead + AsyncWrite + Unpin,
+    // which allows .split() even though Stream itself is !Unpin.
+    use futures::AsyncReadExt;
+    let (reader, writer) = Box::pin(stream).split();
+    let network = VatNetwork::new(reader, writer, Side::Server, Default::default());
+    let rpc_system = RpcSystem::new(Box::new(network), Some(membrane.client));
+    let _ = rpc_system.await;
 }
