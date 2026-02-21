@@ -2550,6 +2550,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "glia"
+version = "0.1.0"
+
+[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3343,6 +3347,7 @@ dependencies = [
  "capnp-rpc",
  "capnpc",
  "futures",
+ "glia",
  "hex",
  "log",
  "runtime",
@@ -7616,6 +7621,7 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "futures",
+ "glia",
  "hex",
  "ipfs-api-backend-hyper",
  "k256",
