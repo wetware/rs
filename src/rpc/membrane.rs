@@ -14,6 +14,7 @@ use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
+use k256::ecdsa::VerifyingKey;
 use membrane::{Epoch, EpochGuard, MembraneServer, SessionBuilder};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
@@ -316,9 +317,13 @@ pub type GuestMembrane = membrane::stem_capnp::membrane::Client;
 /// The membrane provides epoch-scoped sessions containing `Host`, `Executor`,
 /// and `IPFS Client`.
 ///
+/// When `verifying_key` is `Some`, it is stored in the `MembraneServer` for
+/// use in challenge-response authentication (implemented in issue #57).
+///
 /// Returns both the RPC system and the guest's exported [`GuestMembrane`], if
 /// the guest called `runtime::serve()`. If the guest called `runtime::run()`
 /// instead, the returned capability is broken and attempts to use it will fail.
+#[allow(clippy::too_many_arguments)]
 pub fn build_membrane_rpc<R, W>(
     reader: R,
     writer: W,
@@ -327,6 +332,7 @@ pub fn build_membrane_rpc<R, W>(
     wasm_debug: bool,
     epoch_rx: watch::Receiver<Epoch>,
     ipfs_client: ipfs::HttpClient,
+    verifying_key: Option<VerifyingKey>,
 ) -> (RpcSystem<Side>, GuestMembrane)
 where
     R: AsyncRead + Unpin + 'static,
@@ -334,8 +340,11 @@ where
 {
     let sess_builder =
         HostSessionBuilder::new(network_state, swarm_cmd_tx, wasm_debug, ipfs_client);
-    let membrane: GuestMembrane =
-        capnp_rpc::new_client(MembraneServer::new(epoch_rx, sess_builder));
+    let mut membrane_server = MembraneServer::new(epoch_rx, sess_builder);
+    if let Some(vk) = verifying_key {
+        membrane_server = membrane_server.with_verifying_key(vk);
+    }
+    let membrane: GuestMembrane = capnp_rpc::new_client(membrane_server);
 
     let rpc_network = VatNetwork::new(
         reader.compat(),

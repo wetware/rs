@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 
 use clap::{Parser, Subcommand};
+use k256::ecdsa::VerifyingKey;
 use membrane::Epoch;
 use std::path::{Path, PathBuf};
 use tokio::sync::watch;
@@ -72,11 +73,12 @@ enum Commands {
         #[arg(long)]
         wasm_debug: bool,
 
-        /// Path to a secp256k1 key file (raw hex, 32 bytes).
-        /// Generate one with `ww keygen`. If omitted, an ephemeral secp256k1
-        /// key is generated — peer identity will not persist across restarts.
+        /// Path to a secp256k1 identity file (base58btc or hex, 32 bytes).
+        /// Generate one with `ww keygen`. Resolution order:
+        ///   1. This flag  2. $WW_IDENTITY env var
+        ///   3. /etc/identity in image layers  4. ephemeral (not persisted)
         #[arg(long, value_name = "PATH")]
-        key_file: Option<String>,
+        identity: Option<String>,
 
         /// Atom contract address (hex, 0x-prefixed). Enables the epoch
         /// pipeline: on-chain HEAD tracking, IPFS pinning, session
@@ -165,20 +167,19 @@ impl Commands {
                 paths,
                 port,
                 wasm_debug,
-                key_file,
+                identity,
                 stem,
                 rpc_url,
                 ws_url,
                 confirmation_depth,
             } => {
-                let keypair = Self::load_keypair(key_file.as_deref()).await?;
                 if paths.len() == 1 {
                     // Single path: developer mode
                     Self::run_env(
                         PathBuf::from(&paths[0]),
                         port,
                         wasm_debug,
-                        keypair,
+                        identity,
                         stem,
                         rpc_url,
                         ws_url,
@@ -191,7 +192,7 @@ impl Commands {
                         paths,
                         port,
                         wasm_debug,
-                        keypair,
+                        identity,
                         stem,
                         rpc_url,
                         ws_url,
@@ -403,16 +404,65 @@ pub extern "C" fn _start() {
         Ok(())
     }
 
-    /// Load a libp2p keypair from an optional key file path.
+    /// Resolve the node's secp256k1 signing key and verifying key.
     ///
-    /// If `path` is `Some`, loads a secp256k1 key from that file.
-    /// If `None`, generates an ephemeral secp256k1 key (dev/test only).
-    async fn load_keypair(path: Option<&str>) -> Result<libp2p::identity::Keypair> {
-        let sk = match path {
-            Some(p) => ww::keys::load(p)?,
-            None => ww::keys::generate()?,
-        };
-        ww::keys::to_libp2p(&sk)
+    /// Resolution order (first match wins):
+    ///   1. `--identity PATH` CLI flag
+    ///   2. `$WW_IDENTITY` environment variable
+    ///   3. `/etc/identity` present in the merged image layers
+    ///   4. Ephemeral key (generated at runtime, discarded on exit)
+    ///
+    /// For sources 1, 2, and 4 the key is written to `merged_root/etc/identity`
+    /// so the guest can read it from `/etc/identity` via WASI.  Source 3 already
+    /// has the file in place — no injection needed.
+    ///
+    /// Returns `(signing_key, verifying_key, source_description)`.
+    fn resolve_identity(
+        flag: Option<&str>,
+        merged_root: &std::path::Path,
+    ) -> Result<(k256::ecdsa::SigningKey, VerifyingKey, &'static str)> {
+        // 1. --identity CLI flag
+        if let Some(path) = flag {
+            let sk = ww::keys::load(path)?;
+            Self::inject_identity(&sk, merged_root)?;
+            let vk = *sk.verifying_key();
+            return Ok((sk, vk, "--identity"));
+        }
+
+        // 2. $WW_IDENTITY environment variable
+        if let Ok(path) = std::env::var("WW_IDENTITY") {
+            if !path.is_empty() {
+                let sk = ww::keys::load(&path)?;
+                Self::inject_identity(&sk, merged_root)?;
+                let vk = *sk.verifying_key();
+                return Ok((sk, vk, "$WW_IDENTITY"));
+            }
+        }
+
+        // 3. /etc/identity already present in the merged image layers
+        let identity_path = merged_root.join("etc/identity");
+        if identity_path.exists() {
+            let path_str = identity_path
+                .to_str()
+                .context("/etc/identity path is non-UTF-8")?;
+            let sk = ww::keys::load(path_str)?;
+            let vk = *sk.verifying_key();
+            return Ok((sk, vk, "/etc/identity (image)"));
+        }
+
+        // 4. Ephemeral: generate, inject, and return
+        let sk = ww::keys::generate()?;
+        Self::inject_identity(&sk, merged_root)?;
+        let vk = *sk.verifying_key();
+        Ok((sk, vk, "ephemeral"))
+    }
+
+    /// Write a base58btc-encoded signing key to `<merged_root>/etc/identity`.
+    fn inject_identity(sk: &k256::ecdsa::SigningKey, merged_root: &std::path::Path) -> Result<()> {
+        let etc = merged_root.join("etc");
+        std::fs::create_dir_all(&etc).context("create /etc in merged FHS")?;
+        std::fs::write(etc.join("identity"), ww::keys::encode(sk))
+            .context("write /etc/identity to merged FHS")
     }
 
     /// Generate a new secp256k1 identity secret.
@@ -442,7 +492,7 @@ pub extern "C" fn _start() {
         path: PathBuf,
         port: u16,
         wasm_debug: bool,
-        keypair: libp2p::identity::Keypair,
+        identity: Option<String>,
         stem: Option<String>,
         rpc_url: String,
         ws_url: String,
@@ -479,13 +529,6 @@ pub extern "C" fn _start() {
         let images = vec![path_str];
 
         ww::config::init_tracing();
-
-        // Start the libp2p swarm.
-        let wetware_host = host::WetwareHost::new(port, keypair)?;
-        let network_state = wetware_host.network_state();
-        let swarm_cmd_tx = wetware_host.swarm_cmd_tx();
-        let stream_control = wetware_host.stream_control();
-        tokio::spawn(wetware_host.run());
 
         // Build a chain loader: try IPFS first (if reachable), fall back to host FS.
         let ipfs_client = ipfs::HttpClient::new("http://localhost:5001".into());
@@ -543,6 +586,20 @@ pub extern "C" fn _start() {
         let merged = image::merge_layers(&all_images, &ipfs_client).await?;
         let image_path = merged.path().to_string_lossy().to_string();
 
+        // Resolve identity after merge so /etc/identity in image layers is visible.
+        let (_sk, verifying_key, identity_source) =
+            Self::resolve_identity(identity.as_deref(), merged.path())?;
+        tracing::info!(source = identity_source, "Node identity resolved");
+
+        let keypair = ww::keys::to_libp2p(&_sk)?;
+
+        // Start the libp2p swarm.
+        let wetware_host = host::WetwareHost::new(port, keypair)?;
+        let network_state = wetware_host.network_state();
+        let swarm_cmd_tx = wetware_host.swarm_cmd_tx();
+        let stream_control = wetware_host.stream_control();
+        tokio::spawn(wetware_host.run());
+
         tracing::info!(
             layers = all_images.len(),
             root = %image_path,
@@ -556,7 +613,8 @@ pub extern "C" fn _start() {
             .with_swarm_cmd_tx(swarm_cmd_tx)
             .with_wasm_debug(wasm_debug)
             .with_image_root(merged.path().into())
-            .with_ipfs_client(ipfs_client.clone());
+            .with_ipfs_client(ipfs_client.clone())
+            .with_verifying_key(verifying_key);
 
         // If we have an epoch channel, give the receiver to the cell
         // and spawn the epoch pipeline with the sender.
@@ -656,20 +714,13 @@ pub extern "C" fn _start() {
         images: Vec<String>,
         port: u16,
         wasm_debug: bool,
-        keypair: libp2p::identity::Keypair,
+        identity: Option<String>,
         stem: Option<String>,
         rpc_url: String,
         ws_url: String,
         confirmation_depth: u64,
     ) -> Result<()> {
         ww::config::init_tracing();
-
-        // Start the libp2p swarm.
-        let wetware_host = host::WetwareHost::new(port, keypair)?;
-        let network_state = wetware_host.network_state();
-        let swarm_cmd_tx = wetware_host.swarm_cmd_tx();
-        let stream_control = wetware_host.stream_control();
-        tokio::spawn(wetware_host.run());
 
         // Build a chain loader: try IPFS first (if reachable), fall back to host FS.
         let ipfs_client = ipfs::HttpClient::new("http://localhost:5001".into());
@@ -727,6 +778,20 @@ pub extern "C" fn _start() {
         let merged = image::merge_layers(&all_images, &ipfs_client).await?;
         let image_path = merged.path().to_string_lossy().to_string();
 
+        // Resolve identity after merge so /etc/identity in image layers is visible.
+        let (_sk, verifying_key, identity_source) =
+            Self::resolve_identity(identity.as_deref(), merged.path())?;
+        tracing::info!(source = identity_source, "Node identity resolved");
+
+        let keypair = ww::keys::to_libp2p(&_sk)?;
+
+        // Start the libp2p swarm.
+        let wetware_host = host::WetwareHost::new(port, keypair)?;
+        let network_state = wetware_host.network_state();
+        let swarm_cmd_tx = wetware_host.swarm_cmd_tx();
+        let stream_control = wetware_host.stream_control();
+        tokio::spawn(wetware_host.run());
+
         tracing::info!(
             layers = all_images.len(),
             root = %image_path,
@@ -740,7 +805,8 @@ pub extern "C" fn _start() {
             .with_swarm_cmd_tx(swarm_cmd_tx)
             .with_wasm_debug(wasm_debug)
             .with_image_root(merged.path().into())
-            .with_ipfs_client(ipfs_client.clone());
+            .with_ipfs_client(ipfs_client.clone())
+            .with_verifying_key(verifying_key);
 
         // If we have an epoch channel, give the receiver to the cell
         // and spawn the epoch pipeline with the sender.

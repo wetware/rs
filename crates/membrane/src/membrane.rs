@@ -5,6 +5,7 @@ use crate::stem_capnp;
 use capnp::capability::Promise;
 use capnp::Error;
 use capnp_rpc::new_client;
+use k256::ecdsa::VerifyingKey;
 use tokio::sync::watch;
 
 /// Callback trait for filling the concrete Session during graft.
@@ -38,9 +39,12 @@ impl SessionBuilder for NoExtension {
 /// Membrane server: stable across epochs, backed by a watch receiver for the adopted epoch.
 ///
 /// The `session_builder` callback fills the session fields when a session is issued.
+/// When `verifying_key` is set, `graft()` will validate the caller's secp256k1
+/// signature against it (implemented in issue #57).
 pub struct MembraneServer<F: SessionBuilder> {
     receiver: watch::Receiver<Epoch>,
     session_builder: F,
+    verifying_key: Option<VerifyingKey>,
 }
 
 impl<F: SessionBuilder> MembraneServer<F> {
@@ -48,7 +52,14 @@ impl<F: SessionBuilder> MembraneServer<F> {
         Self {
             receiver,
             session_builder,
+            verifying_key: None,
         }
+    }
+
+    /// Set the secp256k1 verifying key used to authenticate `graft()` callers.
+    pub fn with_verifying_key(mut self, vk: VerifyingKey) -> Self {
+        self.verifying_key = Some(vk);
+        self
     }
 
     fn get_current_epoch(&self) -> Epoch {

@@ -6,7 +6,7 @@
 //! Example config:
 //! ```glia
 //! {:port     2025
-//!  :key-file "~/.ww/key"
+//!  :identity "~/.ww/key"
 //!  :images   ["images/my-app" "images/shell"]}
 //! ```
 #![cfg(not(target_arch = "wasm32"))]
@@ -20,7 +20,7 @@ use glia::Val;
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub port: u16,
-    pub key_file: Option<PathBuf>,
+    pub identity: Option<PathBuf>,
     pub images: Vec<PathBuf>,
 }
 
@@ -28,7 +28,7 @@ impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             port: 2025,
-            key_file: None,
+            identity: None,
             images: Vec::new(),
         }
     }
@@ -81,10 +81,10 @@ fn from_val(val: &Val) -> Result<DaemonConfig> {
                     other => bail!(":port must be an integer, got: {other}"),
                 };
             }
-            "key-file" => {
-                config.key_file = match value {
+            "identity" => {
+                config.identity = match value {
                     Val::Str(s) => Some(expand_tilde(s)),
-                    other => bail!(":key-file must be a string, got: {other}"),
+                    other => bail!(":identity must be a string, got: {other}"),
                 };
             }
             "images" => {
@@ -123,11 +123,11 @@ mod tests {
 
     #[test]
     fn parse_full_config() {
-        let input = r#"{:port 2025 :key-file "~/.ww/key" :images ["img/a" "img/b"]}"#;
+        let input = r#"{:port 2025 :identity "~/.ww/key" :images ["img/a" "img/b"]}"#;
         let val = glia::read(input).unwrap();
         let config = from_val(&val).unwrap();
         assert_eq!(config.port, 2025);
-        assert!(config.key_file.is_some());
+        assert!(config.identity.is_some());
         assert_eq!(config.images.len(), 2);
     }
 
@@ -137,7 +137,7 @@ mod tests {
         let val = glia::read(input).unwrap();
         let config = from_val(&val).unwrap();
         assert_eq!(config.port, 2025);
-        assert!(config.key_file.is_none());
+        assert!(config.identity.is_none());
         assert!(config.images.is_empty());
     }
 
@@ -147,7 +147,7 @@ mod tests {
         let val = glia::read(input).unwrap();
         let config = from_val(&val).unwrap();
         assert_eq!(config.port, 3000);
-        assert!(config.key_file.is_none());
+        assert!(config.identity.is_none());
     }
 
     #[test]
