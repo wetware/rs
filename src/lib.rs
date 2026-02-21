@@ -7,6 +7,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cell;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod daemon_config;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod epoch;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod host;
@@ -18,8 +20,6 @@ pub mod ipfs;
 pub mod keys;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod loaders;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod daemon_config;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod rpc;
 

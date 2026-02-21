@@ -50,8 +50,8 @@ pub fn load(path: &std::path::Path) -> Result<DaemonConfig> {
         return Ok(DaemonConfig::default());
     }
 
-    let contents =
-        std::fs::read_to_string(path).with_context(|| format!("read config: {}", path.display()))?;
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("read config: {}", path.display()))?;
 
     let val = glia::read(&contents)
         .map_err(|e| anyhow::anyhow!("parse config {}: {e}", path.display()))?;

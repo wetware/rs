@@ -153,13 +153,13 @@ pub fn read_many(input: &str) -> Result<Vec<Val>, String> {
 /// Token types produced by the tokenizer.
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
-    Open,      // (
-    Close,     // )
-    VecOpen,   // [
-    VecClose,  // ]
-    MapOpen,   // {
-    MapClose,  // }
-    SetOpen,   // #{
+    Open,     // (
+    Close,    // )
+    VecOpen,  // [
+    VecClose, // ]
+    MapOpen,  // {
+    MapClose, // }
+    SetOpen,  // #{
     Atom(String),
 }
 
