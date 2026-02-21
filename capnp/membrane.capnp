@@ -8,20 +8,8 @@
 
 @0xa59e04af26eca82f;
 
-using Stem = import "stem.capnp";
-# Vendored copy; no code generated (see crate_provides in build.rs).
-
-using Peer = import "peer.capnp";
-# Local peer interfaces: Host, Executor, Process, ByteStream.
-
-using Ipfs = import "ipfs.capnp";
-# IPFS CoreAPI-style client capability.
-
 struct Session {
-  host     @0 :Peer.Host;      # Swarm-level operations (id, addrs, peers, connect).
-  executor @1 :Peer.Executor;  # WASM execution (runBytes, echo).
-  ipfs     @2 :Ipfs.Client;    # IPFS CoreAPI (unixfs, block, dag, ...).
+  host     @0 :import "peer.capnp".Host;      # Swarm-level operations (id, addrs, peers, connect).
+  executor @1 :import "peer.capnp".Executor;  # WASM execution (runBytes, echo).
+  ipfs     @2 :import "ipfs.capnp".Client;    # IPFS CoreAPI (unixfs, block, dag, ...).
 }
-
-# The bootstrap type for wetware guests is Stem.Membrane(Session).
-# No new interface needed — we reuse stem's generic Membrane directly.

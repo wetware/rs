@@ -1,5 +1,3 @@
-#![feature(wasip2)]
-
 use wasip2::cli::stderr::get_stderr;
 use wasip2::cli::stdin::get_stdin;
 use wasip2::cli::stdout::get_stdout;
