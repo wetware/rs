@@ -38,9 +38,9 @@ enum Commands {
         template: Option<String>,
     },
 
-    /// Build a wetware environment, producing a runnable WASM artifact.
+    /// Build a wetware environment, producing boot/main.wasm.
     ///
-    /// Compiles a Rust project targeting wasm32-wasi and copies the
+    /// Compiles a Rust project targeting wasm32-wasip2 and copies the
     /// artifact to boot/main.wasm in the environment root.
     ///
     /// Expects Cargo.toml at the root of <path>.

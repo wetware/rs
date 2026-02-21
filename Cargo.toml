@@ -4,7 +4,7 @@ members = [
     "crates/atom",
     "crates/membrane",
     "std/runtime",
-    "images/kernel",
+    "std/kernel",
 ]
 
 [package]

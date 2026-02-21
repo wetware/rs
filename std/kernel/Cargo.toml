@@ -10,7 +10,7 @@ futures = "0.3"
 log = "0.4.29"
 wasip2 = "1.0.2"
 hex = "0.4"
-runtime = { path = "../../std/runtime" }
+runtime = { path = "../runtime" }
 
 [lib]
 crate-type = ["cdylib"]
