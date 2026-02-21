@@ -91,7 +91,7 @@ impl NetworkState {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum StreamMode {
+enum StreamMode {
     ReadOnly,
     WriteOnly,
 }
@@ -102,7 +102,7 @@ pub struct ByteStreamImpl {
 }
 
 impl ByteStreamImpl {
-    pub(crate) fn new(stream: io::DuplexStream, mode: StreamMode) -> Self {
+    fn new(stream: io::DuplexStream, mode: StreamMode) -> Self {
         Self {
             stream: Arc::new(Mutex::new(stream)),
             mode,

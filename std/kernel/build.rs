@@ -1,6 +1,3 @@
-// TODO: Extract a shared build-support crate so all guests use a common
-// capnp compilation helper instead of duplicating this logic.
-
 use std::env;
 use std::path::Path;
 
