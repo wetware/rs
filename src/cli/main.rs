@@ -493,7 +493,7 @@ pub extern "C" fn _start() {
 
         // spawn_serving registers a /wetware/capnp/1.0.0 libp2p stream
         // handler that bootstraps each incoming connection with the
-        // membrane exported by the kernel (pid0).
+        // membrane exported by the kernel.
         let result = cell.spawn_serving(stream_control).await?;
         tracing::info!(code = result.exit_code, "Guest exited");
 
@@ -674,7 +674,7 @@ pub extern "C" fn _start() {
 
         // spawn_serving registers a /wetware/capnp/1.0.0 libp2p stream
         // handler that bootstraps each incoming connection with the
-        // membrane exported by the kernel (pid0).
+        // membrane exported by the kernel.
         let result = cell.spawn_serving(stream_control).await?;
         tracing::info!(code = result.exit_code, "Guest exited");
 

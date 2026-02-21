@@ -20,9 +20,9 @@ host:
 std: kernel shell
 
 kernel:
-	cargo build -p pid0 --target $(WASM_TARGET) --release
+	cargo build -p kernel --target $(WASM_TARGET) --release
 	@mkdir -p std/kernel/boot
-	cp target/$(WASM_TARGET)/release/pid0.wasm std/kernel/boot/main.wasm
+	cp target/$(WASM_TARGET)/release/kernel.wasm std/kernel/boot/main.wasm
 
 shell:
 	cargo build -p shell --target $(WASM_TARGET) --release

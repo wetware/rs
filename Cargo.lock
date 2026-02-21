@@ -3315,6 +3315,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel"
+version = "0.1.0"
+dependencies = [
+ "capnp",
+ "capnp-rpc",
+ "capnpc",
+ "futures",
+ "hex",
+ "log",
+ "runtime",
+ "wasip2",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4395,20 +4409,6 @@ checksum = "b4c5cc86750666a3ed20bdaf5ca2a0344f9c67674cae0515bec2da16fbaa47db"
 dependencies = [
  "fixedbitset",
  "indexmap",
-]
-
-[[package]]
-name = "pid0"
-version = "0.1.0"
-dependencies = [
- "capnp",
- "capnp-rpc",
- "capnpc",
- "futures",
- "hex",
- "log",
- "runtime",
- "wasip2",
 ]
 
 [[package]]

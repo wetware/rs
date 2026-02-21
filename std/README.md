@@ -7,7 +7,7 @@ Standard components for the wetware guest environment.
 | Path | Package | Role |
 |------|---------|------|
 | `std/runtime/` | `runtime` | Guest SDK — connects a WASM component to the host over WASI streams and drives the Cap'n Proto RPC event loop. All guests link against this. |
-| `std/kernel/`  | `pid0`    | Init process — grafts onto the host Membrane, re-exports an attenuated capability to peers. |
+| `std/kernel/`  | `kernel`    | Init process — grafts onto the host Membrane, re-exports an attenuated capability to peers. |
 | `std/shell/`   | `shell`   | Interactive shell (in development). |
 
 ## Convention
@@ -34,5 +34,5 @@ ww push std/
 ww build std/kernel
 
 # Or with cargo directly
-cargo build -p pid0 --target wasm32-wasip2 --release
+cargo build -p kernel --target wasm32-wasip2 --release
 ```
