@@ -9,7 +9,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use libp2p::core::connection::ConnectedPoint;
 use libp2p::swarm::SwarmEvent;
-use libp2p::{identity, Multiaddr, PeerId, SwarmBuilder};
+use libp2p::{Multiaddr, PeerId, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::{Config as WasmConfig, Engine};
 
@@ -41,8 +41,10 @@ pub struct Libp2pHost {
 
 impl Libp2pHost {
     /// Create a new libp2p host and start listening on the given TCP port.
-    pub fn new(port: u16) -> Result<Self> {
-        let keypair = identity::Keypair::generate_ed25519();
+    ///
+    /// `keypair` is the node's identity — load it with [`crate::keys::to_libp2p`]
+    /// or supply an ephemeral key for dev/test use.
+    pub fn new(port: u16, keypair: libp2p::identity::Keypair) -> Result<Self> {
         let peer_id = keypair.public().to_peer_id();
         let kad =
             libp2p::kad::Behaviour::new(peer_id, libp2p::kad::store::MemoryStore::new(peer_id));
@@ -221,8 +223,8 @@ pub struct WetwareHost {
 }
 
 impl WetwareHost {
-    pub fn new(port: u16) -> Result<Self> {
-        let libp2p = Libp2pHost::new(port)?;
+    pub fn new(port: u16, keypair: libp2p::identity::Keypair) -> Result<Self> {
+        let libp2p = Libp2pHost::new(port, keypair)?;
         let wasmtime = WasmtimeHost::new()?;
         let network_state = NetworkState::from_peer_id(libp2p.local_peer_id().to_bytes());
         let (swarm_cmd_tx, swarm_cmd_rx) = mpsc::channel(64);

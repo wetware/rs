@@ -74,6 +74,12 @@ enum Commands {
         #[arg(long)]
         wasm_debug: bool,
 
+        /// Path to a secp256k1 key file (raw hex, 32 bytes).
+        /// Generate one with `ww keygen`. If omitted, an ephemeral secp256k1
+        /// key is generated — peer identity will not persist across restarts.
+        #[arg(long, value_name = "PATH")]
+        key_file: Option<String>,
+
         /// Atom contract address (hex, 0x-prefixed). Enables the epoch
         /// pipeline: on-chain HEAD tracking, IPFS pinning, session
         /// invalidation on head changes.
@@ -91,6 +97,16 @@ enum Commands {
         /// Number of confirmations before finalizing a HeadUpdated event.
         #[arg(long, default_value = "6")]
         confirmation_depth: u64,
+    },
+
+    /// Generate a new secp256k1 identity key.
+    ///
+    /// Writes a raw 32-byte key as lowercase hex to the output path.
+    /// Prints the derived Ethereum address and libp2p Peer ID.
+    Keygen {
+        /// Where to write the key file (default: ~/.ww/key).
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
     },
 
     /// Publish a wetware environment to IPFS.
@@ -148,17 +164,20 @@ impl Commands {
                 paths,
                 port,
                 wasm_debug,
+                key_file,
                 stem,
                 rpc_url,
                 ws_url,
                 confirmation_depth,
             } => {
+                let keypair = Self::load_keypair(key_file.as_deref()).await?;
                 if paths.len() == 1 {
                     // Single path: developer mode
                     Self::run_env(
                         PathBuf::from(&paths[0]),
                         port,
                         wasm_debug,
+                        keypair,
                         stem,
                         rpc_url,
                         ws_url,
@@ -171,6 +190,7 @@ impl Commands {
                         paths,
                         port,
                         wasm_debug,
+                        keypair,
                         stem,
                         rpc_url,
                         ws_url,
@@ -186,6 +206,7 @@ impl Commands {
                 rpc_url,
                 private_key,
             } => Self::push(path, ipfs_url, stem, rpc_url, private_key).await,
+            Commands::Keygen { output } => Self::keygen(output).await,
         }
     }
 
@@ -381,11 +402,47 @@ pub extern "C" fn _start() {
         Ok(())
     }
 
+    /// Load a libp2p keypair from an optional key file path.
+    ///
+    /// If `path` is `Some`, loads a secp256k1 key from that file.
+    /// If `None`, generates an ephemeral secp256k1 key (dev/test only).
+    async fn load_keypair(path: Option<&str>) -> Result<libp2p::identity::Keypair> {
+        let sk = match path {
+            Some(p) => ww::keys::load(p)?,
+            None => ww::keys::generate()?,
+        };
+        ww::keys::to_libp2p(&sk)
+    }
+
+    /// Generate a new secp256k1 identity key and write it to disk.
+    async fn keygen(output: Option<PathBuf>) -> Result<()> {
+        let path = match output {
+            Some(p) => p,
+            None => dirs::home_dir()
+                .context("cannot determine home directory")?
+                .join(".ww/key"),
+        };
+
+        let sk = ww::keys::generate()?;
+        ww::keys::save(&sk, &path)?;
+
+        let kp = ww::keys::to_libp2p(&sk)?;
+        let addr = ww::keys::ethereum_address(&sk);
+        let peer_id = kp.public().to_peer_id();
+
+        println!("Key written to: {}", path.display());
+        println!("EVM address:    0x{}", hex::encode(addr));
+        println!("Peer ID:        {peer_id}");
+        Ok(())
+    }
+
     /// Run a wetware environment
+    #[allow(clippy::too_many_arguments)]
     async fn run_env(
         path: PathBuf,
         port: u16,
         wasm_debug: bool,
+        keypair: libp2p::identity::Keypair,
         stem: Option<String>,
         rpc_url: String,
         ws_url: String,
@@ -424,7 +481,7 @@ pub extern "C" fn _start() {
         ww::config::init_tracing();
 
         // Start the libp2p swarm.
-        let wetware_host = host::WetwareHost::new(port)?;
+        let wetware_host = host::WetwareHost::new(port, keypair)?;
         let network_state = wetware_host.network_state();
         let swarm_cmd_tx = wetware_host.swarm_cmd_tx();
         let stream_control = wetware_host.stream_control();
@@ -594,10 +651,12 @@ pub extern "C" fn _start() {
     }
 
     /// Run daemon mode with multiple image layers
+    #[allow(clippy::too_many_arguments)]
     async fn run_daemon(
         images: Vec<String>,
         port: u16,
         wasm_debug: bool,
+        keypair: libp2p::identity::Keypair,
         stem: Option<String>,
         rpc_url: String,
         ws_url: String,
@@ -606,7 +665,7 @@ pub extern "C" fn _start() {
         ww::config::init_tracing();
 
         // Start the libp2p swarm.
-        let wetware_host = host::WetwareHost::new(port)?;
+        let wetware_host = host::WetwareHost::new(port, keypair)?;
         let network_state = wetware_host.network_state();
         let swarm_cmd_tx = wetware_host.swarm_cmd_tx();
         let stream_control = wetware_host.stream_control();
