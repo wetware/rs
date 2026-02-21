@@ -97,12 +97,15 @@ enum Commands {
         confirmation_depth: u64,
     },
 
-    /// Generate a new secp256k1 identity key.
+    /// Generate a new secp256k1 identity secret.
     ///
-    /// Writes a raw 32-byte key as lowercase hex to the output path.
-    /// Prints the derived Ethereum address and libp2p Peer ID.
+    /// Prints a base58btc-encoded secret key to stdout.  Metadata (EVM
+    /// address, Peer ID) is printed to stderr so stdout stays pipeable:
+    ///
+    ///     ww keygen > ~/.ww/key
+    ///     ww keygen --output ~/.ww/key   # equivalent
     Keygen {
-        /// Where to write the key file (default: ~/.ww/key).
+        /// Write the secret to a file instead of stdout.
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
     },
@@ -412,25 +415,24 @@ pub extern "C" fn _start() {
         ww::keys::to_libp2p(&sk)
     }
 
-    /// Generate a new secp256k1 identity key and write it to disk.
+    /// Generate a new secp256k1 identity secret.
     async fn keygen(output: Option<PathBuf>) -> Result<()> {
-        let path = match output {
-            Some(p) => p,
-            None => dirs::home_dir()
-                .context("cannot determine home directory")?
-                .join(".ww/key"),
-        };
-
         let sk = ww::keys::generate()?;
-        ww::keys::save(&sk, &path)?;
+        let encoded = ww::keys::encode(&sk);
 
         let kp = ww::keys::to_libp2p(&sk)?;
         let addr = ww::keys::ethereum_address(&sk);
         let peer_id = kp.public().to_peer_id();
 
-        println!("Key written to: {}", path.display());
-        println!("EVM address:    0x{}", hex::encode(addr));
-        println!("Peer ID:        {peer_id}");
+        if let Some(path) = output {
+            ww::keys::save(&sk, &path)?;
+            eprintln!("Secret written to: {}", path.display());
+        } else {
+            println!("{encoded}");
+        }
+
+        eprintln!("EVM address:    0x{}", hex::encode(addr));
+        eprintln!("Peer ID:        {peer_id}");
         Ok(())
     }
 

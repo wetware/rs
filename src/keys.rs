@@ -5,11 +5,13 @@
 //! - Ethereum / Monad address for on-chain operations
 //! - Membrane Signer for epoch-scoped session authentication
 //!
-//! Keys are stored as raw lowercase hex (32 bytes = 64 hex chars) on the
-//! local filesystem. No external services are involved in key storage.
+//! Keys are stored as base58btc (Bitcoin alphabet, ~44 chars for 32 bytes)
+//! on the local filesystem. Hex-encoded keys are also accepted on load for
+//! backward compatibility.
 #![cfg(not(target_arch = "wasm32"))]
 
 use anyhow::{bail, Context, Result};
+use base58::{FromBase58, ToBase58};
 use k256::ecdsa::SigningKey;
 use libp2p::identity::Keypair;
 use sha3::{Digest, Keccak256};
@@ -23,6 +25,11 @@ pub fn generate() -> Result<SigningKey> {
         .context("OS CSPRNG failed")?;
     SigningKey::from_bytes((&secret_bytes).into())
         .context("secp256k1 key generation failed (CSPRNG produced invalid scalar)")
+}
+
+/// Encode a signing key as a base58btc string.
+pub fn encode(sk: &SigningKey) -> String {
+    sk.to_bytes().to_base58()
 }
 
 /// Convert a k256 [`SigningKey`] into a libp2p [`Keypair`] (secp256k1).
@@ -49,16 +56,18 @@ pub fn ethereum_address(sk: &SigningKey) -> [u8; 20] {
     addr
 }
 
-/// Load a hex-encoded secp256k1 private key from a local filesystem path.
-///
-/// The file must contain exactly 64 lowercase hex characters (32 bytes),
-/// optionally surrounded by whitespace (newlines are trimmed).
-pub fn load(path: &str) -> Result<SigningKey> {
-    let hex_str =
-        std::fs::read_to_string(path).with_context(|| format!("read key file: {path}"))?;
-
-    let bytes = hex::decode(hex_str.trim())
-        .context("key file must contain a hex-encoded 32-byte secp256k1 secret")?;
+/// Decode a base58btc or hex string into a 32-byte signing key.
+fn decode(s: &str) -> Result<SigningKey> {
+    let bytes = if let Ok(b) = s.from_base58() {
+        b
+    } else if let Ok(b) = hex::decode(s) {
+        b
+    } else {
+        bail!(
+            "key must be base58btc or hex-encoded (got {} chars)",
+            s.len()
+        );
+    };
 
     if bytes.len() != 32 {
         bail!("expected 32-byte key, got {} bytes", bytes.len());
@@ -67,15 +76,67 @@ pub fn load(path: &str) -> Result<SigningKey> {
     SigningKey::from_bytes(bytes.as_slice().into()).context("invalid secp256k1 secret key bytes")
 }
 
-/// Write a hex-encoded secp256k1 private key to disk.
+/// Load a secp256k1 private key from a local filesystem path.
 ///
-/// Parent directories are created as needed. The file is written as 64
-/// lowercase hex characters with no trailing newline.
+/// Accepts base58btc or hex encoding (auto-detected).
+pub fn load(path: &str) -> Result<SigningKey> {
+    let contents =
+        std::fs::read_to_string(path).with_context(|| format!("read key file: {path}"))?;
+    decode(contents.trim()).with_context(|| format!("invalid key in {path}"))
+}
+
+/// Write a base58btc-encoded secp256k1 private key to disk.
+///
+/// Parent directories are created as needed.
 pub fn save(sk: &SigningKey, path: &std::path::Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create key directory: {}", parent.display()))?;
     }
-    let hex = hex::encode(sk.to_bytes());
-    std::fs::write(path, hex).with_context(|| format!("write key: {}", path.display()))
+    std::fs::write(path, encode(sk)).with_context(|| format!("write key: {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_base58() {
+        let sk = generate().unwrap();
+        let encoded = encode(&sk);
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(sk.to_bytes(), decoded.to_bytes());
+    }
+
+    #[test]
+    fn roundtrip_hex_compat() {
+        let sk = generate().unwrap();
+        let hex_str = hex::encode(sk.to_bytes());
+        let decoded = decode(&hex_str).unwrap();
+        assert_eq!(sk.to_bytes(), decoded.to_bytes());
+    }
+
+    #[test]
+    fn base58_is_shorter_than_hex() {
+        let sk = generate().unwrap();
+        let b58 = encode(&sk);
+        let hex_str = hex::encode(sk.to_bytes());
+        assert!(
+            b58.len() < hex_str.len(),
+            "base58 ({}) should be shorter than hex ({})",
+            b58.len(),
+            hex_str.len()
+        );
+    }
+
+    #[test]
+    fn invalid_encoding_rejected() {
+        assert!(decode("not-valid-anything!!!").is_err());
+    }
+
+    #[test]
+    fn wrong_length_rejected() {
+        let short = [1u8; 16].to_base58();
+        assert!(decode(&short).is_err());
+    }
 }
