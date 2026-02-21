@@ -1,496 +1,667 @@
-use capnp::capability::FromClientHook;
-use capnp_rpc::rpc_twoparty_capnp::Side;
-use capnp_rpc::twoparty::VatNetwork;
-use capnp_rpc::RpcSystem;
-use futures::task::noop_waker;
-use futures::FutureExt;
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+#![feature(wasip2)]
 
-mod bindings {
-    wit_bindgen::generate!({
-        path: "../../wit",
-        world: "guest-streams",
-        with: {
-            "wasi:io/error@0.2.9": wasip2::io::error,
-            "wasi:io/poll@0.2.9": wasip2::io::poll,
-            "wasi:io/streams@0.2.9": wasip2::io::streams,
-        },
+use wasip2::cli::stderr::get_stderr;
+use wasip2::cli::stdin::get_stdin;
+use wasip2::cli::stdout::get_stdout;
+use wasip2::exports::cli::run::Guest;
+
+#[allow(dead_code)]
+mod peer_capnp {
+    include!(concat!(env!("OUT_DIR"), "/peer_capnp.rs"));
+}
+
+#[allow(dead_code)]
+mod stem_capnp {
+    include!(concat!(env!("OUT_DIR"), "/stem_capnp.rs"));
+}
+
+#[allow(dead_code)]
+mod ipfs_capnp {
+    include!(concat!(env!("OUT_DIR"), "/ipfs_capnp.rs"));
+}
+
+#[allow(dead_code)]
+mod membrane_capnp {
+    include!(concat!(env!("OUT_DIR"), "/membrane_capnp.rs"));
+}
+
+/// Bootstrap capability: a Membrane whose sessions carry our Session extension.
+type Membrane = stem_capnp::membrane::Client<membrane_capnp::session::Owned>;
+
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Trace
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let stderr = get_stderr();
+        let _ = stderr.blocking_write_and_flush(
+            format!("[{}] {}\n", record.level(), record.args()).as_bytes(),
+        );
+    }
+
+    fn flush(&self) {}
+}
+
+static LOGGER: StderrLogger = StderrLogger;
+
+fn init_logging() {
+    if log::set_logger(&LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Trace);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// S-expression reader/printer
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+enum Val {
+    Sym(String),
+    Str(String),
+    List(Vec<Val>),
+    Nil,
+}
+
+impl core::fmt::Display for Val {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Val::Sym(s) => write!(f, "{s}"),
+            Val::Str(s) => write!(f, "\"{s}\""),
+            Val::List(items) => {
+                write!(f, "(")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, ")")
+            }
+            Val::Nil => write!(f, "nil"),
+        }
+    }
+}
+
+fn read(input: &str) -> Result<Val, String> {
+    let tokens = tokenize(input)?;
+    if tokens.is_empty() {
+        return Err("empty input".into());
+    }
+    let (val, rest) = parse_tokens(&tokens)?;
+    if !rest.is_empty() {
+        return Err("unexpected tokens after expression".into());
+    }
+    Ok(val)
+}
+
+fn tokenize(input: &str) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    let mut chars = input.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        match c {
+            ' ' | '\t' | '\r' | '\n' => {
+                chars.next();
+            }
+            '(' | ')' => {
+                tokens.push(c.to_string());
+                chars.next();
+            }
+            '"' => {
+                chars.next();
+                let mut s = String::new();
+                loop {
+                    match chars.next() {
+                        Some('\\') => match chars.next() {
+                            Some(esc) => s.push(esc),
+                            None => return Err("unterminated string escape".into()),
+                        },
+                        Some('"') => break,
+                        Some(ch) => s.push(ch),
+                        None => return Err("unterminated string".into()),
+                    }
+                }
+                tokens.push(format!("\"{s}\""));
+            }
+            ';' => {
+                // Comment: skip to end of line.
+                while chars.peek().is_some_and(|&c| c != '\n') {
+                    chars.next();
+                }
+            }
+            _ => {
+                let mut atom = String::new();
+                while chars.peek().is_some_and(|&c| !matches!(c, ' ' | '\t' | '\r' | '\n' | '(' | ')' | '"')) {
+                    atom.push(chars.next().unwrap());
+                }
+                tokens.push(atom);
+            }
+        }
+    }
+    Ok(tokens)
+}
+
+fn parse_tokens<'a>(tokens: &'a [String]) -> Result<(Val, &'a [String]), String> {
+    if tokens.is_empty() {
+        return Err("unexpected end of input".into());
+    }
+    if tokens[0] == "(" {
+        let mut items = Vec::new();
+        let mut rest = &tokens[1..];
+        loop {
+            if rest.is_empty() {
+                return Err("unclosed parenthesis".into());
+            }
+            if rest[0] == ")" {
+                return Ok((Val::List(items), &rest[1..]));
+            }
+            let (val, new_rest) = parse_tokens(rest)?;
+            items.push(val);
+            rest = new_rest;
+        }
+    } else if tokens[0] == ")" {
+        Err("unexpected )".into())
+    } else if tokens[0].starts_with('"') {
+        let s = &tokens[0][1..tokens[0].len() - 1];
+        Ok((Val::Str(s.to_string()), &tokens[1..]))
+    } else if &tokens[0] == "nil" {
+        Ok((Val::Nil, &tokens[1..]))
+    } else {
+        Ok((Val::Sym(tokens[0].clone()), &tokens[1..]))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Evaluator — dispatches (capability method args...) to RPC calls
+// ---------------------------------------------------------------------------
+
+struct ShellCtx {
+    host: peer_capnp::host::Client,
+    executor: peer_capnp::executor::Client,
+    ipfs: ipfs_capnp::client::Client,
+}
+
+async fn eval(expr: &Val, ctx: &ShellCtx) -> Result<Val, String> {
+    match expr {
+        Val::List(items) if items.is_empty() => Ok(Val::Nil),
+        Val::List(items) => {
+            let cmd = match &items[0] {
+                Val::Sym(s) => s.as_str(),
+                _ => return Err(format!("expected symbol, got {}", items[0])),
+            };
+            match cmd {
+                "host" => eval_host(&items[1..], ctx).await,
+                "executor" => eval_executor(&items[1..], ctx).await,
+                "ipfs" => eval_ipfs(&items[1..], ctx).await,
+                "help" => Ok(Val::Str(HELP_TEXT.to_string())),
+                "exit" => std::process::exit(0),
+                _ => eval_path_lookup(cmd, &items[1..], ctx).await,
+            }
+        }
+        // Self-evaluating forms.
+        other => Ok(other.clone()),
+    }
+}
+
+async fn eval_host(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
+    let method = match args.first() {
+        Some(Val::Sym(s)) => s.as_str(),
+        _ => return Err("(host <method> [args...])".into()),
+    };
+    match method {
+        "id" => {
+            let resp = ctx
+                .host
+                .id_request()
+                .send()
+                .promise
+                .await
+                .map_err(|e| e.to_string())?;
+            let id = resp
+                .get()
+                .map_err(|e| e.to_string())?
+                .get_peer_id()
+                .map_err(|e| e.to_string())?;
+            Ok(Val::Str(hex::encode(id)))
+        }
+        "addrs" => {
+            let resp = ctx
+                .host
+                .addrs_request()
+                .send()
+                .promise
+                .await
+                .map_err(|e| e.to_string())?;
+            let addrs = resp
+                .get()
+                .map_err(|e| e.to_string())?
+                .get_addrs()
+                .map_err(|e| e.to_string())?;
+            let items: Vec<Val> = (0..addrs.len())
+                .filter_map(|i| {
+                    addrs
+                        .get(i)
+                        .ok()
+                        .and_then(|d| String::from_utf8(d.to_vec()).ok())
+                        .map(Val::Str)
+                })
+                .collect();
+            Ok(Val::List(items))
+        }
+        "peers" => {
+            let resp = ctx
+                .host
+                .peers_request()
+                .send()
+                .promise
+                .await
+                .map_err(|e| e.to_string())?;
+            let peers = resp
+                .get()
+                .map_err(|e| e.to_string())?
+                .get_peers()
+                .map_err(|e| e.to_string())?;
+            let items: Vec<Val> = (0..peers.len())
+                .filter_map(|i| {
+                    let peer = peers.get(i);
+                    let id = peer.get_peer_id().ok().map(hex::encode)?;
+                    let addrs = peer.get_addrs().ok()?;
+                    let mut entry = vec![Val::Str(id)];
+                    for j in 0..addrs.len() {
+                        if let Ok(a) = addrs.get(j) {
+                            if let Ok(s) = String::from_utf8(a.to_vec()) {
+                                entry.push(Val::Str(s));
+                            }
+                        }
+                    }
+                    Some(Val::List(entry))
+                })
+                .collect();
+            Ok(Val::List(items))
+        }
+        "connect" => {
+            let addr_str = match args.get(1) {
+                Some(Val::Str(s)) => s.clone(),
+                _ => return Err("(host connect \"<multiaddr>\")".into()),
+            };
+            // Parse multiaddr: extract peer ID and address.
+            // For now, pass the raw multiaddr bytes and empty peer ID.
+            let mut req = ctx.host.connect_request();
+            {
+                let mut b = req.get();
+                b.set_peer_id(&[]);
+                let mut addrs = b.init_addrs(1);
+                addrs.set(0, addr_str.as_bytes());
+            }
+            req.send()
+                .promise
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Val::Sym("ok".into()))
+        }
+        _ => Err(format!("unknown host method: {method}")),
+    }
+}
+
+async fn eval_executor(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
+    let method = match args.first() {
+        Some(Val::Sym(s)) => s.as_str(),
+        _ => return Err("(executor <method> [args...])".into()),
+    };
+    match method {
+        "echo" => {
+            let msg = match args.get(1) {
+                Some(Val::Str(s)) => s.clone(),
+                Some(Val::Sym(s)) => s.clone(),
+                _ => return Err("(executor echo \"<message>\")".into()),
+            };
+            let mut req = ctx.executor.echo_request();
+            req.get().set_message(&msg);
+            let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+            let text = resp
+                .get()
+                .map_err(|e| e.to_string())?
+                .get_response()
+                .map_err(|e| e.to_string())?
+                .to_str()
+                .map_err(|e| e.to_string())?;
+            Ok(Val::Str(text.to_string()))
+        }
+        _ => Err(format!("unknown executor method: {method}")),
+    }
+}
+
+async fn eval_ipfs(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
+    let method = match args.first() {
+        Some(Val::Sym(s)) => s.as_str(),
+        _ => return Err("(ipfs <method> [args...])".into()),
+    };
+    match method {
+        "cat" => {
+            let path = match args.get(1) {
+                Some(Val::Str(s)) => s.clone(),
+                _ => return Err("(ipfs cat \"<path>\")".into()),
+            };
+            let unixfs_resp = ctx
+                .ipfs
+                .unixfs_request()
+                .send()
+                .promise
+                .await
+                .map_err(|e| e.to_string())?;
+            let unixfs = unixfs_resp
+                .get()
+                .map_err(|e| e.to_string())?
+                .get_api()
+                .map_err(|e| e.to_string())?;
+            let mut req = unixfs.cat_request();
+            req.get().set_path(&path);
+            let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+            let data = resp
+                .get()
+                .map_err(|e| e.to_string())?
+                .get_data()
+                .map_err(|e| e.to_string())?;
+            // Try as UTF-8, fall back to hex.
+            match std::str::from_utf8(data) {
+                Ok(s) => Ok(Val::Str(s.to_string())),
+                Err(_) => Ok(Val::Str(format!("<{} bytes>", data.len()))),
+            }
+        }
+        "ls" => {
+            let path = match args.get(1) {
+                Some(Val::Str(s)) => s.clone(),
+                _ => return Err("(ipfs ls \"<path>\")".into()),
+            };
+            let unixfs_resp = ctx
+                .ipfs
+                .unixfs_request()
+                .send()
+                .promise
+                .await
+                .map_err(|e| e.to_string())?;
+            let unixfs = unixfs_resp
+                .get()
+                .map_err(|e| e.to_string())?
+                .get_api()
+                .map_err(|e| e.to_string())?;
+            let mut req = unixfs.ls_request();
+            req.get().set_path(&path);
+            let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+            let entries = resp
+                .get()
+                .map_err(|e| e.to_string())?
+                .get_entries()
+                .map_err(|e| e.to_string())?;
+            let items: Vec<Val> = (0..entries.len())
+                .filter_map(|i| {
+                    let e = entries.get(i);
+                    let name = e.get_name().ok()?.to_str().ok()?;
+                    let size = e.get_size();
+                    Some(Val::List(vec![
+                        Val::Str(name.to_string()),
+                        Val::Sym(size.to_string()),
+                    ]))
+                })
+                .collect();
+            Ok(Val::List(items))
+        }
+        _ => Err(format!("unknown ipfs method: {method}")),
+    }
+}
+
+async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
+    // Convert args to strings once — used for whichever candidate we find.
+    let str_args: Vec<String> = args
+        .iter()
+        .map(|v| match v {
+            Val::Str(s) | Val::Sym(s) => s.clone(),
+            other => format!("{other}"),
+        })
+        .collect();
+
+    let path_var = std::env::var("PATH").unwrap_or_else(|_| "/bin".to_string());
+    for dir in path_var.split(':') {
+        // Candidate 1: <dir>/<cmd>.wasm (flat binary)
+        // Candidate 2: <dir>/<cmd>/main.wasm (image-style nested)
+        let candidates = [
+            format!("{dir}/{cmd}.wasm"),
+            format!("{dir}/{cmd}/main.wasm"),
+        ];
+        let bytes = candidates.iter().find_map(|p| std::fs::read(p).ok());
+        if let Some(bytes) = bytes {
+            let mut req = ctx.executor.run_bytes_request();
+            {
+                let mut b = req.get();
+                b.set_wasm(&bytes);
+                let mut arg_list = b.init_args(str_args.len() as u32);
+                for (i, a) in str_args.iter().enumerate() {
+                    arg_list.set(i as u32, a);
+                }
+            }
+            let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+            let process = resp
+                .get()
+                .map_err(|e| e.to_string())?
+                .get_process()
+                .map_err(|e| e.to_string())?;
+
+            // Read stdout to completion.
+            let stdout_resp = process
+                .stdout_request()
+                .send()
+                .promise
+                .await
+                .map_err(|e| e.to_string())?;
+            let stdout_stream = stdout_resp
+                .get()
+                .map_err(|e| e.to_string())?
+                .get_stream()
+                .map_err(|e| e.to_string())?;
+
+            let mut output = Vec::new();
+            loop {
+                let mut req = stdout_stream.read_request();
+                req.get().set_max_bytes(65536);
+                let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+                let chunk = resp
+                    .get()
+                    .map_err(|e| e.to_string())?
+                    .get_data()
+                    .map_err(|e| e.to_string())?;
+                if chunk.is_empty() {
+                    break;
+                }
+                output.extend_from_slice(chunk);
+            }
+
+            // Wait for exit.
+            let wait_resp = process
+                .wait_request()
+                .send()
+                .promise
+                .await
+                .map_err(|e| e.to_string())?;
+            let exit_code = wait_resp
+                .get()
+                .map_err(|e| e.to_string())?
+                .get_exit_code();
+
+            let out_str = String::from_utf8_lossy(&output).trim_end().to_string();
+            if exit_code != 0 {
+                return Err(format!("{cmd}: exit code {exit_code}\n{out_str}"));
+            }
+            return Ok(Val::Str(out_str));
+        }
+    }
+    Err(format!("{cmd}: command not found"))
+}
+
+const HELP_TEXT: &str = "\
+Capabilities:
+  (host id)                    Peer ID
+  (host addrs)                 Listen addresses
+  (host peers)                 Connected peers
+  (host connect \"<multiaddr>\") Dial a peer
+
+  (executor echo \"<msg>\")      Diagnostic echo
+
+  (ipfs cat \"<path>\")          Fetch IPFS content
+  (ipfs ls \"<path>\")           List IPFS directory
+
+Built-ins:
+  (help)                       This message
+  (exit)                       Quit
+
+Any other command is looked up in PATH as <cmd>.wasm or <cmd>/main.wasm.";
+
+// ---------------------------------------------------------------------------
+// Shell mode (TTY)
+// ---------------------------------------------------------------------------
+
+const PROMPT: &[u8] = b"ww> ";
+
+fn write_prompt(stdout: &wasip2::io::streams::OutputStream) {
+    let _ = stdout.blocking_write_and_flush(PROMPT);
+}
+
+async fn run_shell(ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
+    let stdin = get_stdin();
+    let stdout = get_stdout();
+    let stderr = get_stderr();
+
+    write_prompt(&stdout);
+    let mut buf: Vec<u8> = Vec::new();
+
+    'outer: loop {
+        match stdin.blocking_read(4096) {
+            Ok(b) if b.is_empty() => break 'outer,
+            Ok(b) => buf.extend_from_slice(&b),
+            Err(_) => break 'outer,
+        }
+
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line_bytes = buf.drain(..=pos).collect::<Vec<_>>();
+            let line = match std::str::from_utf8(&line_bytes) {
+                Ok(s) => s.trim(),
+                Err(_) => {
+                    write_prompt(&stdout);
+                    continue;
+                }
+            };
+
+            if line.is_empty() {
+                write_prompt(&stdout);
+                continue;
+            }
+
+            match read(line) {
+                Ok(expr) => match eval(&expr, &ctx).await {
+                    Ok(result) => {
+                        let _ = stdout
+                            .blocking_write_and_flush(format!("{result}\n").as_bytes());
+                    }
+                    Err(e) => {
+                        let _ = stderr
+                            .blocking_write_and_flush(format!("error: {e}\n").as_bytes());
+                    }
+                },
+                Err(e) => {
+                    let _ = stderr
+                        .blocking_write_and_flush(format!("parse error: {e}\n").as_bytes());
+                }
+            }
+
+            write_prompt(&stdout);
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Daemon mode (non-TTY)
+// ---------------------------------------------------------------------------
+
+async fn run_daemon(ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
+    let stderr = get_stderr();
+    let stdin = get_stdin();
+
+    // Log readiness with peer ID.
+    let id_resp = ctx
+        .host
+        .id_request()
+        .send()
+        .promise
+        .await
+        .map_err(|e| e.to_string())?;
+    let peer_id = id_resp
+        .get()
+        .map_err(|e| e.to_string())?
+        .get_peer_id()
+        .map_err(|e| e.to_string())?;
+    let peer_id_hex = hex::encode(peer_id);
+    let _ = stderr.blocking_write_and_flush(
+        format!("{{\"event\":\"ready\",\"peer_id\":\"{peer_id_hex}\"}}\n").as_bytes(),
+    );
+
+    // Block until stdin is closed (host signals shutdown).
+    loop {
+        match stdin.blocking_read(4096) {
+            Ok(b) if b.is_empty() => break,
+            Err(_) => break,
+            Ok(_) => {} // Discard input in daemon mode.
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+struct Pid0;
+
+impl Guest for Pid0 {
+    fn run() -> Result<(), ()> {
+        run_impl();
+        Ok(())
+    }
+}
+
+fn run_impl() {
+    init_logging();
+
+    runtime::run(|membrane: Membrane| async move {
+        let graft_resp = membrane.graft_request().send().promise.await?;
+        let session = graft_resp.get()?.get_session()?;
+        let ext = session.get_extension()?;
+
+        let ctx = ShellCtx {
+            host: ext.get_host()?,
+            executor: ext.get_executor()?,
+            ipfs: ext.get_ipfs()?,
+        };
+
+        let is_tty = std::env::var("WW_TTY").is_ok();
+        let result = if is_tty {
+            run_shell(ctx).await
+        } else {
+            run_daemon(ctx).await
+        };
+
+        if let Err(e) = result {
+            log::error!("kernel error: {e}");
+        }
+
+        Ok(())
     });
 }
 
-use bindings::wetware::streams::streams::create_connection;
-use wasip2::io::poll as wasi_poll;
-use wasip2::io::streams::{
-    InputStream as WasiInputStream, OutputStream as WasiOutputStream, Pollable as WasiPollable,
-    StreamError as WasiStreamError,
-};
-
-pub struct StreamReader {
-    stream: WasiInputStream,
-    buffer: Vec<u8>,
-    offset: usize,
-}
-
-impl StreamReader {
-    pub fn new(stream: WasiInputStream) -> Self {
-        Self {
-            stream,
-            buffer: Vec::new(),
-            offset: 0,
-        }
-    }
-
-    pub fn pollable(&self) -> WasiPollable {
-        self.stream.subscribe()
-    }
-}
-
-impl futures::io::AsyncRead for StreamReader {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut [u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        if self.offset < self.buffer.len() {
-            let available = &self.buffer[self.offset..];
-            let to_copy = available.len().min(buf.len());
-            buf[..to_copy].copy_from_slice(&available[..to_copy]);
-            self.offset += to_copy;
-            if self.offset >= self.buffer.len() {
-                self.buffer.clear();
-                self.offset = 0;
-            }
-            return std::task::Poll::Ready(Ok(to_copy));
-        }
-
-        let len = buf.len() as u64;
-        match self.stream.read(len) {
-            Ok(bytes) => {
-                if bytes.is_empty() {
-                    cx.waker().wake_by_ref();
-                    return std::task::Poll::Pending;
-                }
-                self.buffer = bytes;
-                self.offset = 0;
-                let available = &self.buffer[self.offset..];
-                let to_copy = available.len().min(buf.len());
-                buf[..to_copy].copy_from_slice(&available[..to_copy]);
-                self.offset += to_copy;
-                std::task::Poll::Ready(Ok(to_copy))
-            }
-            Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
-            Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("stream read error: {:?}", err),
-            ))),
-        }
-    }
-}
-
-pub struct StreamWriter {
-    stream: WasiOutputStream,
-}
-
-impl StreamWriter {
-    pub fn new(stream: WasiOutputStream) -> Self {
-        Self { stream }
-    }
-
-    pub fn pollable(&self) -> WasiPollable {
-        self.stream.subscribe()
-    }
-}
-
-impl futures::io::AsyncWrite for StreamWriter {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        if buf.is_empty() {
-            return std::task::Poll::Ready(Ok(0));
-        }
-        match self.stream.check_write() {
-            Ok(0) => {
-                cx.waker().wake_by_ref();
-                std::task::Poll::Pending
-            }
-            Ok(budget) => {
-                let to_write = buf.len().min(budget as usize);
-                match self.stream.write(&buf[..to_write]) {
-                    Ok(_written) => std::task::Poll::Ready(Ok(to_write)),
-                    Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
-                    Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("stream write error: {:?}", err),
-                    ))),
-                }
-            }
-            Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
-            Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("stream write error: {:?}", err),
-            ))),
-        }
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match self.stream.flush() {
-            Ok(()) => std::task::Poll::Ready(Ok(())),
-            Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(())),
-            Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("stream flush error: {:?}", err),
-            ))),
-        }
-    }
-
-    fn poll_close(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match self.stream.flush() {
-            Ok(()) => std::task::Poll::Ready(Ok(())),
-            Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(())),
-            Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("stream close error: {:?}", err),
-            ))),
-        }
-    }
-}
-
-pub struct StreamPollables {
-    pub reader: WasiPollable,
-    pub writer: WasiPollable,
-}
-
-pub struct GuestStreams {
-    pub reader: StreamReader,
-    pub writer: StreamWriter,
-    pub pollables: StreamPollables,
-}
-
-pub fn connect_streams() -> GuestStreams {
-    let connection = create_connection();
-    let input_stream = connection.get_input_stream();
-    let output_stream = connection.get_output_stream();
-
-    let reader = StreamReader::new(input_stream);
-    let writer = StreamWriter::new(output_stream);
-    let pollables = StreamPollables {
-        reader: reader.pollable(),
-        writer: writer.pollable(),
-    };
-
-    GuestStreams {
-        reader,
-        writer,
-        pollables,
-    }
-}
-
-pub struct RpcSession<C> {
-    pub rpc_system: RpcSystem<Side>,
-    pub client: C,
-    pub pollables: StreamPollables,
-}
-
-impl<C: FromClientHook> RpcSession<C> {
-    pub fn connect() -> Self {
-        Self::connect_with_export(None)
-    }
-
-    /// Connect and export `bootstrap` as this vat's bootstrap capability.
-    ///
-    /// The host can retrieve the exported cap via `rpc_system.bootstrap(Side::Client)`.
-    /// Pass `None` for guests that do not export a capability (equivalent to `connect()`).
-    pub fn connect_with_export(bootstrap: Option<capnp::capability::Client>) -> Self {
-        let streams = connect_streams();
-        let pollables = streams.pollables;
-        let network = VatNetwork::new(
-            streams.reader,
-            streams.writer,
-            Side::Client,
-            Default::default(),
-        );
-        let mut rpc_system = RpcSystem::new(Box::new(network), bootstrap);
-        let client = rpc_system.bootstrap(Side::Server);
-        Self {
-            rpc_system,
-            client,
-            pollables,
-        }
-    }
-
-    pub fn forget(self) {
-        std::mem::forget(self.client);
-        std::mem::forget(self.rpc_system);
-        std::mem::forget(self.pollables);
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct DriveOutcome {
-    pub done: bool,
-    pub progressed: bool,
-}
-
-impl DriveOutcome {
-    pub fn done() -> Self {
-        Self {
-            done: true,
-            progressed: true,
-        }
-    }
-
-    pub fn progress() -> Self {
-        Self {
-            done: false,
-            progressed: true,
-        }
-    }
-
-    pub fn pending() -> Self {
-        Self {
-            done: false,
-            progressed: false,
-        }
-    }
-}
-
-pub struct RpcDriver {
-    waker: Waker,
-}
-
-impl RpcDriver {
-    pub fn new() -> Self {
-        Self {
-            waker: noop_waker(),
-        }
-    }
-
-    pub fn drive_until<F>(
-        &self,
-        rpc_system: &mut RpcSystem<Side>,
-        pollables: &StreamPollables,
-        mut poll: F,
-    ) where
-        F: FnMut(&mut Context<'_>) -> DriveOutcome,
-    {
-        loop {
-            let mut made_progress = false;
-            let mut cx = Context::from_waker(&self.waker);
-
-            match rpc_system.poll_unpin(&mut cx) {
-                Poll::Ready(Ok(())) | Poll::Ready(Err(_)) => {
-                    made_progress = true;
-                }
-                Poll::Pending => {}
-            }
-
-            let outcome = poll(&mut cx);
-            made_progress |= outcome.progressed;
-
-            if outcome.done {
-                break;
-            }
-
-            // Flush any writes queued by the poll closure before blocking.
-            match rpc_system.poll_unpin(&mut cx) {
-                Poll::Ready(Ok(())) | Poll::Ready(Err(_)) => {
-                    made_progress = true;
-                }
-                Poll::Pending => {}
-            }
-
-            if !made_progress {
-                if pollables.writer.ready() {
-                    wasi_poll::poll(&[&pollables.reader]);
-                } else {
-                    wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
-                }
-            }
-        }
-    }
-}
-
-/// Drive the RPC system and poll a single future to completion.
-///
-/// Returns `Some(value)` if the future resolves, or `None` if the
-/// RPC system terminates before the future completes.
-pub fn block_on<C, F>(session: &mut RpcSession<C>, mut future: F) -> Option<F::Output>
-where
-    C: FromClientHook,
-    F: Future + Unpin,
-{
-    let waker = noop_waker();
-    let mut rpc_done = false;
-    loop {
-        let mut cx = Context::from_waker(&waker);
-        let mut made_progress = false;
-
-        if !rpc_done {
-            match session.rpc_system.poll_unpin(&mut cx) {
-                Poll::Ready(_) => {
-                    rpc_done = true;
-                    made_progress = true;
-                }
-                Poll::Pending => {}
-            }
-        }
-
-        match Pin::new(&mut future).poll(&mut cx) {
-            Poll::Ready(value) => return Some(value),
-            Poll::Pending => {}
-        }
-
-        // Flush any writes queued by the future before blocking in wasi_poll.
-        if !rpc_done {
-            match session.rpc_system.poll_unpin(&mut cx) {
-                Poll::Ready(_) => {
-                    rpc_done = true;
-                    made_progress = true;
-                }
-                Poll::Pending => {}
-            }
-        }
-
-        if rpc_done {
-            return None;
-        }
-
-        if !made_progress {
-            if session.pollables.writer.ready() {
-                wasi_poll::poll(&[&session.pollables.reader]);
-            } else {
-                wasi_poll::poll(&[&session.pollables.reader, &session.pollables.writer]);
-            }
-        }
-    }
-}
-
-/// Run a guest program with an async entry point, exporting a bootstrap capability.
-///
-/// Like [`run`], but the guest also provides `bootstrap` as its own bootstrap
-/// capability on the RPC connection.  The host can retrieve it via
-/// `rpc_system.bootstrap(Side::Client)`.
-///
-/// Use this when the guest needs to export a capability back to the host —
-/// for example, a pid0 that wraps and attenuates the host's Membrane before
-/// re-exporting it to external peers.
-///
-/// # Example
-///
-/// ```no_run
-/// let my_membrane: capnp::capability::Client = capnp_rpc::new_client(MyMembraneImpl).client;
-/// wetware_guest::serve(my_membrane, |host| async move {
-///     // ... use host capabilities, export my_membrane to host ...
-///     Ok(())
-/// });
-/// ```
-pub fn serve<C, F, Fut>(bootstrap: capnp::capability::Client, f: F)
-where
-    C: FromClientHook + Clone,
-    F: FnOnce(C) -> Fut,
-    Fut: Future<Output = Result<(), capnp::Error>>,
-{
-    run_with_session(RpcSession::<C>::connect_with_export(Some(bootstrap)), f)
-}
-
-/// Run a guest program with an async entry point.
-///
-/// Sets up the RPC session, bootstraps the host capability, and drives
-/// the provided async closure to completion alongside the RPC system.
-/// Handles all resource cleanup automatically.
-///
-/// # Example
-///
-/// ```no_run
-/// wetware_guest::run(|host| async move {
-///     let executor = host.executor_request().send().pipeline.get_executor();
-///     let resp = executor.echo_request().send().promise.await?;
-///     let text = resp.get()?.get_response()?.to_str()?;
-///     Ok(())
-/// });
-/// ```
-pub fn run<C, F, Fut>(f: F)
-where
-    C: FromClientHook + Clone,
-    F: FnOnce(C) -> Fut,
-    Fut: Future<Output = Result<(), capnp::Error>>,
-{
-    run_with_session(RpcSession::<C>::connect(), f)
-}
-
-fn run_with_session<C, F, Fut>(mut session: RpcSession<C>, f: F)
-where
-    C: FromClientHook + Clone,
-    F: FnOnce(C) -> Fut,
-    Fut: Future<Output = Result<(), capnp::Error>>,
-{
-    let client = session.client.clone();
-    let future = f(client);
-    let mut future = Box::pin(future);
-
-    let waker = noop_waker();
-    let mut rpc_done = false;
-    loop {
-        let mut cx = Context::from_waker(&waker);
-        let mut made_progress = false;
-
-        if !rpc_done {
-            match session.rpc_system.poll_unpin(&mut cx) {
-                Poll::Ready(_) => {
-                    rpc_done = true;
-                    made_progress = true;
-                }
-                Poll::Pending => {}
-            }
-        }
-
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(_) => {
-                // Forget the future to avoid dropping Cap'n Proto objects
-                // which would trigger WASI resource cleanup errors.
-                std::mem::forget(future);
-                session.forget();
-                return;
-            }
-            Poll::Pending => {}
-        }
-
-        // Flush any writes queued by the future before blocking in wasi_poll.
-        // Without this, an RPC call queued during future.poll (e.g. echo after
-        // graft resolves) is never sent, and wasi_poll blocks forever waiting
-        // for a response that the host never received.
-        if !rpc_done {
-            match session.rpc_system.poll_unpin(&mut cx) {
-                Poll::Ready(_) => {
-                    rpc_done = true;
-                    made_progress = true;
-                }
-                Poll::Pending => {}
-            }
-        }
-
-        if rpc_done {
-            std::mem::forget(future);
-            session.forget();
-            return;
-        }
-
-        if !made_progress {
-            if session.pollables.writer.ready() {
-                wasi_poll::poll(&[&session.pollables.reader]);
-            } else {
-                wasi_poll::poll(&[&session.pollables.reader, &session.pollables.writer]);
-            }
-        }
-    }
-}
+wasip2::cli::command::export!(Pid0);

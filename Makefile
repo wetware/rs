@@ -8,8 +8,8 @@ RELEASE_DIR  = target/$(WASM_TARGET)/release
 
 IMAGES_DIR := images
 
-.PHONY: all host guests images clean run-shell
-.PHONY: guest-shell image-shell
+.PHONY: all host guests images clean run-kernel
+.PHONY: guest-kernel image-kernel
 .PHONY: podman-build podman-run podman-clean podman-dev
 
 all: guests images host
@@ -21,24 +21,24 @@ host:
 
 # --- Guests ------------------------------------------------------------------
 
-guests: guest-shell
+guests: guest-kernel
 
-guest-shell:
-	cd std/shell && cargo build --target $(WASM_TARGET) --release --target-dir target
+guest-kernel:
+	cd std/kernel && cargo build --target $(WASM_TARGET) --release --target-dir target
 
 # --- Images ------------------------------------------------------------------
 # Assemble FHS-style image directories:
 #   <image>/bin/main.wasm   — guest entrypoint
 
-images: image-shell
+images: image-kernel
 
-image-shell: guest-shell
-	@mkdir -p $(IMAGES_DIR)/shell/bin
-	cp std/shell/$(RELEASE_DIR)/shell.wasm $(IMAGES_DIR)/shell/bin/main.wasm
+image-kernel: guest-kernel
+	@mkdir -p $(IMAGES_DIR)/kernel/bin
+	cp std/kernel/$(RELEASE_DIR)/kernel.wasm $(IMAGES_DIR)/kernel/bin/main.wasm
 
-# Build the shell image and launch it interactively.
-run-shell: image-shell
-	cargo run -- run $(IMAGES_DIR)/shell
+# Build the kernel image and launch it interactively.
+run-kernel: image-kernel
+	cargo run -- run $(IMAGES_DIR)/kernel
 
 # --- Clean -------------------------------------------------------------------
 
