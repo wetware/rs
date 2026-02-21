@@ -1,28 +1,38 @@
 # std
 
-Standard crates for the wetware guest environment.
+Standard components for the wetware guest environment.
 
 ## Layout
 
-| Crate | Package | Role |
-|-------|---------|------|
-| `std/runtime/` | `runtime` | Guest SDK — connects a WASM component to the host over WASI streams and drives the Cap'n Proto RPC event loop. All guest processes link against this. |
-| `std/kernel/` | `kernel` | Init process (pid0) — grafts onto the host Membrane, obtains a Session, and enters either **daemon mode** (non-TTY) or **shell mode** (TTY Lisp REPL). Builds to `images/kernel/`. |
+| Path | Package | Role |
+|------|---------|------|
+| `std/runtime/` | `runtime` | Guest SDK — connects a WASM component to the host over WASI streams and drives the Cap'n Proto RPC event loop. All guests link against this. |
+| `std/kernel/`  | `pid0`    | Init process — grafts onto the host Membrane, re-exports an attenuated capability to peers. |
+| `std/shell/`   | `shell`   | Interactive shell (in development). |
 
-## Naming convention
+## Convention
 
-Each executable crate in `std/` has a corresponding directory in `images/`:
+Every component builds to `boot/main.wasm` inside its own directory:
 
 ```
-std/kernel/  →  images/kernel/bin/main.wasm
+std/kernel/boot/main.wasm    ← ww build std/kernel
+std/shell/boot/main.wasm     ← ww build std/shell
 ```
 
-Library crates (`std/runtime/`) have no `images/` counterpart.
+Build artifacts are **not committed**. They are published to IPFS:
+
+```bash
+ww build std/kernel
+ww push std/
+# → /ipfs/<CID>
+```
 
 ## Building
 
-```sh
-make guests    # compile all std/ guest crates to wasm32-wasip2
-make images    # install artifacts into images/
-make kernel    # shorthand: build std/kernel + install to images/kernel
+```bash
+# Build a single component
+ww build std/kernel
+
+# Or with cargo directly
+cargo build -p pid0 --target wasm32-wasip2 --release
 ```
