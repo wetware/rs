@@ -29,9 +29,8 @@ pub fn generate() -> Result<SigningKey> {
 ///
 /// The resulting keypair can be used directly with [`SwarmBuilder::with_existing_identity`].
 pub fn to_libp2p(sk: &SigningKey) -> Result<Keypair> {
-    let secret =
-        libp2p::identity::secp256k1::SecretKey::try_from_bytes(sk.to_bytes().to_vec())
-            .context("failed to convert secp256k1 key to libp2p identity")?;
+    let secret = libp2p::identity::secp256k1::SecretKey::try_from_bytes(sk.to_bytes().to_vec())
+        .context("failed to convert secp256k1 key to libp2p identity")?;
     let kp = libp2p::identity::secp256k1::Keypair::from(secret);
     Ok(Keypair::from(kp))
 }
@@ -55,8 +54,8 @@ pub fn ethereum_address(sk: &SigningKey) -> [u8; 20] {
 /// The file must contain exactly 64 lowercase hex characters (32 bytes),
 /// optionally surrounded by whitespace (newlines are trimmed).
 pub fn load(path: &str) -> Result<SigningKey> {
-    let hex_str = std::fs::read_to_string(path)
-        .with_context(|| format!("read key file: {path}"))?;
+    let hex_str =
+        std::fs::read_to_string(path).with_context(|| format!("read key file: {path}"))?;
 
     let bytes = hex::decode(hex_str.trim())
         .context("key file must contain a hex-encoded 32-byte secp256k1 secret")?;
@@ -65,8 +64,7 @@ pub fn load(path: &str) -> Result<SigningKey> {
         bail!("expected 32-byte key, got {} bytes", bytes.len());
     }
 
-    SigningKey::from_bytes(bytes.as_slice().into())
-        .context("invalid secp256k1 secret key bytes")
+    SigningKey::from_bytes(bytes.as_slice().into()).context("invalid secp256k1 secret key bytes")
 }
 
 /// Write a hex-encoded secp256k1 private key to disk.
