@@ -81,9 +81,9 @@ async fn eval(expr: &Val, ctx: &mut ShellCtx) -> Result<Val, String> {
                 (cmd, &items[1..])
             };
             match resolved_cap {
-                "host"     => eval_host(args, ctx).await,
+                "host" => eval_host(args, ctx).await,
                 "executor" => eval_executor(args, ctx).await,
-                "ipfs"     => eval_ipfs(args, ctx).await,
+                "ipfs" => eval_ipfs(args, ctx).await,
                 "session" => {
                     // (session <cap> <method> [args...]) — session-qualified dispatch
                     let cap = match args.first() {
@@ -91,9 +91,9 @@ async fn eval(expr: &Val, ctx: &mut ShellCtx) -> Result<Val, String> {
                         _ => return Err("(session <capability> <method> [args...])".into()),
                     };
                     match cap {
-                        "host"     => eval_host(&args[1..], ctx).await,
+                        "host" => eval_host(&args[1..], ctx).await,
                         "executor" => eval_executor(&args[1..], ctx).await,
-                        "ipfs"     => eval_ipfs(&args[1..], ctx).await,
+                        "ipfs" => eval_ipfs(&args[1..], ctx).await,
                         _ => Err(format!("unknown capability: {cap}")),
                     }
                 }
@@ -207,10 +207,7 @@ async fn eval_host(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
                 let mut addrs = b.init_addrs(1);
                 addrs.set(0, addr_str.as_bytes());
             }
-            req.send()
-                .promise
-                .await
-                .map_err(|e| e.to_string())?;
+            req.send().promise.await.map_err(|e| e.to_string())?;
             Ok(Val::Sym("ok".into()))
         }
         _ => Err(format!("unknown host method: {method}")),
@@ -396,10 +393,7 @@ async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &ShellCtx) -> Result<Val
                 .promise
                 .await
                 .map_err(|e| e.to_string())?;
-            let exit_code = wait_resp
-                .get()
-                .map_err(|e| e.to_string())?
-                .get_exit_code();
+            let exit_code = wait_resp.get().map_err(|e| e.to_string())?.get_exit_code();
 
             let out_str = String::from_utf8_lossy(&output).trim_end().to_string();
             if exit_code != 0 {
@@ -472,17 +466,15 @@ async fn run_shell(mut ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> 
                 Ok(expr) => match eval(&expr, &mut ctx).await {
                     Ok(Val::Nil) => {}
                     Ok(result) => {
-                        let _ = stdout
-                            .blocking_write_and_flush(format!("{result}\n").as_bytes());
+                        let _ = stdout.blocking_write_and_flush(format!("{result}\n").as_bytes());
                     }
                     Err(e) => {
-                        let _ = stderr
-                            .blocking_write_and_flush(format!("error: {e}\n").as_bytes());
+                        let _ = stderr.blocking_write_and_flush(format!("error: {e}\n").as_bytes());
                     }
                 },
                 Err(e) => {
-                    let _ = stderr
-                        .blocking_write_and_flush(format!("parse error: {e}\n").as_bytes());
+                    let _ =
+                        stderr.blocking_write_and_flush(format!("parse error: {e}\n").as_bytes());
                 }
             }
 

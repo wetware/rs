@@ -70,10 +70,7 @@ pub async fn merge_layers(
         }
         let main_wasm = path.join("bin/main.wasm");
         if !main_wasm.exists() {
-            bail!(
-                "Image missing bin/main.wasm: {}",
-                path.display()
-            );
+            bail!("Image missing bin/main.wasm: {}", path.display());
         }
         return Ok(MergedImage {
             root: ImageRoot::Direct(path),
@@ -156,10 +153,7 @@ async fn apply_ipfs_layer(ipfs_path: &str, dst: &Path, client: &ipfs::HttpClient
 ///
 /// Returns `CurrentHead { seq, cid }` where `cid` is raw binary bytes
 /// from the contract's `head()` view function.
-pub async fn read_contract_head(
-    rpc_url: &str,
-    contract: &[u8; 20],
-) -> Result<atom::CurrentHead> {
+pub async fn read_contract_head(rpc_url: &str, contract: &[u8; 20]) -> Result<atom::CurrentHead> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .build()
@@ -272,10 +266,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_directories_merge() {
-        let base = make_layer(&[
-            ("bin/main.wasm", b"(wasm)"),
-            ("boot/QmPeerA", b"addr-a"),
-        ]);
+        let base = make_layer(&[("bin/main.wasm", b"(wasm)"), ("boot/QmPeerA", b"addr-a")]);
         let overlay = make_layer(&[("boot/QmPeerB", b"addr-b")]);
         let client = stub_ipfs_client();
 
@@ -309,12 +300,10 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("missing bin/main.wasm")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing bin/main.wasm"));
     }
 
     #[tokio::test]
@@ -322,12 +311,7 @@ mod tests {
         let client = stub_ipfs_client();
         let result = merge_layers(&[], &client).await;
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("No image layers")
-        );
+        assert!(result.unwrap_err().to_string().contains("No image layers"));
     }
 
     #[tokio::test]

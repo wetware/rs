@@ -10,24 +10,39 @@
 mod common;
 
 use anyhow::{Context, Result};
+use atom::abi::{
+    decode_head_return, decode_log_to_observed, CurrentHead, HEAD_SELECTOR, HEAD_UPDATED_TOPIC0,
+};
 use common::{deploy_atom, evm_revert, evm_snapshot, set_head, spawn_anvil};
 use serde_json::{json, Value};
-use atom::abi::{decode_head_return, decode_log_to_observed, CurrentHead, HEAD_SELECTOR, HEAD_UPDATED_TOPIC0};
 use std::path::Path;
 
-async fn http_json_rpc(client: &reqwest::Client, url: &str, method: &str, params: Value, id: u64) -> Result<Value> {
+async fn http_json_rpc(
+    client: &reqwest::Client,
+    url: &str,
+    method: &str,
+    params: Value,
+    id: u64,
+) -> Result<Value> {
     let body = json!({
         "jsonrpc": "2.0",
         "id": id,
         "method": method,
         "params": params
     });
-    let resp = client.post(url).json(&body).send().await.context("HTTP request")?;
+    let resp = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .context("HTTP request")?;
     let v: Value = resp.json().await.context("parse response")?;
     if let Some(err) = v.get("error") {
         anyhow::bail!("RPC error: {}", err);
     }
-    v.get("result").cloned().ok_or_else(|| anyhow::anyhow!("Missing result"))
+    v.get("result")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Missing result"))
 }
 
 async fn eth_get_logs(
@@ -44,7 +59,9 @@ async fn eth_get_logs(
         "toBlock": format!("0x{:x}", to_block),
     });
     let result = http_json_rpc(client, http_url, "eth_getLogs", json!([filter]), 12).await?;
-    let arr = result.as_array().ok_or_else(|| anyhow::anyhow!("getLogs not array"))?;
+    let arr = result
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("getLogs not array"))?;
     let logs: Vec<Value> = arr
         .iter()
         .filter(|log| {
@@ -71,7 +88,9 @@ async fn atom_head(
         "data": format!("0x{}", hex::encode(HEAD_SELECTOR)),
     }, "latest"]);
     let result = http_json_rpc(client, http_url, "eth_call", params, 13).await?;
-    let s = result.as_str().ok_or_else(|| anyhow::anyhow!("eth_call result not string"))?;
+    let s = result
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("eth_call result not string"))?;
     let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s)).context("decode eth_call")?;
     decode_head_return(&bytes).context("decode head()")
 }
@@ -82,14 +101,16 @@ async fn test_reorg_naive_observer_mismatch() {
         eprintln!("skipping test_reorg_naive_observer_mismatch: anvil/forge/cast not in PATH");
         return;
     }
-    let _ = tracing_subscriber::fmt()
-        .with_test_writer()
-        .try_init();
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
 
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).unwrap();
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .unwrap();
     let (mut anvil_process, rpc_url) = spawn_anvil().await.expect("spawn anvil");
     let contract_addr = deploy_atom(repo_root, &rpc_url).expect("deploy Atom");
-    let addr_bytes = hex::decode(contract_addr.strip_prefix("0x").unwrap_or(&contract_addr)).expect("hex");
+    let addr_bytes =
+        hex::decode(contract_addr.strip_prefix("0x").unwrap_or(&contract_addr)).expect("hex");
     let mut contract_address = [0u8; 20];
     contract_address.copy_from_slice(&addr_bytes);
 
@@ -103,7 +124,15 @@ async fn test_reorg_naive_observer_mismatch() {
 
     // Emit HeadUpdated: setHead("cid-1")
     let cid_hex = "0x6369642d31"; // "cid-1" in hex
-    set_head(repo_root, &rpc_url, &contract_addr, "setHead(bytes)", cid_hex, None).expect("setHead");
+    set_head(
+        repo_root,
+        &rpc_url,
+        &contract_addr,
+        "setHead(bytes)",
+        cid_hex,
+        None,
+    )
+    .expect("setHead");
 
     // Naive observation: poll eth_getLogs, decode, update in-memory applied_head (no reorg safety).
     let from_block = 1u64;
@@ -115,7 +144,10 @@ async fn test_reorg_naive_observer_mismatch() {
         .iter()
         .filter_map(|log| decode_log_to_observed(log).ok())
         .collect();
-    assert!(!observed.is_empty(), "expected at least one HeadUpdated log");
+    assert!(
+        !observed.is_empty(),
+        "expected at least one HeadUpdated log"
+    );
     let observed_event = &observed[0];
     let applied_head = CurrentHead {
         seq: observed_event.seq,
@@ -126,7 +158,9 @@ async fn test_reorg_naive_observer_mismatch() {
     assert_eq!(applied_head.cid.as_slice(), b"cid-1");
 
     // Revert chain so the setHead block is no longer canonical (simulates reorg).
-    let reverted = evm_revert(&rpc_url, &snapshot_id).await.expect("evm_revert");
+    let reverted = evm_revert(&rpc_url, &snapshot_id)
+        .await
+        .expect("evm_revert");
     assert!(reverted, "evm_revert should return true");
 
     // Post-revert canonical checks: eth_getLogs should not contain our tx; stem.head() should be initial.
@@ -141,10 +175,18 @@ async fn test_reorg_naive_observer_mismatch() {
             .map(|b| b.as_slice() == observed_tx_hash)
             .unwrap_or(false)
     });
-    assert!(!has_our_tx, "canonical logs must not contain the reverted setHead tx");
+    assert!(
+        !has_our_tx,
+        "canonical logs must not contain the reverted setHead tx"
+    );
 
-    let canonical_head = atom_head(&client, &rpc_url, &contract_address).await.expect("atom head()");
-    assert_eq!(canonical_head.seq, 0, "canonical chain must no longer reflect the reverted setHead");
+    let canonical_head = atom_head(&client, &rpc_url, &contract_address)
+        .await
+        .expect("atom head()");
+    assert_eq!(
+        canonical_head.seq, 0,
+        "canonical chain must no longer reflect the reverted setHead"
+    );
     // After evm_revert, canonical head is back to initial state (seq 0); cid may be initial or empty depending on node.
 
     // Expected limitation: naive observer still has the orphaned applied_head (no rollback).

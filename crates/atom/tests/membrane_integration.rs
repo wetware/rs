@@ -3,13 +3,13 @@
 
 mod common;
 
+use atom::stem_capnp;
+use atom::{AtomIndexer, Epoch, IndexerConfig, MembraneServer};
 use capnp_rpc::new_client;
 use common::{deploy_atom, set_head, spawn_anvil, StubSessionBuilder};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use atom::stem_capnp;
-use atom::{Epoch, IndexerConfig, AtomIndexer, MembraneServer};
 use tokio::sync::watch;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
@@ -53,16 +53,30 @@ async fn test_membrane_graft_echo_against_anvil() {
         .with_test_writer()
         .try_init();
 
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).unwrap();
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .unwrap();
     let (mut anvil_process, rpc_url) = spawn_anvil().await.expect("spawn anvil");
     let contract_addr = deploy_atom(repo_root, &rpc_url).expect("deploy Atom");
-    let addr_bytes = hex::decode(contract_addr.strip_prefix("0x").unwrap_or(&contract_addr)).expect("hex");
+    let addr_bytes =
+        hex::decode(contract_addr.strip_prefix("0x").unwrap_or(&contract_addr)).expect("hex");
     let mut contract_address = [0u8; 20];
     contract_address.copy_from_slice(&addr_bytes);
 
-    set_head(repo_root, &rpc_url, &contract_addr, "setHead(bytes)", "0x697066732f2f6669727374", None).expect("setHead 1");
+    set_head(
+        repo_root,
+        &rpc_url,
+        &contract_addr,
+        "setHead(bytes)",
+        "0x697066732f2f6669727374",
+        None,
+    )
+    .expect("setHead 1");
 
-    let ws_url = rpc_url.replace("http://", "ws://").replace("https://", "wss://");
+    let ws_url = rpc_url
+        .replace("http://", "ws://")
+        .replace("https://", "wss://");
     let config = IndexerConfig {
         ws_url: ws_url.clone(),
         http_url: rpc_url.clone(),
@@ -78,16 +92,13 @@ async fn test_membrane_graft_echo_against_anvil() {
         let _ = indexer_clone.run().await;
     });
 
-    let first_ev = timeout(
-        Duration::from_secs(15),
-        async {
-            loop {
-                if let Ok(ev) = recv.recv().await {
-                    return ev;
-                }
+    let first_ev = timeout(Duration::from_secs(15), async {
+        loop {
+            if let Ok(ev) = recv.recv().await {
+                return ev;
             }
-        },
-    )
+        }
+    })
     .await
     .expect("timeout waiting for first event");
 
@@ -117,7 +128,11 @@ async fn test_membrane_graft_echo_against_anvil() {
     let mut echo_req = executor.echo_request();
     echo_req.get().set_message("hello");
     let echo_resp = echo_req.send().promise.await.expect("echo RPC");
-    let response = echo_resp.get().expect("echo results").get_response().expect("response");
+    let response = echo_resp
+        .get()
+        .expect("echo results")
+        .get_response()
+        .expect("response");
     assert_eq!(response.to_str().unwrap(), "pong");
 
     // Advance epoch → same executor.echo → staleEpoch error
@@ -126,7 +141,10 @@ async fn test_membrane_graft_echo_against_anvil() {
     echo_req2.get().set_message("hello");
     match echo_req2.send().promise.await {
         Ok(_) => panic!("echo should fail with RPC error after epoch advance"),
-        Err(e) => assert!(e.to_string().contains("staleEpoch"), "error should mention staleEpoch, got: {e}"),
+        Err(e) => assert!(
+            e.to_string().contains("staleEpoch"),
+            "error should mention staleEpoch, got: {e}"
+        ),
     }
 }
 
@@ -159,8 +177,16 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
     let mut echo_req = executor.echo_request();
     echo_req.get().set_message("ping");
     let echo_resp = echo_req.send().promise.await.expect("echo RPC");
-    let response = echo_resp.get().expect("echo results").get_response().expect("response");
-    assert_eq!(response.to_str().unwrap(), "pong", "session should be ok under current epoch");
+    let response = echo_resp
+        .get()
+        .expect("echo results")
+        .get_response()
+        .expect("response");
+    assert_eq!(
+        response.to_str().unwrap(),
+        "pong",
+        "session should be ok under current epoch"
+    );
 
     // Advance epoch → same executor.echo → staleEpoch
     tx.send(epoch2).unwrap();
@@ -168,7 +194,10 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
     echo_req2.get().set_message("ping");
     match echo_req2.send().promise.await {
         Ok(_) => panic!("echo should fail with RPC error after epoch advance"),
-        Err(e) => assert!(e.to_string().contains("staleEpoch"), "error should mention staleEpoch, got: {e}"),
+        Err(e) => assert!(
+            e.to_string().contains("staleEpoch"),
+            "error should mention staleEpoch, got: {e}"
+        ),
     }
 
     // Re-graft → new executor.echo → Ok
@@ -181,7 +210,19 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
 
     let mut echo_req3 = executor2.echo_request();
     echo_req3.get().set_message("ping");
-    let echo_resp3 = echo_req3.send().promise.await.expect("echo after re-graft RPC");
-    let response3 = echo_resp3.get().expect("echo results").get_response().expect("response");
-    assert_eq!(response3.to_str().unwrap(), "pong", "re-graft session should be ok");
+    let echo_resp3 = echo_req3
+        .send()
+        .promise
+        .await
+        .expect("echo after re-graft RPC");
+    let response3 = echo_resp3
+        .get()
+        .expect("echo results")
+        .get_response()
+        .expect("response");
+    assert_eq!(
+        response3.to_str().unwrap(),
+        "pong",
+        "re-graft session should be ok"
+    );
 }

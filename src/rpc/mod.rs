@@ -597,8 +597,7 @@ mod tests {
         let network_state = NetworkState::from_peer_id(peer_id);
         let (swarm_tx, swarm_rx) = mpsc::channel(16);
 
-        let server_rpc =
-            build_peer_rpc(server_read, server_write, network_state, swarm_tx, false);
+        let server_rpc = build_peer_rpc(server_read, server_write, network_state, swarm_tx, false);
 
         let server_handle = tokio::task::spawn_local(async move {
             let _ = server_rpc.await;
@@ -668,16 +667,18 @@ mod tests {
             .run_until(async {
                 let (host, _server, _rx) = setup_rpc();
 
-                let executor = host
-                    .executor_request()
-                    .send()
-                    .pipeline
-                    .get_executor();
+                let executor = host.executor_request().send().pipeline.get_executor();
 
                 let mut req = executor.echo_request();
                 req.get().set_message("hello world");
                 let resp = req.send().promise.await.unwrap();
-                let response = resp.get().unwrap().get_response().unwrap().to_str().unwrap();
+                let response = resp
+                    .get()
+                    .unwrap()
+                    .get_response()
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
                 assert_eq!(response, "Echo: hello world");
             })
             .await;
@@ -690,15 +691,17 @@ mod tests {
             .run_until(async {
                 let (host, _server, _rx) = setup_rpc();
 
-                let executor = host
-                    .executor_request()
-                    .send()
-                    .pipeline
-                    .get_executor();
+                let executor = host.executor_request().send().pipeline.get_executor();
 
                 let req = executor.echo_request();
                 let resp = req.send().promise.await.unwrap();
-                let response = resp.get().unwrap().get_response().unwrap().to_str().unwrap();
+                let response = resp
+                    .get()
+                    .unwrap()
+                    .get_response()
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
                 assert_eq!(response, "Echo: ");
             })
             .await;
@@ -711,11 +714,7 @@ mod tests {
             .run_until(async {
                 let (host, _server, _rx) = setup_rpc();
 
-                let executor = host
-                    .executor_request()
-                    .send()
-                    .pipeline
-                    .get_executor();
+                let executor = host.executor_request().send().pipeline.get_executor();
 
                 let mut futures = Vec::new();
                 for i in 0..5 {
@@ -726,7 +725,13 @@ mod tests {
 
                 for (i, fut) in futures.into_iter().enumerate() {
                     let resp = fut.await.unwrap();
-                    let response = resp.get().unwrap().get_response().unwrap().to_str().unwrap();
+                    let response = resp
+                        .get()
+                        .unwrap()
+                        .get_response()
+                        .unwrap()
+                        .to_str()
+                        .unwrap();
                     assert_eq!(response, format!("Echo: msg-{i}"));
                 }
             })

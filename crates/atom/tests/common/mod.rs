@@ -53,8 +53,9 @@ impl SessionBuilder for StubSessionBuilder {
         guard: &EpochGuard,
         mut builder: atom::stem_capnp::session::Builder<'_>,
     ) -> std::result::Result<(), capnp::Error> {
-        let executor: system_capnp::executor::Client =
-            capnp_rpc::new_client(StubExecutor { guard: guard.clone() });
+        let executor: system_capnp::executor::Client = capnp_rpc::new_client(StubExecutor {
+            guard: guard.clone(),
+        });
         builder.set_executor(executor);
         Ok(())
     }
@@ -68,27 +69,42 @@ fn http_client() -> reqwest::Client {
         .expect("reqwest client")
 }
 
-async fn http_json_rpc(client: &reqwest::Client, url: &str, method: &str, params: Value, id: u64) -> Result<Value> {
+async fn http_json_rpc(
+    client: &reqwest::Client,
+    url: &str,
+    method: &str,
+    params: Value,
+    id: u64,
+) -> Result<Value> {
     let body = json!({
         "jsonrpc": "2.0",
         "id": id,
         "method": method,
         "params": params
     });
-    let resp = client.post(url).json(&body).send().await.context("HTTP request")?;
+    let resp = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .context("HTTP request")?;
     let resp = resp.error_for_status().context("HTTP status")?;
     let v: Value = resp.json().await.context("parse response")?;
     if let Some(err) = v.get("error") {
         anyhow::bail!("RPC error: {}", err);
     }
-    v.get("result").cloned().ok_or_else(|| anyhow::anyhow!("Missing result"))
+    v.get("result")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Missing result"))
 }
 
 /// Create a snapshot of the current chain state (Anvil). Returns snapshot id for evm_revert.
 pub async fn evm_snapshot(http_url: &str) -> Result<String> {
     let client = http_client();
     let result = http_json_rpc(&client, http_url, "evm_snapshot", json!([]), 10).await?;
-    let id = result.as_str().ok_or_else(|| anyhow::anyhow!("snapshot id not string"))?;
+    let id = result
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("snapshot id not string"))?;
     Ok(id.to_string())
 }
 
@@ -96,7 +112,9 @@ pub async fn evm_snapshot(http_url: &str) -> Result<String> {
 pub async fn evm_revert(http_url: &str, snap: &str) -> Result<bool> {
     let client = http_client();
     let result = http_json_rpc(&client, http_url, "evm_revert", json!([snap]), 11).await?;
-    result.as_bool().ok_or_else(|| anyhow::anyhow!("evm_revert result not bool"))
+    result
+        .as_bool()
+        .ok_or_else(|| anyhow::anyhow!("evm_revert result not bool"))
 }
 
 /// Mine n blocks (Anvil). Loops evm_mine one block at a time.
@@ -112,7 +130,9 @@ pub async fn evm_mine(http_url: &str, n: u64) -> Result<()> {
 pub async fn eth_block_number(http_url: &str) -> Result<u64> {
     let client = http_client();
     let result = http_json_rpc(&client, http_url, "eth_blockNumber", json!([]), 1).await?;
-    let s = result.as_str().ok_or_else(|| anyhow::anyhow!("blockNumber not string"))?;
+    let s = result
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("blockNumber not string"))?;
     let s = s.strip_prefix("0x").unwrap_or(s);
     u64::from_str_radix(s, 16).context("parse block number")
 }
@@ -129,13 +149,18 @@ pub async fn eth_get_transaction_count(http_url: &str, address: &str) -> Result<
         14,
     )
     .await?;
-    let s = result.as_str().ok_or_else(|| anyhow::anyhow!("getTransactionCount result not string"))?;
+    let s = result
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("getTransactionCount result not string"))?;
     let s = s.strip_prefix("0x").unwrap_or(s);
     u64::from_str_radix(s, 16).context("parse nonce")
 }
 
 /// Call Atom.head() via eth_call and decode. For optional post-revert assertion (e.g. seq == 0).
-pub async fn atom_head_http(http_url: &str, contract_address: &[u8; 20]) -> Result<atom::CurrentHead> {
+pub async fn atom_head_http(
+    http_url: &str,
+    contract_address: &[u8; 20],
+) -> Result<atom::CurrentHead> {
     use atom::abi::{decode_head_return, HEAD_SELECTOR};
     let client = http_client();
     let params = json!([{
@@ -143,7 +168,9 @@ pub async fn atom_head_http(http_url: &str, contract_address: &[u8; 20]) -> Resu
         "data": format!("0x{}", hex::encode(HEAD_SELECTOR)),
     }, "latest"]);
     let result = http_json_rpc(&client, http_url, "eth_call", params, 13).await?;
-    let s = result.as_str().ok_or_else(|| anyhow::anyhow!("eth_call result not string"))?;
+    let s = result
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("eth_call result not string"))?;
     let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s)).context("decode eth_call")?;
     decode_head_return(&bytes).context("decode head()")
 }
@@ -167,13 +194,15 @@ pub fn foundry_available() -> bool {
 /// Spawn Anvil on a dynamic port and wait until ready.
 pub async fn spawn_anvil() -> Result<(Child, String)> {
     let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .context("bind for port")?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").context("bind for port")?;
         listener.local_addr()?.port()
     };
     let rpc_url = format!("http://127.0.0.1:{}", port);
     let mut cmd = Command::new("anvil");
-    cmd.arg("--port").arg(port.to_string()).arg("--host").arg("127.0.0.1");
+    cmd.arg("--port")
+        .arg(port.to_string())
+        .arg("--host")
+        .arg("127.0.0.1");
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let process = cmd.spawn().context("spawn anvil")?;
     wait_for_rpc(&rpc_url).await?;
@@ -185,7 +214,9 @@ async fn wait_for_rpc(url: &str) -> Result<()> {
     for _ in 0..30 {
         let ok = client
             .post(url)
-            .json(&serde_json::json!({"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}))
+            .json(
+                &serde_json::json!({"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}),
+            )
             .send()
             .await
             .is_ok();
@@ -205,9 +236,11 @@ pub fn deploy_atom(repo_root: &std::path::Path, rpc_url: &str) -> Result<String>
         .args([
             "script",
             "script/Deploy.s.sol:Deploy",
-            "--rpc-url", rpc_url,
+            "--rpc-url",
+            rpc_url,
             "--broadcast",
-            "--private-key", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+            "--private-key",
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
         ])
         .output()
         .context("forge script")?;
@@ -221,8 +254,7 @@ pub fn deploy_atom(repo_root: &std::path::Path, rpc_url: &str) -> Result<String>
     let artifact_path = repo_root.join("broadcast/Deploy.s.sol/31337/run-latest.json");
     let bytes = std::fs::read(&artifact_path)
         .with_context(|| format!("read broadcast artifact: {}", artifact_path.display()))?;
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).context("parse broadcast JSON")?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).context("parse broadcast JSON")?;
     let txs = json
         .get("transactions")
         .and_then(|t| t.as_array())
@@ -252,7 +284,14 @@ pub fn set_head(
     cid_kind: Option<u8>,
 ) -> Result<()> {
     let cid_hex_arg = cid_hex.strip_prefix("0x").unwrap_or(cid_hex);
-    set_head_hex(repo_root, rpc_url, contract, signature, cid_hex_arg, cid_kind)
+    set_head_hex(
+        repo_root,
+        rpc_url,
+        contract,
+        signature,
+        cid_hex_arg,
+        cid_kind,
+    )
 }
 
 /// Anvil default account 0 (used for eth_sendTransaction when node signs).
@@ -385,8 +424,11 @@ pub async fn send_raw_transaction(http_url: &str, to: &str, calldata: &[u8]) -> 
 
     let client = http_client();
     let params = json!([format!("0x{}", hex::encode(&raw_tx))]);
-    let tx_hash_value = http_json_rpc(&client, http_url, "eth_sendRawTransaction", params, 21).await?;
-    let _tx_hash = tx_hash_value.as_str().ok_or_else(|| anyhow::anyhow!("tx hash not string"))?;
+    let tx_hash_value =
+        http_json_rpc(&client, http_url, "eth_sendRawTransaction", params, 21).await?;
+    let _tx_hash = tx_hash_value
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("tx hash not string"))?;
     Ok(())
 }
 
@@ -398,9 +440,7 @@ pub async fn send_transaction(http_url: &str, to: &str, calldata: &[u8]) -> Resu
     // Build JSON body as raw string so "data" is sent exactly (no serde_json round-trip).
     let body = format!(
         r#"{{"jsonrpc":"2.0","id":20,"method":"eth_sendTransaction","params":[{{"from":"{}","to":"0x{}","data":"0x{}","value":"0x0","gas":"0x30d40"}}]}}"#,
-        ANVIL_DEFAULT_FROM,
-        to,
-        data_hex
+        ANVIL_DEFAULT_FROM, to, data_hex
     );
     let client = http_client();
     let result = async {
@@ -416,8 +456,11 @@ pub async fn send_transaction(http_url: &str, to: &str, calldata: &[u8]) -> Resu
         if let Some(err) = v.get("error") {
             anyhow::bail!("RPC error: {}", err);
         }
-        v.get("result").cloned().ok_or_else(|| anyhow::anyhow!("Missing result"))
-    }.await;
+        v.get("result")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Missing result"))
+    }
+    .await;
     let _ = result?;
     Ok(())
 }
@@ -450,13 +493,10 @@ fn set_head_hex(
     cid_hex_no_prefix: &str,
     cid_kind: Option<u8>,
 ) -> Result<()> {
-    let mut cast_args: Vec<String> = vec![
-        "send".into(),
-        contract.into(),
-        signature.into(),
-    ];
+    let mut cast_args: Vec<String> = vec!["send".into(), contract.into(), signature.into()];
     if signature == "setHead(uint8,bytes)" {
-        let k = cid_kind.ok_or_else(|| anyhow::anyhow!("cid_kind required for setHead(uint8,bytes)"))?;
+        let k = cid_kind
+            .ok_or_else(|| anyhow::anyhow!("cid_kind required for setHead(uint8,bytes)"))?;
         cast_args.push(k.to_string());
     }
     cast_args.push(cid_hex_no_prefix.into());

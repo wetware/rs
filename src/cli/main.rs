@@ -155,10 +155,28 @@ impl Commands {
             } => {
                 if paths.len() == 1 {
                     // Single path: developer mode
-                    Self::run_env(PathBuf::from(&paths[0]), port, wasm_debug, stem, rpc_url, ws_url, confirmation_depth).await
+                    Self::run_env(
+                        PathBuf::from(&paths[0]),
+                        port,
+                        wasm_debug,
+                        stem,
+                        rpc_url,
+                        ws_url,
+                        confirmation_depth,
+                    )
+                    .await
                 } else {
                     // Multiple paths: daemon mode
-                    Self::run_daemon(paths, port, wasm_debug, stem, rpc_url, ws_url, confirmation_depth).await
+                    Self::run_daemon(
+                        paths,
+                        port,
+                        wasm_debug,
+                        stem,
+                        rpc_url,
+                        ws_url,
+                        confirmation_depth,
+                    )
+                    .await
                 }
             }
             Commands::Push {
@@ -203,11 +221,17 @@ impl Commands {
         if let Some(template_name) = template {
             match template_name.as_str() {
                 "rust" => Self::scaffold_rust_template(&target_dir)?,
-                _ => bail!("Unknown template: '{}'. Supported templates: rust", template_name),
+                _ => bail!(
+                    "Unknown template: '{}'. Supported templates: rust",
+                    template_name
+                ),
             }
         }
 
-        println!("Initialized wetware environment at: {}", target_dir.display());
+        println!(
+            "Initialized wetware environment at: {}",
+            target_dir.display()
+        );
         Ok(())
     }
 
@@ -265,8 +289,7 @@ pub extern "C" fn _start() {
 "#;
 
         let lib_rs_path = src_dir.join("lib.rs");
-        std::fs::write(&lib_rs_path, lib_rs_content)
-            .context("Failed to write src/lib.rs")?;
+        std::fs::write(&lib_rs_path, lib_rs_content).context("Failed to write src/lib.rs")?;
 
         println!("Scaffolded Rust template:");
         println!("  Cargo.toml - Guest project configuration");
@@ -293,9 +316,13 @@ pub extern "C" fn _start() {
         let output = std::process::Command::new("cargo")
             .args(&[
                 "build",
-                "--target", "wasm32-wasip2",
+                "--target",
+                "wasm32-wasip2",
                 "--release",
-                "--manifest-path", cargo_toml.to_str().ok_or_else(|| anyhow::anyhow!("Invalid path"))?
+                "--manifest-path",
+                cargo_toml
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid path"))?,
             ])
             .output()
             .context("Failed to execute cargo build")?;
@@ -305,7 +332,8 @@ pub extern "C" fn _start() {
 
             if stderr.contains("cannot find `wasm32-wasip2` target")
                 || stderr.contains("target `wasm32-wasip2` not installed")
-                || stderr.contains("target `wasm32-wasip1` not installed") {
+                || stderr.contains("target `wasm32-wasip1` not installed")
+            {
                 bail!(
                     "wasm32-wasip2 target is not installed.\n\
                      \n\
@@ -322,9 +350,7 @@ pub extern "C" fn _start() {
         let mut wasm_file = None;
 
         // Look for the first .wasm file (or the crate name if it matches)
-        for entry in std::fs::read_dir(&target_dir)
-            .context("Failed to read target directory")?
-        {
+        for entry in std::fs::read_dir(&target_dir).context("Failed to read target directory")? {
             let entry = entry?;
             let path = entry.path();
             if path.extension().map_or(false, |ext| ext == "wasm") {
@@ -342,12 +368,14 @@ pub extern "C" fn _start() {
 
         // Copy to boot/main.wasm
         let boot_dir = path.join("boot");
-        std::fs::create_dir_all(&boot_dir)
-            .context("Failed to create boot directory")?;
+        std::fs::create_dir_all(&boot_dir).context("Failed to create boot directory")?;
 
         let dst_wasm = boot_dir.join("main.wasm");
-        std::fs::copy(&src_wasm, &dst_wasm)
-            .context(format!("Failed to copy {} to {}", src_wasm.display(), dst_wasm.display()))?;
+        std::fs::copy(&src_wasm, &dst_wasm).context(format!(
+            "Failed to copy {} to {}",
+            src_wasm.display(),
+            dst_wasm.display()
+        ))?;
 
         println!("Successfully built: {}", dst_wasm.display());
         Ok(())
@@ -382,8 +410,7 @@ pub extern "C" fn _start() {
             // Create a compatibility layer: the runtime expects bin/main.wasm.
             // We copy boot/main.wasm to bin/main.wasm for the image merging logic.
             let bin_dir = path.join("bin");
-            std::fs::create_dir_all(&bin_dir)
-                .context("Failed to create bin directory")?;
+            std::fs::create_dir_all(&bin_dir).context("Failed to create bin directory")?;
 
             let bin_wasm = bin_dir.join("main.wasm");
             std::fs::copy(&boot_wasm, &bin_wasm)
@@ -524,12 +551,10 @@ pub extern "C" fn _start() {
         // Create a compatibility layer: the runtime expects bin/main.wasm.
         // We copy boot/main.wasm to bin/main.wasm for the published image.
         let bin_dir = path.join("bin");
-        std::fs::create_dir_all(&bin_dir)
-            .context("Failed to create bin directory")?;
+        std::fs::create_dir_all(&bin_dir).context("Failed to create bin directory")?;
 
         let bin_wasm = bin_dir.join("main.wasm");
-        std::fs::copy(&boot_wasm, &bin_wasm)
-            .context("Failed to prepare WASM artifact for IPFS")?;
+        std::fs::copy(&boot_wasm, &bin_wasm).context("Failed to prepare WASM artifact for IPFS")?;
 
         println!("Publishing to IPFS...");
 
@@ -559,7 +584,10 @@ pub extern "C" fn _start() {
             // Note: Full on-chain update implementation would go here.
             // For now, we'll just acknowledge the request.
             println!("Note: On-chain contract update via CLI is not yet implemented.");
-            println!("The CID can be manually updated at contract: 0x{}", hex::encode(contract));
+            println!(
+                "The CID can be manually updated at contract: 0x{}",
+                hex::encode(contract)
+            );
         }
 
         Ok(())

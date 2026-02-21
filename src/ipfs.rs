@@ -275,10 +275,13 @@ impl HttpClient {
     /// Adds all files in the directory to IPFS and returns
     /// the CID of the root directory. Skips common build artifacts.
     pub async fn add_dir(&self, dir_path: &Path) -> Result<String> {
-        use std::fs;
         use std::collections::VecDeque;
+        use std::fs;
 
-        let url = format!("{}/api/v0/add?wrap-with-directory=true&progress=false", self.base_url);
+        let url = format!(
+            "{}/api/v0/add?wrap-with-directory=true&progress=false",
+            self.base_url
+        );
         let mut form = reqwest::multipart::Form::new();
 
         // Collect all files first to get directory structure right
@@ -302,7 +305,11 @@ impl HttpClient {
                 let file_name_str = file_name.to_string_lossy().to_string();
 
                 // Skip Cargo build artifacts and version control
-                if file_name_str == "target" || file_name_str == ".git" || file_name_str == ".gitignore" || file_name_str == "Cargo.lock" {
+                if file_name_str == "target"
+                    || file_name_str == ".git"
+                    || file_name_str == ".gitignore"
+                    || file_name_str == "Cargo.lock"
+                {
                     continue;
                 }
 

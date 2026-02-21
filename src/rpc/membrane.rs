@@ -60,13 +60,12 @@ impl SessionBuilder for HostSessionBuilder {
         guard: &EpochGuard,
         mut builder: membrane::stem_capnp::session::Builder<'_>,
     ) -> Result<(), capnp::Error> {
-        let host: system_capnp::host::Client =
-            capnp_rpc::new_client(super::HostImpl::new(
-                self.network_state.clone(),
-                self.swarm_cmd_tx.clone(),
-                self.wasm_debug,
-                Some(guard.clone()),
-            ));
+        let host: system_capnp::host::Client = capnp_rpc::new_client(super::HostImpl::new(
+            self.network_state.clone(),
+            self.swarm_cmd_tx.clone(),
+            self.wasm_debug,
+            Some(guard.clone()),
+        ));
         builder.set_host(host);
 
         let executor: system_capnp::executor::Client =
@@ -78,11 +77,9 @@ impl SessionBuilder for HostSessionBuilder {
             ));
         builder.set_executor(executor);
 
-        let ipfs_client: ipfs_capnp::client::Client =
-            capnp_rpc::new_client(EpochGuardedIpfsClient::new(
-                self.ipfs_client.clone(),
-                guard.clone(),
-            ));
+        let ipfs_client: ipfs_capnp::client::Client = capnp_rpc::new_client(
+            EpochGuardedIpfsClient::new(self.ipfs_client.clone(), guard.clone()),
+        );
         builder.set_ipfs(ipfs_client);
 
         Ok(())
@@ -113,11 +110,10 @@ impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
         mut results: ipfs_capnp::client::UnixfsResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
-        let api: ipfs_capnp::unix_f_s::Client =
-            capnp_rpc::new_client(EpochGuardedUnixFS::new(
-                self.ipfs_client.clone(),
-                self.guard.clone(),
-            ));
+        let api: ipfs_capnp::unix_f_s::Client = capnp_rpc::new_client(EpochGuardedUnixFS::new(
+            self.ipfs_client.clone(),
+            self.guard.clone(),
+        ));
         results.get().set_api(api);
         Promise::ok(())
     }
@@ -127,7 +123,9 @@ impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
         _params: ipfs_capnp::client::BlockParams,
         _results: ipfs_capnp::client::BlockResults,
     ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("block API not yet implemented".into()))
+        Promise::err(capnp::Error::unimplemented(
+            "block API not yet implemented".into(),
+        ))
     }
 
     fn dag(
@@ -135,7 +133,9 @@ impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
         _params: ipfs_capnp::client::DagParams,
         _results: ipfs_capnp::client::DagResults,
     ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("dag API not yet implemented".into()))
+        Promise::err(capnp::Error::unimplemented(
+            "dag API not yet implemented".into(),
+        ))
     }
 
     fn name(
@@ -143,7 +143,9 @@ impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
         _params: ipfs_capnp::client::NameParams,
         _results: ipfs_capnp::client::NameResults,
     ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("name API not yet implemented".into()))
+        Promise::err(capnp::Error::unimplemented(
+            "name API not yet implemented".into(),
+        ))
     }
 
     fn key(
@@ -151,7 +153,9 @@ impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
         _params: ipfs_capnp::client::KeyParams,
         _results: ipfs_capnp::client::KeyResults,
     ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("key API not yet implemented".into()))
+        Promise::err(capnp::Error::unimplemented(
+            "key API not yet implemented".into(),
+        ))
     }
 
     fn pin(
@@ -159,7 +163,9 @@ impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
         _params: ipfs_capnp::client::PinParams,
         _results: ipfs_capnp::client::PinResults,
     ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("pin API not yet implemented".into()))
+        Promise::err(capnp::Error::unimplemented(
+            "pin API not yet implemented".into(),
+        ))
     }
 
     fn object(
@@ -167,7 +173,9 @@ impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
         _params: ipfs_capnp::client::ObjectParams,
         _results: ipfs_capnp::client::ObjectResults,
     ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("object API not yet implemented".into()))
+        Promise::err(capnp::Error::unimplemented(
+            "object API not yet implemented".into(),
+        ))
     }
 
     fn swarm(
@@ -175,7 +183,9 @@ impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
         _params: ipfs_capnp::client::SwarmParams,
         _results: ipfs_capnp::client::SwarmResults,
     ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("swarm API not yet implemented".into()))
+        Promise::err(capnp::Error::unimplemented(
+            "swarm API not yet implemented".into(),
+        ))
     }
 
     fn pub_sub(
@@ -183,7 +193,9 @@ impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
         _params: ipfs_capnp::client::PubSubParams,
         _results: ipfs_capnp::client::PubSubResults,
     ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("pubsub API not yet implemented".into()))
+        Promise::err(capnp::Error::unimplemented(
+            "pubsub API not yet implemented".into(),
+        ))
     }
 
     fn routing(
@@ -191,7 +203,9 @@ impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
         _params: ipfs_capnp::client::RoutingParams,
         _results: ipfs_capnp::client::RoutingResults,
     ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("routing API not yet implemented".into()))
+        Promise::err(capnp::Error::unimplemented(
+            "routing API not yet implemented".into(),
+        ))
     }
 
     fn resolve_path(
@@ -199,7 +213,9 @@ impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
         _params: ipfs_capnp::client::ResolvePathParams,
         _results: ipfs_capnp::client::ResolvePathResults,
     ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("resolvePath not yet implemented".into()))
+        Promise::err(capnp::Error::unimplemented(
+            "resolvePath not yet implemented".into(),
+        ))
     }
 
     fn resolve_node(
@@ -207,7 +223,9 @@ impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
         _params: ipfs_capnp::client::ResolveNodeParams,
         _results: ipfs_capnp::client::ResolveNodeResults,
     ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("resolveNode not yet implemented".into()))
+        Promise::err(capnp::Error::unimplemented(
+            "resolveNode not yet implemented".into(),
+        ))
     }
 }
 
@@ -235,7 +253,9 @@ impl ipfs_capnp::unix_f_s::Server for EpochGuardedUnixFS {
         mut results: ipfs_capnp::unix_f_s::CatResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
-        let path = pry!(pry!(params.get()).get_path()).to_string().unwrap_or_default();
+        let path = pry!(pry!(params.get()).get_path())
+            .to_string()
+            .unwrap_or_default();
         let client = self.ipfs_client.clone();
         Promise::from_future(async move {
             let data = client
@@ -254,7 +274,9 @@ impl ipfs_capnp::unix_f_s::Server for EpochGuardedUnixFS {
         mut results: ipfs_capnp::unix_f_s::LsResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
-        let path = pry!(pry!(params.get()).get_path()).to_string().unwrap_or_default();
+        let path = pry!(pry!(params.get()).get_path())
+            .to_string()
+            .unwrap_or_default();
         let client = self.ipfs_client.clone();
         Promise::from_future(async move {
             let entries = client

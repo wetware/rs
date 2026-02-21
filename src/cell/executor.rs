@@ -246,10 +246,7 @@ impl Cell {
     /// This is the production entry point: Ganglion (and other peers) connect
     /// to the host's libp2p swarm and open a stream on this protocol to obtain
     /// the kernel's capability surface.
-    pub async fn spawn_serving(
-        self,
-        control: libp2p_stream::Control,
-    ) -> Result<SpawnResult> {
+    pub async fn spawn_serving(self, control: libp2p_stream::Control) -> Result<SpawnResult> {
         self.spawn_rpc_inner(Some(control)).await
     }
 

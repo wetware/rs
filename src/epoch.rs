@@ -71,13 +71,18 @@ pub async fn run_epoch_pipeline(
                 };
 
                 for fe in finalized {
-                    if let Err(e) = handle_finalized(&fe, &epoch_tx, &ipfs_client, &mut prev_ipfs_path).await {
+                    if let Err(e) =
+                        handle_finalized(&fe, &epoch_tx, &ipfs_client, &mut prev_ipfs_path).await
+                    {
                         warn!(seq = fe.seq, "Failed to handle finalized event: {e}");
                     }
                 }
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                warn!(skipped = n, "Epoch pipeline lagged; some events were dropped");
+                warn!(
+                    skipped = n,
+                    "Epoch pipeline lagged; some events were dropped"
+                );
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                 info!("Indexer channel closed; epoch pipeline shutting down");
@@ -97,8 +102,8 @@ async fn handle_finalized(
     ipfs_client: &ipfs::HttpClient,
     prev_ipfs_path: &mut Option<String>,
 ) -> Result<()> {
-    let ipfs_path = cid_bytes_to_ipfs_path(&fe.cid)
-        .context("Failed to convert finalized CID to IPFS path")?;
+    let ipfs_path =
+        cid_bytes_to_ipfs_path(&fe.cid).context("Failed to convert finalized CID to IPFS path")?;
 
     // Pin the new head.
     if let Err(e) = ipfs_client.pin_add(&ipfs_path).await {

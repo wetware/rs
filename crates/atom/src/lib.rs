@@ -9,9 +9,7 @@
 pub use membrane::stem_capnp;
 pub use membrane::system_capnp;
 pub use membrane::{
-    Epoch, EpochGuard,
-    membrane_client, MembraneServer, NoExtension,
-    SessionBuilder,
+    membrane_client, Epoch, EpochGuard, MembraneServer, NoExtension, SessionBuilder,
 };
 
 pub mod abi;

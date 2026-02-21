@@ -16,7 +16,7 @@
 //!
 //!   cargo run -p atom --example atom_indexer -- --rpc-url http://127.0.0.1:8545 --contract 0x...
 
-use atom::{IndexerConfig, AtomIndexer};
+use atom::{AtomIndexer, IndexerConfig};
 use std::sync::Arc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

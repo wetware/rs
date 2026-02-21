@@ -5,20 +5,17 @@
 //! itself; use the [crate::Finalizer] with a [crate::Strategy] (e.g. [crate::ConfirmationDepth])
 //! for reorg-safe, confirmation-based output.
 
-use crate::abi::{
-    decode_log_to_observed, CurrentHead, HeadUpdatedObserved,
-    HEAD_UPDATED_TOPIC0,
-};
+use crate::abi::{decode_log_to_observed, CurrentHead, HeadUpdatedObserved, HEAD_UPDATED_TOPIC0};
 use crate::config::IndexerConfig;
 use crate::cursor::Cursor;
 use anyhow::{Context, Result};
+use futures_util::{SinkExt, StreamExt};
+use rand::Rng;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tokio::time::{sleep, Duration, timeout};
+use tokio::time::{sleep, timeout, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use futures_util::{SinkExt, StreamExt};
-use rand::Rng;
 
 fn build_logs_filter(
     address: &[u8; 20],
@@ -60,7 +57,13 @@ fn build_logs_filter_address_only(
     filter
 }
 
-async fn http_json_rpc(client: &reqwest::Client, url: &str, method: &str, params: Value, id: u64) -> Result<Value> {
+async fn http_json_rpc(
+    client: &reqwest::Client,
+    url: &str,
+    method: &str,
+    params: Value,
+    id: u64,
+) -> Result<Value> {
     let body = json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -86,7 +89,9 @@ async fn http_json_rpc(client: &reqwest::Client, url: &str, method: &str, params
 
 async fn eth_block_number(client: &reqwest::Client, http_url: &str) -> Result<u64> {
     let result = http_json_rpc(client, http_url, "eth_blockNumber", json!([]), 1).await?;
-    let s = result.as_str().ok_or_else(|| anyhow::anyhow!("blockNumber not string"))?;
+    let s = result
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("blockNumber not string"))?;
     let s = s.strip_prefix("0x").unwrap_or(s);
     u64::from_str_radix(s, 16).context("parse block number")
 }
@@ -107,7 +112,9 @@ async fn eth_get_logs(
     filter: Value,
 ) -> Result<Vec<Value>> {
     let result = http_json_rpc(client, http_url, "eth_getLogs", json!([filter]), 2).await?;
-    let arr = result.as_array().ok_or_else(|| anyhow::anyhow!("getLogs not array"))?;
+    let arr = result
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("getLogs not array"))?;
     Ok(arr.clone())
 }
 
@@ -149,12 +156,7 @@ impl AtomIndexer {
         let reconnection = config.reconnection.clone();
 
         loop {
-            match run_once(
-                Arc::clone(&self),
-                &http_client,
-                &mut cursor,
-                config,
-            ).await {
+            match run_once(Arc::clone(&self), &http_client, &mut cursor, config).await {
                 Ok(()) => {
                     sleep(Duration::from_secs(reconnection.initial_backoff_secs)).await;
                 }
@@ -201,48 +203,60 @@ async fn run_once(
         .await
         .map_err(|e| anyhow::anyhow!("send subscribe: {}", e))?;
 
-    let (sub_id, needs_client_filter) = match timeout(Duration::from_secs(10), ws_receiver.next()).await {
-        Ok(Some(Ok(Message::Text(text)))) => {
-            let v: Value = serde_json::from_str(&text).context("parse sub response")?;
-            if v.get("error").is_some() {
-                let err = v["error"].get("message").and_then(|m| m.as_str()).unwrap_or("");
-                if err.contains("data did not match") || err.contains("variant") {
-                    tracing::warn!("RPC does not support logs filter (Anvil?), using client-side filter");
-                    let sub_req_no_filter = json!({
-                        "jsonrpc": "2.0",
-                        "id": logs_id,
-                        "method": "eth_subscribe",
-                        "params": ["logs"]
-                    });
-                    ws_sender
-                        .send(Message::Text(serde_json::to_string(&sub_req_no_filter)?))
-                        .await
-                        .map_err(|e| anyhow::anyhow!("send subscribe: {}", e))?;
-                    let text2 = timeout(Duration::from_secs(10), ws_receiver.next())
-                        .await
-                        .map_err(|_| anyhow::anyhow!("subscribe timeout"))?
-                        .ok_or_else(|| anyhow::anyhow!("ws closed"))?
-                        .map_err(|e| anyhow::anyhow!("ws: {}", e))?;
-                    let msg = match text2 {
-                        Message::Text(t) => t,
-                        _ => anyhow::bail!("expected text"),
-                    };
-                    let v2: Value = serde_json::from_str(&msg)?;
-                    let id = v2["result"].as_str().ok_or_else(|| anyhow::anyhow!("no sub id"))?.to_string();
-                    (id, true)
+    let (sub_id, needs_client_filter) =
+        match timeout(Duration::from_secs(10), ws_receiver.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                let v: Value = serde_json::from_str(&text).context("parse sub response")?;
+                if v.get("error").is_some() {
+                    let err = v["error"]
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("");
+                    if err.contains("data did not match") || err.contains("variant") {
+                        tracing::warn!(
+                            "RPC does not support logs filter (Anvil?), using client-side filter"
+                        );
+                        let sub_req_no_filter = json!({
+                            "jsonrpc": "2.0",
+                            "id": logs_id,
+                            "method": "eth_subscribe",
+                            "params": ["logs"]
+                        });
+                        ws_sender
+                            .send(Message::Text(serde_json::to_string(&sub_req_no_filter)?))
+                            .await
+                            .map_err(|e| anyhow::anyhow!("send subscribe: {}", e))?;
+                        let text2 = timeout(Duration::from_secs(10), ws_receiver.next())
+                            .await
+                            .map_err(|_| anyhow::anyhow!("subscribe timeout"))?
+                            .ok_or_else(|| anyhow::anyhow!("ws closed"))?
+                            .map_err(|e| anyhow::anyhow!("ws: {}", e))?;
+                        let msg = match text2 {
+                            Message::Text(t) => t,
+                            _ => anyhow::bail!("expected text"),
+                        };
+                        let v2: Value = serde_json::from_str(&msg)?;
+                        let id = v2["result"]
+                            .as_str()
+                            .ok_or_else(|| anyhow::anyhow!("no sub id"))?
+                            .to_string();
+                        (id, true)
+                    } else {
+                        anyhow::bail!("subscribe error: {}", err);
+                    }
                 } else {
-                    anyhow::bail!("subscribe error: {}", err);
+                    let id = v["result"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("no result"))?
+                        .to_string();
+                    (id, false)
                 }
-            } else {
-                let id = v["result"].as_str().ok_or_else(|| anyhow::anyhow!("no result"))?.to_string();
-                (id, false)
             }
-        }
-        Ok(Some(Ok(_))) => anyhow::bail!("unexpected message"),
-        Ok(Some(Err(e))) => return Err(anyhow::anyhow!("ws: {}", e)),
-        Ok(None) => anyhow::bail!("ws closed"),
-        Err(_) => anyhow::bail!("subscribe timeout"),
-    };
+            Ok(Some(Ok(_))) => anyhow::bail!("unexpected message"),
+            Ok(Some(Err(e))) => return Err(anyhow::anyhow!("ws: {}", e)),
+            Ok(None) => anyhow::bail!("ws closed"),
+            Err(_) => anyhow::bail!("subscribe timeout"),
+        };
     let _ = sub_id;
 
     // Backfill after subscribe so the WS stream buffers any events arriving in between.
@@ -258,7 +272,8 @@ async fn run_once(
             config.getlogs_max_range,
             &indexer.event_tx,
             &indexer.current_head,
-        ).await?;
+        )
+        .await?;
         cursor.last_processed_block = tip;
     }
 
@@ -312,7 +327,8 @@ async fn run_once(
                 seq: observed.seq,
                 cid: observed.cid,
             },
-        ).await;
+        )
+        .await;
     }
     Ok(())
 }
@@ -357,11 +373,8 @@ async fn backfill(
             Ok(l) => l,
             Err(e) => {
                 tracing::debug!(reason = %e, "eth_getLogs with topic filter failed, trying address-only");
-                let fallback = build_logs_filter_address_only(
-                    contract_address,
-                    Some(from),
-                    Some(to),
-                );
+                let fallback =
+                    build_logs_filter_address_only(contract_address, Some(from), Some(to));
                 let raw = eth_get_logs(client, http_url, fallback).await?;
                 raw.into_iter()
                     .filter(log_matches_head_updated)
@@ -370,11 +383,7 @@ async fn backfill(
         };
         // If topic filter returned empty, try address-only (some nodes ignore topic filter and return []).
         let logs = if logs.is_empty() {
-            let fallback = build_logs_filter_address_only(
-                contract_address,
-                Some(from),
-                Some(to),
-            );
+            let fallback = build_logs_filter_address_only(contract_address, Some(from), Some(to));
             match eth_get_logs(client, http_url, fallback).await {
                 Ok(raw) => raw
                     .into_iter()
@@ -388,11 +397,18 @@ async fn backfill(
         let mut observed: Vec<HeadUpdatedObserved> = logs
             .iter()
             .filter_map(|log| {
-                decode_log_to_observed(log).map_err(|e| tracing::debug!(%e, "decode log skipped")).ok()
+                decode_log_to_observed(log)
+                    .map_err(|e| tracing::debug!(%e, "decode log skipped"))
+                    .ok()
             })
             .collect();
         if !logs.is_empty() && observed.is_empty() {
-            tracing::warn!(raw_count = logs.len(), from, to, "backfill: logs received but none decoded");
+            tracing::warn!(
+                raw_count = logs.len(),
+                from,
+                to,
+                "backfill: logs received but none decoded"
+            );
         } else if !observed.is_empty() {
             tracing::debug!(count = observed.len(), from, to, "backfill: decoded events");
         }
@@ -405,7 +421,8 @@ async fn backfill(
                     seq: o.seq,
                     cid: o.cid,
                 },
-            ).await;
+            )
+            .await;
         }
         from = to + 1;
     }
@@ -417,13 +434,9 @@ async fn set_current_head_if_newer(
     new: CurrentHead,
 ) {
     let mut guard = current_head.write().await;
-    let should_set = guard
-        .as_ref()
-        .map(|h| new.seq >= h.seq)
-        .unwrap_or(true);
+    let should_set = guard.as_ref().map(|h| new.seq >= h.seq).unwrap_or(true);
     if should_set {
         tracing::info!(seq = new.seq, "current HEAD updated");
         *guard = Some(new);
     }
 }
-

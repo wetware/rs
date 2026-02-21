@@ -68,7 +68,11 @@ pub fn decode_log_to_observed(log_value: &Value) -> Result<HeadUpdatedObserved> 
         anyhow::bail!("Expected at least 4 topics, got {}", topics.len());
     }
     let seq = {
-        let t1 = parse_hex_bytes(topics[1].as_str().ok_or_else(|| anyhow::anyhow!("topic1 not str"))?)?;
+        let t1 = parse_hex_bytes(
+            topics[1]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("topic1 not str"))?,
+        )?;
         if t1.len() < 8 {
             anyhow::bail!("topic1 too short for uint64");
         }
@@ -101,7 +105,10 @@ pub fn decode_log_to_observed(log_value: &Value) -> Result<HeadUpdatedObserved> 
 /// Decode head() return data (eth_call result): (uint64, bytes) ABI via alloy sol-types.
 /// Falls back to manual decode if the contract uses a non-standard offset (e.g. 64 instead of 32).
 pub fn decode_head_return(data: &[u8]) -> Result<CurrentHead> {
-    type HeadReturn = (alloy::sol_types::sol_data::Uint<64>, alloy::sol_types::sol_data::Bytes);
+    type HeadReturn = (
+        alloy::sol_types::sol_data::Uint<64>,
+        alloy::sol_types::sol_data::Bytes,
+    );
     if let Ok((seq, cid)) = HeadReturn::abi_decode(data, false) {
         return Ok(CurrentHead {
             seq,
@@ -121,7 +128,8 @@ fn decode_head_return_manual(data: &[u8]) -> Result<CurrentHead> {
     if data.len() < cid_offset + 32 {
         anyhow::bail!("head() return too short for cid offset");
     }
-    let cid_len = u32::from_be_bytes(data[cid_offset + 28..cid_offset + 32].try_into().unwrap()) as usize;
+    let cid_len =
+        u32::from_be_bytes(data[cid_offset + 28..cid_offset + 32].try_into().unwrap()) as usize;
     if data.len() < cid_offset + 32 + cid_len {
         anyhow::bail!("head() return too short for cid");
     }
@@ -147,7 +155,8 @@ fn decode_event_data_bytes_manual(data: &[u8]) -> Result<Vec<u8>> {
     if data.len() < cid_offset + 32 {
         anyhow::bail!("event data too short for cid offset");
     }
-    let len = u32::from_be_bytes(data[cid_offset + 28..cid_offset + 32].try_into().unwrap()) as usize;
+    let len =
+        u32::from_be_bytes(data[cid_offset + 28..cid_offset + 32].try_into().unwrap()) as usize;
     if data.len() < cid_offset + 32 + len {
         anyhow::bail!("event data too short for cid len {}", len);
     }
@@ -199,7 +208,10 @@ mod tests {
         assert_eq!(HEAD_UPDATED_TOPIC0, [0x85, 0xf2, 0xcb, 0x2e]);
     }
 
-    type HeadReturn = (alloy::sol_types::sol_data::Uint<64>, alloy::sol_types::sol_data::Bytes);
+    type HeadReturn = (
+        alloy::sol_types::sol_data::Uint<64>,
+        alloy::sol_types::sol_data::Bytes,
+    );
 
     #[test]
     fn decode_head_return_minimal() {

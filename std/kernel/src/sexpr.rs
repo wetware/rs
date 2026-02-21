@@ -311,10 +311,7 @@ mod tests {
 
     #[test]
     fn display_list() {
-        let v = Val::List(vec![
-            Val::Sym("host".into()),
-            Val::Str("addr".into()),
-        ]);
+        let v = Val::List(vec![Val::Sym("host".into()), Val::Str("addr".into())]);
         assert_eq!(format!("{v}"), "(host \"addr\")");
     }
 

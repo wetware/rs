@@ -2,11 +2,11 @@
 
 mod common;
 
+use atom::{AtomIndexer, FinalizerBuilder, IndexerConfig};
 use common::{
-    deploy_atom, eth_block_number, evm_mine, evm_revert, evm_snapshot, set_head_bytes, spawn_anvil,
-    atom_head_http,
+    atom_head_http, deploy_atom, eth_block_number, evm_mine, evm_revert, evm_snapshot,
+    set_head_bytes, spawn_anvil,
 };
-use atom::{FinalizerBuilder, IndexerConfig, AtomIndexer};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,15 +42,21 @@ async fn test_reorg_indexer_false_positive_finalizer_filters() {
         .try_init();
 
     // CARGO_MANIFEST_DIR is crates/atom, so ancestors().nth(2) is repo root (script/, broadcast/).
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).unwrap();
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .unwrap();
     let (anvil_process, rpc_url) = spawn_anvil().await.expect("spawn anvil");
     let contract_addr = deploy_atom(repo_root, &rpc_url).expect("deploy Atom");
-    let addr_bytes = hex::decode(contract_addr.strip_prefix("0x").unwrap_or(&contract_addr)).expect("hex");
+    let addr_bytes =
+        hex::decode(contract_addr.strip_prefix("0x").unwrap_or(&contract_addr)).expect("hex");
     let mut contract_address = [0u8; 20];
     contract_address.copy_from_slice(&addr_bytes);
 
     let current_block = eth_block_number(&rpc_url).await.expect("eth_block_number");
-    let ws_url = rpc_url.replace("http://", "ws://").replace("https://", "wss://");
+    let ws_url = rpc_url
+        .replace("http://", "ws://")
+        .replace("https://", "wss://");
     let config = IndexerConfig {
         ws_url: ws_url.clone(),
         http_url: rpc_url.clone(),
@@ -81,20 +87,29 @@ async fn test_reorg_indexer_false_positive_finalizer_filters() {
 
     // setHead("cid-reorg") after indexer is running (indexer sees event via subscription/backfill of new blocks).
     const CID_REORG_BYTES: &[u8] = b"cid-reorg";
-    set_head_bytes(repo_root, &rpc_url, &contract_addr, "setHead(bytes)", CID_REORG_BYTES, None).await.expect("setHead");
+    set_head_bytes(
+        repo_root,
+        &rpc_url,
+        &contract_addr,
+        "setHead(bytes)",
+        CID_REORG_BYTES,
+        None,
+    )
+    .await
+    .expect("setHead");
 
     // Wait until an observed event matches (seq, cid); ignore unrelated/replayed events.
-    let ev = match timeout(
-        Duration::from_secs(10),
-        async {
-            loop {
-                let e = recv.recv().await.map_err(|_| anyhow::anyhow!("recv closed"))?;
-                if e.seq == 1 && e.cid.as_slice() == CID_REORG_BYTES {
-                    return Ok::<_, anyhow::Error>(e);
-                }
+    let ev = match timeout(Duration::from_secs(10), async {
+        loop {
+            let e = recv
+                .recv()
+                .await
+                .map_err(|_| anyhow::anyhow!("recv closed"))?;
+            if e.seq == 1 && e.cid.as_slice() == CID_REORG_BYTES {
+                return Ok::<_, anyhow::Error>(e);
             }
-        },
-    )
+        }
+    })
     .await
     {
         Ok(Ok(e)) => e,
@@ -123,6 +138,8 @@ async fn test_reorg_indexer_false_positive_finalizer_filters() {
         finalized.len()
     );
 
-    let head = atom_head_http(&rpc_url, &contract_address).await.expect("stem head()");
+    let head = atom_head_http(&rpc_url, &contract_address)
+        .await
+        .expect("stem head()");
     assert_eq!(head.seq, 0, "canonical head must be seq 0 after revert");
 }

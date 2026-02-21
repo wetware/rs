@@ -11,7 +11,7 @@
 //!   --depth <K>   Confirmation depth (number of blocks after event before considering finalized). Default: 6.
 //!   --cursor <path>  Path to file containing start block (one line, decimal). If missing or invalid, start from 0.
 
-use atom::{FinalizerBuilder, IndexerConfig, AtomIndexer};
+use atom::{AtomIndexer, FinalizerBuilder, IndexerConfig};
 use std::io::BufRead;
 use std::sync::Arc;
 
