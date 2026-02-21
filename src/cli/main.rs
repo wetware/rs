@@ -437,6 +437,7 @@ pub extern "C" fn _start() {
     }
 
     /// Run a wetware environment
+    #[allow(clippy::too_many_arguments)]
     async fn run_env(
         path: PathBuf,
         port: u16,
@@ -650,6 +651,7 @@ pub extern "C" fn _start() {
     }
 
     /// Run daemon mode with multiple image layers
+    #[allow(clippy::too_many_arguments)]
     async fn run_daemon(
         images: Vec<String>,
         port: u16,
