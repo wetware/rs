@@ -75,8 +75,8 @@ enum Commands {
         wasm_debug: bool,
 
         /// Path to a secp256k1 key file (raw hex, 32 bytes).
-        /// Generate one with `ww keygen`. If omitted, an ephemeral ed25519
-        /// key is used — peer identity will not persist across restarts.
+        /// Generate one with `ww keygen`. If omitted, an ephemeral secp256k1
+        /// key is generated — peer identity will not persist across restarts.
         #[arg(long, value_name = "PATH")]
         key_file: Option<String>,
 
@@ -405,15 +405,13 @@ pub extern "C" fn _start() {
     /// Load a libp2p keypair from an optional key file path.
     ///
     /// If `path` is `Some`, loads a secp256k1 key from that file.
-    /// If `None`, generates an ephemeral ed25519 key (dev/test only).
+    /// If `None`, generates an ephemeral secp256k1 key (dev/test only).
     async fn load_keypair(path: Option<&str>) -> Result<libp2p::identity::Keypair> {
-        match path {
-            Some(p) => {
-                let sk = ww::keys::load(p)?;
-                ww::keys::to_libp2p(&sk)
-            }
-            None => Ok(libp2p::identity::Keypair::generate_ed25519()),
-        }
+        let sk = match path {
+            Some(p) => ww::keys::load(p)?,
+            None => ww::keys::generate()?,
+        };
+        ww::keys::to_libp2p(&sk)
     }
 
     /// Generate a new secp256k1 identity key and write it to disk.
