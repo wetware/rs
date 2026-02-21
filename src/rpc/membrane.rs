@@ -16,6 +16,7 @@ use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
 use k256::ecdsa::SigningKey;
+use libp2p::identity::Keypair;
 use libp2p_core::SignedEnvelope;
 use membrane::{stem_capnp, Epoch, EpochGuard, MembraneServer, SessionBuilder};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -47,13 +48,15 @@ use super::NetworkState;
 /// - payload_type: `"/ww/membrane/graft-nonce"`
 /// - payload:      nonce as 8-byte big-endian u64
 struct EpochGuardedKernelSigner {
-    sk: Arc<SigningKey>,
+    /// Pre-converted libp2p keypair; conversion from k256 happens once at construction,
+    /// not on every sign call.
+    keypair: Keypair,
     guard: EpochGuard,
 }
 
 impl EpochGuardedKernelSigner {
-    fn new(sk: Arc<SigningKey>, guard: EpochGuard) -> Self {
-        Self { sk, guard }
+    fn new(keypair: Keypair, guard: EpochGuard) -> Self {
+        Self { keypair, guard }
     }
 }
 
@@ -66,10 +69,8 @@ impl stem_capnp::signer::Server for EpochGuardedKernelSigner {
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
         let nonce = pry!(params.get()).get_nonce();
-        let keypair =
-            pry!(crate::keys::to_libp2p(&self.sk).map_err(|e| capnp::Error::failed(e.to_string())));
         let envelope = pry!(SignedEnvelope::new(
-            &keypair,
+            &self.keypair,
             "ww-membrane-graft".to_string(),
             b"/ww/membrane/graft-nonce".to_vec(),
             nonce.to_be_bytes().to_vec(),
@@ -84,7 +85,7 @@ impl stem_capnp::signer::Server for EpochGuardedKernelSigner {
 // HostSessionBuilder — SessionBuilder for the concrete stem Session
 // ---------------------------------------------------------------------------
 
-/// Fills the Session with epoch-guarded Host, Executor, IPFS Client, and Signer.
+/// Fills the Session with epoch-guarded Host, Executor, IPFS Client, and node identity.
 pub struct HostSessionBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
@@ -140,8 +141,10 @@ impl SessionBuilder for HostSessionBuilder {
         builder.set_ipfs(ipfs_client);
 
         if let Some(sk) = &self.signing_key {
+            let keypair =
+                crate::keys::to_libp2p(sk).map_err(|e| capnp::Error::failed(e.to_string()))?;
             let signer: stem_capnp::signer::Client =
-                capnp_rpc::new_client(EpochGuardedKernelSigner::new(Arc::clone(sk), guard.clone()));
+                capnp_rpc::new_client(EpochGuardedKernelSigner::new(keypair, guard.clone()));
             builder.set_identity(signer);
         }
 
@@ -377,7 +380,7 @@ pub type GuestMembrane = membrane::stem_capnp::membrane::Client;
 /// Build an RPC system that bootstraps a `Membrane` instead of a bare `Host`.
 ///
 /// The membrane provides epoch-scoped sessions containing `Host`, `Executor`,
-/// `IPFS Client`, and (when `signing_key` is `Some`) a host-side `Signer`.
+/// `IPFS Client`, and (when `signing_key` is `Some`) a host-side node identity signer.
 ///
 /// When `signing_key` is `Some`:
 /// - The `VerifyingKey` is stored in `MembraneServer` for challenge-response
