@@ -36,7 +36,7 @@ walkdir = "2"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libp2p = { version = "0.55.0", features = ["tokio", "tcp", "noise", "yamux", "macros", "kad", "identify", "rsa", "request-response"] }
 ipfs-api-backend-hyper = "0.6.0"
-reqwest = { version = "0.12.24", features = ["json", "stream"] }
+reqwest = { version = "0.12.24", features = ["json", "stream", "multipart"] }
 tar = "0.4"
 clap = { version = "4.5.51", features = ["derive"] }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
