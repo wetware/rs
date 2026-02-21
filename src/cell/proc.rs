@@ -66,7 +66,6 @@ struct ConnectionState {
 struct ProcInit {
     env: Vec<String>,
     args: Vec<String>,
-    wasm_debug: bool,
     bytecode: Vec<u8>,
     loader: Option<Box<dyn Loader>>,
     engine: Option<Arc<Engine>>,
@@ -236,41 +235,30 @@ impl Builder {
 
     /// Build a Proc instance. All required parameters must be supplied first.
     pub async fn build(self) -> Result<Proc> {
-        let Builder {
-            env,
-            args,
-            wasm_debug,
-            bytecode,
-            loader,
-            engine,
-            stdin,
-            stdout,
-            stderr,
-            data_streams,
-            image_root,
-        } = self;
-
-        let bytecode =
-            bytecode.ok_or_else(|| anyhow!("bytecode must be provided to Proc::Builder"))?;
-        let stdin =
-            stdin.ok_or_else(|| anyhow!("stdin handle must be provided to Proc::Builder"))?;
-        let stdout =
-            stdout.ok_or_else(|| anyhow!("stdout handle must be provided to Proc::Builder"))?;
-        let stderr =
-            stderr.ok_or_else(|| anyhow!("stderr handle must be provided to Proc::Builder"))?;
+        let bytecode = self
+            .bytecode
+            .ok_or_else(|| anyhow!("bytecode must be provided to Proc::Builder"))?;
+        let stdin = self
+            .stdin
+            .ok_or_else(|| anyhow!("stdin handle must be provided to Proc::Builder"))?;
+        let stdout = self
+            .stdout
+            .ok_or_else(|| anyhow!("stdout handle must be provided to Proc::Builder"))?;
+        let stderr = self
+            .stderr
+            .ok_or_else(|| anyhow!("stderr handle must be provided to Proc::Builder"))?;
 
         Proc::new(ProcInit {
-            env,
-            args,
-            wasm_debug,
+            env: self.env,
+            args: self.args,
             bytecode,
-            loader,
-            engine,
+            loader: self.loader,
+            engine: self.engine,
             stdin,
             stdout,
             stderr,
-            data_streams,
-            image_root,
+            data_streams: self.data_streams,
+            image_root: self.image_root,
         })
         .await
     }
@@ -290,11 +278,7 @@ pub struct Proc {
     /// Typed handle to the guest command world
     pub command: WasiCliCommand,
     /// Cell runtime store
-    #[allow(dead_code)]
     pub store: Store<ComponentRunStates>,
-    /// Whether debug info was enabled
-    #[allow(dead_code)]
-    pub wasm_debug: bool,
 }
 
 impl Proc {
@@ -303,7 +287,6 @@ impl Proc {
         let ProcInit {
             env,
             args,
-            wasm_debug,
             bytecode,
             loader,
             engine,
@@ -431,11 +414,7 @@ impl Proc {
             "Guest component instantiated"
         );
 
-        Ok(Self {
-            command,
-            store,
-            wasm_debug,
-        })
+        Ok(Self { command, store })
     }
 
     /// Invoke the guest's `wasi:cli/run#run` export and wait for completion.

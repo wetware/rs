@@ -1,3 +1,6 @@
+mod sexpr;
+use sexpr::{read, Val};
+
 use wasip2::cli::stderr::get_stderr;
 use wasip2::cli::stdin::get_stdin;
 use wasip2::cli::stdout::get_stdout;
@@ -46,126 +49,6 @@ static LOGGER: StderrLogger = StderrLogger;
 fn init_logging() {
     if log::set_logger(&LOGGER).is_ok() {
         log::set_max_level(log::LevelFilter::Trace);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// S-expression reader/printer
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-enum Val {
-    Sym(String),
-    Str(String),
-    List(Vec<Val>),
-    Nil,
-}
-
-impl core::fmt::Display for Val {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Val::Sym(s) => write!(f, "{s}"),
-            Val::Str(s) => write!(f, "\"{s}\""),
-            Val::List(items) => {
-                write!(f, "(")?;
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " ")?;
-                    }
-                    write!(f, "{item}")?;
-                }
-                write!(f, ")")
-            }
-            Val::Nil => write!(f, "nil"),
-        }
-    }
-}
-
-fn read(input: &str) -> Result<Val, String> {
-    let tokens = tokenize(input)?;
-    if tokens.is_empty() {
-        return Err("empty input".into());
-    }
-    let (val, rest) = parse_tokens(&tokens)?;
-    if !rest.is_empty() {
-        return Err("unexpected tokens after expression".into());
-    }
-    Ok(val)
-}
-
-fn tokenize(input: &str) -> Result<Vec<String>, String> {
-    let mut tokens = Vec::new();
-    let mut chars = input.chars().peekable();
-    while let Some(&c) = chars.peek() {
-        match c {
-            ' ' | '\t' | '\r' | '\n' => {
-                chars.next();
-            }
-            '(' | ')' => {
-                tokens.push(c.to_string());
-                chars.next();
-            }
-            '"' => {
-                chars.next();
-                let mut s = String::new();
-                loop {
-                    match chars.next() {
-                        Some('\\') => match chars.next() {
-                            Some(esc) => s.push(esc),
-                            None => return Err("unterminated string escape".into()),
-                        },
-                        Some('"') => break,
-                        Some(ch) => s.push(ch),
-                        None => return Err("unterminated string".into()),
-                    }
-                }
-                tokens.push(format!("\"{s}\""));
-            }
-            ';' => {
-                // Comment: skip to end of line.
-                while chars.peek().is_some_and(|&c| c != '\n') {
-                    chars.next();
-                }
-            }
-            _ => {
-                let mut atom = String::new();
-                while chars.peek().is_some_and(|&c| !matches!(c, ' ' | '\t' | '\r' | '\n' | '(' | ')' | '"')) {
-                    atom.push(chars.next().unwrap());
-                }
-                tokens.push(atom);
-            }
-        }
-    }
-    Ok(tokens)
-}
-
-fn parse_tokens<'a>(tokens: &'a [String]) -> Result<(Val, &'a [String]), String> {
-    if tokens.is_empty() {
-        return Err("unexpected end of input".into());
-    }
-    if tokens[0] == "(" {
-        let mut items = Vec::new();
-        let mut rest = &tokens[1..];
-        loop {
-            if rest.is_empty() {
-                return Err("unclosed parenthesis".into());
-            }
-            if rest[0] == ")" {
-                return Ok((Val::List(items), &rest[1..]));
-            }
-            let (val, new_rest) = parse_tokens(rest)?;
-            items.push(val);
-            rest = new_rest;
-        }
-    } else if tokens[0] == ")" {
-        Err("unexpected )".into())
-    } else if tokens[0].starts_with('"') {
-        let s = &tokens[0][1..tokens[0].len() - 1];
-        Ok((Val::Str(s.to_string()), &tokens[1..]))
-    } else if &tokens[0] == "nil" {
-        Ok((Val::Nil, &tokens[1..]))
-    } else {
-        Ok((Val::Sym(tokens[0].clone()), &tokens[1..]))
     }
 }
 
