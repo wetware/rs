@@ -42,8 +42,9 @@ Rationale:
 
 ### Ephemeral fallback
 
-If `--key-file` is not provided to `ww run`, an ephemeral ed25519 key is
-generated at startup and discarded on exit. This is fine for local development
+If `--key-file` is not provided to `ww run`, an ephemeral secp256k1 key is
+generated at startup and discarded on exit. The node uses secp256k1 exclusively
+— ed25519 is not used anywhere in the stack. This is fine for local development
 and testing but means the node's Peer ID changes on every restart.
 
 ## Usage
