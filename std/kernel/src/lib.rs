@@ -59,6 +59,12 @@ struct ShellCtx {
     host: system_capnp::host::Client,
     executor: system_capnp::executor::Client,
     ipfs: ipfs_capnp::client::Client,
+    /// Host-side secp256k1 signer for this node identity.
+    ///
+    /// Provided by the host through the Session so the kernel can sign messages
+    /// without holding the private key in WASM memory.
+    #[allow(dead_code)]
+    signer: stem_capnp::signer::Client,
     cwd: String,
 }
 
@@ -546,6 +552,7 @@ fn run_impl() {
             host: session.get_host()?,
             executor: session.get_executor()?,
             ipfs: session.get_ipfs()?,
+            signer: session.get_signer()?,
             cwd: "/".to_string(),
         };
 

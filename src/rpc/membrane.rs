@@ -1,21 +1,22 @@
-//! Membrane-based RPC bootstrap: epoch-scoped Host + Executor capabilities.
+//! Membrane-based RPC bootstrap: epoch-scoped Host + Executor + Signer capabilities.
 //!
 //! Instead of bootstrapping a bare `Host`, the membrane provides an epoch-scoped
-//! `Session` containing `Host`, `Executor`, and `IPFS Client`.
+//! `Session` containing `Host`, `Executor`, `IPFS Client`, and `Signer`.
 //! All capabilities fail with `staleEpoch` when the epoch advances.
 //!
 //! The `membrane` crate owns the Membrane server and epoch machinery.
 //! This module provides the `SessionBuilder` impl that injects wetware-specific
-//! capabilities (Host + Executor + IPFS) into the session, plus the epoch-guarded
-//! IPFS wrappers.
+//! capabilities into the session, plus the epoch-guarded IPFS and Signer wrappers.
+
+use std::sync::Arc;
 
 use capnp::capability::Promise;
 use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
-use k256::ecdsa::VerifyingKey;
-use membrane::{Epoch, EpochGuard, MembraneServer, SessionBuilder};
+use k256::ecdsa::{signature::Signer as EcdsaSigner, Signature, SigningKey};
+use membrane::{stem_capnp, Epoch, EpochGuard, MembraneServer, SessionBuilder};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -28,15 +29,73 @@ use crate::system_capnp;
 use super::NetworkState;
 
 // ---------------------------------------------------------------------------
+// EpochGuardedKernelSigner — host-side secp256k1 signer for the kernel
+// ---------------------------------------------------------------------------
+
+/// Host-side secp256k1 signer provided to the kernel through the Session.
+///
+/// The private key lives in the host process and is never sent into WASM memory.
+/// Epoch-guarded so signing fails with `staleEpoch` after an epoch advance.
+///
+/// Uses the libp2p signed-envelope domain separation (RFC 0002):
+/// ```text
+/// varint(18)  "ww-membrane-graft"          # domain
+/// varint(25)  "/ww/membrane/graft-nonce"   # payload_type
+/// varint(8)   <8-byte big-endian nonce>    # payload
+/// ```
+struct EpochGuardedKernelSigner {
+    sk: Arc<SigningKey>,
+    guard: EpochGuard,
+}
+
+impl EpochGuardedKernelSigner {
+    fn new(sk: Arc<SigningKey>, guard: EpochGuard) -> Self {
+        Self { sk, guard }
+    }
+}
+
+/// Build the RFC 0002 domain-separated signing buffer.
+fn build_signing_buffer(nonce: u64) -> Vec<u8> {
+    const DOMAIN: &[u8] = b"ww-membrane-graft";
+    const PAYLOAD_TYPE: &[u8] = b"/ww/membrane/graft-nonce";
+    let nonce_bytes = nonce.to_be_bytes();
+    let mut buf = Vec::with_capacity(1 + DOMAIN.len() + 1 + PAYLOAD_TYPE.len() + 1 + 8);
+    buf.push(DOMAIN.len() as u8);
+    buf.extend_from_slice(DOMAIN);
+    buf.push(PAYLOAD_TYPE.len() as u8);
+    buf.extend_from_slice(PAYLOAD_TYPE);
+    buf.push(nonce_bytes.len() as u8);
+    buf.extend_from_slice(&nonce_bytes);
+    buf
+}
+
+#[allow(refining_impl_trait)]
+impl stem_capnp::signer::Server for EpochGuardedKernelSigner {
+    fn sign(
+        self: capnp::capability::Rc<Self>,
+        params: stem_capnp::signer::SignParams,
+        mut results: stem_capnp::signer::SignResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.guard.check());
+        let nonce = pry!(params.get()).get_nonce();
+        let buf = build_signing_buffer(nonce);
+        let sig: Signature = self.sk.sign(&buf);
+        results.get().set_sig(sig.to_bytes().as_slice());
+        Promise::ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HostSessionBuilder — SessionBuilder for the concrete stem Session
 // ---------------------------------------------------------------------------
 
-/// Fills the Session with epoch-guarded Host, Executor, and IPFS Client.
+/// Fills the Session with epoch-guarded Host, Executor, IPFS Client, and Signer.
 pub struct HostSessionBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
     ipfs_client: ipfs::HttpClient,
+    signing_key: Option<Arc<SigningKey>>,
 }
 
 impl HostSessionBuilder {
@@ -45,12 +104,14 @@ impl HostSessionBuilder {
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
         wasm_debug: bool,
         ipfs_client: ipfs::HttpClient,
+        signing_key: Option<Arc<SigningKey>>,
     ) -> Self {
         Self {
             network_state,
             swarm_cmd_tx,
             wasm_debug,
             ipfs_client,
+            signing_key,
         }
     }
 }
@@ -59,7 +120,7 @@ impl SessionBuilder for HostSessionBuilder {
     fn build(
         &self,
         guard: &EpochGuard,
-        mut builder: membrane::stem_capnp::session::Builder<'_>,
+        mut builder: stem_capnp::session::Builder<'_>,
     ) -> Result<(), capnp::Error> {
         let host: system_capnp::host::Client = capnp_rpc::new_client(super::HostImpl::new(
             self.network_state.clone(),
@@ -82,6 +143,12 @@ impl SessionBuilder for HostSessionBuilder {
             EpochGuardedIpfsClient::new(self.ipfs_client.clone(), guard.clone()),
         );
         builder.set_ipfs(ipfs_client);
+
+        if let Some(sk) = &self.signing_key {
+            let signer: stem_capnp::signer::Client =
+                capnp_rpc::new_client(EpochGuardedKernelSigner::new(Arc::clone(sk), guard.clone()));
+            builder.set_signer(signer);
+        }
 
         Ok(())
     }
@@ -315,10 +382,13 @@ pub type GuestMembrane = membrane::stem_capnp::membrane::Client;
 /// Build an RPC system that bootstraps a `Membrane` instead of a bare `Host`.
 ///
 /// The membrane provides epoch-scoped sessions containing `Host`, `Executor`,
-/// and `IPFS Client`.
+/// `IPFS Client`, and (when `signing_key` is `Some`) a host-side `Signer`.
 ///
-/// When `verifying_key` is `Some`, it is stored in the `MembraneServer` for
-/// use in challenge-response authentication (implemented in issue #57).
+/// When `signing_key` is `Some`:
+/// - The `VerifyingKey` is stored in `MembraneServer` for challenge-response
+///   authentication (implemented in issue #57).
+/// - An `EpochGuardedKernelSigner` is injected into every session so the kernel
+///   can sign messages using the node identity without holding the private key.
 ///
 /// Returns both the RPC system and the guest's exported [`GuestMembrane`], if
 /// the guest called `runtime::serve()`. If the guest called `runtime::run()`
@@ -332,14 +402,20 @@ pub fn build_membrane_rpc<R, W>(
     wasm_debug: bool,
     epoch_rx: watch::Receiver<Epoch>,
     ipfs_client: ipfs::HttpClient,
-    verifying_key: Option<VerifyingKey>,
+    signing_key: Option<Arc<SigningKey>>,
 ) -> (RpcSystem<Side>, GuestMembrane)
 where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
 {
-    let sess_builder =
-        HostSessionBuilder::new(network_state, swarm_cmd_tx, wasm_debug, ipfs_client);
+    let verifying_key = signing_key.as_ref().map(|sk| *sk.verifying_key());
+    let sess_builder = HostSessionBuilder::new(
+        network_state,
+        swarm_cmd_tx,
+        wasm_debug,
+        ipfs_client,
+        signing_key,
+    );
     let mut membrane_server = MembraneServer::new(epoch_rx, sess_builder);
     if let Some(vk) = verifying_key {
         membrane_server = membrane_server.with_verifying_key(vk);
