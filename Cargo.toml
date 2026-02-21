@@ -2,6 +2,7 @@
 members = [
     ".",
     "crates/atom",
+    "crates/glia",
     "crates/membrane",
     "std/runtime",
     "std/kernel",
@@ -32,6 +33,7 @@ base58 = "0.2"
 libc = "0.2.177"
 tempfile = "3.23.0"
 walkdir = "2"
+glia = { path = "crates/glia" }
 
 # Host-only dependencies (not needed for WASM guests)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

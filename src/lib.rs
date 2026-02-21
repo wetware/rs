@@ -19,6 +19,8 @@ pub mod keys;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod loaders;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod daemon_config;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod rpc;
 
 // Re-export capnp schema modules from the membrane crate so host code can
@@ -33,6 +35,9 @@ pub use membrane::system_capnp;
 // Modules available for both host and guest
 pub mod config;
 pub mod default_kernel;
+
+// Re-export the Glia language crate
+pub use glia;
 
 // Re-export commonly used types for convenience
 #[cfg(not(target_arch = "wasm32"))]

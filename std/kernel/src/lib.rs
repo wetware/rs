@@ -1,5 +1,4 @@
-mod sexpr;
-use sexpr::{read, Val};
+use glia::{read, Val};
 
 use wasip2::cli::stderr::get_stderr;
 use wasip2::cli::stdin::get_stdin;
