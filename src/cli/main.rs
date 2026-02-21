@@ -458,10 +458,7 @@ pub extern "C" fn _start() {
     }
 
     /// Write a base58btc-encoded signing key to `<merged_root>/etc/identity`.
-    fn inject_identity(
-        sk: &k256::ecdsa::SigningKey,
-        merged_root: &std::path::Path,
-    ) -> Result<()> {
+    fn inject_identity(sk: &k256::ecdsa::SigningKey, merged_root: &std::path::Path) -> Result<()> {
         let etc = merged_root.join("etc");
         std::fs::create_dir_all(&etc).context("create /etc in merged FHS")?;
         std::fs::write(etc.join("identity"), ww::keys::encode(sk))
