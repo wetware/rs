@@ -188,10 +188,10 @@ async fn eval(expr: &Val, ctx: &mut ShellCtx) -> Result<Val, String> {
                 Val::Sym(s) => s.as_str(),
                 _ => return Err(format!("expected symbol, got {}", items[0])),
             };
-            // Resolve self::cap or self.cap compound symbols to the capability name.
+            // Resolve session::cap or session.cap compound symbols to the capability name.
             let (resolved_cap, args) = if let Some(cap) = cmd
-                .strip_prefix("self::")
-                .or_else(|| cmd.strip_prefix("self."))
+                .strip_prefix("session::")
+                .or_else(|| cmd.strip_prefix("session."))
             {
                 (cap, &items[1..])
             } else {
@@ -201,11 +201,11 @@ async fn eval(expr: &Val, ctx: &mut ShellCtx) -> Result<Val, String> {
                 "host"     => eval_host(args, ctx).await,
                 "executor" => eval_executor(args, ctx).await,
                 "ipfs"     => eval_ipfs(args, ctx).await,
-                "self" => {
-                    // (self <cap> <method> [args...]) — session-qualified dispatch
+                "session" => {
+                    // (session <cap> <method> [args...]) — session-qualified dispatch
                     let cap = match args.first() {
                         Some(Val::Sym(s)) => s.as_str(),
-                        _ => return Err("(self <capability> <method> [args...])".into()),
+                        _ => return Err("(session <capability> <method> [args...])".into()),
                     };
                     match cap {
                         "host"     => eval_host(&args[1..], ctx).await,
@@ -652,9 +652,9 @@ async fn run_daemon(ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
 // Entry point
 // ---------------------------------------------------------------------------
 
-struct Pid0;
+struct Kernel;
 
-impl Guest for Pid0 {
+impl Guest for Kernel {
     fn run() -> Result<(), ()> {
         run_impl();
         Ok(())
@@ -690,4 +690,4 @@ fn run_impl() {
     });
 }
 
-wasip2::cli::command::export!(Pid0);
+wasip2::cli::command::export!(Kernel);
