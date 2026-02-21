@@ -323,6 +323,7 @@ pub type GuestMembrane = membrane::stem_capnp::membrane::Client;
 /// Returns both the RPC system and the guest's exported [`GuestMembrane`], if
 /// the guest called `runtime::serve()`. If the guest called `runtime::run()`
 /// instead, the returned capability is broken and attempts to use it will fail.
+#[allow(clippy::too_many_arguments)]
 pub fn build_membrane_rpc<R, W>(
     reader: R,
     writer: W,
