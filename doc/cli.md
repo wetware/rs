@@ -18,7 +18,7 @@ ww run [OPTIONS] <IMAGE>...
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--port <PORT>` | `2020` | libp2p swarm listen port |
+| `--port <PORT>` | `2025` | libp2p swarm listen port |
 | `--wasm-debug` | off | Enable WASM debug info for guest processes |
 | `--stem <ADDR>` | none | Atom contract address (hex, 0x-prefixed). Enables epoch lifecycle: reads on-chain HEAD, prepends as base image layer, watches for updates. |
 | `--rpc-url <URL>` | `http://127.0.0.1:8545` | HTTP JSON-RPC endpoint for `eth_call` / `eth_getLogs` |

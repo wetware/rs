@@ -184,9 +184,10 @@ struct ShellCtx {
     host: peer_capnp::host::Client,
     executor: peer_capnp::executor::Client,
     ipfs: ipfs_capnp::client::Client,
+    cwd: String,
 }
 
-async fn eval(expr: &Val, ctx: &ShellCtx) -> Result<Val, String> {
+async fn eval(expr: &Val, ctx: &mut ShellCtx) -> Result<Val, String> {
     match expr {
         Val::List(items) if items.is_empty() => Ok(Val::Nil),
         Val::List(items) => {
@@ -194,13 +195,45 @@ async fn eval(expr: &Val, ctx: &ShellCtx) -> Result<Val, String> {
                 Val::Sym(s) => s.as_str(),
                 _ => return Err(format!("expected symbol, got {}", items[0])),
             };
-            match cmd {
-                "host" => eval_host(&items[1..], ctx).await,
-                "executor" => eval_executor(&items[1..], ctx).await,
-                "ipfs" => eval_ipfs(&items[1..], ctx).await,
+            // Resolve self::cap or self.cap compound symbols to the capability name.
+            let (resolved_cap, args) = if let Some(cap) = cmd
+                .strip_prefix("self::")
+                .or_else(|| cmd.strip_prefix("self."))
+            {
+                (cap, &items[1..])
+            } else {
+                (cmd, &items[1..])
+            };
+            match resolved_cap {
+                "host"     => eval_host(args, ctx).await,
+                "executor" => eval_executor(args, ctx).await,
+                "ipfs"     => eval_ipfs(args, ctx).await,
+                "self" => {
+                    // (self <cap> <method> [args...]) — session-qualified dispatch
+                    let cap = match args.first() {
+                        Some(Val::Sym(s)) => s.as_str(),
+                        _ => return Err("(self <capability> <method> [args...])".into()),
+                    };
+                    match cap {
+                        "host"     => eval_host(&args[1..], ctx).await,
+                        "executor" => eval_executor(&args[1..], ctx).await,
+                        "ipfs"     => eval_ipfs(&args[1..], ctx).await,
+                        _ => Err(format!("unknown capability: {cap}")),
+                    }
+                }
+                "cd" => {
+                    let path = match args.first() {
+                        Some(Val::Str(s)) => s.clone(),
+                        Some(Val::Sym(s)) => s.clone(),
+                        None => "/".to_string(),
+                        _ => return Err("(cd \"<path>\")".into()),
+                    };
+                    ctx.cwd = path;
+                    Ok(Val::Nil)
+                }
                 "help" => Ok(Val::Str(HELP_TEXT.to_string())),
                 "exit" => std::process::exit(0),
-                _ => eval_path_lookup(cmd, &items[1..], ctx).await,
+                _ => eval_path_lookup(resolved_cap, args, ctx).await,
             }
         }
         // Self-evaluating forms.
@@ -524,18 +557,17 @@ Any other command is looked up in PATH as <cmd>.wasm or <cmd>/main.wasm.";
 // Shell mode (TTY)
 // ---------------------------------------------------------------------------
 
-const PROMPT: &[u8] = b"ww> ";
-
-fn write_prompt(stdout: &wasip2::io::streams::OutputStream) {
-    let _ = stdout.blocking_write_and_flush(PROMPT);
+fn write_prompt(stdout: &wasip2::io::streams::OutputStream, cwd: &str) {
+    let prompt = format!("{} ❯ ", cwd);
+    let _ = stdout.blocking_write_and_flush(prompt.as_bytes());
 }
 
-async fn run_shell(ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_shell(mut ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
     let stdin = get_stdin();
     let stdout = get_stdout();
     let stderr = get_stderr();
 
-    write_prompt(&stdout);
+    write_prompt(&stdout, &ctx.cwd);
     let mut buf: Vec<u8> = Vec::new();
 
     'outer: loop {
@@ -550,18 +582,19 @@ async fn run_shell(ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
             let line = match std::str::from_utf8(&line_bytes) {
                 Ok(s) => s.trim(),
                 Err(_) => {
-                    write_prompt(&stdout);
+                    write_prompt(&stdout, &ctx.cwd);
                     continue;
                 }
             };
 
             if line.is_empty() {
-                write_prompt(&stdout);
+                write_prompt(&stdout, &ctx.cwd);
                 continue;
             }
 
             match read(line) {
-                Ok(expr) => match eval(&expr, &ctx).await {
+                Ok(expr) => match eval(&expr, &mut ctx).await {
+                    Ok(Val::Nil) => {}
                     Ok(result) => {
                         let _ = stdout
                             .blocking_write_and_flush(format!("{result}\n").as_bytes());
@@ -577,7 +610,7 @@ async fn run_shell(ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            write_prompt(&stdout);
+            write_prompt(&stdout, &ctx.cwd);
         }
     }
 
@@ -647,6 +680,7 @@ fn run_impl() {
             host: ext.get_host()?,
             executor: ext.get_executor()?,
             ipfs: ext.get_ipfs()?,
+            cwd: "/".to_string(),
         };
 
         let is_tty = std::env::var("WW_TTY").is_ok();

@@ -17,7 +17,7 @@ cargo run -- run examples/images/pid0
 
 `ww run <image>` does three things:
 
-1. **Starts a libp2p swarm** on the configured port (default 2020)
+1. **Starts a libp2p swarm** on the configured port (default 2025)
 2. **Loads `<image>/bin/main.wasm`** using a chain loader (tries IPFS, falls
    back to host filesystem)
 3. **Spawns the guest** with WASI stdio bound to the host terminal and Cap'n
@@ -149,7 +149,7 @@ Arguments:
   <IMAGE>    Image path: local directory or IPFS path containing bin/main.wasm
 
 Options:
-  --port <PORT>      libp2p swarm port [default: 2020]
+  --port <PORT>      libp2p swarm port [default: 2025]
   --wasm-debug       Enable WASM debug info for guest processes
   -h, --help         Print help
   -V, --version      Print version
@@ -190,7 +190,7 @@ RUST_LOG=ww=trace         # everything, including RPC message tracing
 │  ┌─────────────┐    ┌─────────────────────────────┐  │
 │  │ libp2p      │    │ Cell                        │  │
 │  │ swarm       │    │                             │  │
-│  │ (port 2020) │    │  ┌───────┐  Cap'n Proto    │  │
+│  │ (port 2025) │    │  ┌───────┐  Cap'n Proto    │  │
 │  │             │◄───┤  │ pid0  │◄──── RPC ──────►│  │
 │  │             │    │  │ .wasm │  (in-memory)     │  │
 │  │             │    │  └───────┘                  │  │

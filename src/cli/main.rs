@@ -42,7 +42,7 @@ enum Commands {
         images: Vec<String>,
 
         /// libp2p swarm port
-        #[arg(long, default_value = "2020")]
+        #[arg(long, default_value = "2025")]
         port: u16,
 
         /// Enable WASM debug info for guest processes

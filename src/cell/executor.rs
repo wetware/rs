@@ -18,7 +18,7 @@ use crate::host::SwarmCommand;
 use crate::rpc::membrane::GuestMembrane;
 use crate::rpc::NetworkState;
 
-const CAPNP_PROTOCOL: StreamProtocol = StreamProtocol::new("/wetware/capnp/1.0.0");
+const CAPNP_PROTOCOL: StreamProtocol = StreamProtocol::new("/ww/0.1.0");
 
 /// Builder for constructing a [`Cell`].
 ///

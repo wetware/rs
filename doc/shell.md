@@ -37,7 +37,7 @@ Strings are double-quoted. Symbols are bare words. Comments start with
 | `id` | `(host id)` | Peer ID (hex-encoded) |
 | `addrs` | `(host addrs)` | Listen multiaddrs |
 | `peers` | `(host peers)` | Connected peers with addresses |
-| `connect` | `(host connect "/ip4/1.2.3.4/tcp/2020/p2p/12D3...")` | Dial a peer |
+| `connect` | `(host connect "/ip4/1.2.3.4/tcp/2025/p2p/12D3...")` | Dial a peer |
 
 #### executor
 
