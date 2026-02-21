@@ -3873,6 +3873,7 @@ dependencies = [
  "capnp",
  "capnp-rpc",
  "capnpc",
+ "k256",
  "tokio",
 ]
 

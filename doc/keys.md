@@ -40,12 +40,28 @@ Rationale:
 - Private key material **never touches IPFS** or any other content-addressed
   store. Even if the node CID is public, the key file stays local.
 
-### Ephemeral fallback
+### Identity resolution
 
-If `--key-file` is not provided to `ww run`, an ephemeral secp256k1 key is
-generated at startup and discarded on exit. The node uses secp256k1 exclusively
-— ed25519 is not used anywhere in the stack. This is fine for local development
-and testing but means the node's Peer ID changes on every restart.
+`ww run` resolves the node identity in this order (first match wins):
+
+1. `--identity PATH` — explicit path to a key file
+2. `$WW_IDENTITY` — environment variable pointing to a key file
+3. `/etc/identity` present in the merged image layers (baked into the image)
+4. Ephemeral — generated at startup, discarded on exit
+
+Each time the host resolves the identity it logs the source at `INFO` level
+so the active source is always visible in the log output.
+
+The ephemeral fallback is fine for local development and testing but means
+the node's Peer ID and EVM address change on every restart. Use a persistent
+key for any deployment that other nodes need to remember across restarts.
+
+The Glia config file (`~/.ww/config.glia`) also accepts `:identity` to
+set a default key file for daemon mode:
+
+```glia
+{:port 2025 :identity "~/.ww/key" :images ["images/my-app"]}
+```
 
 ## Usage
 
@@ -58,7 +74,7 @@ ww keygen --output ~/.ww/key
 ww keygen > ~/.ww/key          # equivalent
 
 # Run with a persistent identity
-ww run --key-file ~/.ww/key images/my-app
+ww run --identity ~/.ww/key images/my-app
 ```
 
 ## File format

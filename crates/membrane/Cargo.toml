@@ -10,6 +10,7 @@ capnpc = "0.23.3"
 [dependencies]
 capnp = "0.23.2"
 capnp-rpc = "0.23.0"
+k256 = { version = "0.13", features = ["ecdsa"] }
 tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]

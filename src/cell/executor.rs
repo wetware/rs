@@ -3,6 +3,7 @@ use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
 use futures::FutureExt;
+use k256::ecdsa::VerifyingKey;
 use libp2p::StreamProtocol;
 use membrane::Epoch;
 use std::io::IsTerminal;
@@ -69,6 +70,7 @@ pub struct CellBuilder {
     initial_epoch: Option<Epoch>,
     ipfs_client: Option<crate::ipfs::HttpClient>,
     epoch_rx: Option<watch::Receiver<Epoch>>,
+    verifying_key: Option<VerifyingKey>,
 }
 
 impl CellBuilder {
@@ -90,6 +92,7 @@ impl CellBuilder {
             initial_epoch: None,
             ipfs_client: None,
             epoch_rx: None,
+            verifying_key: None,
         }
     }
 
@@ -171,6 +174,15 @@ impl CellBuilder {
         self
     }
 
+    /// Set the secp256k1 verifying key for `graft()` authentication.
+    ///
+    /// When set, the key is threaded through to `MembraneServer` so that
+    /// challenge-response authentication can be applied in `graft()` (issue #57).
+    pub fn with_verifying_key(mut self, vk: VerifyingKey) -> Self {
+        self.verifying_key = Some(vk);
+        self
+    }
+
     /// Build the Cell.
     ///
     /// # Panics
@@ -192,6 +204,7 @@ impl CellBuilder {
                 .ipfs_client
                 .unwrap_or_else(|| crate::ipfs::HttpClient::new("http://localhost:5001".into())),
             epoch_rx: self.epoch_rx,
+            verifying_key: self.verifying_key,
         }
     }
 }
@@ -217,6 +230,7 @@ pub struct Cell {
     pub initial_epoch: Option<Epoch>,
     pub ipfs_client: crate::ipfs::HttpClient,
     pub epoch_rx: Option<watch::Receiver<Epoch>>,
+    pub verifying_key: Option<VerifyingKey>,
 }
 
 /// Result of spawning a cell with RPC: exit code, guest membrane, and optional epoch sender.
@@ -269,6 +283,7 @@ impl Cell {
             initial_epoch: _,
             ipfs_client: _,
             epoch_rx: _,
+            verifying_key: _,
         } = self;
 
         crate::config::init_tracing();
@@ -331,6 +346,7 @@ impl Cell {
         let network_state = self.network_state.clone();
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
         let ipfs_client = self.ipfs_client.clone();
+        let verifying_key = self.verifying_key.take();
         let pre_epoch_rx = self.epoch_rx.take();
         let initial_epoch = self.initial_epoch.clone().unwrap_or(Epoch {
             seq: 0,
@@ -360,6 +376,7 @@ impl Cell {
             wasm_debug,
             epoch_rx,
             ipfs_client,
+            verifying_key,
         );
 
         tracing::debug!("Starting streams RPC server for guest");
