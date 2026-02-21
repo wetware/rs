@@ -18,9 +18,11 @@ use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+use ::membrane::EpochGuard;
+
 use crate::cell::proc::Builder as ProcBuilder;
 use crate::host::SwarmCommand;
-use crate::peer_capnp;
+use crate::system_capnp;
 
 #[derive(Clone, Debug)]
 pub struct PeerInfo {
@@ -114,11 +116,11 @@ impl ByteStreamImpl {
     }
 }
 
-impl peer_capnp::byte_stream::Server for ByteStreamImpl {
+impl system_capnp::byte_stream::Server for ByteStreamImpl {
     fn read(
         self: capnp::capability::Rc<Self>,
-        params: peer_capnp::byte_stream::ReadParams,
-        mut results: peer_capnp::byte_stream::ReadResults,
+        params: system_capnp::byte_stream::ReadParams,
+        mut results: system_capnp::byte_stream::ReadResults,
     ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
         if matches!(self.mode, StreamMode::WriteOnly) {
             return Promise::from_future(async {
@@ -147,8 +149,8 @@ impl peer_capnp::byte_stream::Server for ByteStreamImpl {
 
     fn write(
         self: capnp::capability::Rc<Self>,
-        params: peer_capnp::byte_stream::WriteParams,
-        _results: peer_capnp::byte_stream::WriteResults,
+        params: system_capnp::byte_stream::WriteParams,
+        _results: system_capnp::byte_stream::WriteResults,
     ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
         if matches!(self.mode, StreamMode::ReadOnly) {
             return Promise::from_future(async {
@@ -176,8 +178,8 @@ impl peer_capnp::byte_stream::Server for ByteStreamImpl {
 
     fn close(
         self: capnp::capability::Rc<Self>,
-        _params: peer_capnp::byte_stream::CloseParams,
-        _results: peer_capnp::byte_stream::CloseResults,
+        _params: system_capnp::byte_stream::CloseParams,
+        _results: system_capnp::byte_stream::CloseResults,
     ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
         let stream = self.stream.clone();
         Promise::from_future(async move {
@@ -189,17 +191,17 @@ impl peer_capnp::byte_stream::Server for ByteStreamImpl {
 }
 
 pub struct ProcessImpl {
-    stdin: peer_capnp::byte_stream::Client,
-    stdout: peer_capnp::byte_stream::Client,
-    stderr: peer_capnp::byte_stream::Client,
+    stdin: system_capnp::byte_stream::Client,
+    stdout: system_capnp::byte_stream::Client,
+    stderr: system_capnp::byte_stream::Client,
     exit_rx: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<i32>>>>,
 }
 
 impl ProcessImpl {
     pub(crate) fn new(
-        stdin: peer_capnp::byte_stream::Client,
-        stdout: peer_capnp::byte_stream::Client,
-        stderr: peer_capnp::byte_stream::Client,
+        stdin: system_capnp::byte_stream::Client,
+        stdout: system_capnp::byte_stream::Client,
+        stderr: system_capnp::byte_stream::Client,
         exit_rx: tokio::sync::oneshot::Receiver<i32>,
     ) -> Self {
         Self {
@@ -211,11 +213,11 @@ impl ProcessImpl {
     }
 }
 
-impl peer_capnp::process::Server for ProcessImpl {
+impl system_capnp::process::Server for ProcessImpl {
     fn stdin(
         self: capnp::capability::Rc<Self>,
-        _params: peer_capnp::process::StdinParams,
-        mut results: peer_capnp::process::StdinResults,
+        _params: system_capnp::process::StdinParams,
+        mut results: system_capnp::process::StdinResults,
     ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
         results.get().set_stream(self.stdin.clone());
         Promise::ok(())
@@ -223,8 +225,8 @@ impl peer_capnp::process::Server for ProcessImpl {
 
     fn stdout(
         self: capnp::capability::Rc<Self>,
-        _params: peer_capnp::process::StdoutParams,
-        mut results: peer_capnp::process::StdoutResults,
+        _params: system_capnp::process::StdoutParams,
+        mut results: system_capnp::process::StdoutResults,
     ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
         results.get().set_stream(self.stdout.clone());
         Promise::ok(())
@@ -232,8 +234,8 @@ impl peer_capnp::process::Server for ProcessImpl {
 
     fn stderr(
         self: capnp::capability::Rc<Self>,
-        _params: peer_capnp::process::StderrParams,
-        mut results: peer_capnp::process::StderrResults,
+        _params: system_capnp::process::StderrParams,
+        mut results: system_capnp::process::StderrResults,
     ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
         results.get().set_stream(self.stderr.clone());
         Promise::ok(())
@@ -241,8 +243,8 @@ impl peer_capnp::process::Server for ProcessImpl {
 
     fn wait(
         self: capnp::capability::Rc<Self>,
-        _params: peer_capnp::process::WaitParams,
-        mut results: peer_capnp::process::WaitResults,
+        _params: system_capnp::process::WaitParams,
+        mut results: system_capnp::process::WaitResults,
     ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
         let exit_rx = Arc::clone(&self.exit_rx);
         Promise::from_future(async move {
@@ -261,6 +263,7 @@ pub struct HostImpl {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
+    guard: Option<EpochGuard>,
 }
 
 impl HostImpl {
@@ -268,21 +271,32 @@ impl HostImpl {
         network_state: NetworkState,
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
         wasm_debug: bool,
+        guard: Option<EpochGuard>,
     ) -> Self {
         Self {
             network_state,
             swarm_cmd_tx,
             wasm_debug,
+            guard,
+        }
+    }
+
+    fn check_epoch(&self) -> Result<(), capnp::Error> {
+        match self.guard {
+            Some(ref g) => g.check(),
+            None => Ok(()),
         }
     }
 }
 
-impl peer_capnp::host::Server for HostImpl {
+#[allow(refining_impl_trait)]
+impl system_capnp::host::Server for HostImpl {
     fn id(
         self: capnp::capability::Rc<Self>,
-        _params: peer_capnp::host::IdParams,
-        mut results: peer_capnp::host::IdResults,
-    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+        _params: system_capnp::host::IdParams,
+        mut results: system_capnp::host::IdResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
         let network_state = self.network_state.clone();
         Promise::from_future(async move {
             let snapshot = network_state.snapshot().await;
@@ -293,9 +307,10 @@ impl peer_capnp::host::Server for HostImpl {
 
     fn addrs(
         self: capnp::capability::Rc<Self>,
-        _params: peer_capnp::host::AddrsParams,
-        mut results: peer_capnp::host::AddrsResults,
-    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+        _params: system_capnp::host::AddrsParams,
+        mut results: system_capnp::host::AddrsResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
         let network_state = self.network_state.clone();
         Promise::from_future(async move {
             let snapshot = network_state.snapshot().await;
@@ -309,9 +324,10 @@ impl peer_capnp::host::Server for HostImpl {
 
     fn peers(
         self: capnp::capability::Rc<Self>,
-        _params: peer_capnp::host::PeersParams,
-        mut results: peer_capnp::host::PeersResults,
-    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+        _params: system_capnp::host::PeersParams,
+        mut results: system_capnp::host::PeersResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
         let network_state = self.network_state.clone();
         Promise::from_future(async move {
             let snapshot = network_state.snapshot().await;
@@ -330,9 +346,10 @@ impl peer_capnp::host::Server for HostImpl {
 
     fn connect(
         self: capnp::capability::Rc<Self>,
-        params: peer_capnp::host::ConnectParams,
-        _results: peer_capnp::host::ConnectResults,
-    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+        params: system_capnp::host::ConnectParams,
+        _results: system_capnp::host::ConnectResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
         let params_reader = pry!(params.get());
         let peer_id_bytes = read_data_result(params_reader.get_peer_id());
         let addrs_bytes: Vec<Vec<u8>> = match params_reader.get_addrs() {
@@ -374,13 +391,15 @@ impl peer_capnp::host::Server for HostImpl {
 
     fn executor(
         self: capnp::capability::Rc<Self>,
-        _params: peer_capnp::host::ExecutorParams,
-        mut results: peer_capnp::host::ExecutorResults,
-    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
-        let executor: peer_capnp::executor::Client = capnp_rpc::new_client(ExecutorImpl::new(
+        _params: system_capnp::host::ExecutorParams,
+        mut results: system_capnp::host::ExecutorResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
+        let executor: system_capnp::executor::Client = capnp_rpc::new_client(ExecutorImpl::new(
             self.network_state.clone(),
             self.swarm_cmd_tx.clone(),
             self.wasm_debug,
+            self.guard.clone(),
         ));
         results.get().set_executor(executor);
         Promise::ok(())
@@ -391,6 +410,7 @@ pub struct ExecutorImpl {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
+    guard: Option<EpochGuard>,
 }
 
 impl ExecutorImpl {
@@ -398,11 +418,20 @@ impl ExecutorImpl {
         network_state: NetworkState,
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
         wasm_debug: bool,
+        guard: Option<EpochGuard>,
     ) -> Self {
         Self {
             network_state,
             swarm_cmd_tx,
             wasm_debug,
+            guard,
+        }
+    }
+
+    fn check_epoch(&self) -> Result<(), capnp::Error> {
+        match self.guard {
+            Some(ref g) => g.check(),
+            None => Ok(()),
         }
     }
 }
@@ -433,30 +462,30 @@ fn read_data_result(data: capnp::Result<capnp::data::Reader<'_>>) -> Vec<u8> {
     }
 }
 
-impl peer_capnp::executor::Server for ExecutorImpl {
+#[allow(refining_impl_trait)]
+impl system_capnp::executor::Server for ExecutorImpl {
     fn echo(
         self: capnp::capability::Rc<Self>,
-        params: peer_capnp::executor::EchoParams,
-        mut results: peer_capnp::executor::EchoResults,
-    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+        params: system_capnp::executor::EchoParams,
+        mut results: system_capnp::executor::EchoResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
         let message = match pry!(params.get()).get_message() {
             Ok(s) => s.to_string().unwrap_or_else(|_| String::new()),
             Err(_) => String::new(),
         };
-        tracing::info!("Host: Received echo request: {}", message);
-        Promise::from_future(async move {
-            let response = format!("Echo: {}", message);
-            tracing::info!("Host: Sending echo response: {}", response);
-            results.get().set_response(&response);
-            Ok(())
-        })
+        tracing::debug!(message, "echo");
+        let response = format!("Echo: {}", message);
+        results.get().set_response(&response);
+        Promise::ok(())
     }
 
     fn run_bytes(
         self: capnp::capability::Rc<Self>,
-        params: peer_capnp::executor::RunBytesParams,
-        mut results: peer_capnp::executor::RunBytesResults,
-    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+        params: system_capnp::executor::RunBytesParams,
+        mut results: system_capnp::executor::RunBytesResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
         let params = pry!(params.get());
         let args = read_text_list_result(params.get_args());
         let env = read_text_list_result(params.get_env());
@@ -468,16 +497,12 @@ impl peer_capnp::executor::Server for ExecutorImpl {
             tracing::info!("run_bytes: starting child process spawn");
             let bytecode = wasm;
 
-            // Create stderr duplex for process interface
             let (host_stderr, guest_stderr) = io::duplex(64 * 1024);
-
-            // Create real stdin/stdout duplexes for Process interface
             let (host_stdin, guest_stdin) = io::duplex(64 * 1024);
             let (host_stdout, guest_stdout) = io::duplex(64 * 1024);
 
             let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
 
-            // Build guest with wetware streams enabled for RPC
             let (builder, mut handles) = ProcBuilder::new()
                 .with_env(env)
                 .with_args(args)
@@ -486,12 +511,10 @@ impl peer_capnp::executor::Server for ExecutorImpl {
                 .with_stdio(guest_stdin, guest_stdout, guest_stderr)
                 .with_data_streams();
 
-            tracing::info!("run_bytes: building child process");
             let proc = builder
                 .build()
                 .await
                 .map_err(|err| capnp::Error::failed(err.to_string()))?;
-            tracing::info!("run_bytes: child process built");
 
             let (reader, writer) = handles
                 .take_host_split()
@@ -499,24 +522,13 @@ impl peer_capnp::executor::Server for ExecutorImpl {
             let child_rpc_system =
                 build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug);
 
-            // Spawn both the child process and its RPC server in a LocalSet
-            tracing::info!("run_bytes: spawning child task");
             tokio::task::spawn_local(async move {
-                tracing::info!("run_bytes: child task started");
                 let local = tokio::task::LocalSet::new();
-
-                // Spawn RPC system
                 local.spawn_local(child_rpc_system.map(|_| ()));
-
-                // Run child process and wait for exit
                 local
                     .run_until(async move {
-                        tracing::info!("run_bytes: running child process");
                         let exit_code = match proc.run().await {
-                            Ok(()) => {
-                                tracing::info!("run_bytes: child process exited successfully");
-                                0
-                            }
+                            Ok(()) => 0,
                             Err(e) => {
                                 tracing::error!("run_bytes: child process failed: {}", e);
                                 1
@@ -525,9 +537,7 @@ impl peer_capnp::executor::Server for ExecutorImpl {
                         let _ = exit_tx.send(exit_code);
                     })
                     .await;
-                tracing::info!("run_bytes: child task completed");
             });
-            tracing::info!("run_bytes: returning process client");
 
             let stdin =
                 capnp_rpc::new_client(ByteStreamImpl::new(host_stdin, StreamMode::WriteOnly));
@@ -536,7 +546,7 @@ impl peer_capnp::executor::Server for ExecutorImpl {
             let stderr =
                 capnp_rpc::new_client(ByteStreamImpl::new(host_stderr, StreamMode::ReadOnly));
 
-            let process_client: peer_capnp::process::Client =
+            let process_client: system_capnp::process::Client =
                 capnp_rpc::new_client(ProcessImpl::new(stdin, stdout, stderr, exit_rx));
             results.get().set_process(process_client);
 
@@ -556,8 +566,8 @@ where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
 {
-    let host: peer_capnp::host::Client =
-        capnp_rpc::new_client(HostImpl::new(network_state, swarm_cmd_tx, wasm_debug));
+    let host: system_capnp::host::Client =
+        capnp_rpc::new_client(HostImpl::new(network_state, swarm_cmd_tx, wasm_debug, None));
 
     let rpc_network = VatNetwork::new(
         reader.compat(),
@@ -575,7 +585,7 @@ mod tests {
 
     /// Helper: spin up server + client over in-memory duplex, return Host client.
     fn setup_rpc() -> (
-        peer_capnp::host::Client,
+        system_capnp::host::Client,
         tokio::task::JoinHandle<()>,
         mpsc::Receiver<SwarmCommand>,
     ) {
@@ -601,7 +611,7 @@ mod tests {
             Default::default(),
         );
         let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
-        let host: peer_capnp::host::Client = client_rpc.bootstrap(Side::Server);
+        let host: system_capnp::host::Client = client_rpc.bootstrap(Side::Server);
         tokio::task::spawn_local(async move {
             let _ = client_rpc.await;
         });

@@ -2,8 +2,18 @@
 //!
 //! - **Epoch** -- a monotonic sequence number anchored to on-chain state
 //! - **EpochGuard** -- checks whether a capability's epoch is still current
-//! - **MembraneServer** -- generic server that issues epoch-scoped sessions via `graft()`
-//! - **SessionExtensionBuilder** -- trait for injecting domain-specific capabilities into sessions
+//! - **MembraneServer** -- server that issues epoch-scoped sessions via `graft()`
+//! - **SessionBuilder** -- trait for injecting domain-specific capabilities into sessions
+
+#[allow(unused_parens)]
+pub mod system_capnp {
+    include!(concat!(env!("OUT_DIR"), "/capnp/system_capnp.rs"));
+}
+
+#[allow(unused_parens)]
+pub mod ipfs_capnp {
+    include!(concat!(env!("OUT_DIR"), "/capnp/ipfs_capnp.rs"));
+}
 
 #[allow(unused_parens, clippy::extra_unused_type_parameters)]
 pub mod stem_capnp {
@@ -13,7 +23,5 @@ pub mod stem_capnp {
 pub mod epoch;
 pub mod membrane;
 
-pub use epoch::{Epoch, EpochGuard, fill_epoch_builder};
-pub use membrane::{
-    membrane_client, MembraneServer, NoExtension, SessionExtensionBuilder, StatusPollerServer,
-};
+pub use epoch::{Epoch, EpochGuard};
+pub use membrane::{membrane_client, MembraneServer, NoExtension, SessionBuilder};

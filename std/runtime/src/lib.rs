@@ -382,7 +382,7 @@ where
 /// `rpc_system.bootstrap(Side::Client)`.
 ///
 /// Use this when the guest needs to export a capability back to the host —
-/// for example, a pid0 that wraps and attenuates the host's Membrane before
+/// for example, a kernel that wraps and attenuates the host's Membrane before
 /// re-exporting it to external peers.
 ///
 /// # Example

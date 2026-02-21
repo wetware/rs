@@ -1333,19 +1333,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "child-echo"
-version = "0.1.0"
-dependencies = [
- "capnp",
- "capnp-rpc",
- "capnpc",
- "futures",
- "log",
- "wasip2",
- "wetware-guest",
-]
-
-[[package]]
 name = "chrono"
 version = "0.4.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1357,6 +1344,18 @@ dependencies = [
  "serde",
  "wasm-bindgen",
  "windows-link",
+]
+
+[[package]]
+name = "cid"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3147d8272e8fa0ccd29ce51194dd98f79ddfb8191ba9e3409884e751798acf3a"
+dependencies = [
+ "core2",
+ "multibase",
+ "multihash 0.19.3",
+ "unsigned-varint 0.8.0",
 ]
 
 [[package]]
@@ -3316,6 +3315,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel"
+version = "0.1.0"
+dependencies = [
+ "capnp",
+ "capnp-rpc",
+ "capnpc",
+ "futures",
+ "hex",
+ "log",
+ "runtime",
+ "wasip2",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4399,19 +4412,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pid0"
-version = "0.1.0"
-dependencies = [
- "capnp",
- "capnp-rpc",
- "capnpc",
- "futures",
- "log",
- "wasip2",
- "wetware-guest",
-]
-
-[[package]]
 name = "pin-project"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4987,6 +4987,7 @@ dependencies = [
  "js-sys",
  "log",
  "mime",
+ "mime_guess",
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
@@ -5099,6 +5100,17 @@ name = "ruint-macro"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48fd7bd8a6377e15ad9d42a8ec25371b94ddc67abe7c8b9127bec79bebaaae18"
+
+[[package]]
+name = "runtime"
+version = "0.1.0"
+dependencies = [
+ "capnp",
+ "capnp-rpc",
+ "futures",
+ "wasip2",
+ "wit-bindgen 0.41.0",
+]
 
 [[package]]
 name = "rustc-demangle"
@@ -5472,9 +5484,9 @@ dependencies = [
 name = "shell"
 version = "0.1.0"
 dependencies = [
- "log",
- "shlex",
- "wasip2",
+ "capnp",
+ "capnp-rpc",
+ "runtime",
 ]
 
 [[package]]
@@ -6958,17 +6970,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wetware-guest"
-version = "0.1.0"
-dependencies = [
- "capnp",
- "capnp-rpc",
- "futures",
- "wasip2",
- "wit-bindgen 0.41.0",
-]
-
-[[package]]
 name = "widestring"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7575,6 +7576,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "atom",
  "base58",
  "base64 0.22.1",
  "bytes",
@@ -7582,8 +7584,10 @@ dependencies = [
  "capnp-rpc",
  "capnpc",
  "chrono",
+ "cid",
  "clap",
  "futures",
+ "hex",
  "ipfs-api-backend-hyper",
  "libc",
  "libp2p",

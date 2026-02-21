@@ -1,4 +1,4 @@
-package wetware:pid0;
+package wetware:kernel;
 
 use wetware:streams/streams;
 

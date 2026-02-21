@@ -3,10 +3,10 @@ name = "shell"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies]
+capnp = "0.23.2"
+capnp-rpc = "0.23.0"
+runtime = { path = "../runtime" }
+
 [lib]
 crate-type = ["cdylib"]
-
-[dependencies]
-wasip2 = "1.0.2"
-log = "0.4"
-shlex = "1.3"

@@ -1,15 +1,15 @@
-//! Integration test: Anvil → indexer → Epoch → Membrane server → client → graft → Session → pollStatus.
+//! Integration test: Epoch → Membrane → graft → Session → executor.echo (epoch-guarded).
 //! All local: membrane server and client are in-process (capnp-rpc local dispatch).
 
 mod common;
 
 use capnp_rpc::new_client;
-use common::{deploy_atom, set_head, spawn_anvil};
+use common::{deploy_atom, set_head, spawn_anvil, StubSessionBuilder};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use atom::stem_capnp;
-use atom::{membrane_client, Epoch, IndexerConfig, AtomIndexer};
+use atom::{Epoch, IndexerConfig, AtomIndexer, MembraneServer};
 use tokio::sync::watch;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
@@ -37,10 +37,15 @@ fn observed_to_epoch(ev: &atom::HeadUpdatedObserved) -> Epoch {
     }
 }
 
+/// Helper: create a membrane client backed by StubSessionBuilder (epoch-guarded echo).
+fn stub_membrane(rx: watch::Receiver<Epoch>) -> stem_capnp::membrane::Client {
+    new_client(MembraneServer::new(rx, StubSessionBuilder))
+}
+
 #[tokio::test]
-async fn test_membrane_graft_poll_status_against_anvil() {
+async fn test_membrane_graft_echo_against_anvil() {
     if !common::foundry_available() {
-        eprintln!("skipping test_membrane_graft_poll_status_against_anvil: anvil/forge/cast not in PATH");
+        eprintln!("skipping test_membrane_graft_echo_against_anvil: anvil/forge/cast not in PATH");
         return;
     }
     let _ = tracing_subscriber::fmt()
@@ -97,36 +102,35 @@ async fn test_membrane_graft_poll_status_against_anvil() {
     };
 
     let (tx, rx) = watch::channel(epoch1.clone());
-    let membrane = membrane_client(rx);
+    let membrane = stub_membrane(rx);
     let signer_client: stem_capnp::signer::Client = new_client(StubSigner);
 
+    // Graft → get session → echo → Ok
     let mut graft_req = membrane.graft_request();
     graft_req.get().set_signer(signer_client);
 
     let graft_rpc_response = graft_req.send().promise.await.expect("graft RPC");
     let graft_response = graft_rpc_response.get().expect("graft results");
     let session = graft_response.get_session().expect("session");
-    let issued = session.get_issued_epoch().expect("issued_epoch");
-    assert_eq!(issued.get_seq(), epoch1.seq);
-    assert_eq!(issued.get_adopted_block(), epoch1.adopted_block);
+    let executor = session.get_executor().expect("executor");
 
-    let poller = session.get_status_poller().expect("status_poller");
-    let poll_req = poller.poll_status_request();
-    let status1 = {
-        let r = poll_req.send().promise.await.expect("poll_status RPC");
-        r.get().expect("poll_status results").get_status().expect("status")
-    };
-    assert_eq!(status1, stem_capnp::Status::Ok, "session should be ok under current epoch");
+    let mut echo_req = executor.echo_request();
+    echo_req.get().set_message("hello");
+    let echo_resp = echo_req.send().promise.await.expect("echo RPC");
+    let response = echo_resp.get().expect("echo results").get_response().expect("response");
+    assert_eq!(response.to_str().unwrap(), "pong");
 
+    // Advance epoch → same executor.echo → staleEpoch error
     tx.send(epoch2).unwrap();
-    let poll_req2 = poller.poll_status_request();
-    match poll_req2.send().promise.await {
-        Ok(_) => panic!("poll_status should fail with RPC error after epoch advance"),
+    let mut echo_req2 = executor.echo_request();
+    echo_req2.get().set_message("hello");
+    match echo_req2.send().promise.await {
+        Ok(_) => panic!("echo should fail with RPC error after epoch advance"),
         Err(e) => assert!(e.to_string().contains("staleEpoch"), "error should mention staleEpoch, got: {e}"),
     }
 }
 
-/// No-chain regression test: poller fails with RPC error after epoch advance, then re-graft returns Ok.
+/// No-chain regression test: echo fails with staleEpoch after epoch advance, then re-graft recovers.
 #[tokio::test]
 async fn test_membrane_stale_epoch_then_recovery_no_chain() {
     let epoch1 = Epoch {
@@ -141,40 +145,43 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
     };
 
     let (tx, rx) = watch::channel(epoch1.clone());
-    let membrane = membrane_client(rx);
+    let membrane = stub_membrane(rx);
     let signer_client: stem_capnp::signer::Client = new_client(StubSigner);
 
+    // Graft → echo → Ok
     let mut graft_req = membrane.graft_request();
     graft_req.get().set_signer(signer_client.clone());
     let graft_rpc_response = graft_req.send().promise.await.expect("graft RPC");
     let graft_response = graft_rpc_response.get().expect("graft results");
     let session = graft_response.get_session().expect("session");
-    let poller = session.get_status_poller().expect("status_poller");
+    let executor = session.get_executor().expect("executor");
 
-    let poll_req = poller.poll_status_request();
-    let status1 = {
-        let r = poll_req.send().promise.await.expect("poll_status RPC");
-        r.get().expect("poll_status results").get_status().expect("status")
-    };
-    assert_eq!(status1, stem_capnp::Status::Ok, "session should be ok under current epoch");
+    let mut echo_req = executor.echo_request();
+    echo_req.get().set_message("ping");
+    let echo_resp = echo_req.send().promise.await.expect("echo RPC");
+    let response = echo_resp.get().expect("echo results").get_response().expect("response");
+    assert_eq!(response.to_str().unwrap(), "pong", "session should be ok under current epoch");
 
+    // Advance epoch → same executor.echo → staleEpoch
     tx.send(epoch2).unwrap();
-    let poll_req2 = poller.poll_status_request();
-    match poll_req2.send().promise.await {
-        Ok(_) => panic!("poll_status should fail with RPC error after epoch advance"),
+    let mut echo_req2 = executor.echo_request();
+    echo_req2.get().set_message("ping");
+    match echo_req2.send().promise.await {
+        Ok(_) => panic!("echo should fail with RPC error after epoch advance"),
         Err(e) => assert!(e.to_string().contains("staleEpoch"), "error should mention staleEpoch, got: {e}"),
     }
 
+    // Re-graft → new executor.echo → Ok
     let mut graft_req2 = membrane.graft_request();
     graft_req2.get().set_signer(signer_client.clone());
     let graft_rpc_response2 = graft_req2.send().promise.await.expect("re-graft RPC");
     let graft_response2 = graft_rpc_response2.get().expect("re-graft results");
     let session2 = graft_response2.get_session().expect("session");
-    let poller2 = session2.get_status_poller().expect("status_poller");
-    let poll_req3 = poller2.poll_status_request();
-    let status3 = {
-        let r = poll_req3.send().promise.await.expect("poll_status after re-graft RPC");
-        r.get().expect("poll_status results").get_status().expect("status")
-    };
-    assert_eq!(status3, stem_capnp::Status::Ok, "re-graft session should be ok");
+    let executor2 = session2.get_executor().expect("executor");
+
+    let mut echo_req3 = executor2.echo_request();
+    echo_req3.get().set_message("ping");
+    let echo_resp3 = echo_req3.send().promise.await.expect("echo after re-graft RPC");
+    let response3 = echo_resp3.get().expect("echo results").get_response().expect("response");
+    assert_eq!(response3.to_str().unwrap(), "pong", "re-graft session should be ok");
 }
