@@ -1,8 +1,6 @@
-# Vendored from github.com/wetware/stem.  This file MUST stay in sync with
-# stem's canonical copy.  No Rust code is generated for it — build.rs uses
-# capnpc::CompilerCommand::crate_provides("stem", [...]) so that downstream
-# schemas can import it for type resolution while referencing the stem crate's
-# generated types at compile time.  See doc/capnp-cross-crate.md.
+# Stem schema: Epoch, Signer, Session, and Membrane definitions.
+# Compiled by the membrane crate (crates/membrane/build.rs).
+# The host re-exports generated types via `pub use membrane::stem_capnp`.
 
 @0x9bce094a026970c4;
 
@@ -12,33 +10,19 @@ struct Epoch {
   adoptedBlock @2 :UInt64;# Block number at which this epoch was adopted.
 }
 
-enum Status {
-  ok @0;             # Operation succeeded under the current epoch.
-  unauthorized @1;   # Caller not authorized under current policy.
-  internalError @2;  # Unexpected internal failure.
-}
-
 interface Signer {
-  sign @0 (domain :Text, nonce :UInt64) -> (sig :Data);
+  sign @0 (nonce :UInt64) -> (sig :Data);
   # Sign an arbitrary nonce under a given domain string.
 }
 
-interface StatusPoller {
-  pollStatus @0 () -> (status :Status);
+struct Session {
+  host     @0 :import "system.capnp".Host;      # Swarm-level operations (id, addrs, peers, connect).
+  executor @1 :import "system.capnp".Executor;  # WASM execution (runBytes, echo).
+  ipfs     @2 :import "ipfs.capnp".Client;      # IPFS CoreAPI (unixfs, block, dag, ...).
 }
 
-struct Session(Extension) {
-  issuedEpoch @0 :Epoch;
-  # Epoch under which this session was minted.
 
-  statusPoller @1 :StatusPoller;
-  # Capability for polling session status. Can be withheld (client receives null capability).
-
-  extension @2 :Extension;
-  # Platform-specific capabilities scoped to this session.
-}
-
-interface Membrane(SessionExt) {
-  graft @0 (signer :Signer) -> (session :Session(SessionExt));
+interface Membrane {
+  graft @0 (signer :Signer) -> (session :Session);
   # Graft a signer to the membrane, establishing an epoch-scoped session.
 }

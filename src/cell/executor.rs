@@ -1,14 +1,24 @@
 use anyhow::{Context, Result};
+use capnp_rpc::rpc_twoparty_capnp::Side;
+use capnp_rpc::twoparty::VatNetwork;
+use capnp_rpc::RpcSystem;
 use futures::FutureExt;
+use libp2p::StreamProtocol;
+use membrane::Epoch;
+use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{stderr, stdin, stdout};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::info;
 
 use crate::cell::{proc::DataStreamHandles, Loader, ProcBuilder};
 use crate::host::SwarmCommand;
+use crate::rpc::membrane::GuestMembrane;
 use crate::rpc::NetworkState;
+
+const CAPNP_PROTOCOL: StreamProtocol = StreamProtocol::new("/ww/0.1.0");
 
 /// Builder for constructing a [`Cell`].
 ///
@@ -39,7 +49,7 @@ use crate::rpc::NetworkState;
 /// # Example
 ///
 /// ```ignore
-/// let cell = CellBuilder::new("examples/images/pid0".into())
+/// let cell = CellBuilder::new("images/kernel".into())
 ///     .with_loader(Box::new(HostPathLoader))
 ///     .with_network_state(network_state)
 ///     .with_swarm_cmd_tx(swarm_cmd_tx)
@@ -55,6 +65,10 @@ pub struct CellBuilder {
     wasmtime_engine: Option<Arc<wasmtime::Engine>>,
     network_state: Option<NetworkState>,
     swarm_cmd_tx: Option<mpsc::Sender<SwarmCommand>>,
+    image_root: Option<PathBuf>,
+    initial_epoch: Option<Epoch>,
+    ipfs_client: Option<crate::ipfs::HttpClient>,
+    epoch_rx: Option<watch::Receiver<Epoch>>,
 }
 
 impl CellBuilder {
@@ -72,6 +86,10 @@ impl CellBuilder {
             wasmtime_engine: None,
             network_state: None,
             swarm_cmd_tx: None,
+            image_root: None,
+            initial_epoch: None,
+            ipfs_client: None,
+            epoch_rx: None,
         }
     }
 
@@ -117,6 +135,42 @@ impl CellBuilder {
         self
     }
 
+    /// Set the FHS image root for WASI preopen.
+    ///
+    /// When set, the merged image directory is mounted read-only at `/`
+    /// in the guest's WASI filesystem, giving guests access to `boot/`,
+    /// `svc/`, `etc/`, and other FHS paths.
+    pub fn with_image_root(mut self, root: PathBuf) -> Self {
+        self.image_root = Some(root);
+        self
+    }
+
+    /// Set the initial epoch from on-chain state.
+    ///
+    /// When set, this epoch seeds the watch channel instead of the default
+    /// zero epoch. The epoch pipeline can later advance it via the returned
+    /// `watch::Sender<Epoch>`.
+    pub fn with_initial_epoch(mut self, epoch: Epoch) -> Self {
+        self.initial_epoch = Some(epoch);
+        self
+    }
+
+    /// Provide a pre-created epoch receiver.
+    ///
+    /// When set, `spawn_rpc_inner` uses this receiver instead of creating
+    /// a new channel. The caller retains the corresponding `watch::Sender`
+    /// and is responsible for advancing epochs (e.g. via the epoch pipeline).
+    pub fn with_epoch_rx(mut self, rx: watch::Receiver<Epoch>) -> Self {
+        self.epoch_rx = Some(rx);
+        self
+    }
+
+    /// Set the IPFS HTTP client for the CoreAPI capability.
+    pub fn with_ipfs_client(mut self, client: crate::ipfs::HttpClient) -> Self {
+        self.ipfs_client = Some(client);
+        self
+    }
+
     /// Build the Cell.
     ///
     /// # Panics
@@ -132,6 +186,12 @@ impl CellBuilder {
             wasmtime_engine: self.wasmtime_engine,
             network_state: self.network_state.expect("network_state must be set"),
             swarm_cmd_tx: self.swarm_cmd_tx.expect("swarm_cmd_tx must be set"),
+            image_root: self.image_root,
+            initial_epoch: self.initial_epoch,
+            ipfs_client: self
+                .ipfs_client
+                .unwrap_or_else(|| crate::ipfs::HttpClient::new("http://localhost:5001".into())),
+            epoch_rx: self.epoch_rx,
         }
     }
 }
@@ -153,12 +213,44 @@ pub struct Cell {
     pub wasmtime_engine: Option<Arc<wasmtime::Engine>>,
     pub network_state: NetworkState,
     pub swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
+    pub image_root: Option<PathBuf>,
+    pub initial_epoch: Option<Epoch>,
+    pub ipfs_client: crate::ipfs::HttpClient,
+    pub epoch_rx: Option<watch::Receiver<Epoch>>,
+}
+
+/// Result of spawning a cell with RPC: exit code, guest membrane, and optional epoch sender.
+///
+/// `epoch_tx` is `Some` when the cell created its own epoch channel (no external
+/// receiver was provided). It is `None` when the caller supplied a pre-created
+/// receiver via [`CellBuilder::with_epoch_rx`].
+pub struct SpawnResult {
+    pub exit_code: i32,
+    pub guest_membrane: GuestMembrane,
+    pub epoch_tx: Option<watch::Sender<Epoch>>,
 }
 
 impl Cell {
     /// Execute the cell command using wetware streams for RPC transport.
-    pub async fn spawn(self) -> Result<i32> {
-        self.spawn_with_streams_rpc().await
+    ///
+    /// Returns a [`SpawnResult`] containing the guest's exit code, its exported
+    /// [`GuestMembrane`], and the epoch sender for advancing epochs.
+    pub async fn spawn(self) -> Result<SpawnResult> {
+        self.spawn_rpc_inner(None).await
+    }
+
+    /// Like [`spawn`], but also accepts incoming libp2p streams for
+    /// `/wetware/capnp/1.0.0` and bootstraps each one with the guest's
+    /// exported [`GuestMembrane`].
+    ///
+    /// This is the production entry point: Ganglion (and other peers) connect
+    /// to the host's libp2p swarm and open a stream on this protocol to obtain
+    /// the kernel's capability surface.
+    pub async fn spawn_serving(
+        self,
+        control: libp2p_stream::Control,
+    ) -> Result<SpawnResult> {
+        self.spawn_rpc_inner(Some(control)).await
     }
 
     /// Execute the cell command and return the join handle plus data stream handles.
@@ -176,6 +268,10 @@ impl Cell {
             wasmtime_engine,
             network_state: _,
             swarm_cmd_tx: _,
+            image_root,
+            initial_epoch: _,
+            ipfs_client: _,
+            epoch_rx: _,
         } = self;
 
         crate::config::init_tracing();
@@ -187,7 +283,7 @@ impl Cell {
         let bytecode = loader.load(&wasm_path).await.with_context(|| {
             format!("Failed to load bin/main.wasm from image: {path} (resolved to: {wasm_path})")
         })?;
-        info!(binary = %path, "Loaded guest bytecode");
+        tracing::debug!(binary = %path, "Loaded guest bytecode");
 
         let stdin_handle = stdin();
         let stdout_handle = stdout();
@@ -199,61 +295,131 @@ impl Cell {
             ProcBuilder::new()
         };
 
-        let (builder, handles) = builder
+        // Inject host-side environment signals for the guest.
+        let mut guest_env = env.unwrap_or_default();
+        if std::io::stdin().is_terminal() {
+            guest_env.push("WW_TTY=1".to_string());
+        }
+        if !guest_env.iter().any(|v| v.starts_with("PATH=")) {
+            guest_env.push("PATH=/bin".to_string());
+        }
+
+        let builder = builder
             .with_wasm_debug(wasm_debug)
-            .with_env(env.unwrap_or_default())
+            .with_env(guest_env)
             .with_args(args)
             .with_bytecode(bytecode)
             .with_loader(Some(loader))
             .with_stdio(stdin_handle, stdout_handle, stderr_handle)
-            .with_data_streams();
+            .with_image_root(image_root);
+        let (builder, handles) = builder.with_data_streams();
 
         let proc = builder.build().await?;
-        info!(binary = %path, "Built guest process");
+        tracing::debug!(binary = %path, "Guest process ready");
         let join = tokio::spawn(async move { proc.run().await });
 
         Ok((join, handles))
     }
 
     /// Execute the cell command and serve Cap'n Proto RPC over wetware streams.
-    pub async fn spawn_with_streams_rpc(self) -> Result<i32> {
+    pub async fn spawn_with_streams_rpc(self) -> Result<SpawnResult> {
+        self.spawn_rpc_inner(None).await
+    }
+
+    async fn spawn_rpc_inner(
+        mut self,
+        stream_control: Option<libp2p_stream::Control>,
+    ) -> Result<SpawnResult> {
         let wasm_debug = self.wasm_debug;
         let network_state = self.network_state.clone();
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
+        let ipfs_client = self.ipfs_client.clone();
+        let pre_epoch_rx = self.epoch_rx.take();
+        let initial_epoch = self.initial_epoch.clone().unwrap_or(Epoch {
+            seq: 0,
+            head: vec![],
+            adopted_block: 0,
+        });
         let (join, handles) = self.spawn_with_streams().await?;
         let mut handles = handles;
         let (reader, writer) = handles
             .take_host_split()
             .ok_or_else(|| anyhow::anyhow!("host stream missing; RPC streams already consumed"))?;
-        // Static epoch (never advances) — real epoch wiring is a future concern.
-        let initial_epoch = stem::membrane::Epoch {
-            seq: 0,
-            head: vec![],
-            adopted_block: 0,
+
+        // Use the externally-provided epoch receiver if available,
+        // otherwise create a new channel.
+        let (epoch_tx, epoch_rx) = if let Some(rx) = pre_epoch_rx {
+            (None, rx)
+        } else {
+            let (tx, rx) = watch::channel(initial_epoch);
+            (Some(tx), rx)
         };
-        let (_epoch_tx, epoch_rx) = tokio::sync::watch::channel(initial_epoch);
-        let rpc_system = crate::rpc::membrane::build_membrane_rpc(
+
+        let (rpc_system, guest_membrane) = crate::rpc::membrane::build_membrane_rpc(
             reader,
             writer,
             network_state,
             swarm_cmd_tx,
             wasm_debug,
             epoch_rx,
+            ipfs_client,
         );
 
-        info!("Starting streams RPC server for guest");
+        tracing::debug!("Starting streams RPC server for guest");
         let local = tokio::task::LocalSet::new();
         local.spawn_local(rpc_system.map(|_| ()));
-        local
+
+        if let Some(control) = stream_control {
+            let membrane = guest_membrane.clone();
+            local.spawn_local(accept_capnp_streams(control, membrane));
+        }
+
+        let exit_code = local
             .run_until(async move {
                 let exit_code = match join.await {
                     Ok(Ok(())) => 0,
                     Ok(Err(_)) | Err(_) => 1,
                 };
-                info!(code = exit_code, "Guest exited (streams RPC)");
+                tracing::debug!(code = exit_code, "Guest exited (streams RPC)");
                 Ok::<i32, anyhow::Error>(exit_code)
             })
-            .await
-    }
+            .await?;
 
+        Ok(SpawnResult {
+            exit_code,
+            guest_membrane,
+            epoch_tx,
+        })
+    }
+}
+
+/// Accept incoming libp2p streams for the capnp protocol and serve each with
+/// the guest's exported membrane.  Runs inside the cell's `LocalSet` so that
+/// `spawn_local` is available for per-connection tasks.
+async fn accept_capnp_streams(mut control: libp2p_stream::Control, membrane: GuestMembrane) {
+    let mut incoming = match control.accept(CAPNP_PROTOCOL) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("failed to register capnp stream handler: {}", e);
+            return;
+        }
+    };
+    tracing::info!(protocol = %CAPNP_PROTOCOL, "Accepting capnp streams");
+    use futures::StreamExt;
+    while let Some((_peer_id, stream)) = incoming.next().await {
+        let m = membrane.clone();
+        tokio::task::spawn_local(serve_one_capnp_stream(stream, m));
+    }
+}
+
+/// Serve a single libp2p stream as a Cap'n Proto RPC connection, bootstrapping
+/// the remote peer with the guest's exported membrane.
+async fn serve_one_capnp_stream(stream: libp2p::Stream, membrane: GuestMembrane) {
+    // Box::pin(stream) → Pin<Box<Stream>>: AsyncRead + AsyncWrite + Unpin,
+    // which allows .split() even though Stream itself is !Unpin.
+    use futures::AsyncReadExt;
+    let (reader, writer) = Box::pin(stream).split();
+    let network = VatNetwork::new(reader, writer, Side::Server, Default::default());
+    let rpc_system = RpcSystem::new(Box::new(network), Some(membrane.client));
+    let _ = rpc_system.await;
 }

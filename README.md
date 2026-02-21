@@ -6,226 +6,163 @@ sandboxed cells, with host capabilities exposed over Cap'n Proto RPC.
 ## Quick start
 
 ```bash
-# Build guests and assemble images
-make guests images
+# Scaffold a new guest
+ww init my-app --template rust
+cd my-app
 
-# Boot pid0 from a local image
-cargo run -- run examples/images/pid0
+# Build
+ww build
+
+# Run locally
+ww run
+
+# Publish to IPFS and run from anywhere
+ww push
+ww run /ipfs/<CID>
+```
+
+## Developer CLI
+
+`ww` is the developer CLI for building and publishing wetware applications.
+
+```
+ww init [<subdir>] [--template rust]   Scaffold a new environment
+ww build [<path>]                      Compile to boot/main.wasm
+ww run [<path>|<ipfs-path>]            Boot a local or IPFS environment
+ww push [<path>]                       Publish to IPFS, print CID
 ```
 
 ## How it works
 
-`ww run <image>` does three things:
+`ww run <path>` does three things:
 
-1. **Starts a libp2p swarm** on the configured port (default 2020)
-2. **Loads `<image>/bin/main.wasm`** using a chain loader (tries IPFS, falls
-   back to host filesystem)
+1. **Starts a libp2p swarm** on the configured port (default 2025)
+2. **Loads `boot/main.wasm`** from the environment (local or IPFS)
 3. **Spawns the guest** with WASI stdio bound to the host terminal and Cap'n
-   Proto Host RPC served over in-memory data streams
+   Proto RPC served over in-memory data streams
 
-The guest (pid0) bootstraps by calling methods on the `Host` capability — for
-example, `host.executor().runBytes(wasm)` to spawn child processes.
+## Environment layout
 
-## Image layout
-
-Images follow a simplified
-[Filesystem Hierarchy Standard](https://en.wikipedia.org/wiki/Filesystem_Hierarchy_Standard)
-convention. This gives us a predictable, extensible structure whether the image
-lives on local disk or is fetched from IPFS:
+Each wetware environment follows a minimal FHS convention:
 
 ```
-<image>/
-  bin/
+<env>/
+  boot/
     main.wasm          # guest entrypoint (required)
-  boot/                # bootstrap peer hints (optional)
-    <peerID>           # one file per peer; contents = multiaddrs, one per line
-  svc/                 # background services (optional)
-    <name>/            # each service is a nested image
-      bin/main.wasm
-      ...
-  etc/                 # reserved — configuration files
-  usr/
-    lib/               # reserved — shared WASM libraries
+  bin/                 # additional executables (optional)
+  etc/                 # configuration (optional, lazy)
+  usr/                 # shared libraries (optional, lazy)
+  var/                 # runtime state (optional, lazy)
 ```
 
-Today only `bin/main.wasm` is required.
+Only `boot/main.wasm` is required. Other directories are created on demand.
 
-### `boot/` — bootstrap peers
+The `<path>` argument to `ww run` can be:
 
-The `boot/` directory contains peer discovery hints. Each file is named after a
-libp2p peer ID and contains that peer's multiaddrs, one per line:
+| Form | Example |
+|------|---------|
+| Local path | `std/kernel` |
+| IPFS path  | `/ipfs/QmAbc123...` |
 
-```
-<image>/boot/
-  12D3KooWRmFc...     # /ip4/104.131.131.82/tcp/4001
-                       # /ip6/::1/tcp/4001
-  QmaCpDMGvV2B...     # /dnsaddr/bootstrap.libp2p.io
-```
+## Standard library (`std/`)
 
-This convention is content-addressable-friendly — on IPFS the entire `boot/`
-directory is a single DAG node, so updating the bootstrap set just means
-publishing a new image CID. Filenames are base58btc-encoded peer IDs (the
-standard `12D3KooW...` / `Qm...` format used by libp2p) and file contents are
-plain-text multiaddrs (trivial to read). At load time the runtime decodes each
-filename via `PeerId::from_str()` and dials the listed addresses.
-
-> **Not yet wired up** — `boot/` is specced here but not read by the runtime
-> yet. For now, peer discovery happens via the local Kubo daemon's swarm.
-
-### `svc/` — background services
-
-The `svc/` directory contains background services that the runtime spawns
-automatically at boot, after `bin/main.wasm` starts. Each entry is a nested
-image with its own FHS layout:
+`std/` is the base image layer — default programs available in every wetware
+environment. Built with `ww build`, published to IPFS with `ww push`.
 
 ```
-<image>/svc/
-  echo/
-    bin/main.wasm      # the echo service
-  metrics/
-    bin/main.wasm      # a metrics collector
-    etc/...            # its own config
+std/
+├── runtime/    Rust guest SDK (library crate)
+├── kernel/     Init process — grafts onto the host Membrane
+└── shell/      Interactive shell (in development)
 ```
 
-Services run in the background without owning stdio. The directory name is the
-service name. Since each service is a full image, it can carry its own `boot/`,
-`etc/`, and even nested `svc/` — it's images all the way down.
+Build and publish the std layer:
 
-On IPFS, each `svc/<name>/` subtree is its own DAG node. You can publish and
-reference a service image independently, and the parent image just links to it.
-Updating a service means publishing a new service CID and re-linking.
-
-> **Not yet wired up** — `svc/` is specced here but not read by the runtime yet.
-
-### Reserved directories
-
-- **`etc/`** — guest configuration (capability grants, resource limits, etc.)
-- **`usr/lib/`** — shared WASM libraries that guests can link against
-
-The `<image>` argument to `ww run` can be:
-
-| Form | Example | Resolution |
-|------|---------|------------|
-| Local path | `examples/images/pid0` | Read directly from host filesystem |
-| IPFS path | `/ipfs/QmAbc123...` | Fetched via local IPFS daemon (http://localhost:5001) |
+```bash
+ww build std/kernel
+ww push std/
+```
 
 ## Building
 
 ### Prerequisites
 
-- Rust nightly toolchain with `wasm32-wasip2` target
-- (Optional) [Kubo](https://docs.ipfs.tech/install/) for IPFS image resolution
+- Rust toolchain with `wasm32-wasip2` target
+- (Optional) [Kubo](https://docs.ipfs.tech/install/) for IPFS resolution
 
 ```bash
-# One-time setup for guest compilation
-rustup target add wasm32-wasip2 --toolchain nightly
+rustup target add wasm32-wasip2
 ```
 
-### Build everything
+### Build the host binary
 
 ```bash
-make guests images    # build all WASM guests + assemble image dirs
-cargo build           # build the host binary
+cargo build
 ```
 
-### Build guests individually
-
-Guest build order matters — pid0 embeds child-echo via `include_bytes!`, so
-child-echo must build first:
+### Build a std component
 
 ```bash
-make child-echo       # must come first
-make shell
-make pid0             # depends on child-echo
-make images           # copy artifacts into examples/images/
+ww build std/kernel    # produces std/kernel/boot/main.wasm
+ww build std/shell     # produces std/shell/boot/main.wasm
 ```
 
 ## Usage
 
 ```
-ww run <IMAGE> [OPTIONS]
+ww run <PATH> [OPTIONS]
 
 Arguments:
-  <IMAGE>    Image path: local directory or IPFS path containing bin/main.wasm
+  <PATH>    Local directory or IPFS path (default: .)
 
 Options:
-  --port <PORT>      libp2p swarm port [default: 2020]
-  --wasm-debug       Enable WASM debug info for guest processes
-  -h, --help         Print help
-  -V, --version      Print version
+  --port <PORT>                libp2p swarm port [default: 2025]
+  --wasm-debug                 Enable WASM debug info
+  --stem <ADDR>                Atom contract address (enables epoch pipeline)
+  --rpc-url <URL>              HTTP JSON-RPC URL [default: http://127.0.0.1:8545]
+  --ws-url <URL>               WebSocket JSON-RPC URL [default: ws://127.0.0.1:8545]
+  --confirmation-depth <N>     Confirmations before finalizing [default: 6]
 ```
 
 ### Examples
 
 ```bash
-# Boot pid0 from local image directory
-cargo run -- run examples/images/pid0
+# Run the kernel locally
+ww run std/kernel
 
-# With debug logging
-RUST_LOG=ww=debug cargo run -- run examples/images/pid0
+# Run a user app
+ww run my-app
 
-# Custom swarm port
-cargo run -- run examples/images/pid0 --port 3000
+# Run from IPFS
+ww run /ipfs/QmSomeHash
 
-# Boot from IPFS (requires running Kubo daemon)
-cargo run -- run /ipfs/QmSomeHash
+# Merge image layers (std base + user app)
+ww run /ipfs/QmStdCID my-app
+
+# With on-chain epoch tracking
+ww run my-app --stem 0xABCD... --rpc-url http://127.0.0.1:8545
 ```
 
 ### Logging
 
-Logging uses the standard `RUST_LOG` environment variable:
-
 ```bash
-RUST_LOG=ww=info          # default — info-level wetware logs
-RUST_LOG=ww=debug         # include debug output
-RUST_LOG=ww=trace         # everything, including RPC message tracing
+RUST_LOG=ww=info     # default
+RUST_LOG=ww=debug    # verbose
+RUST_LOG=ww=trace    # everything
 ```
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────┐
-│  ww run <image>                                      │
-│                                                      │
-│  ┌─────────────┐    ┌─────────────────────────────┐  │
-│  │ libp2p      │    │ Cell                        │  │
-│  │ swarm       │    │                             │  │
-│  │ (port 2020) │    │  ┌───────┐  Cap'n Proto    │  │
-│  │             │◄───┤  │ pid0  │◄──── RPC ──────►│  │
-│  │             │    │  │ .wasm │  (in-memory)     │  │
-│  │             │    │  └───────┘                  │  │
-│  │             │    │      │                      │  │
-│  │             │    │      │ host.executor()      │  │
-│  │             │    │      │   .runBytes(wasm)    │  │
-│  │             │    │      ▼                      │  │
-│  │             │    │  ┌────────────┐             │  │
-│  │             │    │  │ child-echo │             │  │
-│  │             │    │  │ .wasm      │             │  │
-│  │             │    │  └────────────┘             │  │
-│  └─────────────┘    └─────────────────────────────┘  │
-│                                                      │
-│  stdin/stdout/stderr ◄──── WASI stdio ────► terminal │
-└──────────────────────────────────────────────────────┘
-```
-
-- **Cell** loads `bin/main.wasm` from the image and spawns it as a WASI process
-- **Host RPC** (Cap'n Proto) is served over in-memory duplex streams — no TCP
-  listener, no external port
-- **WASI stdio** is bound to the host terminal, so guest trace logs appear on
-  stderr just like a normal process
-- **ExecutorImpl** lets guests spawn child processes (pid0 → child-echo)
 
 ## Testing
 
 ```bash
-cargo test --lib      # 32 unit tests (no guest builds needed)
+cargo test --lib
+cargo test -p membrane
+cargo test -p atom --lib
 ```
 
-## Cap'n Proto schema
+## Cap'n Proto schemas
 
-The Host capability interface is defined in [`capnp/peer.capnp`](capnp/peer.capnp):
+Defined in `capnp/`:
 
-- **Host** — identity, addresses, peers, connect, executor
-- **Executor** — `runBytes(wasm)` to spawn a child process, `echo` for testing
-- **Process** — stdin/stdout/stderr streams + `wait()` for exit code
-- **ByteStream** — read/write/close over duplex pipes
+- **`system.capnp`** — Host, Executor, Process, ByteStream
+- **`stem.capnp`** — Membrane, Session (host + executor + ipfs)
+- **`ipfs.capnp`** — IPFS CoreAPI (UnixFS, Block, Pin, …)

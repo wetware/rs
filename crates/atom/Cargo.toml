@@ -1,0 +1,38 @@
+[package]
+name = "atom"
+version = "0.1.0"
+edition = "2021"
+description = "Off-chain Atom runtime: head-following, finalization, and caching for the Atom contract"
+
+
+[dependencies]
+membrane = { path = "../membrane" }
+alloy = { version = "0.4", features = ["rpc-types", "sol-types"] }
+capnp = "0.23.2"
+anyhow = "1"
+futures-util = "0.3"
+hex = "0.4"
+rand = "0.8"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha3 = "0.10"
+thiserror = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "signal"] }
+tokio-tungstenite = "0.24"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+capnp-rpc = "0.23.0"
+
+[dev-dependencies]
+k256 = { version = "0.13", features = ["ecdsa"] }
+rlp = "0.5"
+tokio-test = "0.4"
+
+[[example]]
+name = "atom_indexer"
+path = "examples/atom_indexer.rs"
+
+[[example]]
+name = "finalizer"
+path = "examples/finalizer.rs"

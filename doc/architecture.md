@@ -9,10 +9,10 @@ see [rpc-transport.md](rpc-transport.md).
 Wetware is a peer-to-peer runtime that loads WASM guest images and executes
 them inside sandboxed cells. `ww run` resolves one or more image layers into
 a unified FHS root, loads `bin/main.wasm` from the result, and spawns the
-guest with a `Host` capability served over in-memory Cap'n Proto RPC.
+guest with a `Session` capability served over in-memory Cap'n Proto RPC.
 
 The runtime is deliberately simple. It merges layers, loads a binary, and
-hands it a capability. Everything else — peer discovery, service management,
+hands it capabilities. Everything else — peer discovery, service management,
 access control — is the guest's job.
 
 ## No ambient authority
@@ -30,11 +30,11 @@ connection). That's it. The guest's only connection to the outside world is the
 ```
 Traditional process:        Wetware guest:
   env vars     -> yes         env vars     -> only if explicitly passed
-  filesystem   -> yes         filesystem   -> no
+  filesystem   -> yes         filesystem   -> image root only (read-only)
   network      -> yes         network      -> no
   syscalls     -> yes         syscalls     -> WASI subset only
   ambient auth -> yes         ambient auth -> none
-                              Host cap     -> the only authority
+                              Session      -> the only authority (Host + Executor + IPFS)
 ```
 
 This is the foundation that makes untrusted code execution safe. A guest can
@@ -85,23 +85,34 @@ these capabilities — giving a child a restricted view of the host.
 
 ### Inbound: host to guest
 
-The runtime creates a `Host` capability and bootstraps it to pid0 over
-in-memory Cap'n Proto RPC. From pid0's perspective, it calls
-`wetware_guest::run(|host| { ... })` and receives a `host::Client` —
-a capability reference it can invoke:
+The runtime creates a Membrane and bootstraps it to pid0 over in-memory
+Cap'n Proto RPC. pid0 calls `membrane.graft()` to obtain a `Session`
+containing three capabilities:
+
+```capnp
+struct Session {
+  host     @0 :Peer.Host;       # network identity and peer management
+  executor @1 :Peer.Executor;   # child process execution, diagnostic echo
+  ipfs     @2 :Ipfs.Client;     # IPFS CoreAPI (UnixFS, Block, Dag, ...)
+}
+```
+
+All capabilities are epoch-guarded: they become stale when the on-chain
+head advances. The guest must re-graft to obtain a fresh session.
 
 ```
 Runtime                          pid0
 ───────                          ────
-create HostImpl
-  with ExecutorImpl
-    with network state
-serve via RpcSystem ──────────> bootstrap client
-                                host.id()
-                                host.addrs()
-                                host.connect(peer, addrs)
-                                host.executor() -> Executor
-                                  executor.runBytes(wasm) -> Process
+create Membrane
+  with SessionBuilder
+    Host (network state)
+    Executor (engine, loader)
+    IPFS Client (Kubo HTTP)
+serve via RpcSystem ──────────> membrane.graft() -> Session
+                                  session.host.id()
+                                  session.host.addrs()
+                                  session.executor.echo("hello")
+                                  session.ipfs.unixfs().cat("/ipfs/Qm...")
 ```
 
 ### Outbound: guest to host
@@ -258,8 +269,49 @@ to peers it has a capability reference for. There is no "broadcast to
 the network" or "listen for connections" — only explicit capability
 passing.
 
+## Epoch lifecycle
+
+When `--stem` points to an Atom smart contract, the runtime starts an
+epoch pipeline that watches for `HeadUpdated` events on-chain:
+
+```
+AtomIndexer (WebSocket + HTTP backfill)
+    |  HeadUpdatedObserved events
+    v
+Finalizer (K-confirmation strategy)
+    |  FinalizedEvent
+    v
+pin new CID / unpin old CID on IPFS
+    |
+    v
+epoch_tx.send(Epoch { seq, head, adopted_block })
+    |
+    v
+EpochGuard invalidation → stale sessions fail → guest re-grafts
+```
+
+The epoch channel is created before the guest spawns, so the pipeline
+runs concurrently with the guest via `CellBuilder::with_epoch_rx()`.
+
+## IPFS capability
+
+`Ipfs.Client` (`capnp/ipfs.capnp`) mirrors Go's CoreAPI. Currently
+implemented sub-APIs:
+
+- **UnixFS**: `cat(path) -> Data`, `ls(path) -> List(Entry)`
+
+Stub interfaces declared for future work: Block, Dag, Name, Key, Pin,
+Object, Swarm, PubSub, Routing.
+
+The host delegates to a Kubo HTTP client (`http://localhost:5001`).
+Cap'n Proto pipelining allows `session.ipfs().unixfs().cat(path)` to
+resolve in a single round-trip.
+
 ## See also
 
+- [shell.md](shell.md) — kernel Lisp shell reference
+- [cli.md](cli.md) — CLI flags and usage
 - [rpc-transport.md](rpc-transport.md) — transport plumbing, scheduling model, deadlock analysis
 - [../capnp/peer.capnp](../capnp/peer.capnp) — Host, Executor, Process, ByteStream interfaces
+- [../capnp/ipfs.capnp](../capnp/ipfs.capnp) — IPFS Client capability schema
 - [../README.md](../README.md) — image layout, build instructions, usage

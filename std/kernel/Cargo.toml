@@ -1,0 +1,19 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+capnp = "0.23.2"
+capnp-rpc = "0.23.0"
+futures = "0.3"
+log = "0.4.29"
+wasip2 = "1.0.2"
+hex = "0.4"
+runtime = { path = "../runtime" }
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+capnpc = "0.23.3"

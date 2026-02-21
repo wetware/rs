@@ -1,6 +1,5 @@
 //! Epoch types and the epoch validity guard.
 
-use crate::stem_capnp;
 use capnp::Error;
 use tokio::sync::watch;
 
@@ -10,18 +9,6 @@ pub struct Epoch {
     pub seq: u64,
     pub head: Vec<u8>,
     pub adopted_block: u64,
-}
-
-/// Fill a capnp Epoch builder from a Rust Epoch.
-pub fn fill_epoch_builder(
-    builder: &mut stem_capnp::epoch::Builder<'_>,
-    epoch: &Epoch,
-) -> Result<(), Error> {
-    builder.set_seq(epoch.seq);
-    builder.set_adopted_block(epoch.adopted_block);
-    let head_builder = builder.reborrow().init_head(epoch.head.len() as u32);
-    head_builder.copy_from_slice(epoch.head.as_slice());
-    Ok(())
 }
 
 /// Guard that checks whether the epoch under which a capability was issued is
