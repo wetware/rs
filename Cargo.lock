@@ -1965,7 +1965,16 @@ version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca3aa72a6f96ea37bbc5aa912f6788242832f75369bdfdadcb0e38423f100059"
 dependencies = [
- "dirs-sys",
+ "dirs-sys 0.3.7",
+]
+
+[[package]]
+name = "dirs"
+version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44c45a9d03d6676652bcb5e724c7e988de1acad23a711b5217ab9cbecbec2225"
+dependencies = [
+ "dirs-sys 0.4.1",
 ]
 
 [[package]]
@@ -1977,6 +1986,18 @@ dependencies = [
  "libc",
  "redox_users",
  "winapi",
+]
+
+[[package]]
+name = "dirs-sys"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "520f05a5cbd335fae5a99ff7a6ab8627577660ee5cfd6a94a6a929b52ff0321c"
+dependencies = [
+ "libc",
+ "option-ext",
+ "redox_users",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -3171,7 +3192,7 @@ dependencies = [
  "bytes",
  "cfg-if",
  "common-multipart-rfc7578",
- "dirs",
+ "dirs 4.0.0",
  "futures",
  "http 0.2.12",
  "multiaddr 0.17.1",
@@ -3485,6 +3506,7 @@ dependencies = [
  "bs58",
  "ed25519-dalek",
  "hkdf",
+ "k256",
  "multihash 0.19.3",
  "quick-protobuf",
  "rand 0.8.5",
@@ -4311,6 +4333,12 @@ dependencies = [
  "pkg-config",
  "vcpkg",
 ]
+
+[[package]]
+name = "option-ext"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "parity-scale-codec"
@@ -7586,9 +7614,11 @@ dependencies = [
  "chrono",
  "cid",
  "clap",
+ "dirs 5.0.1",
  "futures",
  "hex",
  "ipfs-api-backend-hyper",
+ "k256",
  "libc",
  "libp2p",
  "libp2p-stream",
@@ -7599,6 +7629,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha3",
  "tar",
  "tempfile",
  "tokio",

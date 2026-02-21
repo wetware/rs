@@ -15,6 +15,8 @@ pub mod image;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ipfs;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod keys;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod loaders;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod rpc;
