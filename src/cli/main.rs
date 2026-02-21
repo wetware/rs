@@ -13,9 +13,7 @@ use ww::loaders::{ChainLoader, HostPathLoader, IpfsUnixfsLoader};
 
 #[derive(Parser)]
 #[command(name = "ww")]
-#[command(
-    about = "P2P sandbox for Web3 applications that execute untrusted code on public networks."
-)]
+#[command(about = "Agentic OS for autonomous programs that coordinate across trust boundaries.")]
 #[command(version = "0.1.0")]
 struct Cli {
     #[command(subcommand)]
@@ -38,10 +36,10 @@ enum Commands {
         template: Option<String>,
     },
 
-    /// Build a wetware environment, producing boot/main.wasm.
+    /// Build a guest project, placing the compiled WASM at boot/main.wasm.
     ///
     /// Compiles a Rust project targeting wasm32-wasip2 and copies the
-    /// artifact to boot/main.wasm in the environment root.
+    /// artifact into the project's FHS root at boot/main.wasm.
     ///
     /// Expects Cargo.toml at the root of <path>.
     Build {
@@ -109,7 +107,7 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
-    /// Publish a wetware environment to IPFS.
+    /// Snapshot a project and push it to IPFS.
     ///
     /// Adds the entire FHS tree to IPFS as a UnixFS directory and returns
     /// the resulting CID. Optionally updates the on-chain Atom contract.
@@ -318,7 +316,7 @@ pub extern "C" fn _start() {
         Ok(())
     }
 
-    /// Build a wetware environment, producing boot/main.wasm
+    /// Build a guest project, placing the compiled WASM at boot/main.wasm
     async fn build(path: PathBuf) -> Result<()> {
         let cargo_toml = path.join("Cargo.toml");
 
