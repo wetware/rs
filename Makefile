@@ -1,51 +1,45 @@
 # Wetware build system
 #
-# `make images` assembles FHS-style image directories under images/.
-# Each image has bin/main.wasm as its entrypoint, consumable by `ww run`.
+# Builds std/ components and places artifacts at <component>/boot/main.wasm.
+# Publish to IPFS with: ww push std/
 
 WASM_TARGET := wasm32-wasip2
-RELEASE_DIR  = target/$(WASM_TARGET)/release
 
-IMAGES_DIR := images
-
-.PHONY: all host guests images clean run-kernel
-.PHONY: guest-kernel image-kernel
+.PHONY: all host std kernel shell clean run-kernel
 .PHONY: podman-build podman-run podman-clean podman-dev
 
-all: guests images host
+all: std host
 
-# --- Host -------------------------------------------------------------------
+# --- Host --------------------------------------------------------------------
 
 host:
 	cargo build --release
 
-# --- Guests ------------------------------------------------------------------
+# --- Std components ----------------------------------------------------------
 
-guests: guest-kernel
+std: kernel shell
 
-guest-kernel:
-	cd std/kernel && cargo build --target $(WASM_TARGET) --release --target-dir target
+kernel:
+	cargo build -p pid0 --target $(WASM_TARGET) --release
+	@mkdir -p std/kernel/boot
+	cp target/$(WASM_TARGET)/release/pid0.wasm std/kernel/boot/main.wasm
 
-# --- Images ------------------------------------------------------------------
-# Assemble FHS-style image directories:
-#   <image>/bin/main.wasm   — guest entrypoint
+shell:
+	cargo build -p shell --target $(WASM_TARGET) --release
+	@mkdir -p std/shell/boot
+	cp target/$(WASM_TARGET)/release/shell.wasm std/shell/boot/main.wasm
 
-images: image-kernel
+# --- Run ---------------------------------------------------------------------
 
-image-kernel: guest-kernel
-	@mkdir -p $(IMAGES_DIR)/kernel/bin
-	cp std/kernel/$(RELEASE_DIR)/kernel.wasm $(IMAGES_DIR)/kernel/bin/main.wasm
-
-# Build the kernel image and launch it interactively.
-run-kernel: image-kernel
-	cargo run -- run $(IMAGES_DIR)/kernel
+run-kernel: kernel
+	cargo run -- run std/kernel
 
 # --- Clean -------------------------------------------------------------------
 
 clean:
 	cargo clean
-	rm -rf $(IMAGES_DIR)/*/bin/*.wasm
-	rm -rf tmp
+	rm -f std/kernel/boot/main.wasm
+	rm -f std/shell/boot/main.wasm
 
 # --- Podman ------------------------------------------------------------------
 
