@@ -4,8 +4,8 @@ use wasip2::cli::stdout::get_stdout;
 use wasip2::exports::cli::run::Guest;
 
 #[allow(dead_code)]
-mod peer_capnp {
-    include!(concat!(env!("OUT_DIR"), "/peer_capnp.rs"));
+mod system_capnp {
+    include!(concat!(env!("OUT_DIR"), "/system_capnp.rs"));
 }
 
 #[allow(dead_code)]
@@ -18,13 +18,8 @@ mod ipfs_capnp {
     include!(concat!(env!("OUT_DIR"), "/ipfs_capnp.rs"));
 }
 
-#[allow(dead_code)]
-mod membrane_capnp {
-    include!(concat!(env!("OUT_DIR"), "/membrane_capnp.rs"));
-}
-
-/// Bootstrap capability: a Membrane whose sessions carry our Session extension.
-type Membrane = stem_capnp::membrane::Client<membrane_capnp::session::Owned>;
+/// Bootstrap capability: the concrete Membrane defined in stem.capnp.
+type Membrane = stem_capnp::membrane::Client;
 
 struct StderrLogger;
 
@@ -179,8 +174,8 @@ fn parse_tokens<'a>(tokens: &'a [String]) -> Result<(Val, &'a [String]), String>
 // ---------------------------------------------------------------------------
 
 struct ShellCtx {
-    host: peer_capnp::host::Client,
-    executor: peer_capnp::executor::Client,
+    host: system_capnp::host::Client,
+    executor: system_capnp::executor::Client,
     ipfs: ipfs_capnp::client::Client,
     cwd: String,
 }
@@ -672,12 +667,11 @@ fn run_impl() {
     runtime::run(|membrane: Membrane| async move {
         let graft_resp = membrane.graft_request().send().promise.await?;
         let session = graft_resp.get()?.get_session()?;
-        let ext = session.get_extension()?;
 
         let ctx = ShellCtx {
-            host: ext.get_host()?,
-            executor: ext.get_executor()?,
-            ipfs: ext.get_ipfs()?,
+            host: session.get_host()?,
+            executor: session.get_executor()?,
+            ipfs: session.get_ipfs()?,
             cwd: "/".to_string(),
         };
 

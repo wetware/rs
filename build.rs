@@ -6,10 +6,6 @@ fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let target_dir = Path::new(&manifest_dir).join("target");
     let cid_file = target_dir.join("default-config.cid");
-    let capnp_dir = Path::new(&manifest_dir).join("capnp");
-    let capnp_file = capnp_dir.join("peer.capnp");
-    let ipfs_file = capnp_dir.join("ipfs.capnp");
-    let membrane_file = capnp_dir.join("membrane.capnp");
 
     // Read CID from the generated .cid file in target directory
     let cid_value = if cid_file.exists() {
@@ -39,15 +35,4 @@ fn main() {
     // Set the environment variable for use in Rust code
     println!("cargo:rustc-env=DEFAULT_KERNEL_CID={cid_value}");
     println!("cargo:rerun-if-changed={}", cid_file.display());
-
-    capnpc::CompilerCommand::new()
-        .file(&capnp_file)
-        .file(&ipfs_file)
-        .file(&membrane_file)
-        .crate_provides("membrane", [0x9bce094a026970c4_u64]) // stem.capnp types live in the membrane crate
-        .run()
-        .expect("failed to compile capnp schemas");
-    println!("cargo:rerun-if-changed={}", capnp_file.display());
-    println!("cargo:rerun-if-changed={}", ipfs_file.display());
-    println!("cargo:rerun-if-changed={}", membrane_file.display());
 }

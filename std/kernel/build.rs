@@ -14,24 +14,19 @@ fn main() {
 
     capnpc::CompilerCommand::new()
         .src_prefix(&capnp_dir)
-        .file(capnp_dir.join("peer.capnp"))
+        .file(capnp_dir.join("system.capnp"))
         .file(capnp_dir.join("ipfs.capnp"))
-        .file(capnp_dir.join("membrane.capnp"))
         .file(capnp_dir.join("stem.capnp"))
         .run()
         .expect("failed to compile capnp schemas");
 
     println!(
         "cargo:rerun-if-changed={}",
-        capnp_dir.join("peer.capnp").display()
+        capnp_dir.join("system.capnp").display()
     );
     println!(
         "cargo:rerun-if-changed={}",
         capnp_dir.join("ipfs.capnp").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        capnp_dir.join("membrane.capnp").display()
     );
     println!(
         "cargo:rerun-if-changed={}",

@@ -12,33 +12,19 @@ struct Epoch {
   adoptedBlock @2 :UInt64;# Block number at which this epoch was adopted.
 }
 
-enum Status {
-  ok @0;             # Operation succeeded under the current epoch.
-  unauthorized @1;   # Caller not authorized under current policy.
-  internalError @2;  # Unexpected internal failure.
-}
-
 interface Signer {
-  sign @0 (domain :Text, nonce :UInt64) -> (sig :Data);
+  sign @0 (nonce :UInt64) -> (sig :Data);
   # Sign an arbitrary nonce under a given domain string.
 }
 
-interface StatusPoller {
-  pollStatus @0 () -> (status :Status);
+struct Session {
+  host     @0 :import "system.capnp".Host;      # Swarm-level operations (id, addrs, peers, connect).
+  executor @1 :import "system.capnp".Executor;  # WASM execution (runBytes, echo).
+  ipfs     @2 :import "ipfs.capnp".Client;      # IPFS CoreAPI (unixfs, block, dag, ...).
 }
 
-struct Session(Extension) {
-  issuedEpoch @0 :Epoch;
-  # Epoch under which this session was minted.
 
-  statusPoller @1 :StatusPoller;
-  # Capability for polling session status. Can be withheld (client receives null capability).
-
-  extension @2 :Extension;
-  # Platform-specific capabilities scoped to this session.
-}
-
-interface Membrane(SessionExt) {
-  graft @0 (signer :Signer) -> (session :Session(SessionExt));
+interface Membrane {
+  graft @0 (signer :Signer) -> (session :Session);
   # Graft a signer to the membrane, establishing an epoch-scoped session.
 }

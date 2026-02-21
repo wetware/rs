@@ -5,8 +5,8 @@
 //! All capabilities fail with `staleEpoch` when the epoch advances.
 //!
 //! The `membrane` crate owns the Membrane server, StatusPoller, and epoch machinery.
-//! This module provides the `SessionExtensionBuilder` impl that injects wetware-specific
-//! capabilities (Host + Executor) into the session, plus the epoch-guarded
+//! This module provides the `SessionBuilder` impl that injects wetware-specific
+//! capabilities (Host + Executor + IPFS) into the session, plus the epoch-guarded
 //! wrappers for those capabilities.
 
 use capnp::capability::Promise;
@@ -14,7 +14,7 @@ use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
-use membrane::{Epoch, EpochGuard, MembraneServer, SessionExtensionBuilder};
+use membrane::{Epoch, EpochGuard, MembraneServer, SessionBuilder};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -22,8 +22,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::host::SwarmCommand;
 use crate::ipfs;
 use crate::ipfs_capnp;
-use crate::membrane_capnp;
-use crate::peer_capnp;
+use crate::system_capnp;
 use crate::rpc::{
     read_data_result, read_text_list_result, ByteStreamImpl, NetworkState, ProcessImpl, StreamMode,
 };
@@ -31,18 +30,18 @@ use crate::rpc::{
 use super::ProcBuilder;
 
 // ---------------------------------------------------------------------------
-// SessionBuilder — SessionExtensionBuilder for Session
+// HostSessionBuilder — SessionBuilder for the concrete stem Session
 // ---------------------------------------------------------------------------
 
-/// Fills the Session extension with epoch-guarded Host, Executor, and IPFS Client.
-pub struct SessionBuilder {
+/// Fills the Session with epoch-guarded Host, Executor, and IPFS Client.
+pub struct HostSessionBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
     ipfs_client: ipfs::HttpClient,
 }
 
-impl SessionBuilder {
+impl HostSessionBuilder {
     pub fn new(
         network_state: NetworkState,
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
@@ -58,13 +57,13 @@ impl SessionBuilder {
     }
 }
 
-impl SessionExtensionBuilder<membrane_capnp::session::Owned> for SessionBuilder {
+impl SessionBuilder for HostSessionBuilder {
     fn build(
         &self,
         guard: &EpochGuard,
-        mut builder: membrane_capnp::session::Builder<'_>,
+        mut builder: membrane::stem_capnp::session::Builder<'_>,
     ) -> Result<(), capnp::Error> {
-        let host: peer_capnp::host::Client = capnp_rpc::new_client(EpochGuardedHost::new(
+        let host: system_capnp::host::Client = capnp_rpc::new_client(EpochGuardedHost::new(
             self.network_state.clone(),
             self.swarm_cmd_tx.clone(),
             self.wasm_debug,
@@ -72,7 +71,7 @@ impl SessionExtensionBuilder<membrane_capnp::session::Owned> for SessionBuilder 
         ));
         builder.set_host(host);
 
-        let executor: peer_capnp::executor::Client =
+        let executor: system_capnp::executor::Client =
             capnp_rpc::new_client(EpochGuardedExecutor::new(
                 self.network_state.clone(),
                 self.swarm_cmd_tx.clone(),
@@ -121,11 +120,11 @@ impl EpochGuardedHost {
 }
 
 #[allow(refining_impl_trait)]
-impl peer_capnp::host::Server for EpochGuardedHost {
+impl system_capnp::host::Server for EpochGuardedHost {
     fn id(
         self: capnp::capability::Rc<Self>,
-        _params: peer_capnp::host::IdParams,
-        mut results: peer_capnp::host::IdResults,
+        _params: system_capnp::host::IdParams,
+        mut results: system_capnp::host::IdResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
         let network_state = self.network_state.clone();
@@ -138,8 +137,8 @@ impl peer_capnp::host::Server for EpochGuardedHost {
 
     fn addrs(
         self: capnp::capability::Rc<Self>,
-        _params: peer_capnp::host::AddrsParams,
-        mut results: peer_capnp::host::AddrsResults,
+        _params: system_capnp::host::AddrsParams,
+        mut results: system_capnp::host::AddrsResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
         let network_state = self.network_state.clone();
@@ -155,8 +154,8 @@ impl peer_capnp::host::Server for EpochGuardedHost {
 
     fn peers(
         self: capnp::capability::Rc<Self>,
-        _params: peer_capnp::host::PeersParams,
-        mut results: peer_capnp::host::PeersResults,
+        _params: system_capnp::host::PeersParams,
+        mut results: system_capnp::host::PeersResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
         let network_state = self.network_state.clone();
@@ -177,8 +176,8 @@ impl peer_capnp::host::Server for EpochGuardedHost {
 
     fn connect(
         self: capnp::capability::Rc<Self>,
-        params: peer_capnp::host::ConnectParams,
-        _results: peer_capnp::host::ConnectResults,
+        params: system_capnp::host::ConnectParams,
+        _results: system_capnp::host::ConnectResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
         let params_reader = pry!(params.get());
@@ -222,11 +221,11 @@ impl peer_capnp::host::Server for EpochGuardedHost {
 
     fn executor(
         self: capnp::capability::Rc<Self>,
-        _params: peer_capnp::host::ExecutorParams,
-        mut results: peer_capnp::host::ExecutorResults,
+        _params: system_capnp::host::ExecutorParams,
+        mut results: system_capnp::host::ExecutorResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
-        let executor: peer_capnp::executor::Client =
+        let executor: system_capnp::executor::Client =
             capnp_rpc::new_client(EpochGuardedExecutor::new(
                 self.network_state.clone(),
                 self.swarm_cmd_tx.clone(),
@@ -267,11 +266,11 @@ impl EpochGuardedExecutor {
 }
 
 #[allow(refining_impl_trait)]
-impl peer_capnp::executor::Server for EpochGuardedExecutor {
+impl system_capnp::executor::Server for EpochGuardedExecutor {
     fn echo(
         self: capnp::capability::Rc<Self>,
-        params: peer_capnp::executor::EchoParams,
-        mut results: peer_capnp::executor::EchoResults,
+        params: system_capnp::executor::EchoParams,
+        mut results: system_capnp::executor::EchoResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
         let message = match pry!(params.get()).get_message() {
@@ -286,8 +285,8 @@ impl peer_capnp::executor::Server for EpochGuardedExecutor {
 
     fn run_bytes(
         self: capnp::capability::Rc<Self>,
-        params: peer_capnp::executor::RunBytesParams,
-        mut results: peer_capnp::executor::RunBytesResults,
+        params: system_capnp::executor::RunBytesParams,
+        mut results: system_capnp::executor::RunBytesResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
         let params = pry!(params.get());
@@ -357,7 +356,7 @@ impl peer_capnp::executor::Server for EpochGuardedExecutor {
             let stderr =
                 capnp_rpc::new_client(ByteStreamImpl::new(host_stderr, StreamMode::ReadOnly));
 
-            let process_client: peer_capnp::process::Client =
+            let process_client: system_capnp::process::Client =
                 capnp_rpc::new_client(ProcessImpl::new(stdin, stdout, stderr, exit_rx));
             results.get().set_process(process_client);
 
@@ -564,12 +563,12 @@ impl ipfs_capnp::unix_f_s::Server for EpochGuardedUnixFS {
 /// When a guest calls `wetware_guest::serve(my_membrane, ...)`, the host
 /// captures it here.  The host can then re-serve it to external peers,
 /// allowing the guest to attenuate or enrich the capability surface it exposes.
-pub type GuestMembrane =
-    membrane::stem_capnp::membrane::Client<membrane_capnp::session::Owned>;
+pub type GuestMembrane = membrane::stem_capnp::membrane::Client;
 
-/// Build an RPC system that bootstraps a `Membrane(Session)` instead of
-/// a bare `Host`. The membrane provides epoch-scoped sessions containing
-/// `Host`, `Executor`, and `StatusPoller`.
+/// Build an RPC system that bootstraps a `Membrane` instead of a bare `Host`.
+///
+/// The membrane provides epoch-scoped sessions containing `Host`, `Executor`,
+/// and `IPFS Client`.
 ///
 /// Returns both the RPC system and the guest's exported [`GuestMembrane`], if
 /// the guest called `wetware_guest::serve()`.  If the guest called `run()`
@@ -587,9 +586,10 @@ where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
 {
-    let ext_builder = SessionBuilder::new(network_state, swarm_cmd_tx, wasm_debug, ipfs_client);
+    let sess_builder =
+        HostSessionBuilder::new(network_state, swarm_cmd_tx, wasm_debug, ipfs_client);
     let membrane: GuestMembrane =
-        capnp_rpc::new_client(MembraneServer::new(epoch_rx, ext_builder));
+        capnp_rpc::new_client(MembraneServer::new(epoch_rx, sess_builder));
 
     let rpc_network = VatNetwork::new(
         reader.compat(),

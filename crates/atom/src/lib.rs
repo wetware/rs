@@ -10,7 +10,7 @@ pub use membrane::stem_capnp;
 pub use membrane::{
     Epoch, EpochGuard, fill_epoch_builder,
     membrane_client, MembraneServer, NoExtension,
-    SessionExtensionBuilder, StatusPollerServer,
+    SessionBuilder, StatusPollerServer,
 };
 
 pub mod abi;
