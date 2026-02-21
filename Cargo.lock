@@ -7628,6 +7628,7 @@ dependencies = [
  "k256",
  "libc",
  "libp2p",
+ "libp2p-core",
  "libp2p-stream",
  "membrane",
  "multiaddr 0.18.2",

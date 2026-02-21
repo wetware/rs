@@ -1,12 +1,12 @@
-//! Membrane-based RPC bootstrap: epoch-scoped Host + Executor + Signer capabilities.
+//! Membrane-based RPC bootstrap: epoch-scoped Host + Executor + node identity capabilities.
 //!
 //! Instead of bootstrapping a bare `Host`, the membrane provides an epoch-scoped
-//! `Session` containing `Host`, `Executor`, `IPFS Client`, and `Signer`.
+//! `Session` containing `Host`, `Executor`, `IPFS Client`, and a node `identity` signer.
 //! All capabilities fail with `staleEpoch` when the epoch advances.
 //!
 //! The `membrane` crate owns the Membrane server and epoch machinery.
 //! This module provides the `SessionBuilder` impl that injects wetware-specific
-//! capabilities into the session, plus the epoch-guarded IPFS and Signer wrappers.
+//! capabilities into the session, plus the epoch-guarded IPFS and identity wrappers.
 
 use std::sync::Arc;
 
@@ -15,7 +15,8 @@ use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
-use k256::ecdsa::{signature::Signer as EcdsaSigner, Signature, SigningKey};
+use k256::ecdsa::SigningKey;
+use libp2p_core::SignedEnvelope;
 use membrane::{stem_capnp, Epoch, EpochGuard, MembraneServer, SessionBuilder};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
@@ -34,15 +35,17 @@ use super::NetworkState;
 
 /// Host-side secp256k1 signer provided to the kernel through the Session.
 ///
-/// The private key lives in the host process and is never sent into WASM memory.
+/// **Security invariant**: the identity secret key never leaves the host process.
+/// The key is never copied into WASM memory or transmitted over the RPC channel.
+/// The kernel receives only a capability reference; all signing happens host-side,
+/// and the kernel's WASM sandbox cannot observe or extract the private key bytes.
+///
 /// Epoch-guarded so signing fails with `staleEpoch` after an epoch advance.
 ///
-/// Uses the libp2p signed-envelope domain separation (RFC 0002):
-/// ```text
-/// varint(18)  "ww-membrane-graft"          # domain
-/// varint(25)  "/ww/membrane/graft-nonce"   # payload_type
-/// varint(8)   <8-byte big-endian nonce>    # payload
-/// ```
+/// Returns a [`libp2p_core::SignedEnvelope`] (protobuf-encoded) with:
+/// - domain:       `"ww-membrane-graft"`
+/// - payload_type: `"/ww/membrane/graft-nonce"`
+/// - payload:      nonce as 8-byte big-endian u64
 struct EpochGuardedKernelSigner {
     sk: Arc<SigningKey>,
     guard: EpochGuard,
@@ -54,21 +57,6 @@ impl EpochGuardedKernelSigner {
     }
 }
 
-/// Build the RFC 0002 domain-separated signing buffer.
-fn build_signing_buffer(nonce: u64) -> Vec<u8> {
-    const DOMAIN: &[u8] = b"ww-membrane-graft";
-    const PAYLOAD_TYPE: &[u8] = b"/ww/membrane/graft-nonce";
-    let nonce_bytes = nonce.to_be_bytes();
-    let mut buf = Vec::with_capacity(1 + DOMAIN.len() + 1 + PAYLOAD_TYPE.len() + 1 + 8);
-    buf.push(DOMAIN.len() as u8);
-    buf.extend_from_slice(DOMAIN);
-    buf.push(PAYLOAD_TYPE.len() as u8);
-    buf.extend_from_slice(PAYLOAD_TYPE);
-    buf.push(nonce_bytes.len() as u8);
-    buf.extend_from_slice(&nonce_bytes);
-    buf
-}
-
 #[allow(refining_impl_trait)]
 impl stem_capnp::signer::Server for EpochGuardedKernelSigner {
     fn sign(
@@ -78,9 +66,16 @@ impl stem_capnp::signer::Server for EpochGuardedKernelSigner {
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
         let nonce = pry!(params.get()).get_nonce();
-        let buf = build_signing_buffer(nonce);
-        let sig: Signature = self.sk.sign(&buf);
-        results.get().set_sig(sig.to_bytes().as_slice());
+        let keypair =
+            pry!(crate::keys::to_libp2p(&self.sk).map_err(|e| capnp::Error::failed(e.to_string())));
+        let envelope = pry!(SignedEnvelope::new(
+            &keypair,
+            "ww-membrane-graft".to_string(),
+            b"/ww/membrane/graft-nonce".to_vec(),
+            nonce.to_be_bytes().to_vec(),
+        )
+        .map_err(|e| capnp::Error::failed(e.to_string())));
+        results.get().set_sig(&envelope.into_protobuf_encoding());
         Promise::ok(())
     }
 }
@@ -147,7 +142,7 @@ impl SessionBuilder for HostSessionBuilder {
         if let Some(sk) = &self.signing_key {
             let signer: stem_capnp::signer::Client =
                 capnp_rpc::new_client(EpochGuardedKernelSigner::new(Arc::clone(sk), guard.clone()));
-            builder.set_signer(signer);
+            builder.set_identity(signer);
         }
 
         Ok(())

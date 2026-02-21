@@ -19,7 +19,7 @@ struct Session {
   host     @0 :import "system.capnp".Host;      # Swarm-level operations (id, addrs, peers, connect).
   executor @1 :import "system.capnp".Executor;  # WASM execution (runBytes, echo).
   ipfs     @2 :import "ipfs.capnp".Client;      # IPFS CoreAPI (unixfs, block, dag, ...).
-  signer   @3 :Signer;                          # Host-side secp256k1 signer for the kernel to use.
+  identity @3 :Signer;                          # Host-side secp256k1 identity signer for the kernel.
 }
 
 
