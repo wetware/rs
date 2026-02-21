@@ -76,12 +76,6 @@ impl<F: SessionBuilder> stem_capnp::membrane::Server for MembraneServer<F> {
     }
 }
 
-/// StatusPoller server: epoch-scoped; pollStatus returns an RPC error when the
-/// epoch has advanced past the one under which this capability was issued.
-pub struct StatusPollerServer {
-    pub guard: EpochGuard,
-}
-
 /// Builds a Membrane capability client from a watch receiver (for use over capnp-rpc).
 ///
 /// Uses `NoExtension` — all session fields are left empty (null capabilities).

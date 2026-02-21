@@ -18,6 +18,8 @@ use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+use ::membrane::EpochGuard;
+
 use crate::cell::proc::Builder as ProcBuilder;
 use crate::host::SwarmCommand;
 use crate::system_capnp;
@@ -261,6 +263,7 @@ pub struct HostImpl {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
+    guard: Option<EpochGuard>,
 }
 
 impl HostImpl {
@@ -268,21 +271,32 @@ impl HostImpl {
         network_state: NetworkState,
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
         wasm_debug: bool,
+        guard: Option<EpochGuard>,
     ) -> Self {
         Self {
             network_state,
             swarm_cmd_tx,
             wasm_debug,
+            guard,
+        }
+    }
+
+    fn check_epoch(&self) -> Result<(), capnp::Error> {
+        match self.guard {
+            Some(ref g) => g.check(),
+            None => Ok(()),
         }
     }
 }
 
+#[allow(refining_impl_trait)]
 impl system_capnp::host::Server for HostImpl {
     fn id(
         self: capnp::capability::Rc<Self>,
         _params: system_capnp::host::IdParams,
         mut results: system_capnp::host::IdResults,
-    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
         let network_state = self.network_state.clone();
         Promise::from_future(async move {
             let snapshot = network_state.snapshot().await;
@@ -295,7 +309,8 @@ impl system_capnp::host::Server for HostImpl {
         self: capnp::capability::Rc<Self>,
         _params: system_capnp::host::AddrsParams,
         mut results: system_capnp::host::AddrsResults,
-    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
         let network_state = self.network_state.clone();
         Promise::from_future(async move {
             let snapshot = network_state.snapshot().await;
@@ -311,7 +326,8 @@ impl system_capnp::host::Server for HostImpl {
         self: capnp::capability::Rc<Self>,
         _params: system_capnp::host::PeersParams,
         mut results: system_capnp::host::PeersResults,
-    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
         let network_state = self.network_state.clone();
         Promise::from_future(async move {
             let snapshot = network_state.snapshot().await;
@@ -332,7 +348,8 @@ impl system_capnp::host::Server for HostImpl {
         self: capnp::capability::Rc<Self>,
         params: system_capnp::host::ConnectParams,
         _results: system_capnp::host::ConnectResults,
-    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
         let params_reader = pry!(params.get());
         let peer_id_bytes = read_data_result(params_reader.get_peer_id());
         let addrs_bytes: Vec<Vec<u8>> = match params_reader.get_addrs() {
@@ -376,11 +393,13 @@ impl system_capnp::host::Server for HostImpl {
         self: capnp::capability::Rc<Self>,
         _params: system_capnp::host::ExecutorParams,
         mut results: system_capnp::host::ExecutorResults,
-    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
         let executor: system_capnp::executor::Client = capnp_rpc::new_client(ExecutorImpl::new(
             self.network_state.clone(),
             self.swarm_cmd_tx.clone(),
             self.wasm_debug,
+            self.guard.clone(),
         ));
         results.get().set_executor(executor);
         Promise::ok(())
@@ -391,6 +410,7 @@ pub struct ExecutorImpl {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
+    guard: Option<EpochGuard>,
 }
 
 impl ExecutorImpl {
@@ -398,11 +418,20 @@ impl ExecutorImpl {
         network_state: NetworkState,
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
         wasm_debug: bool,
+        guard: Option<EpochGuard>,
     ) -> Self {
         Self {
             network_state,
             swarm_cmd_tx,
             wasm_debug,
+            guard,
+        }
+    }
+
+    fn check_epoch(&self) -> Result<(), capnp::Error> {
+        match self.guard {
+            Some(ref g) => g.check(),
+            None => Ok(()),
         }
     }
 }
@@ -433,30 +462,30 @@ fn read_data_result(data: capnp::Result<capnp::data::Reader<'_>>) -> Vec<u8> {
     }
 }
 
+#[allow(refining_impl_trait)]
 impl system_capnp::executor::Server for ExecutorImpl {
     fn echo(
         self: capnp::capability::Rc<Self>,
         params: system_capnp::executor::EchoParams,
         mut results: system_capnp::executor::EchoResults,
-    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
         let message = match pry!(params.get()).get_message() {
             Ok(s) => s.to_string().unwrap_or_else(|_| String::new()),
             Err(_) => String::new(),
         };
-        tracing::info!("Host: Received echo request: {}", message);
-        Promise::from_future(async move {
-            let response = format!("Echo: {}", message);
-            tracing::info!("Host: Sending echo response: {}", response);
-            results.get().set_response(&response);
-            Ok(())
-        })
+        tracing::debug!(message, "echo");
+        let response = format!("Echo: {}", message);
+        results.get().set_response(&response);
+        Promise::ok(())
     }
 
     fn run_bytes(
         self: capnp::capability::Rc<Self>,
         params: system_capnp::executor::RunBytesParams,
         mut results: system_capnp::executor::RunBytesResults,
-    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
         let params = pry!(params.get());
         let args = read_text_list_result(params.get_args());
         let env = read_text_list_result(params.get_env());
@@ -468,16 +497,12 @@ impl system_capnp::executor::Server for ExecutorImpl {
             tracing::info!("run_bytes: starting child process spawn");
             let bytecode = wasm;
 
-            // Create stderr duplex for process interface
             let (host_stderr, guest_stderr) = io::duplex(64 * 1024);
-
-            // Create real stdin/stdout duplexes for Process interface
             let (host_stdin, guest_stdin) = io::duplex(64 * 1024);
             let (host_stdout, guest_stdout) = io::duplex(64 * 1024);
 
             let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
 
-            // Build guest with wetware streams enabled for RPC
             let (builder, mut handles) = ProcBuilder::new()
                 .with_env(env)
                 .with_args(args)
@@ -486,12 +511,10 @@ impl system_capnp::executor::Server for ExecutorImpl {
                 .with_stdio(guest_stdin, guest_stdout, guest_stderr)
                 .with_data_streams();
 
-            tracing::info!("run_bytes: building child process");
             let proc = builder
                 .build()
                 .await
                 .map_err(|err| capnp::Error::failed(err.to_string()))?;
-            tracing::info!("run_bytes: child process built");
 
             let (reader, writer) = handles
                 .take_host_split()
@@ -499,24 +522,13 @@ impl system_capnp::executor::Server for ExecutorImpl {
             let child_rpc_system =
                 build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug);
 
-            // Spawn both the child process and its RPC server in a LocalSet
-            tracing::info!("run_bytes: spawning child task");
             tokio::task::spawn_local(async move {
-                tracing::info!("run_bytes: child task started");
                 let local = tokio::task::LocalSet::new();
-
-                // Spawn RPC system
                 local.spawn_local(child_rpc_system.map(|_| ()));
-
-                // Run child process and wait for exit
                 local
                     .run_until(async move {
-                        tracing::info!("run_bytes: running child process");
                         let exit_code = match proc.run().await {
-                            Ok(()) => {
-                                tracing::info!("run_bytes: child process exited successfully");
-                                0
-                            }
+                            Ok(()) => 0,
                             Err(e) => {
                                 tracing::error!("run_bytes: child process failed: {}", e);
                                 1
@@ -525,9 +537,7 @@ impl system_capnp::executor::Server for ExecutorImpl {
                         let _ = exit_tx.send(exit_code);
                     })
                     .await;
-                tracing::info!("run_bytes: child task completed");
             });
-            tracing::info!("run_bytes: returning process client");
 
             let stdin =
                 capnp_rpc::new_client(ByteStreamImpl::new(host_stdin, StreamMode::WriteOnly));
@@ -557,7 +567,7 @@ where
     W: AsyncWrite + Unpin + 'static,
 {
     let host: system_capnp::host::Client =
-        capnp_rpc::new_client(HostImpl::new(network_state, swarm_cmd_tx, wasm_debug));
+        capnp_rpc::new_client(HostImpl::new(network_state, swarm_cmd_tx, wasm_debug, None));
 
     let rpc_network = VatNetwork::new(
         reader.compat(),

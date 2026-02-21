@@ -23,5 +23,5 @@ pub mod stem_capnp {
 pub mod epoch;
 pub mod membrane;
 
-pub use epoch::{Epoch, EpochGuard, fill_epoch_builder};
-pub use membrane::{membrane_client, MembraneServer, NoExtension, SessionBuilder, StatusPollerServer};
+pub use epoch::{Epoch, EpochGuard};
+pub use membrane::{membrane_client, MembraneServer, NoExtension, SessionBuilder};

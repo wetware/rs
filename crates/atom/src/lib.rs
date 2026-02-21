@@ -7,10 +7,11 @@
 //!   (`Atom.head()`), giving reorg-safe finalized output.
 
 pub use membrane::stem_capnp;
+pub use membrane::system_capnp;
 pub use membrane::{
-    Epoch, EpochGuard, fill_epoch_builder,
+    Epoch, EpochGuard,
     membrane_client, MembraneServer, NoExtension,
-    SessionBuilder, StatusPollerServer,
+    SessionBuilder,
 };
 
 pub mod abi;

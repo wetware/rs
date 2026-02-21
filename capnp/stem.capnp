@@ -1,8 +1,6 @@
-# Vendored from github.com/wetware/stem.  This file MUST stay in sync with
-# stem's canonical copy.  No Rust code is generated for it — build.rs uses
-# capnpc::CompilerCommand::crate_provides("stem", [...]) so that downstream
-# schemas can import it for type resolution while referencing the stem crate's
-# generated types at compile time.  See doc/capnp-cross-crate.md.
+# Stem schema: Epoch, Signer, Session, and Membrane definitions.
+# Compiled by the membrane crate (crates/membrane/build.rs).
+# The host re-exports generated types via `pub use membrane::stem_capnp`.
 
 @0x9bce094a026970c4;
 

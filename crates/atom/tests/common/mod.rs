@@ -3,10 +3,62 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
+use capnp::capability::Promise;
+use capnp_rpc::pry;
 use serde_json::{json, Value};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::time::sleep;
+
+use atom::system_capnp;
+use atom::{EpochGuard, SessionBuilder};
+
+// ---------------------------------------------------------------------------
+// Stub executor + session builder for epoch-guarded capability tests
+// ---------------------------------------------------------------------------
+
+/// Minimal executor that checks epoch guard on echo, returns "pong".
+/// Used by membrane integration tests to verify epoch-staleness semantics.
+pub struct StubExecutor {
+    guard: EpochGuard,
+}
+
+#[allow(refining_impl_trait)]
+impl system_capnp::executor::Server for StubExecutor {
+    fn echo(
+        self: capnp::capability::Rc<Self>,
+        _params: system_capnp::executor::EchoParams,
+        mut results: system_capnp::executor::EchoResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.guard.check());
+        results.get().set_response("pong");
+        Promise::ok(())
+    }
+
+    fn run_bytes(
+        self: capnp::capability::Rc<Self>,
+        _params: system_capnp::executor::RunBytesParams,
+        _results: system_capnp::executor::RunBytesResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::err(capnp::Error::unimplemented("stub".into()))
+    }
+}
+
+/// SessionBuilder that populates session.executor with a StubExecutor.
+pub struct StubSessionBuilder;
+
+impl SessionBuilder for StubSessionBuilder {
+    fn build(
+        &self,
+        guard: &EpochGuard,
+        mut builder: atom::stem_capnp::session::Builder<'_>,
+    ) -> std::result::Result<(), capnp::Error> {
+        let executor: system_capnp::executor::Client =
+            capnp_rpc::new_client(StubExecutor { guard: guard.clone() });
+        builder.set_executor(executor);
+        Ok(())
+    }
+}
 
 /// Reqwest client that does not use system proxy (avoids SCDynamicStore panic in sandbox/CI).
 fn http_client() -> reqwest::Client {
