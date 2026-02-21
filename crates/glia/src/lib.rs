@@ -268,13 +268,13 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 // Parser
 // ---------------------------------------------------------------------------
 
-fn parse_tokens<'a>(tokens: &'a [Token]) -> Result<(Val, &'a [Token]), String> {
+fn parse_tokens(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
     if tokens.is_empty() {
         return Err("unexpected end of input".into());
     }
     match &tokens[0] {
-        Token::Open => parse_seq(&tokens[1..], Token::Close, |items| Val::List(items)),
-        Token::VecOpen => parse_seq(&tokens[1..], Token::VecClose, |items| Val::Vector(items)),
+        Token::Open => parse_seq(&tokens[1..], Token::Close, Val::List),
+        Token::VecOpen => parse_seq(&tokens[1..], Token::VecClose, Val::Vector),
         Token::MapOpen => parse_map(&tokens[1..]),
         Token::SetOpen => parse_set(&tokens[1..]),
         Token::Close => Err("unexpected )".into()),
@@ -284,11 +284,7 @@ fn parse_tokens<'a>(tokens: &'a [Token]) -> Result<(Val, &'a [Token]), String> {
     }
 }
 
-fn parse_seq<'a, F>(
-    tokens: &'a [Token],
-    close: Token,
-    wrap: F,
-) -> Result<(Val, &'a [Token]), String>
+fn parse_seq<F>(tokens: &[Token], close: Token, wrap: F) -> Result<(Val, &[Token]), String>
 where
     F: FnOnce(Vec<Val>) -> Val,
 {
@@ -307,7 +303,7 @@ where
     }
 }
 
-fn parse_map<'a>(tokens: &'a [Token]) -> Result<(Val, &'a [Token]), String> {
+fn parse_map(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
     let mut pairs = Vec::new();
     let mut rest = tokens;
     loop {
@@ -327,7 +323,7 @@ fn parse_map<'a>(tokens: &'a [Token]) -> Result<(Val, &'a [Token]), String> {
     }
 }
 
-fn parse_set<'a>(tokens: &'a [Token]) -> Result<(Val, &'a [Token]), String> {
+fn parse_set(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
     let mut items: Vec<Val> = Vec::new();
     let mut rest = tokens;
     loop {
