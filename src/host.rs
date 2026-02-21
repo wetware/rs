@@ -142,12 +142,14 @@ impl Libp2pHost {
                                 .set_known_peers(known_peers.values().cloned().collect())
                                 .await;
                         }
-                        SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
-                            if let Some(peer_id) = peer_id {
-                                if let Some(senders) = pending_connects.remove(&peer_id) {
-                                    for sender in senders {
-                                        let _ = sender.send(Err(error.to_string()));
-                                    }
+                        SwarmEvent::OutgoingConnectionError {
+                            peer_id: Some(peer_id),
+                            error,
+                            ..
+                        } => {
+                            if let Some(senders) = pending_connects.remove(&peer_id) {
+                                for sender in senders {
+                                    let _ = sender.send(Err(error.to_string()));
                                 }
                             }
                         }

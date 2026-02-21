@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 
 use clap::{Parser, Subcommand};
 use membrane::Epoch;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::watch;
 
 use ww::cell::CellBuilder;
@@ -197,7 +197,7 @@ impl Commands {
         };
 
         // Expand "." to the current directory path for better error messages
-        let target_dir = if target_dir == PathBuf::from(".") {
+        let target_dir = if target_dir == Path::new(".") {
             std::env::current_dir()?
         } else {
             target_dir
@@ -314,7 +314,7 @@ pub extern "C" fn _start() {
 
         // Run cargo build for wasm32-wasip2 target
         let output = std::process::Command::new("cargo")
-            .args(&[
+            .args([
                 "build",
                 "--target",
                 "wasm32-wasip2",
@@ -353,7 +353,7 @@ pub extern "C" fn _start() {
         for entry in std::fs::read_dir(&target_dir).context("Failed to read target directory")? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "wasm") {
+            if path.extension().is_some_and(|ext| ext == "wasm") {
                 wasm_file = Some(path);
                 break;
             }

@@ -42,6 +42,12 @@ pub struct NetworkState {
     inner: Arc<RwLock<NetworkSnapshot>>,
 }
 
+impl Default for NetworkState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NetworkState {
     pub fn new() -> Self {
         use libp2p::identity::Keypair;
