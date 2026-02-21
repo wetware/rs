@@ -1,7 +1,0 @@
-package wetware:kernel;
-
-use wetware:streams/streams;
-
-world streams-import {
-    import streams;
-}
