@@ -1,8 +1,5 @@
 # Wetware build system
 #
-# Guest builds are staged: child-echo must be built before the kernel
-# (kernel embeds child-echo via include_bytes!).
-#
 # `make images` assembles FHS-style image directories under images/.
 # Each image has bin/main.wasm as its entrypoint, consumable by `ww run`.
 
@@ -11,9 +8,8 @@ RELEASE_DIR  = target/$(WASM_TARGET)/release
 
 IMAGES_DIR := images
 
-.PHONY: all host guests images clean
-.PHONY: guest-child-echo guest-shell guest-kernel
-.PHONY: image-child-echo image-shell image-kernel
+.PHONY: all host guests images clean run-shell
+.PHONY: guest-shell image-shell
 .PHONY: podman-build podman-run podman-clean podman-dev
 
 all: guests images host
@@ -24,39 +20,25 @@ host:
 	cargo build --release
 
 # --- Guests ------------------------------------------------------------------
-# Each guest is built with --target-dir target so that artifacts land in
-# the per-crate target/ dir instead of the workspace root.  This matters
-# for kernel, which uses include_bytes! pointing at guests/child-echo/target/.
 
-guests: guest-child-echo guest-shell guest-kernel
-
-guest-child-echo:
-	cd guests/child-echo && cargo build --target $(WASM_TARGET) --release --target-dir target
+guests: guest-shell
 
 guest-shell:
-	cd guests/shell && cargo build --target $(WASM_TARGET) --release --target-dir target
-
-# kernel depends on child-echo (include_bytes! references its wasm)
-guest-kernel: guest-child-echo
-	cd std/kernel && cargo build --target $(WASM_TARGET) --release --target-dir target
+	cd std/shell && cargo build --target $(WASM_TARGET) --release --target-dir target
 
 # --- Images ------------------------------------------------------------------
 # Assemble FHS-style image directories:
 #   <image>/bin/main.wasm   — guest entrypoint
 
-images: image-child-echo image-shell image-kernel
-
-image-child-echo: guest-child-echo
-	@mkdir -p $(IMAGES_DIR)/child-echo/bin
-	cp guests/child-echo/$(RELEASE_DIR)/child_echo.wasm $(IMAGES_DIR)/child-echo/bin/main.wasm
+images: image-shell
 
 image-shell: guest-shell
 	@mkdir -p $(IMAGES_DIR)/shell/bin
-	cp guests/shell/$(RELEASE_DIR)/shell.wasm $(IMAGES_DIR)/shell/bin/main.wasm
+	cp std/shell/$(RELEASE_DIR)/shell.wasm $(IMAGES_DIR)/shell/bin/main.wasm
 
-image-kernel: guest-kernel
-	@mkdir -p $(IMAGES_DIR)/kernel/bin
-	cp std/kernel/$(RELEASE_DIR)/pid0.wasm $(IMAGES_DIR)/kernel/bin/main.wasm
+# Build the shell image and launch it interactively.
+run-shell: image-shell
+	cargo run -- run $(IMAGES_DIR)/shell
 
 # --- Clean -------------------------------------------------------------------
 

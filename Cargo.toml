@@ -3,10 +3,8 @@ members = [
     ".",
     "crates/atom",
     "crates/membrane",
-    "guests/child-echo",
-    "guests/shell",
-    "std/runtime",
     "std/kernel",
+    "std/shell",
 ]
 
 [package]

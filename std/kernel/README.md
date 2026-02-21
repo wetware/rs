@@ -1,32 +1,39 @@
-# kernel — Init Process
+# runtime — Guest Runtime SDK
 
-The first process to run in a wetware node; the root of the capability hierarchy.
+The SDK for WASM programs running inside the wetware host environment.
 
 ## What it is
 
-When `ww` boots, it launches the kernel as its initial WASM guest. The kernel occupies
-a privileged position not because of any mechanism in the runtime — it is simply the
-first process to receive the host's full capability surface.
+When a WASM component is executed by `ww`, it runs inside a sandbox that communicates
+with the host over a WASI stream pair. This crate abstracts that connection into a
+Cap'n Proto RPC session, letting guest code call host capabilities using ordinary
+`async/await`.
 
-The host bootstraps a `Membrane(WetwareSession)` capability over the WASI stream
-connection. The kernel grafts onto this membrane to obtain an epoch-scoped session
-containing `Host`, `Executor`, and `StatusPoller`.
+## Entry points
 
-## What it does
+```rust
+// Receive host capabilities; no export back to the host.
+runtime::run(|host: Membrane| async move {
+    let session = host.graft_request().send().promise.await?;
+    // ...
+    Ok(())
+});
 
-1. **Receives** the host's raw `Membrane` capability via `wetware_guest::serve()`.
-2. **Wraps** it in a `MembraneProxy` that enforces policy (attenuation, auditing, etc.).
-3. **Re-exports** the proxy back to the host as its own bootstrap capability.
+// Receive host capabilities AND export `bootstrap` back to the host.
+// Use this when the guest needs to surface a capability to external peers.
+runtime::serve(my_capability, |host: Membrane| async move {
+    // ...
+    Ok(())
+});
+```
 
-The host then holds this proxy and hands it to external peers connecting over TCP.
-Every capability a remote peer can exercise flows through the kernel's proxy — giving
-the kernel full control over what is exposed and to whom.
+`run()` is suitable for processes that consume capabilities but don't export any.
+`serve()` is the pattern for the shell and other processes that act as intermediaries —
+they receive raw capabilities from the host, wrap or attenuate them, and hand the
+wrapped version back so the host can expose it to external peers.
 
-## Relationship to guest processes
+## Relationship to the shell
 
-The kernel spawns child processes via the `Executor` capability it received. Those
-children get a scoped capability surface derived from the kernel's own session —
-they never have direct access to the raw host membrane.
-
-In this sense the kernel acts like an OS init process: it bootstraps the environment,
-manages process lifecycle, and mediates access to the underlying system.
+The shell (`std/shell`) uses `serve()` to export an attenuated Membrane back to the
+host. Other guest processes that only need to *use* capabilities (not re-export them)
+use `run()`.

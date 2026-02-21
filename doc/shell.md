@@ -65,16 +65,22 @@ IPFS methods pipeline through the `UnixFS` sub-API of the
 ### PATH lookup
 
 Any command that is not a known capability or built-in triggers a PATH
-lookup. The kernel scans directories listed in `PATH` (default: `/bin`)
-for a file named `<cmd>.wasm`, reads the bytes, and executes it via
-`executor.runBytes()`. Standard output is captured and printed; the
-exit code is reported on error.
+lookup. The kernel scans each directory in `PATH` (default: `/bin`) for
+two candidates in order:
+
+1. `<dir>/<cmd>.wasm` — flat single-file binary
+2. `<dir>/<cmd>/main.wasm` — image-style nested binary
+
+The first match wins. The bytes are passed to `executor.runBytes()`.
+Standard output is captured and printed; the exit code is reported on error.
 
 ```
 ww> (my-tool "arg1" "arg2")
 ```
 
-This looks for `/bin/my-tool.wasm` in the image filesystem.
+This looks for `/bin/my-tool.wasm` or `/bin/my-tool/main.wasm` in the
+image filesystem. The nested form lets a command be a full FHS image
+directory with its own `boot/`, `etc/`, etc.
 
 ## Daemon mode (non-TTY)
 
