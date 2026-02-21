@@ -24,14 +24,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new wetware environment with FHS skeleton.
+    /// Initialize a new wetware environment.
     ///
-    /// Creates the directory structure for a wetware application.
-    /// With no arguments, initializes in the current directory.
-    /// With <subdir>, creates <subdir>/ and initializes there.
-    ///
-    /// FHS skeleton created:
-    ///   boot/  etc/  home/  usr/bin  usr/lib  var/log
+    /// Creates a boot/ directory for the WASM artifact. Other FHS
+    /// directories are created lazily as needed.
     Init {
         /// Optional subdirectory to initialize
         #[arg(value_name = "SUBDIR")]
@@ -198,16 +194,10 @@ impl Commands {
             );
         }
 
-        // Create the FHS skeleton
-        let dirs = vec!["boot", "etc", "home", "usr", "usr/bin", "usr/lib", "var", "var/log"];
-
-        for dir_name in dirs {
-            let dir_path = target_dir.join(dir_name);
-            std::fs::create_dir_all(&dir_path).context(format!(
-                "Failed to create directory: {}",
-                dir_path.display()
-            ))?;
-        }
+        // Create boot/ — the only required directory.
+        // Other FHS dirs (etc/, usr/, var/, etc.) are created lazily as needed.
+        std::fs::create_dir_all(target_dir.join("boot"))
+            .context("Failed to create boot directory")?;
 
         // Handle template scaffolding if requested
         if let Some(template_name) = template {

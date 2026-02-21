@@ -5,6 +5,7 @@ members = [
     "crates/membrane",
     "std/runtime",
     "std/kernel",
+    "guests/kernel",
 ]
 
 [package]

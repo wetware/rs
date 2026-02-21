@@ -1,0 +1,7 @@
+package wetware:pid0;
+
+use wetware:streams/streams;
+
+world streams-import {
+    import streams;
+}
