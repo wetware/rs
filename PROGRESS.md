@@ -17,6 +17,38 @@ Scaffolds a new wetware environment with FHS skeleton.
 - ✅ Running `ww init` twice returns clear error
 - ✅ Directory creation idempotent at subtree level
 
+### Template Support
+
+**Status: ✅ Done**
+
+The `ww init` command now supports optional template scaffolding via `--template <name>`:
+
+#### Rust Template (`--template rust`)
+```bash
+$ ww init my-app --template rust
+Scaffolded Rust template:
+  Cargo.toml - Guest project configuration
+  src/lib.rs - Guest entry point with example
+Initialized wetware environment at: my-app
+```
+
+Creates:
+- **Cargo.toml**: Pre-configured with wetware runtime dependencies (capnp, capnp-rpc)
+- **src/lib.rs**: WASM guest entry point using `runtime::run()` with example async closure
+
+The template generates a minimal but complete Rust WASM guest that can be immediately built with `ww build`.
+
+#### Example Workflow with Template
+```bash
+$ ww init my-guest --template rust && cd my-guest
+$ ww build
+Successfully built: ./boot/main.wasm
+
+$ ww run
+Hello from Wetware!
+[INFO] Guest exited [code=0]
+```
+
 ---
 
 ## Milestone 2: ww build [<path>]
@@ -135,14 +167,13 @@ Hello from IPFS!
 
 ## Summary
 
-All four milestones have been successfully implemented and tested. The developer CLI provides a complete, intuitive workflow for building and publishing wetware applications:
+All four milestones have been successfully implemented and tested, along with template scaffolding support. The developer CLI provides a complete, intuitive workflow for building and publishing wetware applications:
 
+### Quick Start with Template
 ```bash
-# Initialize a new environment
-ww init my-app
+# Initialize with Rust template (scaffolds Cargo.toml and src/lib.rs)
+ww init my-app --template rust
 cd my-app
-
-# Create your Rust WASM project with Cargo.toml and src/main.rs
 
 # Build the project
 ww build
@@ -157,7 +188,18 @@ ww push
 ww run /ipfs/QmPSk...
 ```
 
-The implementation maintains backward compatibility with the existing daemon mode (`ww run-daemon` for advanced multi-layer setups) while providing the new simplified single-environment workflow for developers.
+### Manual Setup (without template)
+```bash
+# Initialize empty FHS environment
+ww init my-app
+cd my-app
+
+# Create your Rust WASM project with Cargo.toml and src/lib.rs
+
+# Build, run, and publish as above
+```
+
+The implementation maintains backward compatibility with the existing daemon mode (multiple image layers) while providing the new simplified single-environment workflow for developers. Templates provide optional scaffolding to accelerate getting started.
 
 ---
 

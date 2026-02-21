@@ -36,6 +36,10 @@ enum Commands {
         /// Optional subdirectory to initialize
         #[arg(value_name = "SUBDIR")]
         subdir: Option<PathBuf>,
+
+        /// Optional template to scaffold (e.g., 'rust')
+        #[arg(long, value_name = "TEMPLATE")]
+        template: Option<String>,
     },
 
     /// Build a wetware environment, producing a runnable WASM artifact.
@@ -142,7 +146,7 @@ fn parse_contract_address(s: &str) -> Result<[u8; 20]> {
 impl Commands {
     async fn run(self) -> Result<()> {
         match self {
-            Commands::Init { subdir } => Self::init(subdir).await,
+            Commands::Init { subdir, template } => Self::init(subdir, template).await,
             Commands::Build { path } => Self::build(path).await,
             Commands::Run {
                 paths,
@@ -172,7 +176,7 @@ impl Commands {
     }
 
     /// Initialize a new wetware environment with FHS skeleton
-    async fn init(subdir: Option<PathBuf>) -> Result<()> {
+    async fn init(subdir: Option<PathBuf>, template: Option<String>) -> Result<()> {
         let target_dir = match subdir {
             Some(dir) => dir,
             None => PathBuf::from("."),
@@ -205,7 +209,78 @@ impl Commands {
             ))?;
         }
 
+        // Handle template scaffolding if requested
+        if let Some(template_name) = template {
+            match template_name.as_str() {
+                "rust" => Self::scaffold_rust_template(&target_dir)?,
+                _ => bail!("Unknown template: '{}'. Supported templates: rust", template_name),
+            }
+        }
+
         println!("Initialized wetware environment at: {}", target_dir.display());
+        Ok(())
+    }
+
+    /// Scaffold a Rust guest template with Cargo.toml and src/lib.rs
+    fn scaffold_rust_template(target_dir: &std::path::Path) -> Result<()> {
+        // Create src directory
+        let src_dir = target_dir.join("src");
+        std::fs::create_dir_all(&src_dir).context("Failed to create src directory")?;
+
+        // Create Cargo.toml
+        let cargo_toml_content = r#"[package]
+name = "my-guest"
+version = "0.1.0"
+edition = "2021"
+
+# Wetware guest runtime - adjust the path if running outside the repo
+[dependencies]
+runtime = { path = "../../std/runtime" }
+capnp = "0.23.2"
+capnp-rpc = "0.23.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+capnpc = "0.23.3"
+"#;
+
+        let cargo_toml_path = target_dir.join("Cargo.toml");
+        std::fs::write(&cargo_toml_path, cargo_toml_content)
+            .context("Failed to write Cargo.toml")?;
+
+        // Create src/lib.rs - WASM guest entry point
+        let lib_rs_content = r#"/// Simple Wetware guest that runs an async task.
+///
+/// The `runtime::run()` function bootstraps the RPC connection to the host,
+/// then executes the provided async closure.
+///
+/// Example with host communication:
+/// ```no_run
+/// runtime::run::<capnp::capability::Client, _, _>(|host| async move {
+///     let executor = host.executor_request().send().pipeline.get_executor();
+///     executor.echo_request().send().promise.await?;
+///     Ok(())
+/// });
+/// ```
+
+#[no_mangle]
+pub extern "C" fn _start() {
+    runtime::run::<capnp::capability::Client, _, _>(|_host| async move {
+        println!("Hello from Wetware!");
+        Ok(())
+    });
+}
+"#;
+
+        let lib_rs_path = src_dir.join("lib.rs");
+        std::fs::write(&lib_rs_path, lib_rs_content)
+            .context("Failed to write src/lib.rs")?;
+
+        println!("Scaffolded Rust template:");
+        println!("  Cargo.toml - Guest project configuration");
+        println!("  src/lib.rs - Guest entry point with example");
         Ok(())
     }
 
