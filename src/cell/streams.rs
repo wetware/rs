@@ -86,17 +86,12 @@ impl AsyncRead for Reader {
 /// as a WASI output stream.
 pub struct Writer {
     sender: mpsc::UnboundedSender<Vec<u8>>,
-    #[allow(dead_code)]
-    pending: Vec<u8>,
 }
 
 impl Writer {
     /// Create a new ChannelWriter from a sender.
     pub fn new(sender: mpsc::UnboundedSender<Vec<u8>>) -> Self {
-        Self {
-            sender,
-            pending: Vec::new(),
-        }
+        Self { sender }
     }
 }
 
