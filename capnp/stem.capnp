@@ -21,10 +21,10 @@ interface Identity {
 }
 
 struct Session {
-  host     @0 :import "system.capnp".Host;      # Swarm-level operations (id, addrs, peers, connect).
-  executor @1 :import "system.capnp".Executor;  # WASM execution (runBytes, echo).
-  ipfs     @2 :import "ipfs.capnp".Client;      # IPFS CoreAPI (unixfs, block, dag, ...).
-  identity @3 :Identity;                        # Host-side identity hub: maps signing domains → Signers.
+  identity @0 :Identity;                        # Host-side identity hub: maps signing domains → Signers.
+  host     @1 :import "system.capnp".Host;      # Swarm-level operations (id, addrs, peers, connect).
+  executor @2 :import "system.capnp".Executor;  # WASM execution (runBytes, echo).
+  ipfs     @3 :import "ipfs.capnp".Client;      # IPFS CoreAPI (unixfs, block, dag, ...).
 }
 
 
