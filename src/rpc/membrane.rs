@@ -31,37 +31,106 @@ use crate::system_capnp;
 use super::NetworkState;
 
 // ---------------------------------------------------------------------------
-// EpochGuardedKernelSigner — host-side secp256k1 signer for the kernel
+// SigningDomain — well-known signing domains
 // ---------------------------------------------------------------------------
 
-/// Host-side secp256k1 signer provided to the kernel through the Session.
+/// Well-known signing domains accepted by the node identity hub.
+///
+/// Adding a new variant here is the **only** host-side change required to
+/// support a new domain; unknown strings are rejected at the capnp boundary,
+/// so the set remains compile-time-exhaustive.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SigningDomain {
+    /// Kernel authentication during `Membrane.graft()`.
+    MembraneGraft,
+}
+
+impl SigningDomain {
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "ww-membrane-graft" => Some(Self::MembraneGraft),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MembraneGraft => "ww-membrane-graft",
+        }
+    }
+
+    fn payload_type(self) -> &'static [u8] {
+        match self {
+            Self::MembraneGraft => b"/ww/membrane/graft-nonce",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EpochGuardedIdentity — host-side node identity hub
+// ---------------------------------------------------------------------------
+
+/// Host-side node identity hub provided to the kernel through the Session.
 ///
 /// **Security invariant**: the identity secret key never leaves the host process.
 /// The key is never copied into WASM memory or transmitted over the RPC channel.
 /// The kernel receives only a capability reference; all signing happens host-side,
 /// and the kernel's WASM sandbox cannot observe or extract the private key bytes.
 ///
-/// Epoch-guarded so signing fails with `staleEpoch` after an epoch advance.
-///
-/// Returns a [`libp2p_core::SignedEnvelope`] (protobuf-encoded) with:
-/// - domain:       `"ww-membrane-graft"`
-/// - payload_type: `"/ww/membrane/graft-nonce"`
-/// - payload:      nonce as 8-byte big-endian u64
-struct EpochGuardedKernelSigner {
-    /// Pre-converted libp2p keypair; conversion from k256 happens once at construction,
-    /// not on every sign call.
+/// Epoch-guarded: the hub and all domain signers it issues fail with `staleEpoch`
+/// once the epoch advances.
+struct EpochGuardedIdentity {
+    /// Pre-converted libp2p keypair (k256 → Keypair done once at session construction).
     keypair: Keypair,
     guard: EpochGuard,
 }
 
-impl EpochGuardedKernelSigner {
+impl EpochGuardedIdentity {
     fn new(keypair: Keypair, guard: EpochGuard) -> Self {
         Self { keypair, guard }
     }
 }
 
 #[allow(refining_impl_trait)]
-impl stem_capnp::signer::Server for EpochGuardedKernelSigner {
+impl stem_capnp::identity::Server for EpochGuardedIdentity {
+    fn signer(
+        self: capnp::capability::Rc<Self>,
+        params: stem_capnp::identity::SignerParams,
+        mut results: stem_capnp::identity::SignerResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.guard.check());
+        let domain_str = pry!(pry!(params.get()).get_domain())
+            .to_string()
+            .unwrap_or_default();
+        let domain = pry!(SigningDomain::from_str(&domain_str)
+            .ok_or_else(|| capnp::Error::failed(format!("unknown signing domain: {domain_str}"))));
+        let signer: stem_capnp::signer::Client = capnp_rpc::new_client(EpochGuardedDomainSigner {
+            keypair: self.keypair.clone(),
+            domain,
+            guard: self.guard.clone(),
+        });
+        results.get().set_signer(signer);
+        Promise::ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EpochGuardedDomainSigner — domain-scoped signer
+// ---------------------------------------------------------------------------
+
+/// A [`Signer`] scoped to a single [`SigningDomain`].
+///
+/// Constructed by [`EpochGuardedIdentity::signer()`]; the domain string and
+/// payload_type are baked in at construction so callers only supply the nonce.
+/// Returns a protobuf-encoded [`libp2p_core::SignedEnvelope`].
+struct EpochGuardedDomainSigner {
+    keypair: Keypair,
+    domain: SigningDomain,
+    guard: EpochGuard,
+}
+
+#[allow(refining_impl_trait)]
+impl stem_capnp::signer::Server for EpochGuardedDomainSigner {
     fn sign(
         self: capnp::capability::Rc<Self>,
         params: stem_capnp::signer::SignParams,
@@ -71,8 +140,8 @@ impl stem_capnp::signer::Server for EpochGuardedKernelSigner {
         let nonce = pry!(params.get()).get_nonce();
         let envelope = pry!(SignedEnvelope::new(
             &self.keypair,
-            "ww-membrane-graft".to_string(),
-            b"/ww/membrane/graft-nonce".to_vec(),
+            self.domain.as_str().to_string(),
+            self.domain.payload_type().to_vec(),
             nonce.to_be_bytes().to_vec(),
         )
         .map_err(|e| capnp::Error::failed(e.to_string())));
@@ -143,9 +212,9 @@ impl SessionBuilder for HostSessionBuilder {
         if let Some(sk) = &self.signing_key {
             let keypair =
                 crate::keys::to_libp2p(sk).map_err(|e| capnp::Error::failed(e.to_string()))?;
-            let signer: stem_capnp::signer::Client =
-                capnp_rpc::new_client(EpochGuardedKernelSigner::new(keypair, guard.clone()));
-            builder.set_identity(signer);
+            let identity: stem_capnp::identity::Client =
+                capnp_rpc::new_client(EpochGuardedIdentity::new(keypair, guard.clone()));
+            builder.set_identity(identity);
         }
 
         Ok(())

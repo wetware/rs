@@ -1,4 +1,4 @@
-# Stem schema: Epoch, Signer, Session, and Membrane definitions.
+# Stem schema: Epoch, Signer, Identity, Session, and Membrane definitions.
 # Compiled by the membrane crate (crates/membrane/build.rs).
 # The host re-exports generated types via `pub use membrane::stem_capnp`.
 
@@ -12,14 +12,23 @@ struct Epoch {
 
 interface Signer {
   sign @0 (nonce :UInt64) -> (sig :Data);
-  # Sign an arbitrary nonce under a given domain string.
+  # Sign a nonce; the domain and payload_type are baked in by the issuing Identity hub.
+}
+
+interface Identity {
+  # Returns a Signer scoped to the requested signing domain.
+  #
+  # The host validates `domain` against a compile-time-exhaustive enum
+  # (see `SigningDomain` in src/rpc/membrane.rs).  Unknown domain strings
+  # are rejected with an error so new domains must be explicitly added.
+  signer @0 (domain :Text) -> (signer :Signer);
 }
 
 struct Session {
   host     @0 :import "system.capnp".Host;      # Swarm-level operations (id, addrs, peers, connect).
   executor @1 :import "system.capnp".Executor;  # WASM execution (runBytes, echo).
   ipfs     @2 :import "ipfs.capnp".Client;      # IPFS CoreAPI (unixfs, block, dag, ...).
-  identity @3 :Signer;                          # Host-side secp256k1 identity signer for the kernel.
+  identity @3 :Identity;                        # Host-side identity hub: maps signing domains → Signers.
 }
 
 

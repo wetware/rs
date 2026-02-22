@@ -59,13 +59,13 @@ struct ShellCtx {
     host: system_capnp::host::Client,
     executor: system_capnp::executor::Client,
     ipfs: ipfs_capnp::client::Client,
-    /// Host-side secp256k1 signer for this node identity.
+    /// Host-side node identity hub for this session.
     ///
-    /// Provided by the host through the Session so the kernel can sign messages
-    /// without holding the private key in WASM memory. The identity secret never
-    /// crosses the host–guest boundary; only the capability reference is passed.
+    /// Call `identity.signer("ww-membrane-graft")` (or another known domain) to
+    /// obtain a domain-scoped [`stem_capnp::signer::Client`].  The identity secret
+    /// never crosses the host–guest boundary; only this capability reference is passed.
     #[allow(dead_code)]
-    identity: stem_capnp::signer::Client,
+    identity: stem_capnp::identity::Client,
     cwd: String,
 }
 
