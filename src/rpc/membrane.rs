@@ -422,10 +422,9 @@ pub type GuestMembrane = membrane::stem_capnp::membrane::Client;
 /// `IPFS Client`, and (when `signing_key` is `Some`) a host-side node identity signer.
 ///
 /// When `signing_key` is `Some`:
-/// - The `VerifyingKey` is stored in `MembraneServer` for challenge-response
-///   authentication (implemented in issue #57).
-/// - An `EpochGuardedKernelSigner` is injected into every session so the kernel
-///   can sign messages using the node identity without holding the private key.
+/// - The `VerifyingKey` is stored in `MembraneServer` for graft challenge-response.
+/// - An [`EpochGuardedIdentity`] hub is injected into every session so the kernel
+///   can request domain-scoped signers without holding the private key.
 ///
 /// Returns both the RPC system and the guest's exported [`GuestMembrane`], if
 /// the guest called `runtime::serve()`. If the guest called `runtime::run()`

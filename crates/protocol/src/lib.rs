@@ -2,18 +2,15 @@
 //!
 //! Zero-dependency crate usable from both the host binary and WASM guests.
 
-/// Signing domain for libp2p [`SignedEnvelope`][libp2p_core::SignedEnvelope] operations.
+/// Signing domain for libp2p `SignedEnvelope` operations.
 ///
-/// The exhaustive match ensures the host validates incoming domain strings
-/// against a closed set of known domains.  Any unknown string is rejected
-/// before signing occurs.  New domains must be added here explicitly, keeping
-/// the set finite and auditable.
+/// New domains must be added here explicitly, keeping the set finite and auditable.
 ///
 /// # Wire format
 ///
 /// The domain string is carried over Cap'n Proto RPC as `Text` (UTF-8).
-/// Use [`SigningDomain::as_str`] to get the canonical wire form, and
-/// [`SigningDomain::from_str`] to parse and validate an incoming domain string.
+/// Use [`SigningDomain::as_str`] to get the canonical wire form and
+/// [`SigningDomain::parse`] to validate an incoming domain string.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SigningDomain {
     /// Challenge-response domain for `Membrane::graft`.
