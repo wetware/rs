@@ -17,10 +17,6 @@ interface Signer {
 
 interface Identity {
   # Returns a Signer scoped to the requested signing domain.
-  #
-  # The host validates `domain` against `protocol::SigningDomain` (crates/protocol).
-  # Unknown strings are rejected with an error; new domains must be added there
-  # explicitly so the set stays finite and auditable.
   signer @0 (domain :Text) -> (signer :Signer);
 }
 
