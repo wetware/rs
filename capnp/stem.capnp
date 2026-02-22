@@ -18,9 +18,9 @@ interface Signer {
 interface Identity {
   # Returns a Signer scoped to the requested signing domain.
   #
-  # The host validates `domain` against a compile-time-exhaustive enum
-  # (see `SigningDomain` in src/rpc/membrane.rs).  Unknown domain strings
-  # are rejected with an error so new domains must be explicitly added.
+  # The host validates `domain` against `protocol::SigningDomain` (crates/protocol).
+  # Unknown strings are rejected with an error; new domains must be added there
+  # explicitly so the set stays finite and auditable.
   signer @0 (domain :Text) -> (signer :Signer);
 }
 

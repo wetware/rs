@@ -27,44 +27,9 @@ use crate::host::SwarmCommand;
 use crate::ipfs;
 use crate::ipfs_capnp;
 use crate::system_capnp;
+use protocol::SigningDomain;
 
 use super::NetworkState;
-
-// ---------------------------------------------------------------------------
-// SigningDomain — well-known signing domains
-// ---------------------------------------------------------------------------
-
-/// Well-known signing domains accepted by the node identity hub.
-///
-/// Adding a new variant here is the **only** host-side change required to
-/// support a new domain; unknown strings are rejected at the capnp boundary,
-/// so the set remains compile-time-exhaustive.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SigningDomain {
-    /// Kernel authentication during `Membrane.graft()`.
-    MembraneGraft,
-}
-
-impl SigningDomain {
-    fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "ww-membrane-graft" => Some(Self::MembraneGraft),
-            _ => None,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::MembraneGraft => "ww-membrane-graft",
-        }
-    }
-
-    fn payload_type(self) -> &'static [u8] {
-        match self {
-            Self::MembraneGraft => b"/ww/membrane/graft-nonce",
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // EpochGuardedIdentity — host-side node identity hub
@@ -79,6 +44,9 @@ impl SigningDomain {
 ///
 /// Epoch-guarded: the hub and all domain signers it issues fail with `staleEpoch`
 /// once the epoch advances.
+///
+/// Incoming domain strings are validated against [`protocol::SigningDomain`].
+/// Unknown domains are rejected with an RPC error before any signing occurs.
 struct EpochGuardedIdentity {
     /// Pre-converted libp2p keypair (k256 → Keypair done once at session construction).
     keypair: Keypair,
@@ -99,11 +67,13 @@ impl stem_capnp::identity::Server for EpochGuardedIdentity {
         mut results: stem_capnp::identity::SignerResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
-        let domain_str = pry!(pry!(params.get()).get_domain())
-            .to_string()
-            .unwrap_or_default();
-        let domain = pry!(SigningDomain::from_str(&domain_str)
-            .ok_or_else(|| capnp::Error::failed(format!("unknown signing domain: {domain_str}"))));
+        let domain_reader = pry!(pry!(params.get()).get_domain());
+        let domain_str = pry!(domain_reader
+            .to_str()
+            .map_err(|e| capnp::Error::failed(e.to_string())));
+        let domain = pry!(SigningDomain::parse(domain_str).ok_or_else(|| {
+            capnp::Error::failed(format!("unknown signing domain: {domain_str:?}"))
+        }));
         let signer: stem_capnp::signer::Client = capnp_rpc::new_client(EpochGuardedDomainSigner {
             keypair: self.keypair.clone(),
             domain,
