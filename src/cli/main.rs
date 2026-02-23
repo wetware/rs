@@ -587,11 +587,11 @@ pub extern "C" fn _start() {
         let image_path = merged.path().to_string_lossy().to_string();
 
         // Resolve identity after merge so /etc/identity in image layers is visible.
-        let (_sk, verifying_key, identity_source) =
+        let (sk, _verifying_key, identity_source) =
             Self::resolve_identity(identity.as_deref(), merged.path())?;
         tracing::info!(source = identity_source, "Node identity resolved");
 
-        let keypair = ww::keys::to_libp2p(&_sk)?;
+        let keypair = ww::keys::to_libp2p(&sk)?;
 
         // Start the libp2p swarm.
         let wetware_host = host::WetwareHost::new(port, keypair)?;
@@ -614,7 +614,7 @@ pub extern "C" fn _start() {
             .with_wasm_debug(wasm_debug)
             .with_image_root(merged.path().into())
             .with_ipfs_client(ipfs_client.clone())
-            .with_verifying_key(verifying_key);
+            .with_signing_key(std::sync::Arc::new(sk));
 
         // If we have an epoch channel, give the receiver to the cell
         // and spawn the epoch pipeline with the sender.
@@ -779,11 +779,11 @@ pub extern "C" fn _start() {
         let image_path = merged.path().to_string_lossy().to_string();
 
         // Resolve identity after merge so /etc/identity in image layers is visible.
-        let (_sk, verifying_key, identity_source) =
+        let (sk, _verifying_key, identity_source) =
             Self::resolve_identity(identity.as_deref(), merged.path())?;
         tracing::info!(source = identity_source, "Node identity resolved");
 
-        let keypair = ww::keys::to_libp2p(&_sk)?;
+        let keypair = ww::keys::to_libp2p(&sk)?;
 
         // Start the libp2p swarm.
         let wetware_host = host::WetwareHost::new(port, keypair)?;
@@ -806,7 +806,7 @@ pub extern "C" fn _start() {
             .with_wasm_debug(wasm_debug)
             .with_image_root(merged.path().into())
             .with_ipfs_client(ipfs_client.clone())
-            .with_verifying_key(verifying_key);
+            .with_signing_key(std::sync::Arc::new(sk));
 
         // If we have an epoch channel, give the receiver to the cell
         // and spawn the epoch pipeline with the sender.

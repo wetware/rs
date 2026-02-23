@@ -5747,6 +5747,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "system"
+version = "0.1.0"
+
+[[package]]
 name = "system-configuration"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7628,6 +7632,7 @@ dependencies = [
  "k256",
  "libc",
  "libp2p",
+ "libp2p-core",
  "libp2p-stream",
  "membrane",
  "multiaddr 0.18.2",
@@ -7637,6 +7642,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha3",
+ "system",
  "tar",
  "tempfile",
  "tokio",

@@ -3,7 +3,7 @@ use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
 use futures::FutureExt;
-use k256::ecdsa::VerifyingKey;
+use k256::ecdsa::SigningKey;
 use libp2p::StreamProtocol;
 use membrane::Epoch;
 use std::io::IsTerminal;
@@ -70,7 +70,7 @@ pub struct CellBuilder {
     initial_epoch: Option<Epoch>,
     ipfs_client: Option<crate::ipfs::HttpClient>,
     epoch_rx: Option<watch::Receiver<Epoch>>,
-    verifying_key: Option<VerifyingKey>,
+    signing_key: Option<Arc<SigningKey>>,
 }
 
 impl CellBuilder {
@@ -92,7 +92,7 @@ impl CellBuilder {
             initial_epoch: None,
             ipfs_client: None,
             epoch_rx: None,
-            verifying_key: None,
+            signing_key: None,
         }
     }
 
@@ -174,12 +174,16 @@ impl CellBuilder {
         self
     }
 
-    /// Set the secp256k1 verifying key for `graft()` authentication.
+    /// Set the secp256k1 signing key for the node identity.
     ///
-    /// When set, the key is threaded through to `MembraneServer` so that
-    /// challenge-response authentication can be applied in `graft()` (issue #57).
-    pub fn with_verifying_key(mut self, vk: VerifyingKey) -> Self {
-        self.verifying_key = Some(vk);
+    /// When set:
+    /// - The `VerifyingKey` is threaded to `MembraneServer` for challenge-response
+    ///   authentication in `graft()` (issue #57).
+    /// - An [`EpochGuardedIdentity`] hub backed by this key is injected into every
+    ///   `Session` so the kernel can request domain-scoped signers without holding
+    ///   the private key.
+    pub fn with_signing_key(mut self, sk: Arc<SigningKey>) -> Self {
+        self.signing_key = Some(sk);
         self
     }
 
@@ -204,7 +208,7 @@ impl CellBuilder {
                 .ipfs_client
                 .unwrap_or_else(|| crate::ipfs::HttpClient::new("http://localhost:5001".into())),
             epoch_rx: self.epoch_rx,
-            verifying_key: self.verifying_key,
+            signing_key: self.signing_key,
         }
     }
 }
@@ -230,7 +234,7 @@ pub struct Cell {
     pub initial_epoch: Option<Epoch>,
     pub ipfs_client: crate::ipfs::HttpClient,
     pub epoch_rx: Option<watch::Receiver<Epoch>>,
-    pub verifying_key: Option<VerifyingKey>,
+    pub signing_key: Option<Arc<SigningKey>>,
 }
 
 /// Result of spawning a cell with RPC: exit code, guest membrane, and optional epoch sender.
@@ -283,7 +287,7 @@ impl Cell {
             initial_epoch: _,
             ipfs_client: _,
             epoch_rx: _,
-            verifying_key: _,
+            signing_key: _,
         } = self;
 
         crate::config::init_tracing();
@@ -346,7 +350,7 @@ impl Cell {
         let network_state = self.network_state.clone();
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
         let ipfs_client = self.ipfs_client.clone();
-        let verifying_key = self.verifying_key.take();
+        let signing_key = self.signing_key.take();
         let pre_epoch_rx = self.epoch_rx.take();
         let initial_epoch = self.initial_epoch.clone().unwrap_or(Epoch {
             seq: 0,
@@ -376,7 +380,7 @@ impl Cell {
             wasm_debug,
             epoch_rx,
             ipfs_client,
-            verifying_key,
+            signing_key,
         );
 
         tracing::debug!("Starting streams RPC server for guest");
