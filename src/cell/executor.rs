@@ -179,8 +179,9 @@ impl CellBuilder {
     /// When set:
     /// - The `VerifyingKey` is threaded to `MembraneServer` for challenge-response
     ///   authentication in `graft()` (issue #57).
-    /// - An `EpochGuardedKernelSigner` backed by this key is injected into every
-    ///   `Session` so the kernel can sign messages without holding the private key.
+    /// - An [`EpochGuardedIdentity`] hub backed by this key is injected into every
+    ///   `Session` so the kernel can request domain-scoped signers without holding
+    ///   the private key.
     pub fn with_signing_key(mut self, sk: Arc<SigningKey>) -> Self {
         self.signing_key = Some(sk);
         self

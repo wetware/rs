@@ -45,7 +45,7 @@ use super::NetworkState;
 /// Epoch-guarded: the hub and all domain signers it issues fail with `staleEpoch`
 /// once the epoch advances.
 ///
-/// Incoming domain strings are validated against [`protocol::SigningDomain`].
+/// Incoming domain strings are validated against [`system::SigningDomain`].
 /// Unknown domains are rejected with an RPC error before any signing occurs.
 struct EpochGuardedIdentity {
     /// Pre-converted libp2p keypair (k256 → Keypair done once at session construction).
