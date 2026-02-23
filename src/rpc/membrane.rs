@@ -71,36 +71,38 @@ impl stem_capnp::identity::Server for EpochGuardedIdentity {
         let domain_str = pry!(domain_reader
             .to_str()
             .map_err(|e| capnp::Error::failed(e.to_string())));
-        let domain = pry!(SigningDomain::parse(domain_str).ok_or_else(|| {
-            capnp::Error::failed(format!("unknown signing domain: {domain_str:?}"))
-        }));
-        let signer: stem_capnp::signer::Client = capnp_rpc::new_client(EpochGuardedDomainSigner {
-            keypair: self.keypair.clone(),
-            domain,
-            guard: self.guard.clone(),
-        });
+        pry!(
+            SigningDomain::parse(domain_str).ok_or_else(|| capnp::Error::failed(format!(
+                "unknown signing domain: {domain_str:?}"
+            )))
+        );
+        let signer: stem_capnp::signer::Client =
+            capnp_rpc::new_client(EpochGuardedMembraneSigner {
+                keypair: self.keypair.clone(),
+                guard: self.guard.clone(),
+            });
         results.get().set_signer(signer);
         Promise::ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// EpochGuardedDomainSigner — domain-scoped signer
+// EpochGuardedMembraneSigner — membrane/graft signer
 // ---------------------------------------------------------------------------
 
-/// A [`Signer`] scoped to a single [`SigningDomain`].
+/// Signs graft nonces for the `Membrane::graft` challenge-response protocol.
 ///
-/// Constructed by [`EpochGuardedIdentity::signer()`]; the domain string and
-/// payload_type are baked in at construction so callers only supply the nonce.
-/// Returns a protobuf-encoded [`libp2p_core::SignedEnvelope`].
-struct EpochGuardedDomainSigner {
+/// Constructed by [`EpochGuardedIdentity::signer()`] after validating that the
+/// requested domain is [`SigningDomain::MembraneGraft`].  Domain string and
+/// payload type are fixed constants; callers supply only the nonce.
+/// Returns a protobuf-encoded `libp2p_core::SignedEnvelope`.
+struct EpochGuardedMembraneSigner {
     keypair: Keypair,
-    domain: SigningDomain,
     guard: EpochGuard,
 }
 
 #[allow(refining_impl_trait)]
-impl stem_capnp::signer::Server for EpochGuardedDomainSigner {
+impl stem_capnp::signer::Server for EpochGuardedMembraneSigner {
     fn sign(
         self: capnp::capability::Rc<Self>,
         params: stem_capnp::signer::SignParams,
@@ -110,8 +112,8 @@ impl stem_capnp::signer::Server for EpochGuardedDomainSigner {
         let nonce = pry!(params.get()).get_nonce();
         let envelope = pry!(SignedEnvelope::new(
             &self.keypair,
-            self.domain.as_str().to_string(),
-            self.domain.payload_type().to_vec(),
+            SigningDomain::MembraneGraft.as_str().to_string(),
+            SigningDomain::MembraneGraft.payload_type().to_vec(),
             nonce.to_be_bytes().to_vec(),
         )
         .map_err(|e| capnp::Error::failed(e.to_string())));
