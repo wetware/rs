@@ -4,8 +4,9 @@ use crate::epoch::{Epoch, EpochGuard};
 use crate::stem_capnp;
 use capnp::capability::Promise;
 use capnp::Error;
-use capnp_rpc::new_client;
+use capnp_rpc::{new_client, pry};
 use k256::ecdsa::VerifyingKey;
+use system::SigningDomain;
 use tokio::sync::watch;
 
 /// Callback trait for filling the concrete Session during graft.
@@ -39,8 +40,9 @@ impl SessionBuilder for NoExtension {
 /// Membrane server: stable across epochs, backed by a watch receiver for the adopted epoch.
 ///
 /// The `session_builder` callback fills the session fields when a session is issued.
-/// When `verifying_key` is set, `graft()` will validate the caller's secp256k1
-/// signature against it (implemented in issue #57).
+/// When `verifying_key` is set, `graft()` performs challenge-response authentication:
+/// the caller's signer is challenged with a random nonce, and the returned signature
+/// is verified against the configured public key before issuing a session.
 pub struct MembraneServer<F: SessionBuilder> {
     receiver: watch::Receiver<Epoch>,
     session_builder: F,
@@ -65,25 +67,62 @@ impl<F: SessionBuilder> MembraneServer<F> {
     fn get_current_epoch(&self) -> Epoch {
         self.receiver.borrow().clone()
     }
+
+    /// Build an epoch-guarded session into the results builder.
+    fn build_session(&self, results: &mut stem_capnp::membrane::GraftResults) -> Result<(), Error> {
+        let epoch = self.get_current_epoch();
+        let guard = EpochGuard {
+            issued_seq: epoch.seq,
+            receiver: self.receiver.clone(),
+        };
+        self.session_builder
+            .build(&guard, results.get().init_session())
+    }
 }
 
 #[allow(refining_impl_trait)]
 impl<F: SessionBuilder> stem_capnp::membrane::Server for MembraneServer<F> {
     fn graft(
         self: capnp::capability::Rc<Self>,
-        _params: stem_capnp::membrane::GraftParams,
+        params: stem_capnp::membrane::GraftParams,
         mut results: stem_capnp::membrane::GraftResults,
     ) -> Promise<(), Error> {
-        let epoch = self.get_current_epoch();
-        let guard = EpochGuard {
-            issued_seq: epoch.seq,
-            receiver: self.receiver.clone(),
+        let signer: stem_capnp::signer::Client = match pry!(params.get()).get_signer() {
+            Ok(s) => s,
+            Err(_) => return Promise::err(Error::failed("missing signer".into())),
         };
-        let session_builder = results.get().init_session();
-        if let Err(e) = self.session_builder.build(&guard, session_builder) {
-            return Promise::err(e);
-        }
-        Promise::ok(())
+
+        let vk = match self.verifying_key {
+            Some(vk) => vk,
+            None => {
+                // No verifying key configured — skip authentication.
+                if let Err(e) = self.build_session(&mut results) {
+                    return Promise::err(e);
+                }
+                return Promise::ok(());
+            }
+        };
+
+        let nonce: u64 = rand::random();
+        let mut sign_req = signer.sign_request();
+        sign_req.get().set_nonce(nonce);
+
+        Promise::from_future(async move {
+            let sign_resp = sign_req.send().promise.await?;
+            let sig_bytes = sign_resp.get()?.get_sig()?;
+
+            // Reconstruct the domain-separated signing buffer and verify.
+            let signing_buffer = SigningDomain::MembraneGraft.signing_buffer(&nonce.to_be_bytes());
+            let signature = k256::ecdsa::Signature::from_slice(sig_bytes)
+                .map_err(|e| Error::failed(format!("invalid signature encoding: {e}")))?;
+
+            use k256::ecdsa::signature::Verifier;
+            vk.verify(&signing_buffer, &signature).map_err(|_| {
+                Error::failed("graft auth failed: signature verification failed".into())
+            })?;
+
+            self.build_session(&mut results)
+        })
     }
 }
 

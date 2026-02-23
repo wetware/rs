@@ -7,24 +7,36 @@ use atom::stem_capnp;
 use atom::{AtomIndexer, Epoch, IndexerConfig, MembraneServer};
 use capnp_rpc::new_client;
 use common::{deploy_atom, set_head, spawn_anvil, StubSessionBuilder};
+use k256::ecdsa::SigningKey;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use system::SigningDomain;
 use tokio::sync::watch;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 
-/// Stub Signer for graft: returns empty signature (local test only).
-struct StubSigner;
+/// Signer that produces real secp256k1 ECDSA signatures for graft challenge-response.
+///
+/// Constructs the domain-separated signing buffer (matching the host verifier) and
+/// returns the 64-byte compact ECDSA signature.
+struct TestSigner {
+    sk: SigningKey,
+}
 
 #[allow(refining_impl_trait)]
-impl stem_capnp::signer::Server for StubSigner {
+impl stem_capnp::signer::Server for TestSigner {
     fn sign(
         self: capnp::capability::Rc<Self>,
-        _: stem_capnp::signer::SignParams,
+        params: stem_capnp::signer::SignParams,
         mut results: stem_capnp::signer::SignResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        results.get().init_sig(0);
+        let nonce = capnp_rpc::pry!(params.get()).get_nonce();
+        let signing_buffer = SigningDomain::MembraneGraft.signing_buffer(&nonce.to_be_bytes());
+
+        use k256::ecdsa::signature::Signer;
+        let signature: k256::ecdsa::Signature = self.sk.sign(&signing_buffer);
+        results.get().set_sig(signature.to_bytes().as_slice());
         capnp::capability::Promise::ok(())
     }
 }
@@ -37,9 +49,12 @@ fn observed_to_epoch(ev: &atom::HeadUpdatedObserved) -> Epoch {
     }
 }
 
-/// Helper: create a membrane client backed by StubSessionBuilder (epoch-guarded echo).
-fn stub_membrane(rx: watch::Receiver<Epoch>) -> stem_capnp::membrane::Client {
-    new_client(MembraneServer::new(rx, StubSessionBuilder))
+/// Helper: create an authenticated membrane client backed by StubSessionBuilder.
+fn auth_membrane(
+    rx: watch::Receiver<Epoch>,
+    vk: k256::ecdsa::VerifyingKey,
+) -> stem_capnp::membrane::Client {
+    new_client(MembraneServer::new(rx, StubSessionBuilder).with_verifying_key(vk))
 }
 
 #[tokio::test]
@@ -112,9 +127,13 @@ async fn test_membrane_graft_echo_against_anvil() {
         adopted_block: first_ev.block_number + 1,
     };
 
+    // Generate a test keypair for graft authentication.
+    let sk = SigningKey::random(&mut rand::thread_rng());
+    let vk = *sk.verifying_key();
+
     let (tx, rx) = watch::channel(epoch1.clone());
-    let membrane = stub_membrane(rx);
-    let signer_client: stem_capnp::signer::Client = new_client(StubSigner);
+    let membrane = auth_membrane(rx, vk);
+    let signer_client: stem_capnp::signer::Client = new_client(TestSigner { sk });
 
     // Graft → get session → echo → Ok
     let mut graft_req = membrane.graft_request();
@@ -162,9 +181,12 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
         adopted_block: 101,
     };
 
+    let sk = SigningKey::random(&mut rand::thread_rng());
+    let vk = *sk.verifying_key();
+
     let (tx, rx) = watch::channel(epoch1.clone());
-    let membrane = stub_membrane(rx);
-    let signer_client: stem_capnp::signer::Client = new_client(StubSigner);
+    let membrane = auth_membrane(rx, vk);
+    let signer_client: stem_capnp::signer::Client = new_client(TestSigner { sk });
 
     // Graft → echo → Ok
     let mut graft_req = membrane.graft_request();
@@ -225,4 +247,72 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
         "pong",
         "re-graft session should be ok"
     );
+}
+
+/// Graft with wrong key should fail authentication.
+#[tokio::test]
+async fn test_membrane_graft_wrong_key_rejected() {
+    let epoch = Epoch {
+        seq: 1,
+        head: b"head".to_vec(),
+        adopted_block: 100,
+    };
+
+    // Membrane expects key A, signer holds key B.
+    let sk_a = SigningKey::random(&mut rand::thread_rng());
+    let sk_b = SigningKey::random(&mut rand::thread_rng());
+    let vk_a = *sk_a.verifying_key();
+
+    let (_tx, rx) = watch::channel(epoch);
+    let membrane = auth_membrane(rx, vk_a);
+    let signer_client: stem_capnp::signer::Client = new_client(TestSigner { sk: sk_b });
+
+    let mut graft_req = membrane.graft_request();
+    graft_req.get().set_signer(signer_client);
+
+    match graft_req.send().promise.await {
+        Ok(resp) => match resp.get() {
+            Ok(_) => panic!("graft should fail with wrong key"),
+            Err(e) => assert!(
+                e.to_string().contains("graft auth failed"),
+                "error should mention auth failure, got: {e}"
+            ),
+        },
+        Err(e) => assert!(
+            e.to_string().contains("graft auth failed"),
+            "error should mention auth failure, got: {e}"
+        ),
+    }
+}
+
+/// Graft without signer should fail.
+#[tokio::test]
+async fn test_membrane_graft_missing_signer_rejected() {
+    let epoch = Epoch {
+        seq: 1,
+        head: b"head".to_vec(),
+        adopted_block: 100,
+    };
+
+    let sk = SigningKey::random(&mut rand::thread_rng());
+    let vk = *sk.verifying_key();
+
+    let (_tx, rx) = watch::channel(epoch);
+    let membrane = auth_membrane(rx, vk);
+
+    // Call graft without setting signer.
+    let graft_req = membrane.graft_request();
+    match graft_req.send().promise.await {
+        Ok(resp) => match resp.get() {
+            Ok(_) => panic!("graft should fail without signer"),
+            Err(e) => assert!(
+                e.to_string().contains("missing signer"),
+                "error should mention missing signer, got: {e}"
+            ),
+        },
+        Err(e) => assert!(
+            e.to_string().contains("missing signer"),
+            "error should mention missing signer, got: {e}"
+        ),
+    }
 }

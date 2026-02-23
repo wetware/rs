@@ -934,6 +934,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha3",
+ "system",
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",
@@ -3874,6 +3875,8 @@ dependencies = [
  "capnp-rpc",
  "capnpc",
  "k256",
+ "rand 0.8.5",
+ "system",
  "tokio",
 ]
 
