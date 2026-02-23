@@ -1,5 +1,0 @@
-[package]
-name = "protocol"
-version = "0.1.0"
-edition = "2021"
-description = "Shared protocol types for wetware host and guest"
