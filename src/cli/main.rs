@@ -157,7 +157,7 @@ enum DaemonAction {
     /// a platform service file (launchd on macOS, systemd on Linux),
     /// and prints the activation command.
     Install {
-        /// Path to a secp256k1 identity file. Defaults to ~/.ww/key;
+        /// Path to a secp256k1 identity file. Defaults to ~/.ww/identity;
         /// generated automatically if the file does not exist.
         #[arg(long, value_name = "PATH")]
         identity: Option<PathBuf>,
@@ -540,7 +540,7 @@ pub extern "C" fn _start() {
         let ww_dir = home.join(".ww");
 
         // 1. Resolve identity path — default to ~/.ww/key.
-        let key_path = identity.unwrap_or_else(|| ww_dir.join("key"));
+        let key_path = identity.unwrap_or_else(|| ww_dir.join("identity"));
 
         // Generate key if it doesn't exist.
         if !key_path.exists() {
@@ -625,7 +625,7 @@ pub extern "C" fn _start() {
             .identity
             .as_ref()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| home.join(".ww/key").display().to_string());
+            .unwrap_or_else(|| home.join(".ww/identity").display().to_string());
 
         if cfg!(target_os = "macos") {
             Self::write_launchd_plist(ww_bin, config, home, &identity_str)
