@@ -1,8 +1,11 @@
-//! Multi-layer FHS image resolution.
+//! Unified mount-based FHS image resolution.
 //!
-//! Takes N image root paths (local filesystem or IPFS), resolves them
-//! in order, and materializes a merged FHS tree. Per-file union: later
-//! layers win on file conflicts. Directories merge. No deletes.
+//! Every positional arg to `ww run` is a mount: `source[:target]`.
+//! Root mounts (target `/`) are traditional image layers. Targeted
+//! mounts overlay a host file or directory at a specific guest path.
+//!
+//! Mounts are applied left-to-right. Later mounts win on file
+//! conflicts. Directories merge. No deletes.
 
 use std::path::{Path, PathBuf};
 
@@ -12,11 +15,12 @@ use tempfile::TempDir;
 use walkdir::WalkDir;
 
 use crate::ipfs;
+use crate::mount::Mount;
 
 /// A merged FHS image root on the host filesystem.
 ///
-/// Holds either a direct reference to a single local layer (no copy)
-/// or a temp directory containing the union of multiple layers.
+/// Holds either a direct reference to a single local directory (no copy)
+/// or a temp directory containing the union of all mounts.
 /// The temp directory is cleaned up on drop.
 pub struct MergedImage {
     root: ImageRoot,
@@ -31,9 +35,9 @@ impl std::fmt::Debug for MergedImage {
 }
 
 enum ImageRoot {
-    /// Single local layer — use the original path directly.
+    /// Single local root mount — use the original path directly.
     Direct(PathBuf),
-    /// Multi-layer union materialized in a temp directory.
+    /// Multiple mounts materialized in a temp directory.
     Merged(TempDir),
 }
 
@@ -47,26 +51,26 @@ impl MergedImage {
     }
 }
 
-/// Resolve and merge N image layers into a single FHS root.
+/// Apply mounts to produce a merged FHS root.
 ///
-/// Each layer is either a local filesystem path or an IPFS path.
-/// Layers are applied in order: first layer is the base, last layer
-/// wins on file conflicts. Directories merge.
+/// Each mount is `source[:target]`. Root mounts (target `/`) act as
+/// traditional image layers. Targeted mounts overlay at a specific path.
 ///
-/// The merged root must contain `bin/main.wasm` or an error is returned.
-pub async fn merge_layers(
-    layers: &[String],
+/// Mounts are applied left-to-right: later mounts win on file conflicts.
+/// The merged root must contain `bin/main.wasm` after all mounts.
+pub async fn apply_mounts(
+    mounts: &[Mount],
     ipfs_client: &ipfs::HttpClient,
 ) -> Result<MergedImage> {
-    if layers.is_empty() {
-        bail!("No image layers provided");
+    if mounts.is_empty() {
+        bail!("No mounts provided");
     }
 
-    // Optimization: single local layer — skip the temp dir.
-    if layers.len() == 1 && !ipfs::is_ipfs_path(&layers[0]) {
-        let path = PathBuf::from(&layers[0]);
+    // Optimization: single local root mount — skip the temp dir.
+    if mounts.len() == 1 && mounts[0].is_root() && !ipfs::is_ipfs_path(&mounts[0].source) {
+        let path = PathBuf::from(&mounts[0].source);
         if !path.exists() {
-            bail!("Image path does not exist: {}", layers[0]);
+            bail!("Image path does not exist: {}", mounts[0].source);
         }
         let main_wasm = path.join("bin/main.wasm");
         if !main_wasm.exists() {
@@ -77,21 +81,23 @@ pub async fn merge_layers(
         });
     }
 
-    // Multiple layers or IPFS — materialize into a temp dir.
+    // Multiple mounts or non-trivial source — materialize into a temp dir.
     let merged_dir = TempDir::new().context("Failed to create temp dir for merged image")?;
 
-    for (i, layer) in layers.iter().enumerate() {
-        if ipfs::is_ipfs_path(layer) {
-            apply_ipfs_layer(layer, merged_dir.path(), ipfs_client)
+    for (i, mount) in mounts.iter().enumerate() {
+        let dst = resolve_target(merged_dir.path(), &mount.target);
+
+        if ipfs::is_ipfs_path(&mount.source) {
+            apply_ipfs_layer(&mount.source, &dst, ipfs_client)
                 .await
-                .with_context(|| format!("Failed to apply IPFS layer {i}: {layer}"))?;
+                .with_context(|| format!("Failed to apply IPFS mount {i}: {}", mount.source))?;
         } else {
-            let src = Path::new(layer);
+            let src = Path::new(&mount.source);
             if !src.exists() {
-                bail!("Image layer path does not exist: {layer}");
+                bail!("Mount source does not exist: {}", mount.source);
             }
-            apply_local_layer(src, merged_dir.path())
-                .with_context(|| format!("Failed to apply local layer {i}: {layer}"))?;
+            apply_local_mount(src, &dst)
+                .with_context(|| format!("Failed to apply mount {i}: {}", mount.source))?;
         }
     }
 
@@ -99,14 +105,47 @@ pub async fn merge_layers(
     let main_wasm = merged_dir.path().join("bin/main.wasm");
     if !main_wasm.exists() {
         bail!(
-            "Merged image missing bin/main.wasm (from {} layers)",
-            layers.len()
+            "Merged image missing bin/main.wasm (from {} mounts)",
+            mounts.len()
         );
     }
 
     Ok(MergedImage {
         root: ImageRoot::Merged(merged_dir),
     })
+}
+
+/// Resolve a mount target to a host path within the merged root.
+///
+/// `/etc/identity` → `merged_root/etc/identity`
+/// `/` → `merged_root`
+fn resolve_target(merged_root: &Path, target: &Path) -> PathBuf {
+    let stripped = target.strip_prefix("/").unwrap_or(target);
+    if stripped == Path::new("") {
+        merged_root.to_path_buf()
+    } else {
+        merged_root.join(stripped)
+    }
+}
+
+/// Apply a local mount source to a destination.
+///
+/// If the source is a directory, recursively copies all files (union merge).
+/// If the source is a file, copies the single file (creating parent dirs).
+fn apply_local_mount(src: &Path, dst: &Path) -> Result<()> {
+    if src.is_dir() {
+        apply_local_layer(src, dst)
+    } else {
+        // Single file mount — copy to exact destination path.
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create parent dir: {}", parent.display()))?;
+        }
+        std::fs::copy(src, dst).with_context(|| {
+            format!("Failed to copy {} -> {}", src.display(), dst.display())
+        })?;
+        Ok(())
+    }
 }
 
 /// Apply a local filesystem layer to the merged root.
@@ -147,6 +186,26 @@ fn apply_local_layer(src: &Path, dst: &Path) -> Result<()> {
 /// and extracts it, stripping the top-level CID directory.
 async fn apply_ipfs_layer(ipfs_path: &str, dst: &Path, client: &ipfs::HttpClient) -> Result<()> {
     client.unixfs_ref().get_dir(ipfs_path, dst).await
+}
+
+// ── Keep the old API as a thin wrapper for backward compatibility ──
+
+/// Resolve and merge N image layers into a single FHS root.
+///
+/// Deprecated: prefer `apply_mounts()` which supports targeted mounts.
+/// This wrapper treats each layer string as a root mount (`source:/`).
+pub async fn merge_layers(
+    layers: &[String],
+    ipfs_client: &ipfs::HttpClient,
+) -> Result<MergedImage> {
+    let mounts: Vec<Mount> = layers
+        .iter()
+        .map(|s| Mount {
+            source: s.clone(),
+            target: PathBuf::from("/"),
+        })
+        .collect();
+    apply_mounts(&mounts, ipfs_client).await
 }
 
 /// Read the current head from an Atom contract via one-shot `eth_call`.
@@ -226,6 +285,117 @@ mod tests {
         ipfs::HttpClient::new("http://localhost:5001".into())
     }
 
+    fn root_mount(path: &str) -> Mount {
+        Mount {
+            source: path.to_string(),
+            target: PathBuf::from("/"),
+        }
+    }
+
+    fn targeted_mount(source: &str, target: &str) -> Mount {
+        Mount {
+            source: source.to_string(),
+            target: PathBuf::from(target),
+        }
+    }
+
+    // ── apply_mounts tests (new API) ──
+
+    #[tokio::test]
+    async fn test_single_root_mount_direct() {
+        let layer = make_layer(&[("bin/main.wasm", b"(wasm)")]);
+        let client = stub_ipfs_client();
+        let merged = apply_mounts(
+            &[root_mount(&layer.path().to_string_lossy())],
+            &client,
+        )
+        .await
+        .unwrap();
+        // Single local root mount should use direct reference (no copy).
+        assert!(merged.path().join("bin/main.wasm").exists());
+        assert_eq!(merged.path(), layer.path());
+    }
+
+    #[tokio::test]
+    async fn test_root_mount_plus_targeted_file() {
+        let layer = make_layer(&[("bin/main.wasm", b"(wasm)")]);
+        // Create a host file to mount.
+        let host_file = TempDir::new().unwrap();
+        let identity_path = host_file.path().join("my-key");
+        fs::write(&identity_path, b"secret-key-data").unwrap();
+
+        let client = stub_ipfs_client();
+        let merged = apply_mounts(
+            &[
+                root_mount(&layer.path().to_string_lossy()),
+                targeted_mount(
+                    &identity_path.to_string_lossy(),
+                    "/etc/identity",
+                ),
+            ],
+            &client,
+        )
+        .await
+        .unwrap();
+
+        assert!(merged.path().join("bin/main.wasm").exists());
+        let identity = fs::read_to_string(merged.path().join("etc/identity")).unwrap();
+        assert_eq!(identity, "secret-key-data");
+    }
+
+    #[tokio::test]
+    async fn test_root_mount_plus_targeted_dir() {
+        let layer = make_layer(&[("bin/main.wasm", b"(wasm)")]);
+        let data_dir = make_layer(&[("file-a.txt", b"aaa"), ("sub/file-b.txt", b"bbb")]);
+
+        let client = stub_ipfs_client();
+        let merged = apply_mounts(
+            &[
+                root_mount(&layer.path().to_string_lossy()),
+                targeted_mount(
+                    &data_dir.path().to_string_lossy(),
+                    "/var/data",
+                ),
+            ],
+            &client,
+        )
+        .await
+        .unwrap();
+
+        assert!(merged.path().join("bin/main.wasm").exists());
+        let a = fs::read_to_string(merged.path().join("var/data/file-a.txt")).unwrap();
+        assert_eq!(a, "aaa");
+        let b = fs::read_to_string(merged.path().join("var/data/sub/file-b.txt")).unwrap();
+        assert_eq!(b, "bbb");
+    }
+
+    #[tokio::test]
+    async fn test_targeted_mount_overrides_layer_file() {
+        let layer = make_layer(&[
+            ("bin/main.wasm", b"(wasm)"),
+            ("etc/identity", b"old-key"),
+        ]);
+        let host_file = TempDir::new().unwrap();
+        let new_key = host_file.path().join("new-key");
+        fs::write(&new_key, b"new-key-data").unwrap();
+
+        let client = stub_ipfs_client();
+        let merged = apply_mounts(
+            &[
+                root_mount(&layer.path().to_string_lossy()),
+                targeted_mount(&new_key.to_string_lossy(), "/etc/identity"),
+            ],
+            &client,
+        )
+        .await
+        .unwrap();
+
+        let identity = fs::read_to_string(merged.path().join("etc/identity")).unwrap();
+        assert_eq!(identity, "new-key-data");
+    }
+
+    // ── merge_layers backward compat tests ──
+
     #[tokio::test]
     async fn test_merge_single_local_layer() {
         let layer = make_layer(&[("bin/main.wasm", b"(wasm)")]);
@@ -233,7 +403,6 @@ mod tests {
         let merged = merge_layers(&[layer.path().to_string_lossy().into()], &client)
             .await
             .unwrap();
-        // Single local layer should use direct reference (no copy).
         assert!(merged.path().join("bin/main.wasm").exists());
         assert_eq!(merged.path(), layer.path());
     }
@@ -257,9 +426,7 @@ mod tests {
         .await
         .unwrap();
 
-        // bin/main.wasm from base should be present.
         assert!(merged.path().join("bin/main.wasm").exists());
-        // etc/config should be overridden by overlay.
         let config = fs::read_to_string(merged.path().join("etc/config")).unwrap();
         assert_eq!(config, "overlay-config");
     }
@@ -311,7 +478,7 @@ mod tests {
         let client = stub_ipfs_client();
         let result = merge_layers(&[], &client).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No image layers"));
+        assert!(result.unwrap_err().to_string().contains("No mounts"));
     }
 
     #[tokio::test]
@@ -323,9 +490,8 @@ mod tests {
 
     #[test]
     fn test_cid_bytes_to_ipfs_path_v0() {
-        // CIDv0: raw sha2-256 multihash (0x12 = sha2-256, 0x20 = 32 bytes)
         let mut cid_bytes = vec![0x12, 0x20];
-        cid_bytes.extend_from_slice(&[0xAB; 32]); // 32 bytes of dummy hash
+        cid_bytes.extend_from_slice(&[0xAB; 32]);
         let path = cid_bytes_to_ipfs_path(&cid_bytes).unwrap();
         assert!(
             path.starts_with("/ipfs/Qm"),
@@ -335,8 +501,6 @@ mod tests {
 
     #[test]
     fn test_cid_bytes_to_ipfs_path_v1() {
-        // CIDv1: version(1) + codec(dag-pb=0x70) + sha2-256 multihash
-        // Construct the multihash manually: 0x12 = sha2-256, 0x20 = 32 bytes
         let mut mh_bytes = vec![0x12, 0x20];
         mh_bytes.extend_from_slice(&[0xAB; 32]);
         let mh = cid::multihash::Multihash::from_bytes(&mh_bytes).unwrap();

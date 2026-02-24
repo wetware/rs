@@ -21,6 +21,8 @@ pub mod keys;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod loaders;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod mount;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod rpc;
 
 // Re-export capnp schema modules from the membrane crate so host code can
