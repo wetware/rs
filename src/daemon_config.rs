@@ -6,7 +6,7 @@
 //! Example config:
 //! ```glia
 //! {:port     2025
-//!  :identity "~/.ww/key"
+//!  :identity "~/.ww/identity"
 //!  :images   ["images/my-app" "images/shell"]}
 //! ```
 #![cfg(not(target_arch = "wasm32"))]
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn parse_full_config() {
-        let input = r#"{:port 2025 :identity "~/.ww/key" :images ["img/a" "img/b"]}"#;
+        let input = r#"{:port 2025 :identity "~/.ww/identity" :images ["img/a" "img/b"]}"#;
         let val = glia::read(input).unwrap();
         let config = from_val(&val).unwrap();
         assert_eq!(config.port, 2025);
