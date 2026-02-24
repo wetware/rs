@@ -170,6 +170,13 @@ enum DaemonAction {
         #[arg(long, value_name = "PATH")]
         images: Vec<String>,
     },
+
+    /// Remove the platform service file.
+    ///
+    /// Removes the launchd plist (macOS) or systemd unit (Linux) and
+    /// prints the deactivation command. Does not touch ~/.ww/key or
+    /// ~/.ww/config.glia.
+    Uninstall,
 }
 
 /// Parse a hex-encoded contract address (with or without 0x prefix) into 20 bytes.
@@ -236,6 +243,7 @@ impl Commands {
                     port,
                     images,
                 } => Self::daemon_install(identity, port, images).await,
+                DaemonAction::Uninstall => Self::daemon_uninstall().await,
             },
             Commands::Push {
                 path,
@@ -567,6 +575,41 @@ pub extern "C" fn _start() {
         // 4. Write platform service file.
         let ww_bin = std::env::current_exe().context("cannot determine ww binary path")?;
         Self::write_service_file(&ww_bin, &config, &home)?;
+
+        Ok(())
+    }
+
+    /// Remove the platform service file.
+    async fn daemon_uninstall() -> Result<()> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+
+        if cfg!(target_os = "macos") {
+            let plist_path = home.join("Library/LaunchAgents/io.wetware.ww.plist");
+            if plist_path.exists() {
+                std::fs::remove_file(&plist_path)
+                    .with_context(|| format!("remove {}", plist_path.display()))?;
+                eprintln!("Removed: {}", plist_path.display());
+                eprintln!();
+                eprintln!("If the service is running, stop it with:");
+                eprintln!("  launchctl unload {}", plist_path.display());
+            } else {
+                eprintln!("No service file found at: {}", plist_path.display());
+            }
+        } else if cfg!(target_os = "linux") {
+            let unit_path = home.join(".config/systemd/user/ww.service");
+            if unit_path.exists() {
+                std::fs::remove_file(&unit_path)
+                    .with_context(|| format!("remove {}", unit_path.display()))?;
+                eprintln!("Removed: {}", unit_path.display());
+                eprintln!();
+                eprintln!("If the service is running, stop it with:");
+                eprintln!("  systemctl --user disable --now ww");
+            } else {
+                eprintln!("No service file found at: {}", unit_path.display());
+            }
+        } else {
+            bail!("unsupported platform; only macOS and Linux are supported");
+        }
 
         Ok(())
     }
