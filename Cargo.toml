@@ -6,7 +6,7 @@ members = [
     "crates/membrane",
     "crates/system",
     "std/runtime",
-    "std/kernel",
+    "crates/kernel",
     "std/shell",
 ]
 
