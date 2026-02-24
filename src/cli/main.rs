@@ -104,8 +104,8 @@ enum Commands {
     /// Prints a base58btc-encoded secret key to stdout.  Metadata (EVM
     /// address, Peer ID) is printed to stderr so stdout stays pipeable:
     ///
-    ///     ww keygen > ~/.ww/key
-    ///     ww keygen --output ~/.ww/key   # equivalent
+    ///     ww keygen > ~/.ww/identity
+    ///     ww keygen --output ~/.ww/identity   # equivalent
     Keygen {
         /// Write the secret to a file instead of stdout.
         #[arg(long, value_name = "PATH")]
@@ -174,7 +174,7 @@ enum DaemonAction {
     /// Remove the platform service file.
     ///
     /// Removes the launchd plist (macOS) or systemd unit (Linux) and
-    /// prints the deactivation command. Does not touch ~/.ww/key or
+    /// prints the deactivation command. Does not touch ~/.ww/identity or
     /// ~/.ww/config.glia.
     Uninstall,
 }
@@ -539,7 +539,7 @@ pub extern "C" fn _start() {
         let home = dirs::home_dir().context("cannot determine home directory")?;
         let ww_dir = home.join(".ww");
 
-        // 1. Resolve identity path — default to ~/.ww/key.
+        // 1. Resolve identity path — default to ~/.ww/identity.
         let key_path = identity.unwrap_or_else(|| ww_dir.join("identity"));
 
         // Generate key if it doesn't exist.
