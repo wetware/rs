@@ -72,6 +72,11 @@ enum Commands {
         #[arg(long)]
         wasm_debug: bool,
 
+        /// Path to a secp256k1 identity file. Sugar for PATH:/etc/identity mount.
+        /// Works well with direnv: `export WW_IDENTITY=~/.ww/identity` in .envrc.
+        #[arg(long, env = "WW_IDENTITY", value_name = "PATH")]
+        identity: Option<String>,
+
         /// Atom contract address (hex, 0x-prefixed). Enables the epoch
         /// pipeline: on-chain HEAD tracking, IPFS pinning, session
         /// invalidation on head changes.
@@ -195,12 +200,21 @@ impl Commands {
                 mounts: mount_args,
                 port,
                 wasm_debug,
+                identity,
                 stem,
                 rpc_url,
                 ws_url,
                 confirmation_depth,
             } => {
-                let mounts = ww::mount::parse_args(&mount_args)?;
+                let mut mounts = ww::mount::parse_args(&mount_args)?;
+                // --identity PATH is sugar for PATH:/etc/identity mount.
+                // Appended last so it overrides any /etc/identity from image layers.
+                if let Some(id_path) = identity {
+                    mounts.push(ww::mount::Mount {
+                        source: id_path,
+                        target: PathBuf::from("/etc/identity"),
+                    });
+                }
                 Self::run_with_mounts(
                     mounts,
                     port,
