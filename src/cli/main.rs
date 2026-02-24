@@ -112,6 +112,12 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    /// Manage the wetware background daemon.
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+
     /// Snapshot a project and push it to IPFS.
     ///
     /// Adds the entire FHS tree to IPFS as a UnixFS directory and returns
@@ -140,6 +146,29 @@ enum Commands {
         /// Required only if --stem is provided.
         #[arg(long)]
         private_key: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Register wetware as a user-level background service.
+    ///
+    /// Generates a key if missing, writes the daemon config, creates
+    /// a platform service file (launchd on macOS, systemd on Linux),
+    /// and prints the activation command.
+    Install {
+        /// Path to a secp256k1 identity file. Defaults to ~/.ww/key;
+        /// generated automatically if the file does not exist.
+        #[arg(long, value_name = "PATH")]
+        identity: Option<PathBuf>,
+
+        /// libp2p swarm port.
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Image layers to run (local paths or IPFS CIDs).
+        #[arg(long, value_name = "PATH")]
+        images: Vec<String>,
     },
 }
 
@@ -201,6 +230,13 @@ impl Commands {
                     .await
                 }
             }
+            Commands::Daemon { action } => match action {
+                DaemonAction::Install {
+                    identity,
+                    port,
+                    images,
+                } => Self::daemon_install(identity, port, images).await,
+            },
             Commands::Push {
                 path,
                 ipfs_url,
@@ -483,6 +519,198 @@ pub extern "C" fn _start() {
 
         eprintln!("EVM address:    0x{}", hex::encode(addr));
         eprintln!("Peer ID:        {peer_id}");
+        Ok(())
+    }
+
+    /// Register wetware as a user-level background service.
+    async fn daemon_install(
+        identity: Option<PathBuf>,
+        port: Option<u16>,
+        images: Vec<String>,
+    ) -> Result<()> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        let ww_dir = home.join(".ww");
+
+        // 1. Resolve identity path — default to ~/.ww/key.
+        let key_path = identity.unwrap_or_else(|| ww_dir.join("key"));
+
+        // Generate key if it doesn't exist.
+        if !key_path.exists() {
+            let sk = ww::keys::generate()?;
+            ww::keys::save(&sk, &key_path)?;
+
+            let kp = ww::keys::to_libp2p(&sk)?;
+            let addr = ww::keys::ethereum_address(&sk);
+            eprintln!("Generated new identity: {}", key_path.display());
+            eprintln!("  EVM address: 0x{}", hex::encode(addr));
+            eprintln!("  Peer ID:     {}", kp.public().to_peer_id());
+        } else {
+            eprintln!("Using existing identity: {}", key_path.display());
+        }
+
+        // 2. Build config: load existing, override with CLI flags.
+        let config_path = ww::daemon_config::default_config_path();
+        let mut config = ww::daemon_config::load(&config_path)?;
+
+        if let Some(p) = port {
+            config.port = p;
+        }
+        config.identity = Some(key_path.clone());
+        if !images.is_empty() {
+            config.images = images.iter().map(PathBuf::from).collect();
+        }
+
+        // 3. Write config.
+        config.write(&config_path)?;
+        eprintln!("Wrote config: {}", config_path.display());
+
+        // 4. Write platform service file.
+        let ww_bin = std::env::current_exe().context("cannot determine ww binary path")?;
+        Self::write_service_file(&ww_bin, &config, &home)?;
+
+        Ok(())
+    }
+
+    /// Write a platform-specific service file and print the activation command.
+    fn write_service_file(
+        ww_bin: &Path,
+        config: &ww::daemon_config::DaemonConfig,
+        home: &Path,
+    ) -> Result<()> {
+        // Build the ww run command arguments.
+        let identity_str = config
+            .identity
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| home.join(".ww/key").display().to_string());
+
+        if cfg!(target_os = "macos") {
+            Self::write_launchd_plist(ww_bin, config, home, &identity_str)
+        } else if cfg!(target_os = "linux") {
+            Self::write_systemd_unit(ww_bin, config, home, &identity_str)
+        } else {
+            bail!("unsupported platform; only macOS and Linux are supported")
+        }
+    }
+
+    /// Write a macOS launchd plist.
+    fn write_launchd_plist(
+        ww_bin: &Path,
+        config: &ww::daemon_config::DaemonConfig,
+        home: &Path,
+        identity_str: &str,
+    ) -> Result<()> {
+        let plist_dir = home.join("Library/LaunchAgents");
+        std::fs::create_dir_all(&plist_dir).context("create ~/Library/LaunchAgents")?;
+
+        let plist_path = plist_dir.join("io.wetware.ww.plist");
+
+        let log_dir = home.join(".ww/logs");
+        std::fs::create_dir_all(&log_dir).context("create ~/.ww/logs")?;
+        let log_path = log_dir.join("ww.log");
+
+        // Build ProgramArguments array entries.
+        let mut args = vec![
+            format!("        <string>{}</string>", ww_bin.display()),
+            "        <string>run</string>".to_string(),
+            format!("        <string>--identity</string>"),
+            format!("        <string>{identity_str}</string>"),
+            format!("        <string>--port</string>"),
+            format!("        <string>{}</string>", config.port),
+        ];
+        for img in &config.images {
+            args.push(format!("        <string>{}</string>", img.display()));
+        }
+
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.wetware.ww</string>
+    <key>ProgramArguments</key>
+    <array>
+{args}
+    </array>
+    <key>StandardOutPath</key>
+    <string>{log}</string>
+    <key>StandardErrorPath</key>
+    <string>{log}</string>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
+"#,
+            args = args.join("\n"),
+            log = log_path.display(),
+        );
+
+        std::fs::write(&plist_path, plist)
+            .with_context(|| format!("write plist: {}", plist_path.display()))?;
+        eprintln!("Wrote service: {}", plist_path.display());
+        eprintln!();
+        eprintln!("Activate with:");
+        eprintln!("  launchctl load {}", plist_path.display());
+
+        Ok(())
+    }
+
+    /// Write a Linux systemd user unit.
+    fn write_systemd_unit(
+        ww_bin: &Path,
+        config: &ww::daemon_config::DaemonConfig,
+        home: &Path,
+        identity_str: &str,
+    ) -> Result<()> {
+        let unit_dir = home.join(".config/systemd/user");
+        std::fs::create_dir_all(&unit_dir).context("create ~/.config/systemd/user")?;
+
+        let unit_path = unit_dir.join("ww.service");
+
+        let images_str: Vec<String> = config
+            .images
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        let exec_start = format!(
+            "{} run --identity {} --port {}{}",
+            ww_bin.display(),
+            identity_str,
+            config.port,
+            if images_str.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", images_str.join(" "))
+            },
+        );
+
+        let unit = format!(
+            "[Unit]\n\
+             Description=Wetware daemon\n\
+             After=network-online.target\n\
+             Wants=network-online.target\n\
+             \n\
+             [Service]\n\
+             Type=simple\n\
+             ExecStart={exec_start}\n\
+             Restart=on-failure\n\
+             RestartSec=5\n\
+             \n\
+             [Install]\n\
+             WantedBy=default.target\n"
+        );
+
+        std::fs::write(&unit_path, unit)
+            .with_context(|| format!("write unit: {}", unit_path.display()))?;
+        eprintln!("Wrote service: {}", unit_path.display());
+        eprintln!();
+        eprintln!("Activate with:");
+        eprintln!("  systemctl --user enable --now ww");
+
         Ok(())
     }
 
