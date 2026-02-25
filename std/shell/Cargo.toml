@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 capnp = "0.23.2"
 capnp-rpc = "0.23.0"
-runtime = { path = "../runtime" }
+system = { path = "../system" }
 
 [lib]
 crate-type = ["cdylib"]

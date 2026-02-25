@@ -51,19 +51,18 @@ enum Commands {
 
     /// Run a wetware environment.
     ///
-    /// Single path (developer mode):
-    ///   ww run [<path>]
-    ///   Loads and executes boot/main.wasm from the FHS environment.
+    /// Every positional argument is a mount: `source[:target]`.
+    /// Without `:target`, the source is mounted at `/` (image layer).
+    /// With `:target`, the source is overlaid at that guest path.
     ///
-    /// Multiple paths (daemon/advanced mode):
-    ///   ww run <image1> [<image2> ...]
-    ///   Merges multiple image layers (local or IPFS) and boots the merged result.
+    /// Examples:
+    ///   ww run .                                    # dev mode
+    ///   ww run images/app ~/.ww/identity:/etc/identity
+    ///   ww run /ipfs/QmHash ~/data:/var/data
     Run {
-        /// Path(s) to environment or image layers.
-        /// Single path: local FHS environment or IPFS path (defaults to ".")
-        /// Multiple paths: image layers to merge (later layers override earlier)
-        #[arg(default_value = ".", value_name = "PATH")]
-        paths: Vec<String>,
+        /// Mount(s): `source` (image at /) or `source:/guest/path` (targeted).
+        #[arg(default_value = ".", value_name = "MOUNT")]
+        mounts: Vec<String>,
 
         /// libp2p swarm port
         #[arg(long, default_value = "2025")]
@@ -73,11 +72,9 @@ enum Commands {
         #[arg(long)]
         wasm_debug: bool,
 
-        /// Path to a secp256k1 identity file (base58btc or hex, 32 bytes).
-        /// Generate one with `ww keygen`. Resolution order:
-        ///   1. This flag  2. $WW_IDENTITY env var
-        ///   3. /etc/identity in image layers  4. ephemeral (not persisted)
-        #[arg(long, value_name = "PATH")]
+        /// Path to a secp256k1 identity file. Sugar for PATH:/etc/identity mount.
+        /// Works well with direnv: `export WW_IDENTITY=~/.ww/identity` in .envrc.
+        #[arg(long, env = "WW_IDENTITY", value_name = "PATH")]
         identity: Option<String>,
 
         /// Atom contract address (hex, 0x-prefixed). Enables the epoch
@@ -104,12 +101,18 @@ enum Commands {
     /// Prints a base58btc-encoded secret key to stdout.  Metadata (EVM
     /// address, Peer ID) is printed to stderr so stdout stays pipeable:
     ///
-    ///     ww keygen > ~/.ww/key
-    ///     ww keygen --output ~/.ww/key   # equivalent
+    ///     ww keygen > ~/.ww/identity
+    ///     ww keygen --output ~/.ww/identity   # equivalent
     Keygen {
         /// Write the secret to a file instead of stdout.
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
+    },
+
+    /// Manage the wetware background daemon.
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
     },
 
     /// Snapshot a project and push it to IPFS.
@@ -143,6 +146,36 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Register wetware as a user-level background service.
+    ///
+    /// Generates a key if missing, writes the daemon config, creates
+    /// a platform service file (launchd on macOS, systemd on Linux),
+    /// and prints the activation command.
+    Install {
+        /// Path to a secp256k1 identity file. Defaults to ~/.ww/identity;
+        /// generated automatically if the file does not exist.
+        #[arg(long, value_name = "PATH")]
+        identity: Option<PathBuf>,
+
+        /// libp2p swarm port.
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Image layers to run (local paths or IPFS CIDs).
+        #[arg(long, value_name = "PATH")]
+        images: Vec<String>,
+    },
+
+    /// Remove the platform service file.
+    ///
+    /// Removes the launchd plist (macOS) or systemd unit (Linux) and
+    /// prints the deactivation command. Does not touch ~/.ww/identity or
+    /// ~/.ww/config.glia.
+    Uninstall,
+}
+
 /// Parse a hex-encoded contract address (with or without 0x prefix) into 20 bytes.
 fn parse_contract_address(s: &str) -> Result<[u8; 20]> {
     let hex_str = s.strip_prefix("0x").unwrap_or(s);
@@ -164,7 +197,7 @@ impl Commands {
             Commands::Init { subdir, template } => Self::init(subdir, template).await,
             Commands::Build { path } => Self::build(path).await,
             Commands::Run {
-                paths,
+                mounts: mount_args,
                 port,
                 wasm_debug,
                 identity,
@@ -173,34 +206,34 @@ impl Commands {
                 ws_url,
                 confirmation_depth,
             } => {
-                if paths.len() == 1 {
-                    // Single path: developer mode
-                    Self::run_env(
-                        PathBuf::from(&paths[0]),
-                        port,
-                        wasm_debug,
-                        identity,
-                        stem,
-                        rpc_url,
-                        ws_url,
-                        confirmation_depth,
-                    )
-                    .await
-                } else {
-                    // Multiple paths: daemon mode
-                    Self::run_daemon(
-                        paths,
-                        port,
-                        wasm_debug,
-                        identity,
-                        stem,
-                        rpc_url,
-                        ws_url,
-                        confirmation_depth,
-                    )
-                    .await
+                let mut mounts = ww::mount::parse_args(&mount_args)?;
+                // --identity PATH is sugar for PATH:/etc/identity mount.
+                // Appended last so it overrides any /etc/identity from image layers.
+                if let Some(id_path) = identity {
+                    mounts.push(ww::mount::Mount {
+                        source: id_path,
+                        target: PathBuf::from("/etc/identity"),
+                    });
                 }
+                Self::run_with_mounts(
+                    mounts,
+                    port,
+                    wasm_debug,
+                    stem,
+                    rpc_url,
+                    ws_url,
+                    confirmation_depth,
+                )
+                .await
             }
+            Commands::Daemon { action } => match action {
+                DaemonAction::Install {
+                    identity,
+                    port,
+                    images,
+                } => Self::daemon_install(identity, port, images).await,
+                DaemonAction::Uninstall => Self::daemon_uninstall().await,
+            },
             Commands::Push {
                 path,
                 ipfs_url,
@@ -404,42 +437,17 @@ pub extern "C" fn _start() {
         Ok(())
     }
 
-    /// Resolve the node's secp256k1 signing key and verifying key.
+    /// Resolve the node's secp256k1 signing key from `/etc/identity` in the FHS.
     ///
-    /// Resolution order (first match wins):
-    ///   1. `--identity PATH` CLI flag
-    ///   2. `$WW_IDENTITY` environment variable
-    ///   3. `/etc/identity` present in the merged image layers
-    ///   4. Ephemeral key (generated at runtime, discarded on exit)
-    ///
-    /// For sources 1, 2, and 4 the key is written to `merged_root/etc/identity`
-    /// so the guest can read it from `/etc/identity` via WASI.  Source 3 already
-    /// has the file in place — no injection needed.
+    /// If `/etc/identity` exists (placed by an image layer or a targeted mount
+    /// like `~/.ww/identity:/etc/identity`), the key is loaded from it.
+    /// Otherwise an ephemeral key is generated and injected so the guest
+    /// can still read `/etc/identity` via WASI.
     ///
     /// Returns `(signing_key, verifying_key, source_description)`.
     fn resolve_identity(
-        flag: Option<&str>,
         merged_root: &std::path::Path,
     ) -> Result<(k256::ecdsa::SigningKey, VerifyingKey, &'static str)> {
-        // 1. --identity CLI flag
-        if let Some(path) = flag {
-            let sk = ww::keys::load(path)?;
-            Self::inject_identity(&sk, merged_root)?;
-            let vk = *sk.verifying_key();
-            return Ok((sk, vk, "--identity"));
-        }
-
-        // 2. $WW_IDENTITY environment variable
-        if let Ok(path) = std::env::var("WW_IDENTITY") {
-            if !path.is_empty() {
-                let sk = ww::keys::load(&path)?;
-                Self::inject_identity(&sk, merged_root)?;
-                let vk = *sk.verifying_key();
-                return Ok((sk, vk, "$WW_IDENTITY"));
-            }
-        }
-
-        // 3. /etc/identity already present in the merged image layers
         let identity_path = merged_root.join("etc/identity");
         if identity_path.exists() {
             let path_str = identity_path
@@ -447,22 +455,18 @@ pub extern "C" fn _start() {
                 .context("/etc/identity path is non-UTF-8")?;
             let sk = ww::keys::load(path_str)?;
             let vk = *sk.verifying_key();
-            return Ok((sk, vk, "/etc/identity (image)"));
+            Ok((sk, vk, "/etc/identity"))
+        } else {
+            tracing::warn!("No /etc/identity found; using ephemeral key (will be lost on exit)");
+            let sk = ww::keys::generate()?;
+            // Inject so the guest can read /etc/identity via WASI.
+            let etc = merged_root.join("etc");
+            std::fs::create_dir_all(&etc).context("create /etc in merged FHS")?;
+            std::fs::write(etc.join("identity"), ww::keys::encode(&sk))
+                .context("write /etc/identity to merged FHS")?;
+            let vk = *sk.verifying_key();
+            Ok((sk, vk, "ephemeral"))
         }
-
-        // 4. Ephemeral: generate, inject, and return
-        let sk = ww::keys::generate()?;
-        Self::inject_identity(&sk, merged_root)?;
-        let vk = *sk.verifying_key();
-        Ok((sk, vk, "ephemeral"))
-    }
-
-    /// Write a base58btc-encoded signing key to `<merged_root>/etc/identity`.
-    fn inject_identity(sk: &k256::ecdsa::SigningKey, merged_root: &std::path::Path) -> Result<()> {
-        let etc = merged_root.join("etc");
-        std::fs::create_dir_all(&etc).context("create /etc in merged FHS")?;
-        std::fs::write(etc.join("identity"), ww::keys::encode(sk))
-            .context("write /etc/identity to merged FHS")
     }
 
     /// Generate a new secp256k1 identity secret.
@@ -486,47 +490,257 @@ pub extern "C" fn _start() {
         Ok(())
     }
 
-    /// Run a wetware environment
+    /// Register wetware as a user-level background service.
+    async fn daemon_install(
+        identity: Option<PathBuf>,
+        port: Option<u16>,
+        images: Vec<String>,
+    ) -> Result<()> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        let ww_dir = home.join(".ww");
+
+        // 1. Resolve identity path — default to ~/.ww/identity.
+        let key_path = identity.unwrap_or_else(|| ww_dir.join("identity"));
+
+        // Generate key if it doesn't exist.
+        if !key_path.exists() {
+            let sk = ww::keys::generate()?;
+            ww::keys::save(&sk, &key_path)?;
+
+            let kp = ww::keys::to_libp2p(&sk)?;
+            let addr = ww::keys::ethereum_address(&sk);
+            eprintln!("Generated new identity: {}", key_path.display());
+            eprintln!("  EVM address: 0x{}", hex::encode(addr));
+            eprintln!("  Peer ID:     {}", kp.public().to_peer_id());
+        } else {
+            eprintln!("Using existing identity: {}", key_path.display());
+        }
+
+        // 2. Build config: load existing, override with CLI flags.
+        let config_path = ww::daemon_config::default_config_path();
+        let mut config = ww::daemon_config::load(&config_path)?;
+
+        if let Some(p) = port {
+            config.port = p;
+        }
+        config.identity = Some(key_path.clone());
+        if !images.is_empty() {
+            config.images = images.iter().map(PathBuf::from).collect();
+        }
+
+        // 3. Write config.
+        config.write(&config_path)?;
+        eprintln!("Wrote config: {}", config_path.display());
+
+        // 4. Write platform service file.
+        let ww_bin = std::env::current_exe().context("cannot determine ww binary path")?;
+        Self::write_service_file(&ww_bin, &config, &home)?;
+
+        Ok(())
+    }
+
+    /// Remove the platform service file.
+    async fn daemon_uninstall() -> Result<()> {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+
+        if cfg!(target_os = "macos") {
+            let plist_path = home.join("Library/LaunchAgents/io.wetware.ww.plist");
+            if plist_path.exists() {
+                std::fs::remove_file(&plist_path)
+                    .with_context(|| format!("remove {}", plist_path.display()))?;
+                eprintln!("Removed: {}", plist_path.display());
+                eprintln!();
+                eprintln!("If the service is running, stop it with:");
+                eprintln!("  launchctl unload {}", plist_path.display());
+            } else {
+                eprintln!("No service file found at: {}", plist_path.display());
+            }
+        } else if cfg!(target_os = "linux") {
+            let unit_path = home.join(".config/systemd/user/ww.service");
+            if unit_path.exists() {
+                std::fs::remove_file(&unit_path)
+                    .with_context(|| format!("remove {}", unit_path.display()))?;
+                eprintln!("Removed: {}", unit_path.display());
+                eprintln!();
+                eprintln!("If the service is running, stop it with:");
+                eprintln!("  systemctl --user disable --now ww");
+            } else {
+                eprintln!("No service file found at: {}", unit_path.display());
+            }
+        } else {
+            bail!("unsupported platform; only macOS and Linux are supported");
+        }
+
+        Ok(())
+    }
+
+    /// Write a platform-specific service file and print the activation command.
+    fn write_service_file(
+        ww_bin: &Path,
+        config: &ww::daemon_config::DaemonConfig,
+        home: &Path,
+    ) -> Result<()> {
+        // Identity as a mount arg: path:/etc/identity
+        let identity_mount = config
+            .identity
+            .as_ref()
+            .map(|p| format!("{}:/etc/identity", p.display()))
+            .unwrap_or_else(|| format!("{}:/etc/identity", home.join(".ww/identity").display()));
+
+        if cfg!(target_os = "macos") {
+            Self::write_launchd_plist(ww_bin, config, home, &identity_mount)
+        } else if cfg!(target_os = "linux") {
+            Self::write_systemd_unit(ww_bin, config, home, &identity_mount)
+        } else {
+            bail!("unsupported platform; only macOS and Linux are supported")
+        }
+    }
+
+    /// Write a macOS launchd plist.
+    fn write_launchd_plist(
+        ww_bin: &Path,
+        config: &ww::daemon_config::DaemonConfig,
+        home: &Path,
+        identity_mount: &str,
+    ) -> Result<()> {
+        let plist_dir = home.join("Library/LaunchAgents");
+        std::fs::create_dir_all(&plist_dir).context("create ~/Library/LaunchAgents")?;
+
+        let plist_path = plist_dir.join("io.wetware.ww.plist");
+
+        let log_dir = home.join(".ww/logs");
+        std::fs::create_dir_all(&log_dir).context("create ~/.ww/logs")?;
+        let log_path = log_dir.join("ww.log");
+
+        // Build ProgramArguments array entries.
+        let mut args = vec![
+            format!("        <string>{}</string>", ww_bin.display()),
+            "        <string>run</string>".to_string(),
+            format!("        <string>--port</string>"),
+            format!("        <string>{}</string>", config.port),
+        ];
+        // Image layers (root mounts).
+        for img in &config.images {
+            args.push(format!("        <string>{}</string>", img.display()));
+        }
+        // Identity as a targeted mount.
+        args.push(format!("        <string>{identity_mount}</string>"));
+
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.wetware.ww</string>
+    <key>ProgramArguments</key>
+    <array>
+{args}
+    </array>
+    <key>StandardOutPath</key>
+    <string>{log}</string>
+    <key>StandardErrorPath</key>
+    <string>{log}</string>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
+"#,
+            args = args.join("\n"),
+            log = log_path.display(),
+        );
+
+        std::fs::write(&plist_path, plist)
+            .with_context(|| format!("write plist: {}", plist_path.display()))?;
+        eprintln!("Wrote service: {}", plist_path.display());
+        eprintln!();
+        eprintln!("Activate with:");
+        eprintln!("  launchctl load {}", plist_path.display());
+
+        Ok(())
+    }
+
+    /// Write a Linux systemd user unit.
+    fn write_systemd_unit(
+        ww_bin: &Path,
+        config: &ww::daemon_config::DaemonConfig,
+        home: &Path,
+        identity_mount: &str,
+    ) -> Result<()> {
+        let unit_dir = home.join(".config/systemd/user");
+        std::fs::create_dir_all(&unit_dir).context("create ~/.config/systemd/user")?;
+
+        let unit_path = unit_dir.join("ww.service");
+
+        // Build positional args: images (root mounts) + identity mount.
+        let mut positional = Vec::new();
+        for img in &config.images {
+            positional.push(img.display().to_string());
+        }
+        positional.push(identity_mount.to_string());
+
+        let exec_start = format!(
+            "{} run --port {} {}",
+            ww_bin.display(),
+            config.port,
+            positional.join(" "),
+        );
+
+        let unit = format!(
+            "[Unit]\n\
+             Description=Wetware daemon\n\
+             After=network-online.target\n\
+             Wants=network-online.target\n\
+             \n\
+             [Service]\n\
+             Type=simple\n\
+             ExecStart={exec_start}\n\
+             Restart=on-failure\n\
+             RestartSec=5\n\
+             \n\
+             [Install]\n\
+             WantedBy=default.target\n"
+        );
+
+        std::fs::write(&unit_path, unit)
+            .with_context(|| format!("write unit: {}", unit_path.display()))?;
+        eprintln!("Wrote service: {}", unit_path.display());
+        eprintln!();
+        eprintln!("Activate with:");
+        eprintln!("  systemctl --user enable --now ww");
+
+        Ok(())
+    }
+
+    /// Run a wetware environment from parsed mounts.
     #[allow(clippy::too_many_arguments)]
-    async fn run_env(
-        path: PathBuf,
+    async fn run_with_mounts(
+        mounts: Vec<ww::mount::Mount>,
         port: u16,
         wasm_debug: bool,
-        identity: Option<String>,
         stem: Option<String>,
         rpc_url: String,
         ws_url: String,
         confirmation_depth: u64,
     ) -> Result<()> {
-        let path_str = path.to_string_lossy().to_string();
-        let is_ipfs_path = ipfs::is_ipfs_path(&path_str);
-
-        if !is_ipfs_path {
-            // For local paths, verify boot/main.wasm exists
-            let boot_wasm = path.join("boot/main.wasm");
-
-            if !boot_wasm.exists() {
-                bail!(
-                    "boot/main.wasm not found at: {}\n\
-                     \n\
-                     Please run 'ww build' first to compile your guest program.",
-                    boot_wasm.display()
-                );
+        // Dev-mode compat: if a single local root mount has boot/main.wasm
+        // but not bin/main.wasm, copy it over (the runtime expects bin/).
+        for mount in &mounts {
+            if mount.is_root() && !ipfs::is_ipfs_path(&mount.source) {
+                let src = Path::new(&mount.source);
+                let boot_wasm = src.join("boot/main.wasm");
+                let bin_wasm = src.join("bin/main.wasm");
+                if boot_wasm.exists() && !bin_wasm.exists() {
+                    let bin_dir = src.join("bin");
+                    std::fs::create_dir_all(&bin_dir).context("Failed to create bin directory")?;
+                    std::fs::copy(&boot_wasm, &bin_wasm)
+                        .context("Failed to prepare WASM artifact for runtime")?;
+                }
             }
-
-            // Create a compatibility layer: the runtime expects bin/main.wasm.
-            // We copy boot/main.wasm to bin/main.wasm for the image merging logic.
-            let bin_dir = path.join("bin");
-            std::fs::create_dir_all(&bin_dir).context("Failed to create bin directory")?;
-
-            let bin_wasm = bin_dir.join("main.wasm");
-            std::fs::copy(&boot_wasm, &bin_wasm)
-                .context("Failed to prepare WASM artifact for runtime")?;
         }
-
-        // Pass the environment path as a single image layer to the daemon logic
-        // (supports both local paths and IPFS paths)
-        let images = vec![path_str];
 
         ww::config::init_tracing();
 
@@ -538,8 +752,8 @@ pub extern "C" fn _start() {
         ]);
 
         // If --stem is provided, read the on-chain head and prepend it
-        // as a base image layer.
-        let mut all_images = Vec::new();
+        // as a base root mount.
+        let mut all_mounts: Vec<ww::mount::Mount> = Vec::new();
         let mut epoch_channel: Option<(watch::Sender<Epoch>, watch::Receiver<Epoch>)> = None;
         let stem_config = if let Some(ref stem_addr) = stem {
             let contract = parse_contract_address(stem_addr)?;
@@ -549,7 +763,7 @@ pub extern "C" fn _start() {
             tracing::info!(
                 seq = head.seq,
                 path = %ipfs_path,
-                "Read on-chain HEAD; prepending as base image layer"
+                "Read on-chain HEAD; prepending as base root mount"
             );
 
             // Pin the initial head.
@@ -557,7 +771,10 @@ pub extern "C" fn _start() {
                 tracing::warn!(path = %ipfs_path, "Failed to pin initial head: {e}");
             }
 
-            all_images.push(ipfs_path);
+            all_mounts.push(ww::mount::Mount {
+                source: ipfs_path,
+                target: PathBuf::from("/"),
+            });
 
             let initial_epoch = Epoch {
                 seq: head.seq,
@@ -579,16 +796,15 @@ pub extern "C" fn _start() {
             None
         };
 
-        // Append user-specified layers after the on-chain base.
-        all_images.extend(images);
+        // Append user-specified mounts after the on-chain base.
+        all_mounts.extend(mounts);
 
-        // Merge image layers into a single FHS root.
-        let merged = image::merge_layers(&all_images, &ipfs_client).await?;
+        // Apply all mounts into a single FHS root.
+        let merged = image::apply_mounts(&all_mounts, &ipfs_client).await?;
         let image_path = merged.path().to_string_lossy().to_string();
 
-        // Resolve identity after merge so /etc/identity in image layers is visible.
-        let (sk, _verifying_key, identity_source) =
-            Self::resolve_identity(identity.as_deref(), merged.path())?;
+        // Resolve identity from /etc/identity in the merged FHS.
+        let (sk, _verifying_key, identity_source) = Self::resolve_identity(merged.path())?;
         tracing::info!(source = identity_source, "Node identity resolved");
 
         let keypair = ww::keys::to_libp2p(&sk)?;
@@ -601,7 +817,7 @@ pub extern "C" fn _start() {
         tokio::spawn(wetware_host.run());
 
         tracing::info!(
-            layers = all_images.len(),
+            mounts = all_mounts.len(),
             root = %image_path,
             port,
             "Booting environment"
@@ -706,134 +922,6 @@ pub extern "C" fn _start() {
         }
 
         Ok(())
-    }
-
-    /// Run daemon mode with multiple image layers
-    #[allow(clippy::too_many_arguments)]
-    async fn run_daemon(
-        images: Vec<String>,
-        port: u16,
-        wasm_debug: bool,
-        identity: Option<String>,
-        stem: Option<String>,
-        rpc_url: String,
-        ws_url: String,
-        confirmation_depth: u64,
-    ) -> Result<()> {
-        ww::config::init_tracing();
-
-        // Build a chain loader: try IPFS first (if reachable), fall back to host FS.
-        let ipfs_client = ipfs::HttpClient::new("http://localhost:5001".into());
-        let loader = ChainLoader::new(vec![
-            Box::new(IpfsUnixfsLoader::new(ipfs_client.clone())),
-            Box::new(HostPathLoader),
-        ]);
-
-        // If --stem is provided, read the on-chain head and prepend it
-        // as a base image layer.
-        let mut all_images = Vec::new();
-        let mut epoch_channel: Option<(watch::Sender<Epoch>, watch::Receiver<Epoch>)> = None;
-        let stem_config = if let Some(ref stem_addr) = stem {
-            let contract = parse_contract_address(stem_addr)?;
-            let head = image::read_contract_head(&rpc_url, &contract).await?;
-            let ipfs_path = image::cid_bytes_to_ipfs_path(&head.cid)?;
-
-            tracing::info!(
-                seq = head.seq,
-                path = %ipfs_path,
-                "Read on-chain HEAD; prepending as base image layer"
-            );
-
-            // Pin the initial head.
-            if let Err(e) = ipfs_client.pin_add(&ipfs_path).await {
-                tracing::warn!(path = %ipfs_path, "Failed to pin initial head: {e}");
-            }
-
-            all_images.push(ipfs_path);
-
-            let initial_epoch = Epoch {
-                seq: head.seq,
-                head: head.cid,
-                adopted_block: 0,
-            };
-
-            epoch_channel = Some(watch::channel(initial_epoch));
-
-            Some(atom::IndexerConfig {
-                ws_url: ws_url.clone(),
-                http_url: rpc_url.clone(),
-                contract_address: contract,
-                start_block: 0,
-                getlogs_max_range: 1000,
-                reconnection: Default::default(),
-            })
-        } else {
-            None
-        };
-
-        // Append user-specified layers after the on-chain base.
-        all_images.extend(images);
-
-        // Merge image layers into a single FHS root.
-        let merged = image::merge_layers(&all_images, &ipfs_client).await?;
-        let image_path = merged.path().to_string_lossy().to_string();
-
-        // Resolve identity after merge so /etc/identity in image layers is visible.
-        let (sk, _verifying_key, identity_source) =
-            Self::resolve_identity(identity.as_deref(), merged.path())?;
-        tracing::info!(source = identity_source, "Node identity resolved");
-
-        let keypair = ww::keys::to_libp2p(&sk)?;
-
-        // Start the libp2p swarm.
-        let wetware_host = host::WetwareHost::new(port, keypair)?;
-        let network_state = wetware_host.network_state();
-        let swarm_cmd_tx = wetware_host.swarm_cmd_tx();
-        let stream_control = wetware_host.stream_control();
-        tokio::spawn(wetware_host.run());
-
-        tracing::info!(
-            layers = all_images.len(),
-            root = %image_path,
-            port,
-            "Booting merged image"
-        );
-
-        let mut builder = CellBuilder::new(image_path)
-            .with_loader(Box::new(loader))
-            .with_network_state(network_state)
-            .with_swarm_cmd_tx(swarm_cmd_tx)
-            .with_wasm_debug(wasm_debug)
-            .with_image_root(merged.path().into())
-            .with_ipfs_client(ipfs_client.clone())
-            .with_signing_key(std::sync::Arc::new(sk));
-
-        // If we have an epoch channel, give the receiver to the cell
-        // and spawn the epoch pipeline with the sender.
-        if let Some((epoch_tx, epoch_rx)) = epoch_channel {
-            builder = builder.with_epoch_rx(epoch_rx);
-
-            if let Some(config) = stem_config {
-                tokio::spawn(ww::epoch::run_epoch_pipeline(
-                    config,
-                    epoch_tx,
-                    confirmation_depth,
-                    ipfs_client,
-                ));
-            }
-        }
-
-        let cell = builder.build();
-
-        // spawn_serving registers a /wetware/capnp/1.0.0 libp2p stream
-        // handler that bootstraps each incoming connection with the
-        // membrane exported by the kernel.
-        let result = cell.spawn_serving(stream_control).await?;
-        tracing::info!(code = result.exit_code, "Guest exited");
-
-        // Hold `merged` alive until after guest exits.
-        drop(merged);
-        std::process::exit(result.exit_code);
     }
 }
 

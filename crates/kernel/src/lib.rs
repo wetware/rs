@@ -413,21 +413,22 @@ async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &ShellCtx) -> Result<Val
 
 const HELP_TEXT: &str = "\
 Capabilities:
-  (host id)                    Peer ID
-  (host addrs)                 Listen addresses
-  (host peers)                 Connected peers
-  (host connect \"<multiaddr>\") Dial a peer
+  (host id)                      Peer ID
+  (host addrs)                   Listen addresses
+  (host peers)                   Connected peers
+  (host connect \"<multiaddr>\")   Dial a peer
 
-  (executor echo \"<msg>\")      Diagnostic echo
+  (executor echo \"<msg>\")        Diagnostic echo
 
-  (ipfs cat \"<path>\")          Fetch IPFS content
-  (ipfs ls \"<path>\")           List IPFS directory
+  (ipfs cat \"<path>\")            Fetch IPFS content
+  (ipfs ls \"<path>\")             List IPFS directory
 
 Built-ins:
-  (help)                       This message
-  (exit)                       Quit
+  (cd \"<path>\")                  Change working directory
+  (help)                         This message
+  (exit)                         Quit
 
-Any other command is looked up in PATH as <cmd>.wasm or <cmd>/main.wasm.";
+Unrecognized commands are looked up in PATH (default /bin).";
 
 // ---------------------------------------------------------------------------
 // Shell mode (TTY)
@@ -545,15 +546,15 @@ impl Guest for Kernel {
 fn run_impl() {
     init_logging();
 
-    runtime::run(|membrane: Membrane| async move {
+    system::run(|membrane: Membrane| async move {
         let graft_resp = membrane.graft_request().send().promise.await?;
-        let session = graft_resp.get()?.get_session()?;
+        let results = graft_resp.get()?;
 
         let ctx = ShellCtx {
-            host: session.get_host()?,
-            executor: session.get_executor()?,
-            ipfs: session.get_ipfs()?,
-            identity: session.get_identity()?,
+            host: results.get_host()?,
+            executor: results.get_executor()?,
+            ipfs: results.get_ipfs()?,
+            identity: results.get_identity()?,
             cwd: "/".to_string(),
         };
 

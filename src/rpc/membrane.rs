@@ -1,12 +1,13 @@
 //! Membrane-based RPC bootstrap: epoch-scoped Host + Executor + node identity capabilities.
 //!
-//! Instead of bootstrapping a bare `Host`, the membrane provides an epoch-scoped
-//! `Session` containing `Host`, `Executor`, `IPFS Client`, and a node `identity` signer.
-//! All capabilities fail with `staleEpoch` when the epoch advances.
+//! Instead of bootstrapping a bare `Host`, the membrane's `graft()` returns
+//! epoch-scoped `Host`, `Executor`, `IPFS Client`, and a node `identity` signer
+//! directly as result fields. All capabilities fail with `staleEpoch` when the
+//! epoch advances.
 //!
 //! The `membrane` crate owns the Membrane server and epoch machinery.
-//! This module provides the `SessionBuilder` impl that injects wetware-specific
-//! capabilities into the session, plus the epoch-guarded IPFS and identity wrappers.
+//! This module provides the `GraftBuilder` impl that injects wetware-specific
+//! capabilities into the graft response, plus the epoch-guarded IPFS and identity wrappers.
 
 use std::sync::Arc;
 
@@ -18,7 +19,7 @@ use capnp_rpc::RpcSystem;
 use k256::ecdsa::SigningKey;
 use libp2p::identity::Keypair;
 use libp2p_core::SignedEnvelope;
-use membrane::{stem_capnp, Epoch, EpochGuard, MembraneServer, SessionBuilder};
+use membrane::{stem_capnp, Epoch, EpochGuard, GraftBuilder, MembraneServer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -27,7 +28,7 @@ use crate::host::SwarmCommand;
 use crate::ipfs;
 use crate::ipfs_capnp;
 use crate::system_capnp;
-use system::SigningDomain;
+use auth::SigningDomain;
 
 use super::NetworkState;
 
@@ -123,11 +124,11 @@ impl stem_capnp::signer::Server for EpochGuardedMembraneSigner {
 }
 
 // ---------------------------------------------------------------------------
-// HostSessionBuilder — SessionBuilder for the concrete stem Session
+// HostGraftBuilder — GraftBuilder for the concrete stem graft response
 // ---------------------------------------------------------------------------
 
-/// Fills the Session with epoch-guarded Host, Executor, IPFS Client, and node identity.
-pub struct HostSessionBuilder {
+/// Fills the graft response with epoch-guarded Host, Executor, IPFS Client, and node identity.
+pub struct HostGraftBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
@@ -135,7 +136,7 @@ pub struct HostSessionBuilder {
     signing_key: Option<Arc<SigningKey>>,
 }
 
-impl HostSessionBuilder {
+impl HostGraftBuilder {
     pub fn new(
         network_state: NetworkState,
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
@@ -153,11 +154,11 @@ impl HostSessionBuilder {
     }
 }
 
-impl SessionBuilder for HostSessionBuilder {
+impl GraftBuilder for HostGraftBuilder {
     fn build(
         &self,
         guard: &EpochGuard,
-        mut builder: stem_capnp::session::Builder<'_>,
+        mut builder: stem_capnp::membrane::graft_results::Builder<'_>,
     ) -> Result<(), capnp::Error> {
         let host: system_capnp::host::Client = capnp_rpc::new_client(super::HostImpl::new(
             self.network_state.clone(),
@@ -447,7 +448,7 @@ where
     W: AsyncWrite + Unpin + 'static,
 {
     let verifying_key = signing_key.as_ref().map(|sk| *sk.verifying_key());
-    let sess_builder = HostSessionBuilder::new(
+    let sess_builder = HostGraftBuilder::new(
         network_state,
         swarm_cmd_tx,
         wasm_debug,

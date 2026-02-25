@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use atom::system_capnp;
-use atom::{EpochGuard, SessionBuilder};
+use atom::{EpochGuard, GraftBuilder};
 
 // ---------------------------------------------------------------------------
 // Stub executor + session builder for epoch-guarded capability tests
@@ -44,14 +44,14 @@ impl system_capnp::executor::Server for StubExecutor {
     }
 }
 
-/// SessionBuilder that populates session.executor with a StubExecutor.
+/// GraftBuilder that populates graft results with a StubExecutor.
 pub struct StubSessionBuilder;
 
-impl SessionBuilder for StubSessionBuilder {
+impl GraftBuilder for StubSessionBuilder {
     fn build(
         &self,
         guard: &EpochGuard,
-        mut builder: atom::stem_capnp::session::Builder<'_>,
+        mut builder: atom::stem_capnp::membrane::graft_results::Builder<'_>,
     ) -> std::result::Result<(), capnp::Error> {
         let executor: system_capnp::executor::Client = capnp_rpc::new_client(StubExecutor {
             guard: guard.clone(),

@@ -1,17 +1,17 @@
-//! Integration test: Epoch → Membrane → graft → Session → executor.echo (epoch-guarded).
+//! Integration test: Epoch → Membrane → graft → executor.echo (epoch-guarded).
 //! All local: membrane server and client are in-process (capnp-rpc local dispatch).
 
 mod common;
 
 use atom::stem_capnp;
 use atom::{AtomIndexer, Epoch, IndexerConfig, MembraneServer};
+use auth::SigningDomain;
 use capnp_rpc::new_client;
 use common::{deploy_atom, set_head, spawn_anvil, StubSessionBuilder};
 use k256::ecdsa::SigningKey;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use system::SigningDomain;
 use tokio::sync::watch;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
@@ -135,14 +135,13 @@ async fn test_membrane_graft_echo_against_anvil() {
     let membrane = auth_membrane(rx, vk);
     let signer_client: stem_capnp::signer::Client = new_client(TestSigner { sk });
 
-    // Graft → get session → echo → Ok
+    // Graft → echo → Ok
     let mut graft_req = membrane.graft_request();
     graft_req.get().set_signer(signer_client);
 
     let graft_rpc_response = graft_req.send().promise.await.expect("graft RPC");
     let graft_response = graft_rpc_response.get().expect("graft results");
-    let session = graft_response.get_session().expect("session");
-    let executor = session.get_executor().expect("executor");
+    let executor = graft_response.get_executor().expect("executor");
 
     let mut echo_req = executor.echo_request();
     echo_req.get().set_message("hello");
@@ -193,8 +192,7 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
     graft_req.get().set_signer(signer_client.clone());
     let graft_rpc_response = graft_req.send().promise.await.expect("graft RPC");
     let graft_response = graft_rpc_response.get().expect("graft results");
-    let session = graft_response.get_session().expect("session");
-    let executor = session.get_executor().expect("executor");
+    let executor = graft_response.get_executor().expect("executor");
 
     let mut echo_req = executor.echo_request();
     echo_req.get().set_message("ping");
@@ -207,7 +205,7 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
     assert_eq!(
         response.to_str().unwrap(),
         "pong",
-        "session should be ok under current epoch"
+        "graft should be ok under current epoch"
     );
 
     // Advance epoch → same executor.echo → staleEpoch
@@ -227,8 +225,7 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
     graft_req2.get().set_signer(signer_client.clone());
     let graft_rpc_response2 = graft_req2.send().promise.await.expect("re-graft RPC");
     let graft_response2 = graft_rpc_response2.get().expect("re-graft results");
-    let session2 = graft_response2.get_session().expect("session");
-    let executor2 = session2.get_executor().expect("executor");
+    let executor2 = graft_response2.get_executor().expect("executor");
 
     let mut echo_req3 = executor2.echo_request();
     echo_req3.get().set_message("ping");
@@ -242,11 +239,7 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
         .expect("echo results")
         .get_response()
         .expect("response");
-    assert_eq!(
-        response3.to_str().unwrap(),
-        "pong",
-        "re-graft session should be ok"
-    );
+    assert_eq!(response3.to_str().unwrap(), "pong", "re-graft should be ok");
 }
 
 /// Graft with wrong key should fail authentication.

@@ -1,92 +1,94 @@
 # Wetware
 
-A peer-to-peer runtime that loads WASM guest images and executes them inside
-sandboxed cells, with host capabilities exposed over Cap'n Proto RPC.
+A peer-to-peer agentic OS.
+
+Sandboxed WASM agents with zero ambient authority, capability-based
+security, and on-chain coordination.
 
 ## Quick start
 
 ```bash
-# Scaffold a new guest
-ww init my-app --template rust
-cd my-app
-
 # Build
-ww build
+cargo build                    # host binary
+ww build std/kernel            # kernel agent
 
-# Run locally
-ww run
-
-# Publish to IPFS and run from anywhere
-ww push
-ww run /ipfs/<CID>
+# Run — drops into an interactive Glia shell
+ww run std/kernel
 ```
 
-## Developer CLI
-
-`ww` is the developer CLI for building and publishing wetware applications.
-
 ```
-ww init [<subdir>] [--template rust]   Scaffold a new environment
-ww build [<path>]                      Compile to boot/main.wasm
-ww run [<path>|<ipfs-path>]            Boot a local or IPFS environment
-ww push [<path>]                       Publish to IPFS, print CID
+/ ❯ (help)
+Capabilities:
+  (host id)                      Peer ID
+  (host addrs)                   Listen addresses
+  (host peers)                   Connected peers
+  (host connect "<multiaddr>")   Dial a peer
+  (executor echo "<msg>")        Diagnostic echo
+  (ipfs cat "<path>")            Fetch IPFS content
+  (ipfs ls "<path>")             List IPFS directory
+
+Built-ins:
+  (cd "<path>")                  Change working directory
+  (help)                         This message
+  (exit)                         Quit
+
+Unrecognized commands are looked up in PATH (default /bin).
+
+/ ❯ (host id)
+"00240801122025c7ea..."
+/ ❯ (exit)
+```
+
+For CLI help:
+
+```bash
+ww --help
+ww run --help
 ```
 
 ## How it works
 
-`ww run <path>` does three things:
+`ww run <mount>...` does three things:
 
 1. **Starts a libp2p swarm** on the configured port (default 2025)
-2. **Loads `boot/main.wasm`** from the environment (local or IPFS)
-3. **Spawns the guest** with WASI stdio bound to the host terminal and Cap'n
-   Proto RPC served over in-memory data streams
+2. **Loads `boot/main.wasm`** from the merged image
+3. **Spawns the agent** with WASI stdio bound to the host terminal and
+   Cap'n Proto RPC served over in-memory data streams
 
-## Environment layout
+## Image layout
 
-Each wetware environment follows a minimal FHS convention:
+Each wetware image follows a minimal FHS convention:
 
 ```
-<env>/
+<image>/
   boot/
-    main.wasm          # guest entrypoint (required)
-  bin/                 # additional executables (optional)
-  etc/                 # configuration (optional, lazy)
-  usr/                 # shared libraries (optional, lazy)
-  var/                 # runtime state (optional, lazy)
+    main.wasm          # agent entrypoint (required)
+  bin/                 # executables on the kernel's PATH
+  svc/                 # nested service images (spawned by pid0)
+  etc/                 # configuration (consumed by pid0)
 ```
 
-Only `boot/main.wasm` is required. Other directories are created on demand.
+Only `boot/main.wasm` is required. Everything else is convention
+between the image author and pid0.
 
-The `<path>` argument to `ww run` can be:
+Mounts can be local paths or IPFS paths:
 
 | Form | Example |
 |------|---------|
-| Local path | `crates/kernel` |
+| Local path | `std/kernel` |
 | IPFS path  | `/ipfs/QmAbc123...` |
+| Targeted   | `~/.ww/identity:/etc/identity` |
 
 ## Standard library (`std/`)
 
-`std/` is the base image layer — default programs available in every wetware
-environment. Built with `ww build`, published to IPFS with `ww push`.
+`std/` contains the guest SDK and built-in agents. Built with `ww build`,
+published to IPFS with `ww push`.
 
 ```
 std/
-├── runtime/    Rust guest SDK (library crate)
+├── system/     Guest SDK — RPC session, async runtime, stream adapters
+├── kernel/     Init agent (pid0) — grafts onto the host Membrane
 └── shell/      Interactive shell (in development)
-
-crates/
-├── kernel/     Init process — grafts onto the host Membrane
-├── membrane/   Epoch-scoped capability primitives
-├── system/     Shared system types (zero-dep)
-├── atom/       Off-chain Atom runtime
-└── glia/       Configuration and shell language
-```
-
-Build and publish the std layer:
-
-```bash
-ww build crates/kernel
-ww push std/
 ```
 
 ## Building
@@ -109,21 +111,22 @@ cargo build
 ### Build a std component
 
 ```bash
-ww build crates/kernel    # produces crates/kernel/boot/main.wasm
+ww build std/kernel    # produces std/kernel/boot/main.wasm
 ww build std/shell     # produces std/shell/boot/main.wasm
 ```
 
 ## Usage
 
 ```
-ww run <PATH> [OPTIONS]
+ww run [OPTIONS] [MOUNT]...
 
 Arguments:
-  <PATH>    Local directory or IPFS path (default: .)
+  [MOUNT]...    source or source:/guest/path (default: .)
 
 Options:
   --port <PORT>                libp2p swarm port [default: 2025]
   --wasm-debug                 Enable WASM debug info
+  --identity <PATH>            secp256k1 identity file [env: WW_IDENTITY]
   --stem <ADDR>                Atom contract address (enables epoch pipeline)
   --rpc-url <URL>              HTTP JSON-RPC URL [default: http://127.0.0.1:8545]
   --ws-url <URL>               WebSocket JSON-RPC URL [default: ws://127.0.0.1:8545]
@@ -134,19 +137,19 @@ Options:
 
 ```bash
 # Run the kernel locally
-ww run crates/kernel
-
-# Run a user app
-ww run my-app
+ww run std/kernel
 
 # Run from IPFS
 ww run /ipfs/QmSomeHash
 
-# Merge image layers (std base + user app)
+# Merge image layers (std base + user app overlay)
 ww run /ipfs/QmStdCID my-app
 
+# Targeted mount (identity file at /etc/identity)
+ww run std/kernel ~/.ww/identity:/etc/identity
+
 # With on-chain epoch tracking
-ww run my-app --stem 0xABCD... --rpc-url http://127.0.0.1:8545
+ww run std/kernel --stem 0xABCD...
 ```
 
 ### Logging

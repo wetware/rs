@@ -9,11 +9,11 @@ When `ww run` detects a TTY on stdin it sets `WW_TTY=1` in the guest
 environment. The kernel starts a Clojure-inspired Lisp REPL:
 
 ```
-ww> (host id)
+/ ❯ (host id)
 "00240801122025c7ea..."
-ww> (executor echo "hello")
+/ ❯ (executor echo "hello")
 "hello"
-ww> (exit)
+/ ❯ (exit)
 ```
 
 ### Syntax
@@ -59,6 +59,7 @@ IPFS methods pipeline through the `UnixFS` sub-API of the
 
 | Command | Description |
 |---------|-------------|
+| `(cd "<path>")` | Change working directory |
 | `(help)` | Print available capabilities and methods |
 | `(exit)` | Terminate the kernel |
 
@@ -75,7 +76,7 @@ The first match wins. The bytes are passed to `executor.runBytes()`.
 Standard output is captured and printed; the exit code is reported on error.
 
 ```
-ww> (my-tool "arg1" "arg2")
+/ ❯ (my-tool "arg1" "arg2")
 ```
 
 This looks for `/bin/my-tool.wasm` or `/bin/my-tool/main.wasm` in the
