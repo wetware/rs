@@ -66,10 +66,7 @@ impl MergedImage {
 ///
 /// Root layers are merged via IPFS MFS DAG operations when possible,
 /// falling back to copy-merge on failure.
-pub async fn apply_mounts(
-    mounts: &[Mount],
-    ipfs_client: &ipfs::HttpClient,
-) -> Result<MergedImage> {
+pub async fn apply_mounts(mounts: &[Mount], ipfs_client: &ipfs::HttpClient) -> Result<MergedImage> {
     if mounts.is_empty() {
         bail!("No mounts provided");
     }
@@ -162,9 +159,8 @@ fn apply_local_mount(src: &Path, dst: &Path) -> Result<()> {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create parent dir: {}", parent.display()))?;
         }
-        std::fs::copy(src, dst).with_context(|| {
-            format!("Failed to copy {} -> {}", src.display(), dst.display())
-        })?;
+        std::fs::copy(src, dst)
+            .with_context(|| format!("Failed to copy {} -> {}", src.display(), dst.display()))?;
         Ok(())
     }
 }
@@ -257,9 +253,7 @@ async fn try_dag_merge(
             let cid = client
                 .add_dir(Path::new(&mount.source))
                 .await
-                .with_context(|| {
-                    format!("Failed to add local layer to IPFS: {}", mount.source)
-                })?;
+                .with_context(|| format!("Failed to add local layer to IPFS: {}", mount.source))?;
             cids.push(cid);
         }
     }
@@ -328,7 +322,11 @@ fn merge_overlay_recursive<'a>(
     mfs_path: &'a str,
     overlay_path: &'a str,
 ) -> futures::future::BoxFuture<'a, Result<()>> {
-    Box::pin(merge_overlay_recursive_inner(client, mfs_path, overlay_path))
+    Box::pin(merge_overlay_recursive_inner(
+        client,
+        mfs_path,
+        overlay_path,
+    ))
 }
 
 async fn merge_overlay_recursive_inner(
@@ -382,11 +380,7 @@ async fn merge_overlay_recursive_inner(
 }
 
 /// Copy-merge: the original strategy, used as a fallback when DAG merge fails.
-async fn copy_merge(
-    root_mounts: &[&Mount],
-    client: &ipfs::HttpClient,
-    dst: &Path,
-) -> Result<()> {
+async fn copy_merge(root_mounts: &[&Mount], client: &ipfs::HttpClient, dst: &Path) -> Result<()> {
     for (i, mount) in root_mounts.iter().enumerate() {
         let target_dst = resolve_target(dst, &mount.target);
         if ipfs::is_ipfs_path(&mount.source) {
@@ -522,12 +516,9 @@ mod tests {
     async fn test_single_root_mount_direct() {
         let layer = make_layer(&[("bin/main.wasm", b"(wasm)")]);
         let client = stub_ipfs_client();
-        let merged = apply_mounts(
-            &[root_mount(&layer.path().to_string_lossy())],
-            &client,
-        )
-        .await
-        .unwrap();
+        let merged = apply_mounts(&[root_mount(&layer.path().to_string_lossy())], &client)
+            .await
+            .unwrap();
         // Single local root mount should use direct reference (no copy).
         assert!(merged.path().join("bin/main.wasm").exists());
         assert_eq!(merged.path(), layer.path());
@@ -545,10 +536,7 @@ mod tests {
         let merged = apply_mounts(
             &[
                 root_mount(&layer.path().to_string_lossy()),
-                targeted_mount(
-                    &identity_path.to_string_lossy(),
-                    "/etc/identity",
-                ),
+                targeted_mount(&identity_path.to_string_lossy(), "/etc/identity"),
             ],
             &client,
         )
@@ -569,10 +557,7 @@ mod tests {
         let merged = apply_mounts(
             &[
                 root_mount(&layer.path().to_string_lossy()),
-                targeted_mount(
-                    &data_dir.path().to_string_lossy(),
-                    "/var/data",
-                ),
+                targeted_mount(&data_dir.path().to_string_lossy(), "/var/data"),
             ],
             &client,
         )
@@ -588,10 +573,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_targeted_mount_overrides_layer_file() {
-        let layer = make_layer(&[
-            ("bin/main.wasm", b"(wasm)"),
-            ("etc/identity", b"old-key"),
-        ]);
+        let layer = make_layer(&[("bin/main.wasm", b"(wasm)"), ("etc/identity", b"old-key")]);
         let host_file = TempDir::new().unwrap();
         let new_key = host_file.path().join("new-key");
         fs::write(&new_key, b"new-key-data").unwrap();
@@ -736,5 +718,4 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Empty CID bytes"));
     }
-
 }

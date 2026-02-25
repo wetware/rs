@@ -585,9 +585,7 @@ pub extern "C" fn _start() {
             .identity
             .as_ref()
             .map(|p| format!("{}:/etc/identity", p.display()))
-            .unwrap_or_else(|| {
-                format!("{}:/etc/identity", home.join(".ww/identity").display())
-            });
+            .unwrap_or_else(|| format!("{}:/etc/identity", home.join(".ww/identity").display()));
 
         if cfg!(target_os = "macos") {
             Self::write_launchd_plist(ww_bin, config, home, &identity_mount)
@@ -737,8 +735,7 @@ pub extern "C" fn _start() {
                 let bin_wasm = src.join("bin/main.wasm");
                 if boot_wasm.exists() && !bin_wasm.exists() {
                     let bin_dir = src.join("bin");
-                    std::fs::create_dir_all(&bin_dir)
-                        .context("Failed to create bin directory")?;
+                    std::fs::create_dir_all(&bin_dir).context("Failed to create bin directory")?;
                     std::fs::copy(&boot_wasm, &bin_wasm)
                         .context("Failed to prepare WASM artifact for runtime")?;
                 }
@@ -807,8 +804,7 @@ pub extern "C" fn _start() {
         let image_path = merged.path().to_string_lossy().to_string();
 
         // Resolve identity from /etc/identity in the merged FHS.
-        let (sk, _verifying_key, identity_source) =
-            Self::resolve_identity(merged.path())?;
+        let (sk, _verifying_key, identity_source) = Self::resolve_identity(merged.path())?;
         tracing::info!(source = identity_source, "Node identity resolved");
 
         let keypair = ww::keys::to_libp2p(&sk)?;
@@ -927,7 +923,6 @@ pub extern "C" fn _start() {
 
         Ok(())
     }
-
 }
 
 #[tokio::main]
