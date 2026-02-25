@@ -9,7 +9,7 @@ use membrane::Epoch;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{stderr, stdin, stdout};
+use tokio::io::{stderr, stdout, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::info;
@@ -312,7 +312,36 @@ impl Cell {
         })?;
         tracing::debug!(binary = %path, "Loaded guest bytecode");
 
-        let stdin_handle = stdin();
+        let interactive = std::io::stdin().is_terminal() || std::env::var("WW_TTY").is_ok();
+        let stdin_handle: Box<dyn tokio::io::AsyncRead + Send + Sync + Unpin> = if interactive {
+            // tokio::io::stdin() returns EOF under `cargo run` because the non-blocking
+            // adapter sees no data and reports 0 bytes. Use a blocking reader thread that
+            // feeds real stdin through a duplex pipe so WASI gets a proper async stream.
+            let (reader, mut writer) = tokio::io::duplex(4096);
+            tokio::task::spawn_blocking(move || {
+                use std::io::Read;
+                let stdin = std::io::stdin();
+                let mut handle = stdin.lock();
+                let mut buf = [0u8; 4096];
+                let rt = tokio::runtime::Handle::current();
+                loop {
+                    match handle.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if rt.block_on(AsyncWriteExt::write_all(&mut writer, &buf[..n]))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Box::new(reader)
+        } else {
+            Box::new(tokio::io::empty())
+        };
         let stdout_handle = stdout();
         let stderr_handle = stderr();
 
@@ -324,7 +353,7 @@ impl Cell {
 
         // Inject host-side environment signals for the guest.
         let mut guest_env = env.unwrap_or_default();
-        if std::io::stdin().is_terminal() {
+        if interactive {
             guest_env.push("WW_TTY=1".to_string());
         }
         if !guest_env.iter().any(|v| v.starts_with("PATH=")) {
