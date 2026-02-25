@@ -123,10 +123,7 @@ async fn test_ls_directory() {
     let client = ww::ipfs::HttpClient::new(ipfs_api_url());
     let root_cid = client.add_dir(src.path()).await.expect("add_dir");
 
-    let entries = client
-        .ls(&format!("/ipfs/{root_cid}"))
-        .await
-        .expect("ls");
+    let entries = client.ls(&format!("/ipfs/{root_cid}")).await.expect("ls");
 
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert!(names.contains(&"a.txt"), "expected a.txt in {names:?}");
