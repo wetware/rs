@@ -312,7 +312,12 @@ impl Cell {
         })?;
         tracing::debug!(binary = %path, "Loaded guest bytecode");
 
-        let stdin_handle = stdin();
+        let interactive = std::io::stdin().is_terminal() || std::env::var("WW_TTY").is_ok();
+        let stdin_handle: Box<dyn tokio::io::AsyncRead + Send + Sync + Unpin> = if interactive {
+            Box::new(stdin())
+        } else {
+            Box::new(tokio::io::empty())
+        };
         let stdout_handle = stdout();
         let stderr_handle = stderr();
 
@@ -324,7 +329,7 @@ impl Cell {
 
         // Inject host-side environment signals for the guest.
         let mut guest_env = env.unwrap_or_default();
-        if std::io::stdin().is_terminal() {
+        if interactive {
             guest_env.push("WW_TTY=1".to_string());
         }
         if !guest_env.iter().any(|v| v.starts_with("PATH=")) {
