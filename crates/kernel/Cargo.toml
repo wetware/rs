@@ -10,8 +10,8 @@ futures = "0.3"
 log = "0.4.29"
 wasip2 = "1.0.2"
 hex = "0.4"
-glia = { path = "../../crates/glia" }
-runtime = { path = "../runtime" }
+glia = { path = "../glia" }
+runtime = { path = "../../std/runtime" }
 
 [lib]
 crate-type = ["cdylib"]

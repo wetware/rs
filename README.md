@@ -61,7 +61,7 @@ The `<path>` argument to `ww run` can be:
 
 | Form | Example |
 |------|---------|
-| Local path | `std/kernel` |
+| Local path | `crates/kernel` |
 | IPFS path  | `/ipfs/QmAbc123...` |
 
 ## Standard library (`std/`)
@@ -72,14 +72,20 @@ environment. Built with `ww build`, published to IPFS with `ww push`.
 ```
 std/
 ├── runtime/    Rust guest SDK (library crate)
-├── kernel/     Init process — grafts onto the host Membrane
 └── shell/      Interactive shell (in development)
+
+crates/
+├── kernel/     Init process — grafts onto the host Membrane
+├── membrane/   Epoch-scoped capability primitives
+├── system/     Shared system types (zero-dep)
+├── atom/       Off-chain Atom runtime
+└── glia/       Configuration and shell language
 ```
 
 Build and publish the std layer:
 
 ```bash
-ww build std/kernel
+ww build crates/kernel
 ww push std/
 ```
 
@@ -103,7 +109,7 @@ cargo build
 ### Build a std component
 
 ```bash
-ww build std/kernel    # produces std/kernel/boot/main.wasm
+ww build crates/kernel    # produces crates/kernel/boot/main.wasm
 ww build std/shell     # produces std/shell/boot/main.wasm
 ```
 
@@ -128,7 +134,7 @@ Options:
 
 ```bash
 # Run the kernel locally
-ww run std/kernel
+ww run crates/kernel
 
 # Run a user app
 ww run my-app
