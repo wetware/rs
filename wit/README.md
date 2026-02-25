@@ -1,6 +1,6 @@
 # WIT Interface Definitions
 
-This directory contains WebAssembly Interface Types (WIT) definitions for custom host-guest interfaces in the Wetware runtime.
+This directory contains WebAssembly Interface Types (WIT) definitions for custom host-guest interfaces in Wetware.
 
 ## Overview
 

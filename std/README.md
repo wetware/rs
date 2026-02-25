@@ -1,6 +1,6 @@
 # std
 
-Guest SDK and built-in agents for the wetware runtime.
+Guest SDK and built-in agents for the wetware host.
 
 ## Layout
 
