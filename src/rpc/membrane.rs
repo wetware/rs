@@ -27,7 +27,7 @@ use crate::host::SwarmCommand;
 use crate::ipfs;
 use crate::ipfs_capnp;
 use crate::system_capnp;
-use system::SigningDomain;
+use auth::SigningDomain;
 
 use super::NetworkState;
 
