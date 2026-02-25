@@ -26,7 +26,7 @@ pub struct Mount {
 impl Mount {
     /// Returns `true` if this mount targets the FHS root.
     pub fn is_root(&self) -> bool {
-        self.target == PathBuf::from("/")
+        self.target == std::path::Path::new("/")
     }
 }
 
