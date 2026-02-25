@@ -6,14 +6,19 @@ see [rpc-transport.md](rpc-transport.md).
 
 ## Overview
 
-Wetware is a peer-to-peer runtime that loads WASM guest images and executes
-them inside sandboxed cells. `ww run` resolves one or more image layers into
-a unified FHS root, loads `bin/main.wasm` from the result, and spawns the
-guest with a `Session` capability served over in-memory Cap'n Proto RPC.
+Wetware is a decentralized operating system for autonomous agents. It runs
+WASM guests in sandboxed cells with zero ambient authority: all capabilities
+are explicitly granted over Cap'n Proto RPC, and agents coordinate through
+on-chain epoch boundaries.
 
-The runtime is deliberately simple. It merges layers, loads a binary, and
+`ww run` resolves one or more image layers into a unified FHS root, loads
+`boot/main.wasm` from the result, and spawns the agent with a `Session`
+capability served over in-memory Cap'n Proto RPC.
+
+The host is deliberately simple. It merges layers, loads a binary, and
 hands it capabilities. Everything else — peer discovery, service management,
-access control — is the guest's job.
+access control — is the agent's job. The host is the sandbox; the agent
+is the policy engine.
 
 ## No ambient authority
 
@@ -22,10 +27,11 @@ explicitly-passed Cap'n Proto capability objects. There is no ambient authority.
 
 Traditional programs inherit authority from their environment: they can read
 files, open sockets, inspect environment variables, and call any syscall the OS
-allows. A Wetware guest has none of that. Its WASI sandbox provides stdio
-(bound to the host terminal) and a data stream (bound to the Host RPC
-connection). That's it. The guest's only connection to the outside world is the
-`Host` capability the runtime hands it at boot.
+allows. A Wetware agent has none of that. Its WASI sandbox provides stdio
+(bound to the host terminal) and a data stream (bound to the RPC connection).
+That's it. The agent's only connection to the outside world is the `Membrane`
+the host hands it at boot — and it must authenticate via `graft()` to obtain
+a `Session` with actual capabilities.
 
 ```
 Traditional process:        Wetware guest:
@@ -37,7 +43,7 @@ Traditional process:        Wetware guest:
                               Session      -> the only authority (Host + Executor + IPFS)
 ```
 
-This is the foundation that makes untrusted code execution safe. A guest can
+This is the foundation that makes untrusted code execution safe. An agent can
 only do what the capabilities it holds allow. If you don't hand it the
 `Executor` capability, it can't spawn children. If you don't hand it a
 `connect` method, it can't dial peers.
@@ -46,46 +52,48 @@ only do what the capabilities it holds allow. If you don't hand it the
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Runtime (ww binary)                                │
-│  - loads bin/main.wasm                              │
+│  Host (ww binary)                                   │
+│  - loads kernel from boot/main.wasm                 │
 │  - starts libp2p swarm                              │
-│  - serves Host capability to pid0                   │
+│  - serves Membrane to kernel                        │
 │                                                     │
 │  ┌───────────────────────────────────────────────┐  │
-│  │  pid0 (guest)                                 │  │
-│  │  - interprets boot/, svc/, etc/               │  │
+│  │  kernel (pid0)                                │  │
+│  │  - grafts onto Membrane, obtains Session      │  │
+│  │  - interprets bin/, svc/, etc/                │  │
 │  │  - connects to bootstrap peers                │  │
 │  │  - spawns services                            │  │
-│  │  - defines the Membrane (what to export)      │  │
+│  │  - defines what to export to the network      │  │
 │  │                                               │  │
-│  │  ┌─────────────┐  ┌─────────────┐            │  │
+│  │  ┌─────────────┐  ┌─────────────┐             │  │
 │  │  │ child-echo  │  │ metrics     │  ...        │  │
 │  │  │ (service)   │  │ (service)   │             │  │
-│  │  └─────────────┘  └─────────────┘            │  │
+│  │  └─────────────┘  └─────────────┘             │  │
 │  └───────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────┘
 ```
 
-**Runtime** (`ww` binary) is the kernel. It knows how to load
-`bin/main.wasm` from an image, start a libp2p swarm, and serve Host RPC.
-It knows nothing about the rest of the image layout — `boot/`, `svc/`,
-`etc/` are opaque directories as far as the runtime is concerned.
+**Host** (`ww` binary) is the supervisor. It loads `boot/main.wasm` from an
+image, starts a libp2p swarm, and serves a `Membrane` to pid0 over Cap'n
+Proto RPC. It knows nothing about the rest of the image layout — `bin/`,
+`svc/`, `etc/` are opaque directories as far as the host is concerned.
 
-**pid0** (the guest loaded from `bin/main.wasm`) is init. It receives a
-`Host` capability and uses it to interpret the image layout: read bootstrap
-peers from `boot/`, spawn services from `svc/`, apply configuration from
-`etc/`. pid0 is where policy lives.
+**pid0** (the kernel agent loaded from `boot/main.wasm`) is init. It
+receives a `Membrane`, authenticates via `graft()`, and uses the resulting
+`Session` to interpret the image layout: look up executables from `bin/`,
+spawn services from `svc/`, apply configuration from `etc/`. pid0 is where
+policy lives.
 
-**Children** are processes spawned by pid0 (or by other children) via
-`host.executor().runBytes(wasm)`. Each child gets its own Host capability
-over its own RPC connection. In the future, pid0 will be able to scope
-these capabilities — giving a child a restricted view of the host.
+**Children** are agents spawned by pid0 (or by other children) via
+`session.executor.runBytes(wasm)`. Each child gets its own `Session`
+capability over its own RPC connection. pid0 can scope these capabilities,
+giving a child a restricted view of the host.
 
 ## Capability flow
 
 ### Inbound: host to guest
 
-The runtime creates a Membrane and bootstraps it to pid0 over in-memory
+The host creates a Membrane and bootstraps it to pid0 over in-memory
 Cap'n Proto RPC. pid0 calls `membrane.graft()` to obtain a `Session`
 containing three capabilities:
 
@@ -101,14 +109,14 @@ All capabilities are epoch-guarded: they become stale when the on-chain
 head advances. The guest must re-graft to obtain a fresh session.
 
 ```
-Runtime                          pid0
-───────                          ────
+Host                             pid0
+────                             ────
 create Membrane
   with SessionBuilder
     Host (network state)
     Executor (engine, loader)
     IPFS Client (Kubo HTTP)
-serve via RpcSystem ──────────> membrane.graft() -> Session
+serve via RpcSystem ──────────> membrane.graft(signer) -> Session
                                   session.host.id()
                                   session.host.addrs()
                                   session.executor.echo("hello")
@@ -144,37 +152,38 @@ pid0 exports Membrane ──> host             host ──> pid0 imports Membran
 
 ### The Membrane pattern
 
-pid0 receives a `Host` capability — its view of the world. It can
-wrap, filter, or extend that capability into a **Membrane**: an object
-that controls what the outside world can do.
+pid0 receives a `Membrane` from the host, authenticates via `graft()`,
+and obtains a `Session` with capabilities. It can then wrap, filter, or
+extend those capabilities into a new **Membrane**: an object that controls
+what the outside world can do.
 
 ```
-1. Runtime hands pid0 the Host capability
-2. pid0 wraps Host into a Membrane (adds policy, filters methods, etc.)
-3. pid0 exports the Membrane back to the runtime
-4. Runtime serves the Membrane on a libp2p stream protocol
-5. Remote peers interact with the Membrane, not with the raw Host
+1. Host hands pid0 a Membrane reference
+2. pid0 authenticates via graft(), receives Session capabilities
+3. pid0 wraps Session into an attenuated Membrane (adds policy, filters methods)
+4. pid0 exports the attenuated Membrane back to the host
+5. Host serves the attenuated Membrane on a libp2p stream protocol
+6. Remote peers interact with the attenuated Membrane, not with the raw Session
 ```
 
-This is how pid0 controls access. The runtime doesn't decide what remote
-peers can do — pid0 does, by choosing what to export. The runtime is just
+This is how pid0 controls access. The host doesn't decide what remote
+peers can do — pid0 does, by choosing what to export. The host is just
 the transport.
 
 ## Configuration
 
 There is one configuration model: FHS. An image is an FHS directory tree.
-pid0 interprets it. The runtime only reads `bin/main.wasm`; everything
-else (`boot/`, `svc/`, `etc/`) is between the image author and pid0.
+pid0 interprets it. The host only reads `boot/main.wasm`; everything
+else is between the image author and pid0.
 
-See the [README](../README.md) for the full FHS spec. In brief:
+See the [README](../README.md) for the image layout. In brief:
 
 ```
 <image>/
-  bin/main.wasm     # guest entrypoint — consumed by runtime
-  boot/<peerID>     # bootstrap peers  — consumed by pid0
+  boot/main.wasm    # agent entrypoint — consumed by host
+  bin/              # executables on the kernel's PATH — consumed by pid0
   svc/<name>/       # nested service images — consumed by pid0
-  etc/              # configuration    — consumed by pid0
-  usr/lib/          # shared WASM libraries — reserved
+  etc/              # configuration — consumed by pid0
 ```
 
 The FHS root that pid0 sees can be assembled from multiple **layers**
@@ -198,8 +207,9 @@ ww run --stem 0xABC... /ipfs/QmOverlay ./local-tweaks
 ```
 
 No single layer needs to be complete. A Stem CID might provide `etc/`
-and `boot/` but no `bin/main.wasm`, expecting an overlay to supply the
-code. The only requirement is that the **union** contains `bin/main.wasm`.
+and `bin/` but no `boot/main.wasm`, expecting an overlay to supply the
+entrypoint. The only requirement is that the **union** contains
+`boot/main.wasm`.
 
 ```sh
 # Standalone: fully self-contained local image
@@ -227,24 +237,24 @@ ww run --stem 0xABC... /ipfs/QmPlugin ./local-config
 
 ### Stem integration
 
-When `--stem` is provided, the runtime reads the head CID from the
+When `--stem` is provided, the host reads the head CID from the
 contract, fetches it from IPFS as the base layer, and boots pid0 with
 an epoch-scoped Membrane. When the on-chain head advances, capabilities
-are revoked and the runtime reloads with the new base.
+are revoked and the host reloads with the new base.
 
-Without `--stem`, pid0 gets a bare `Host` capability with no epoch
-lifecycle. The process exits when pid0 exits.
+Without `--stem`, pid0 gets a Membrane with no epoch lifecycle.
+The process exits when pid0 exits.
 
 ### Node config
 
-Orthogonal to the image, **node config** controls how the runtime
+Orthogonal to the image, **node config** controls how the host
 behaves on this particular machine: `--port`, `--wasm-debug`, IPFS
 daemon address, log levels, resource limits. Node config is set via CLI
 flags or env vars — it never lives inside image layers.
 
-## Network architecture (future)
+## Network architecture
 
-Two nodes running Wetware can communicate via capability passing over
+Two nodes running Wetware communicate via capability passing over
 libp2p:
 
 ```
@@ -271,7 +281,7 @@ passing.
 
 ## Epoch lifecycle
 
-When `--stem` points to an Atom smart contract, the runtime starts an
+When `--stem` points to an Atom smart contract, the host starts an
 epoch pipeline that watches for `HeadUpdated` events on-chain:
 
 ```
@@ -303,15 +313,15 @@ implemented sub-APIs:
 Stub interfaces declared for future work: Block, Dag, Name, Key, Pin,
 Object, Swarm, PubSub, Routing.
 
-The host delegates to a Kubo HTTP client (`http://localhost:5001`).
+The host delegates to a local Kubo HTTP client (`http://localhost:5001`).
 Cap'n Proto pipelining allows `session.ipfs().unixfs().cat(path)` to
 resolve in a single round-trip.
 
 ## See also
 
-- [shell.md](shell.md) — kernel Lisp shell reference
+- [shell.md](shell.md) — kernel shell reference (interactive + daemon modes)
 - [cli.md](cli.md) — CLI flags and usage
 - [rpc-transport.md](rpc-transport.md) — transport plumbing, scheduling model, deadlock analysis
-- [../capnp/peer.capnp](../capnp/peer.capnp) — Host, Executor, Process, ByteStream interfaces
+- [../capnp/system.capnp](../capnp/system.capnp) — Host, Executor, Process, ByteStream interfaces
 - [../capnp/ipfs.capnp](../capnp/ipfs.capnp) — IPFS Client capability schema
 - [../README.md](../README.md) — image layout, build instructions, usage
