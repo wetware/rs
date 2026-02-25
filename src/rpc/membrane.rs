@@ -1,13 +1,14 @@
-//! Membrane-based RPC bootstrap: epoch-scoped Host + Executor + node identity capabilities.
+//! Membrane-based RPC bootstrap: epoch-scoped Host + Executor + storage capabilities.
 //!
 //! Instead of bootstrapping a bare `Host`, the membrane's `graft()` returns
-//! epoch-scoped `Host`, `Executor`, `IPFS Client`, and a node `identity` signer
-//! directly as result fields. All capabilities fail with `staleEpoch` when the
-//! epoch advances.
+//! epoch-scoped `Host`, `Executor`, `PrivateStore`, `PublicStore`, and a node
+//! `identity` signer directly as result fields. All capabilities fail with
+//! `staleEpoch` when the epoch advances.
 //!
 //! The `membrane` crate owns the Membrane server and epoch machinery.
 //! This module provides the `GraftBuilder` impl that injects wetware-specific
-//! capabilities into the graft response, plus the epoch-guarded IPFS and identity wrappers.
+//! capabilities into the graft response, plus the epoch-guarded storage and
+//! identity wrappers.
 
 use std::sync::Arc;
 
@@ -127,12 +128,16 @@ impl stem_capnp::signer::Server for EpochGuardedMembraneSigner {
 // HostGraftBuilder — GraftBuilder for the concrete stem graft response
 // ---------------------------------------------------------------------------
 
-/// Fills the graft response with epoch-guarded Host, Executor, IPFS Client, and node identity.
+/// Fills the graft response with epoch-guarded Host, Executor, PrivateStore,
+/// PublicStore, and node identity.
 pub struct HostGraftBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
+    #[allow(dead_code)]
     ipfs_client: ipfs::HttpClient,
+    #[allow(dead_code)]
+    peer_id: Vec<u8>,
     signing_key: Option<Arc<SigningKey>>,
 }
 
@@ -142,6 +147,7 @@ impl HostGraftBuilder {
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
         wasm_debug: bool,
         ipfs_client: ipfs::HttpClient,
+        peer_id: Vec<u8>,
         signing_key: Option<Arc<SigningKey>>,
     ) -> Self {
         Self {
@@ -149,6 +155,7 @@ impl HostGraftBuilder {
             swarm_cmd_tx,
             wasm_debug,
             ipfs_client,
+            peer_id,
             signing_key,
         }
     }
@@ -177,10 +184,13 @@ impl GraftBuilder for HostGraftBuilder {
             ));
         builder.set_executor(executor);
 
-        let ipfs_client: ipfs_capnp::client::Client = capnp_rpc::new_client(
-            EpochGuardedIpfsClient::new(self.ipfs_client.clone(), guard.clone()),
-        );
-        builder.set_ipfs(ipfs_client);
+        let private: ipfs_capnp::private_store::Client =
+            capnp_rpc::new_client(EpochGuardedTempUnixFS::new(guard.clone()));
+        builder.set_private(private);
+
+        let public: ipfs_capnp::public_store::Client =
+            capnp_rpc::new_client(EpochGuardedPublicUnixFS::new(guard.clone()));
+        builder.set_public(public);
 
         if let Some(sk) = &self.signing_key {
             let keypair =
@@ -195,218 +205,117 @@ impl GraftBuilder for HostGraftBuilder {
 }
 
 // ---------------------------------------------------------------------------
-// EpochGuardedIpfsClient — CoreAPI-style IPFS client
+// EpochGuardedTempUnixFS — private (in-memory) store (stub)
 // ---------------------------------------------------------------------------
 
-/// IPFS Client capability that checks epoch validity and delegates to sub-APIs.
-struct EpochGuardedIpfsClient {
-    ipfs_client: ipfs::HttpClient,
+/// Private UnixFS capability backed by an in-memory map.
+///
+/// CIDs are computed locally (sha2-256 hash for integrity, not published).
+/// Content is destroyed when the capability is dropped (epoch advance or
+/// process exit).
+struct EpochGuardedTempUnixFS {
     guard: EpochGuard,
 }
 
-impl EpochGuardedIpfsClient {
-    fn new(ipfs_client: ipfs::HttpClient, guard: EpochGuard) -> Self {
-        Self { ipfs_client, guard }
+impl EpochGuardedTempUnixFS {
+    fn new(guard: EpochGuard) -> Self {
+        Self { guard }
     }
 }
 
 #[allow(refining_impl_trait)]
-impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
-    fn unixfs(
+impl ipfs_capnp::unix_f_s::Server for EpochGuardedTempUnixFS {
+    fn add(
         self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::UnixfsParams,
-        mut results: ipfs_capnp::client::UnixfsResults,
+        _params: ipfs_capnp::unix_f_s::AddParams,
+        _results: ipfs_capnp::unix_f_s::AddResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
-        let api: ipfs_capnp::unix_f_s::Client = capnp_rpc::new_client(EpochGuardedUnixFS::new(
-            self.ipfs_client.clone(),
-            self.guard.clone(),
-        ));
-        results.get().set_api(api);
-        Promise::ok(())
-    }
-
-    fn block(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::BlockParams,
-        _results: ipfs_capnp::client::BlockResults,
-    ) -> Promise<(), capnp::Error> {
         Promise::err(capnp::Error::unimplemented(
-            "block API not yet implemented".into(),
+            "private add not yet implemented".into(),
         ))
     }
 
-    fn dag(
+    fn get(
         self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::DagParams,
-        _results: ipfs_capnp::client::DagResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented(
-            "dag API not yet implemented".into(),
-        ))
-    }
-
-    fn name(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::NameParams,
-        _results: ipfs_capnp::client::NameResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented(
-            "name API not yet implemented".into(),
-        ))
-    }
-
-    fn key(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::KeyParams,
-        _results: ipfs_capnp::client::KeyResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented(
-            "key API not yet implemented".into(),
-        ))
-    }
-
-    fn pin(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::PinParams,
-        _results: ipfs_capnp::client::PinResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented(
-            "pin API not yet implemented".into(),
-        ))
-    }
-
-    fn object(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::ObjectParams,
-        _results: ipfs_capnp::client::ObjectResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented(
-            "object API not yet implemented".into(),
-        ))
-    }
-
-    fn swarm(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::SwarmParams,
-        _results: ipfs_capnp::client::SwarmResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented(
-            "swarm API not yet implemented".into(),
-        ))
-    }
-
-    fn pub_sub(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::PubSubParams,
-        _results: ipfs_capnp::client::PubSubResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented(
-            "pubsub API not yet implemented".into(),
-        ))
-    }
-
-    fn routing(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::RoutingParams,
-        _results: ipfs_capnp::client::RoutingResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented(
-            "routing API not yet implemented".into(),
-        ))
-    }
-
-    fn resolve_path(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::ResolvePathParams,
-        _results: ipfs_capnp::client::ResolvePathResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented(
-            "resolvePath not yet implemented".into(),
-        ))
-    }
-
-    fn resolve_node(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::ResolveNodeParams,
-        _results: ipfs_capnp::client::ResolveNodeResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented(
-            "resolveNode not yet implemented".into(),
-        ))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// EpochGuardedUnixFS
-// ---------------------------------------------------------------------------
-
-/// UnixFS capability backed by Kubo HTTP API.
-struct EpochGuardedUnixFS {
-    ipfs_client: ipfs::HttpClient,
-    guard: EpochGuard,
-}
-
-impl EpochGuardedUnixFS {
-    fn new(ipfs_client: ipfs::HttpClient, guard: EpochGuard) -> Self {
-        Self { ipfs_client, guard }
-    }
-}
-
-#[allow(refining_impl_trait)]
-impl ipfs_capnp::unix_f_s::Server for EpochGuardedUnixFS {
-    fn cat(
-        self: capnp::capability::Rc<Self>,
-        params: ipfs_capnp::unix_f_s::CatParams,
-        mut results: ipfs_capnp::unix_f_s::CatResults,
+        _params: ipfs_capnp::unix_f_s::GetParams,
+        _results: ipfs_capnp::unix_f_s::GetResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
-        let path = pry!(pry!(params.get()).get_path())
-            .to_string()
-            .unwrap_or_default();
-        let client = self.ipfs_client.clone();
-        Promise::from_future(async move {
-            let data = client
-                .unixfs()
-                .get(&path)
-                .await
-                .map_err(|e| capnp::Error::failed(format!("ipfs cat failed: {e}")))?;
-            results.get().set_data(&data);
-            Ok(())
-        })
+        Promise::err(capnp::Error::unimplemented(
+            "private get not yet implemented".into(),
+        ))
     }
 
     fn ls(
         self: capnp::capability::Rc<Self>,
-        params: ipfs_capnp::unix_f_s::LsParams,
-        mut results: ipfs_capnp::unix_f_s::LsResults,
+        _params: ipfs_capnp::unix_f_s::LsParams,
+        _results: ipfs_capnp::unix_f_s::LsResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
-        let path = pry!(pry!(params.get()).get_path())
-            .to_string()
-            .unwrap_or_default();
-        let client = self.ipfs_client.clone();
-        Promise::from_future(async move {
-            let entries = client
-                .ls(&path)
-                .await
-                .map_err(|e| capnp::Error::failed(format!("ipfs ls failed: {e}")))?;
-            let mut list = results.get().init_entries(entries.len() as u32);
-            for (i, entry) in entries.iter().enumerate() {
-                let mut builder = list.reborrow().get(i as u32);
-                builder.set_name(&entry.name);
-                builder.set_size(entry.size);
-                builder.set_type(if entry.entry_type == 1 {
-                    ipfs_capnp::unix_f_s::entry::EntryType::Directory
-                } else {
-                    ipfs_capnp::unix_f_s::entry::EntryType::File
-                });
-                builder.set_cid(entry.hash.as_bytes());
-            }
-            Ok(())
-        })
+        Promise::err(capnp::Error::unimplemented(
+            "private ls not yet implemented".into(),
+        ))
     }
 }
+
+impl ipfs_capnp::private_store::Server for EpochGuardedTempUnixFS {}
+
+// ---------------------------------------------------------------------------
+// EpochGuardedPublicUnixFS — public (Kubo-backed) store (stub)
+// ---------------------------------------------------------------------------
+
+/// Public UnixFS capability backed by the Kubo HTTP API.
+///
+/// Content written here is content-addressed, pinned, and network-retrievable.
+/// Scoped per-agent to `/ww/<peer-id>/public/` on the shared Kubo node.
+struct EpochGuardedPublicUnixFS {
+    guard: EpochGuard,
+}
+
+impl EpochGuardedPublicUnixFS {
+    fn new(guard: EpochGuard) -> Self {
+        Self { guard }
+    }
+}
+
+#[allow(refining_impl_trait)]
+impl ipfs_capnp::unix_f_s::Server for EpochGuardedPublicUnixFS {
+    fn add(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::unix_f_s::AddParams,
+        _results: ipfs_capnp::unix_f_s::AddResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.guard.check());
+        Promise::err(capnp::Error::unimplemented(
+            "public add not yet implemented".into(),
+        ))
+    }
+
+    fn get(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::unix_f_s::GetParams,
+        _results: ipfs_capnp::unix_f_s::GetResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.guard.check());
+        Promise::err(capnp::Error::unimplemented(
+            "public get not yet implemented".into(),
+        ))
+    }
+
+    fn ls(
+        self: capnp::capability::Rc<Self>,
+        _params: ipfs_capnp::unix_f_s::LsParams,
+        _results: ipfs_capnp::unix_f_s::LsResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.guard.check());
+        Promise::err(capnp::Error::unimplemented(
+            "public ls not yet implemented".into(),
+        ))
+    }
+}
+
+impl ipfs_capnp::public_store::Server for EpochGuardedPublicUnixFS {}
 
 // ---------------------------------------------------------------------------
 // build_membrane_rpc — bootstrap Membrane instead of Host
@@ -422,7 +331,8 @@ pub type GuestMembrane = membrane::stem_capnp::membrane::Client;
 /// Build an RPC system that bootstraps a `Membrane` instead of a bare `Host`.
 ///
 /// The membrane provides epoch-scoped sessions containing `Host`, `Executor`,
-/// `IPFS Client`, and (when `signing_key` is `Some`) a host-side node identity signer.
+/// `PrivateStore`, `PublicStore`, and (when `signing_key` is `Some`) a host-side
+/// node identity signer.
 ///
 /// When `signing_key` is `Some`:
 /// - The `VerifyingKey` is stored in `MembraneServer` for graft challenge-response.
@@ -441,6 +351,7 @@ pub fn build_membrane_rpc<R, W>(
     wasm_debug: bool,
     epoch_rx: watch::Receiver<Epoch>,
     ipfs_client: ipfs::HttpClient,
+    peer_id: Vec<u8>,
     signing_key: Option<Arc<SigningKey>>,
 ) -> (RpcSystem<Side>, GuestMembrane)
 where
@@ -452,6 +363,7 @@ where
         swarm_cmd_tx,
         wasm_debug,
         ipfs_client,
+        peer_id,
         signing_key,
     );
     // The local kernel is a trusted process — no challenge-response auth needed.

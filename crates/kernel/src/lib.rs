@@ -58,7 +58,12 @@ fn init_logging() {
 struct ShellCtx {
     host: system_capnp::host::Client,
     executor: system_capnp::executor::Client,
-    ipfs: ipfs_capnp::client::Client,
+    /// Ephemeral process-local storage (UnixFS over in-memory map).
+    /// Upcast from `private_store::Client` to `unix_f_s::Client` for method access.
+    private: ipfs_capnp::unix_f_s::Client,
+    /// Content-addressed IPFS storage (UnixFS over blockstore).
+    /// Upcast from `public_store::Client` to `unix_f_s::Client` for method access.
+    public: ipfs_capnp::unix_f_s::Client,
     /// Host-side node identity hub for this session.
     ///
     /// Call `identity.signer("ww-membrane-graft")` (or another known domain) to
@@ -67,6 +72,15 @@ struct ShellCtx {
     #[allow(dead_code)]
     identity: stem_capnp::identity::Client,
     cwd: String,
+}
+
+/// Upcast a PrivateStore or PublicStore client to the base UnixFS client.
+///
+/// Cap'n Proto `extends` generates distinct Rust client types, but the child
+/// client doesn't inherit request methods. We upcast via the inner capability
+/// hook to get access to `add_request`, `get_request`, `ls_request`.
+fn upcast_to_unixfs(client: capnp::capability::Client) -> ipfs_capnp::unix_f_s::Client {
+    capnp::capability::FromClientHook::new(client.hook)
 }
 
 async fn eval(expr: &Val, ctx: &mut ShellCtx) -> Result<Val, String> {
@@ -89,7 +103,8 @@ async fn eval(expr: &Val, ctx: &mut ShellCtx) -> Result<Val, String> {
             match resolved_cap {
                 "host" => eval_host(args, ctx).await,
                 "executor" => eval_executor(args, ctx).await,
-                "ipfs" => eval_ipfs(args, ctx).await,
+                "private" => eval_store(args, &ctx.private).await,
+                "public" => eval_store(args, &ctx.public).await,
                 "session" => {
                     // (session <cap> <method> [args...]) — session-qualified dispatch
                     let cap = match args.first() {
@@ -99,7 +114,8 @@ async fn eval(expr: &Val, ctx: &mut ShellCtx) -> Result<Val, String> {
                     match cap {
                         "host" => eval_host(&args[1..], ctx).await,
                         "executor" => eval_executor(&args[1..], ctx).await,
-                        "ipfs" => eval_ipfs(&args[1..], ctx).await,
+                        "private" => eval_store(&args[1..], &ctx.private).await,
+                        "public" => eval_store(&args[1..], &ctx.public).await,
                         _ => Err(format!("unknown capability: {cap}")),
                     }
                 }
@@ -248,61 +264,38 @@ async fn eval_executor(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
     }
 }
 
-async fn eval_ipfs(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
+/// Dispatch a store command (private or public) via the shared UnixFS interface.
+async fn eval_store(args: &[Val], store: &ipfs_capnp::unix_f_s::Client) -> Result<Val, String> {
     let method = match args.first() {
         Some(Val::Sym(s)) => s.as_str(),
-        _ => return Err("(ipfs <method> [args...])".into()),
+        _ => return Err("(<store> <method> [args...])".into()),
     };
     match method {
-        "cat" => {
+        "add" => {
+            // TODO: implement Node construction from shell syntax
+            Err("add: not yet implemented in shell (use programmatic API)".into())
+        }
+        "get" => {
             let path = match args.get(1) {
                 Some(Val::Str(s)) => s.clone(),
-                _ => return Err("(ipfs cat \"<path>\")".into()),
+                _ => return Err("(<store> get \"<path>\")".into()),
             };
-            let unixfs_resp = ctx
-                .ipfs
-                .unixfs_request()
-                .send()
-                .promise
-                .await
-                .map_err(|e| e.to_string())?;
-            let unixfs = unixfs_resp
-                .get()
-                .map_err(|e| e.to_string())?
-                .get_api()
-                .map_err(|e| e.to_string())?;
-            let mut req = unixfs.cat_request();
+            let mut req = store.get_request();
             req.get().set_path(&path);
             let resp = req.send().promise.await.map_err(|e| e.to_string())?;
-            let data = resp
+            let node = resp
                 .get()
                 .map_err(|e| e.to_string())?
-                .get_data()
+                .get_node()
                 .map_err(|e| e.to_string())?;
-            // Try as UTF-8, fall back to hex.
-            match std::str::from_utf8(data) {
-                Ok(s) => Ok(Val::Str(s.to_string())),
-                Err(_) => Ok(Val::Str(format!("<{} bytes>", data.len()))),
-            }
+            format_node(node)
         }
         "ls" => {
             let path = match args.get(1) {
                 Some(Val::Str(s)) => s.clone(),
-                _ => return Err("(ipfs ls \"<path>\")".into()),
+                _ => return Err("(<store> ls \"<path>\")".into()),
             };
-            let unixfs_resp = ctx
-                .ipfs
-                .unixfs_request()
-                .send()
-                .promise
-                .await
-                .map_err(|e| e.to_string())?;
-            let unixfs = unixfs_resp
-                .get()
-                .map_err(|e| e.to_string())?
-                .get_api()
-                .map_err(|e| e.to_string())?;
-            let mut req = unixfs.ls_request();
+            let mut req = store.ls_request();
             req.get().set_path(&path);
             let resp = req.send().promise.await.map_err(|e| e.to_string())?;
             let entries = resp
@@ -310,21 +303,51 @@ async fn eval_ipfs(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
                 .map_err(|e| e.to_string())?
                 .get_entries()
                 .map_err(|e| e.to_string())?;
-            let items: Vec<Val> = (0..entries.len())
+            format_dir_entries(entries)
+        }
+        _ => Err(format!("unknown store method: {method}")),
+    }
+}
+
+fn format_node(node: ipfs_capnp::unix_f_s::node::Reader<'_>) -> Result<Val, String> {
+    use ipfs_capnp::unix_f_s::node::Which;
+    match node.which().map_err(|e| e.to_string())? {
+        Which::File(data) => {
+            let data = data.map_err(|e| e.to_string())?;
+            match std::str::from_utf8(data) {
+                Ok(s) => Ok(Val::Str(s.to_string())),
+                Err(_) => Ok(Val::Str(format!("<{} bytes>", data.len()))),
+            }
+        }
+        Which::Directory(links) => {
+            let links = links.map_err(|e| e.to_string())?;
+            let items: Vec<Val> = (0..links.len())
                 .filter_map(|i| {
-                    let e = entries.get(i);
-                    let name = e.get_name().ok()?.to_str().ok()?;
-                    let size = e.get_size();
-                    Some(Val::List(vec![
-                        Val::Str(name.to_string()),
-                        Val::Sym(size.to_string()),
-                    ]))
+                    let link = links.get(i);
+                    let name = link.get_name().ok()?.to_str().ok()?;
+                    Some(Val::Str(name.to_string()))
                 })
                 .collect();
             Ok(Val::List(items))
         }
-        _ => Err(format!("unknown ipfs method: {method}")),
     }
+}
+
+fn format_dir_entries(
+    entries: capnp::struct_list::Reader<'_, ipfs_capnp::unix_f_s::dir_entry::Owned>,
+) -> Result<Val, String> {
+    let items: Vec<Val> = (0..entries.len())
+        .filter_map(|i| {
+            let e = entries.get(i);
+            let name = e.get_name().ok()?.to_str().ok()?;
+            let size = e.get_size();
+            Some(Val::List(vec![
+                Val::Str(name.to_string()),
+                Val::Sym(size.to_string()),
+            ]))
+        })
+        .collect();
+    Ok(Val::List(items))
 }
 
 async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
@@ -420,8 +443,13 @@ Capabilities:
 
   (executor echo \"<msg>\")        Diagnostic echo
 
-  (ipfs cat \"<path>\")            Fetch IPFS content
-  (ipfs ls \"<path>\")             List IPFS directory
+  (private get \"<path>\")         Get from private store
+  (private ls \"<path>\")          List private store directory
+  (private add ...)              Add to private store
+
+  (public get \"<path>\")          Get from public store
+  (public ls \"<path>\")           List public store directory
+  (public add ...)               Add to public store
 
 Built-ins:
   (cd \"<path>\")                  Change working directory
@@ -553,7 +581,8 @@ fn run_impl() {
         let ctx = ShellCtx {
             host: results.get_host()?,
             executor: results.get_executor()?,
-            ipfs: results.get_ipfs()?,
+            private: upcast_to_unixfs(results.get_private()?.client),
+            public: upcast_to_unixfs(results.get_public()?.client),
             identity: results.get_identity()?,
             cwd: "/".to_string(),
         };

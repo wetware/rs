@@ -823,6 +823,7 @@ pub extern "C" fn _start() {
             "Booting environment"
         );
 
+        let peer_id = network_state.snapshot().await.local_peer_id.clone();
         let mut builder = CellBuilder::new(image_path)
             .with_loader(Box::new(loader))
             .with_network_state(network_state)
@@ -830,6 +831,7 @@ pub extern "C" fn _start() {
             .with_wasm_debug(wasm_debug)
             .with_image_root(merged.path().into())
             .with_ipfs_client(ipfs_client.clone())
+            .with_peer_id(peer_id)
             .with_signing_key(std::sync::Arc::new(sk));
 
         // If we have an epoch channel, give the receiver to the cell

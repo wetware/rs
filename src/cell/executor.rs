@@ -69,6 +69,7 @@ pub struct CellBuilder {
     image_root: Option<PathBuf>,
     initial_epoch: Option<Epoch>,
     ipfs_client: Option<crate::ipfs::HttpClient>,
+    peer_id: Option<Vec<u8>>,
     epoch_rx: Option<watch::Receiver<Epoch>>,
     signing_key: Option<Arc<SigningKey>>,
 }
@@ -91,6 +92,7 @@ impl CellBuilder {
             image_root: None,
             initial_epoch: None,
             ipfs_client: None,
+            peer_id: None,
             epoch_rx: None,
             signing_key: None,
         }
@@ -168,9 +170,15 @@ impl CellBuilder {
         self
     }
 
-    /// Set the IPFS HTTP client for the CoreAPI capability.
+    /// Set the IPFS HTTP client for the public store capability.
     pub fn with_ipfs_client(mut self, client: crate::ipfs::HttpClient) -> Self {
         self.ipfs_client = Some(client);
+        self
+    }
+
+    /// Set the peer ID for scoping the public store namespace.
+    pub fn with_peer_id(mut self, peer_id: Vec<u8>) -> Self {
+        self.peer_id = Some(peer_id);
         self
     }
 
@@ -207,6 +215,7 @@ impl CellBuilder {
             ipfs_client: self
                 .ipfs_client
                 .unwrap_or_else(|| crate::ipfs::HttpClient::new("http://localhost:5001".into())),
+            peer_id: self.peer_id.unwrap_or_default(),
             epoch_rx: self.epoch_rx,
             signing_key: self.signing_key,
         }
@@ -233,6 +242,7 @@ pub struct Cell {
     pub image_root: Option<PathBuf>,
     pub initial_epoch: Option<Epoch>,
     pub ipfs_client: crate::ipfs::HttpClient,
+    pub peer_id: Vec<u8>,
     pub epoch_rx: Option<watch::Receiver<Epoch>>,
     pub signing_key: Option<Arc<SigningKey>>,
 }
@@ -286,6 +296,7 @@ impl Cell {
             image_root,
             initial_epoch: _,
             ipfs_client: _,
+            peer_id: _,
             epoch_rx: _,
             signing_key: _,
         } = self;
@@ -350,6 +361,7 @@ impl Cell {
         let network_state = self.network_state.clone();
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
         let ipfs_client = self.ipfs_client.clone();
+        let peer_id = self.peer_id.clone();
         let signing_key = self.signing_key.take();
         let pre_epoch_rx = self.epoch_rx.take();
         let initial_epoch = self.initial_epoch.clone().unwrap_or(Epoch {
@@ -380,6 +392,7 @@ impl Cell {
             wasm_debug,
             epoch_rx,
             ipfs_client,
+            peer_id,
             signing_key,
         );
 
