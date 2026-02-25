@@ -973,6 +973,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "auth"
+version = "0.1.0"
+
+[[package]]
 name = "auto_impl"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3351,7 +3355,7 @@ dependencies = [
  "glia",
  "hex",
  "log",
- "runtime",
+ "system",
  "wasip2",
 ]
 
@@ -5139,17 +5143,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48fd7bd8a6377e15ad9d42a8ec25371b94ddc67abe7c8b9127bec79bebaaae18"
 
 [[package]]
-name = "runtime"
-version = "0.1.0"
-dependencies = [
- "capnp",
- "capnp-rpc",
- "futures",
- "wasip2",
- "wit-bindgen 0.41.0",
-]
-
-[[package]]
 name = "rustc-demangle"
 version = "0.1.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5523,7 +5516,7 @@ version = "0.1.0"
 dependencies = [
  "capnp",
  "capnp-rpc",
- "runtime",
+ "system",
 ]
 
 [[package]]
@@ -5752,6 +5745,13 @@ dependencies = [
 [[package]]
 name = "system"
 version = "0.1.0"
+dependencies = [
+ "capnp",
+ "capnp-rpc",
+ "futures",
+ "wasip2",
+ "wit-bindgen 0.41.0",
+]
 
 [[package]]
 name = "system-configuration"
@@ -7618,6 +7618,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "atom",
+ "auth",
  "base58",
  "base64 0.22.1",
  "bytes",
@@ -7645,7 +7646,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha3",
- "system",
  "tar",
  "tempfile",
  "tokio",

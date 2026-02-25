@@ -545,7 +545,7 @@ impl Guest for Kernel {
 fn run_impl() {
     init_logging();
 
-    runtime::run(|membrane: Membrane| async move {
+    system::run(|membrane: Membrane| async move {
         let graft_resp = membrane.graft_request().send().promise.await?;
         let session = graft_resp.get()?.get_session()?;
 
