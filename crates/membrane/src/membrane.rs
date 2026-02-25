@@ -2,11 +2,11 @@
 
 use crate::epoch::{Epoch, EpochGuard};
 use crate::stem_capnp;
+use auth::SigningDomain;
 use capnp::capability::Promise;
 use capnp::Error;
 use capnp_rpc::{new_client, pry};
 use k256::ecdsa::VerifyingKey;
-use auth::SigningDomain;
 use tokio::sync::watch;
 
 /// Callback trait for populating the graft response with capabilities.

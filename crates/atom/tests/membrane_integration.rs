@@ -5,13 +5,13 @@ mod common;
 
 use atom::stem_capnp;
 use atom::{AtomIndexer, Epoch, IndexerConfig, MembraneServer};
+use auth::SigningDomain;
 use capnp_rpc::new_client;
 use common::{deploy_atom, set_head, spawn_anvil, StubSessionBuilder};
 use k256::ecdsa::SigningKey;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use auth::SigningDomain;
 use tokio::sync::watch;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
