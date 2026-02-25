@@ -79,6 +79,28 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y capnproto
 
+    - name: Install Foundry
+      uses: foundry-rs/foundry-toolchain@v1
+
+    - name: Install IPFS (Kubo)
+      run: |
+        KUBO_VERSION="v0.33.0"
+        wget -qO- "https://dist.ipfs.tech/kubo/${KUBO_VERSION}/kubo_${KUBO_VERSION}_linux-amd64.tar.gz" | tar xz
+        sudo mv kubo/ipfs /usr/local/bin/
+        rm -rf kubo
+
+    - name: Start IPFS daemon
+      run: |
+        ipfs init --profile=test
+        if [ -n "$IPFS_PEER_ADDR" ]; then
+          ipfs bootstrap rm --all
+          ipfs bootstrap add "$IPFS_PEER_ADDR"
+        fi
+        ipfs daemon --enable-gc &
+        for i in $(seq 1 30); do ipfs id >/dev/null 2>&1 && break; sleep 0.5; done
+      env:
+        IPFS_PEER_ADDR: ${{ secrets.IPFS_PEER_ADDR }}
+
     - name: Cache dependencies
       uses: actions/cache@v3
       with:
