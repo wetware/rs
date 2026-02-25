@@ -28,4 +28,4 @@ pub mod epoch;
 pub mod membrane;
 
 pub use epoch::{Epoch, EpochGuard};
-pub use membrane::{membrane_client, MembraneServer, NoExtension, SessionBuilder};
+pub use membrane::{membrane_client, GraftBuilder, MembraneServer, NoExtension};

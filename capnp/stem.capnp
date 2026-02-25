@@ -1,4 +1,4 @@
-# Stem schema: Epoch, Signer, Identity, Session, and Membrane definitions.
+# Stem schema: Epoch, Signer, Identity, and Membrane definitions.
 # Compiled by the membrane crate (crates/membrane/build.rs).
 # The host re-exports generated types via `pub use membrane::stem_capnp`.
 
@@ -20,15 +20,12 @@ interface Identity {
   signer @0 (domain :Text) -> (signer :Signer);
 }
 
-struct Session {
-  identity @0 :Identity;                        # Host-side identity hub: maps signing domains → Signers.
-  host     @1 :import "system.capnp".Host;      # Swarm-level operations (id, addrs, peers, connect).
-  executor @2 :import "system.capnp".Executor;  # WASM execution (runBytes, echo).
-  ipfs     @3 :import "ipfs.capnp".Client;      # IPFS CoreAPI (unixfs, block, dag, ...).
-}
-
-
 interface Membrane {
-  graft @0 (signer :Signer) -> (session :Session);
-  # Graft a signer to the membrane, establishing an epoch-scoped session.
+  graft @0 (signer :Signer) -> (
+    identity :Identity,                        # Host-side identity hub: maps signing domains → Signers.
+    host     :import "system.capnp".Host,      # Swarm-level operations (id, addrs, peers, connect).
+    executor :import "system.capnp".Executor,  # WASM execution (runBytes, echo).
+    ipfs     :import "ipfs.capnp".Client       # IPFS CoreAPI (unixfs, block, dag, ...).
+  );
+  # Graft a signer to the membrane, returning epoch-scoped capabilities.
 }

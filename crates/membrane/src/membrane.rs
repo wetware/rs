@@ -1,4 +1,4 @@
-//! Membrane server: issues epoch-scoped sessions via `graft()`.
+//! Membrane server: issues epoch-scoped capabilities via `graft()`.
 
 use crate::epoch::{Epoch, EpochGuard};
 use crate::stem_capnp;
@@ -9,29 +9,29 @@ use k256::ecdsa::VerifyingKey;
 use system::SigningDomain;
 use tokio::sync::watch;
 
-/// Callback trait for filling the concrete Session during graft.
+/// Callback trait for populating the graft response with capabilities.
 ///
-/// Implementors receive the EpochGuard and a builder for the session,
+/// Implementors receive the EpochGuard and a builder for the graft results,
 /// allowing platform-specific capabilities (Host, Executor, IPFS) to be
-/// injected into the session fields.
-pub trait SessionBuilder: 'static {
+/// injected into the response fields.
+pub trait GraftBuilder: 'static {
     fn build(
         &self,
         guard: &EpochGuard,
-        builder: stem_capnp::session::Builder<'_>,
+        builder: stem_capnp::membrane::graft_results::Builder<'_>,
     ) -> Result<(), Error>;
 }
 
-/// No-op session builder: leaves all session fields empty.
+/// No-op graft builder: leaves all result fields empty.
 ///
 /// Useful for testing or guests that don't need platform capabilities.
 pub struct NoExtension;
 
-impl SessionBuilder for NoExtension {
+impl GraftBuilder for NoExtension {
     fn build(
         &self,
         _guard: &EpochGuard,
-        _builder: stem_capnp::session::Builder<'_>,
+        _builder: stem_capnp::membrane::graft_results::Builder<'_>,
     ) -> Result<(), Error> {
         Ok(())
     }
@@ -39,21 +39,21 @@ impl SessionBuilder for NoExtension {
 
 /// Membrane server: stable across epochs, backed by a watch receiver for the adopted epoch.
 ///
-/// The `session_builder` callback fills the session fields when a session is issued.
+/// The `graft_builder` callback fills the result fields when `graft()` is called.
 /// When `verifying_key` is set, `graft()` performs challenge-response authentication:
 /// the caller's signer is challenged with a random nonce, and the returned signature
-/// is verified against the configured public key before issuing a session.
-pub struct MembraneServer<F: SessionBuilder> {
+/// is verified against the configured public key before issuing capabilities.
+pub struct MembraneServer<F: GraftBuilder> {
     receiver: watch::Receiver<Epoch>,
-    session_builder: F,
+    graft_builder: F,
     verifying_key: Option<VerifyingKey>,
 }
 
-impl<F: SessionBuilder> MembraneServer<F> {
-    pub fn new(receiver: watch::Receiver<Epoch>, session_builder: F) -> Self {
+impl<F: GraftBuilder> MembraneServer<F> {
+    pub fn new(receiver: watch::Receiver<Epoch>, graft_builder: F) -> Self {
         Self {
             receiver,
-            session_builder,
+            graft_builder,
             verifying_key: None,
         }
     }
@@ -68,20 +68,19 @@ impl<F: SessionBuilder> MembraneServer<F> {
         self.receiver.borrow().clone()
     }
 
-    /// Build an epoch-guarded session into the results builder.
-    fn build_session(&self, results: &mut stem_capnp::membrane::GraftResults) -> Result<(), Error> {
+    /// Build epoch-guarded capabilities into the graft results.
+    fn build_graft(&self, results: &mut stem_capnp::membrane::GraftResults) -> Result<(), Error> {
         let epoch = self.get_current_epoch();
         let guard = EpochGuard {
             issued_seq: epoch.seq,
             receiver: self.receiver.clone(),
         };
-        self.session_builder
-            .build(&guard, results.get().init_session())
+        self.graft_builder.build(&guard, results.get())
     }
 }
 
 #[allow(refining_impl_trait)]
-impl<F: SessionBuilder> stem_capnp::membrane::Server for MembraneServer<F> {
+impl<F: GraftBuilder> stem_capnp::membrane::Server for MembraneServer<F> {
     fn graft(
         self: capnp::capability::Rc<Self>,
         params: stem_capnp::membrane::GraftParams,
@@ -96,7 +95,7 @@ impl<F: SessionBuilder> stem_capnp::membrane::Server for MembraneServer<F> {
             Some(vk) => vk,
             None => {
                 // No verifying key configured — skip authentication.
-                if let Err(e) = self.build_session(&mut results) {
+                if let Err(e) = self.build_graft(&mut results) {
                     return Promise::err(e);
                 }
                 return Promise::ok(());
@@ -121,16 +120,16 @@ impl<F: SessionBuilder> stem_capnp::membrane::Server for MembraneServer<F> {
                 Error::failed("graft auth failed: signature verification failed".into())
             })?;
 
-            self.build_session(&mut results)
+            self.build_graft(&mut results)
         })
     }
 }
 
 /// Builds a Membrane capability client from a watch receiver (for use over capnp-rpc).
 ///
-/// Uses `NoExtension` — all session fields are left empty (null capabilities).
-/// For platform-specific sessions, construct
-/// `MembraneServer::new(receiver, your_session_builder)` directly.
+/// Uses `NoExtension` — all result fields are left empty (null capabilities).
+/// For platform-specific graft responses, construct
+/// `MembraneServer::new(receiver, your_graft_builder)` directly.
 pub fn membrane_client(receiver: watch::Receiver<Epoch>) -> stem_capnp::membrane::Client {
     new_client(MembraneServer::new(receiver, NoExtension))
 }

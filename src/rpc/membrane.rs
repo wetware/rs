@@ -1,12 +1,13 @@
 //! Membrane-based RPC bootstrap: epoch-scoped Host + Executor + node identity capabilities.
 //!
-//! Instead of bootstrapping a bare `Host`, the membrane provides an epoch-scoped
-//! `Session` containing `Host`, `Executor`, `IPFS Client`, and a node `identity` signer.
-//! All capabilities fail with `staleEpoch` when the epoch advances.
+//! Instead of bootstrapping a bare `Host`, the membrane's `graft()` returns
+//! epoch-scoped `Host`, `Executor`, `IPFS Client`, and a node `identity` signer
+//! directly as result fields. All capabilities fail with `staleEpoch` when the
+//! epoch advances.
 //!
 //! The `membrane` crate owns the Membrane server and epoch machinery.
-//! This module provides the `SessionBuilder` impl that injects wetware-specific
-//! capabilities into the session, plus the epoch-guarded IPFS and identity wrappers.
+//! This module provides the `GraftBuilder` impl that injects wetware-specific
+//! capabilities into the graft response, plus the epoch-guarded IPFS and identity wrappers.
 
 use std::sync::Arc;
 
@@ -18,7 +19,7 @@ use capnp_rpc::RpcSystem;
 use k256::ecdsa::SigningKey;
 use libp2p::identity::Keypair;
 use libp2p_core::SignedEnvelope;
-use membrane::{stem_capnp, Epoch, EpochGuard, MembraneServer, SessionBuilder};
+use membrane::{stem_capnp, Epoch, EpochGuard, GraftBuilder, MembraneServer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -126,7 +127,7 @@ impl stem_capnp::signer::Server for EpochGuardedMembraneSigner {
 // HostSessionBuilder — SessionBuilder for the concrete stem Session
 // ---------------------------------------------------------------------------
 
-/// Fills the Session with epoch-guarded Host, Executor, IPFS Client, and node identity.
+/// Fills the graft response with epoch-guarded Host, Executor, IPFS Client, and node identity.
 pub struct HostSessionBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
@@ -153,11 +154,11 @@ impl HostSessionBuilder {
     }
 }
 
-impl SessionBuilder for HostSessionBuilder {
+impl GraftBuilder for HostSessionBuilder {
     fn build(
         &self,
         guard: &EpochGuard,
-        mut builder: stem_capnp::session::Builder<'_>,
+        mut builder: stem_capnp::membrane::graft_results::Builder<'_>,
     ) -> Result<(), capnp::Error> {
         let host: system_capnp::host::Client = capnp_rpc::new_client(super::HostImpl::new(
             self.network_state.clone(),
