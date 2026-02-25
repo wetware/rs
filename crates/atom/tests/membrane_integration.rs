@@ -239,11 +239,7 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
         .expect("echo results")
         .get_response()
         .expect("response");
-    assert_eq!(
-        response3.to_str().unwrap(),
-        "pong",
-        "re-graft should be ok"
-    );
+    assert_eq!(response3.to_str().unwrap(), "pong", "re-graft should be ok");
 }
 
 /// Graft with wrong key should fail authentication.
