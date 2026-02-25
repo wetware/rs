@@ -124,11 +124,11 @@ impl stem_capnp::signer::Server for EpochGuardedMembraneSigner {
 }
 
 // ---------------------------------------------------------------------------
-// HostSessionBuilder — SessionBuilder for the concrete stem Session
+// HostGraftBuilder — GraftBuilder for the concrete stem graft response
 // ---------------------------------------------------------------------------
 
 /// Fills the graft response with epoch-guarded Host, Executor, IPFS Client, and node identity.
-pub struct HostSessionBuilder {
+pub struct HostGraftBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
@@ -136,7 +136,7 @@ pub struct HostSessionBuilder {
     signing_key: Option<Arc<SigningKey>>,
 }
 
-impl HostSessionBuilder {
+impl HostGraftBuilder {
     pub fn new(
         network_state: NetworkState,
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
@@ -154,7 +154,7 @@ impl HostSessionBuilder {
     }
 }
 
-impl GraftBuilder for HostSessionBuilder {
+impl GraftBuilder for HostGraftBuilder {
     fn build(
         &self,
         guard: &EpochGuard,
@@ -448,7 +448,7 @@ where
     W: AsyncWrite + Unpin + 'static,
 {
     let verifying_key = signing_key.as_ref().map(|sk| *sk.verifying_key());
-    let sess_builder = HostSessionBuilder::new(
+    let sess_builder = HostGraftBuilder::new(
         network_state,
         swarm_cmd_tx,
         wasm_debug,

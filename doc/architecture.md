@@ -12,8 +12,8 @@ are explicitly granted over Cap'n Proto RPC, and agents coordinate through
 on-chain epoch boundaries.
 
 `ww run` resolves one or more image layers into a unified FHS root, loads
-`boot/main.wasm` from the result, and spawns the agent with a `Session`
-capability served over in-memory Cap'n Proto RPC.
+`boot/main.wasm` from the result, and spawns the agent with epoch-scoped
+capabilities served over in-memory Cap'n Proto RPC.
 
 The host is deliberately simple. It merges layers, loads a binary, and
 hands it capabilities. Everything else — peer discovery, service management,
@@ -31,7 +31,7 @@ allows. A Wetware agent has none of that. Its WASI sandbox provides stdio
 (bound to the host terminal) and a data stream (bound to the RPC connection).
 That's it. The agent's only connection to the outside world is the `Membrane`
 the host hands it at boot — and it must authenticate via `graft()` to obtain
-a `Session` with actual capabilities.
+actual capabilities.
 
 ```
 Traditional process:        Wetware guest:
@@ -40,7 +40,7 @@ Traditional process:        Wetware guest:
   network      -> yes         network      -> no
   syscalls     -> yes         syscalls     -> WASI subset only
   ambient auth -> yes         ambient auth -> none
-                              Session      -> the only authority (Host + Executor + IPFS)
+                              graft caps   -> the only authority (Host + Executor + IPFS)
 ```
 
 This is the foundation that makes untrusted code execution safe. An agent can
@@ -59,7 +59,7 @@ only do what the capabilities it holds allow. If you don't hand it the
 │                                                     │
 │  ┌───────────────────────────────────────────────┐  │
 │  │  kernel (pid0)                                │  │
-│  │  - grafts onto Membrane, obtains Session      │  │
+│  │  - grafts onto Membrane, obtains capabilities  │  │
 │  │  - interprets bin/, svc/, etc/                │  │
 │  │  - connects to bootstrap peers                │  │
 │  │  - spawns services                            │  │
@@ -80,13 +80,13 @@ Proto RPC. It knows nothing about the rest of the image layout — `bin/`,
 
 **pid0** (the kernel agent loaded from `boot/main.wasm`) is init. It
 receives a `Membrane`, authenticates via `graft()`, and uses the resulting
-`Session` to interpret the image layout: look up executables from `bin/`,
+capabilities to interpret the image layout: look up executables from `bin/`,
 spawn services from `svc/`, apply configuration from `etc/`. pid0 is where
 policy lives.
 
 **Children** are agents spawned by pid0 (or by other children) via
-`session.executor.runBytes(wasm)`. Each child gets its own `Session`
-capability over its own RPC connection. pid0 can scope these capabilities,
+`executor.runBytes(wasm)`. Each child gets its own set of capabilities
+over its own RPC connection. pid0 can scope these capabilities,
 giving a child a restricted view of the host.
 
 ## Capability flow
@@ -94,33 +94,29 @@ giving a child a restricted view of the host.
 ### Inbound: host to guest
 
 The host creates a Membrane and bootstraps it to pid0 over in-memory
-Cap'n Proto RPC. pid0 calls `membrane.graft()` to obtain a `Session`
-containing three capabilities:
+Cap'n Proto RPC. pid0 calls `membrane.graft()` to obtain three
+epoch-guarded capabilities as flat return fields:
 
-```capnp
-struct Session {
-  host     @0 :Peer.Host;       # network identity and peer management
-  executor @1 :Peer.Executor;   # child process execution, diagnostic echo
-  ipfs     @2 :Ipfs.Client;     # IPFS CoreAPI (UnixFS, Block, Dag, ...)
-}
-```
+- **host** (`Peer.Host`) — network identity and peer management
+- **executor** (`Peer.Executor`) — child process execution, diagnostic echo
+- **ipfs** (`Ipfs.Client`) — IPFS CoreAPI (UnixFS, Block, Dag, ...)
 
 All capabilities are epoch-guarded: they become stale when the on-chain
-head advances. The guest must re-graft to obtain a fresh session.
+head advances. The guest must re-graft to obtain fresh capabilities.
 
 ```
 Host                             pid0
 ────                             ────
 create Membrane
-  with SessionBuilder
+  with GraftBuilder
     Host (network state)
     Executor (engine, loader)
     IPFS Client (Kubo HTTP)
-serve via RpcSystem ──────────> membrane.graft(signer) -> Session
-                                  session.host.id()
-                                  session.host.addrs()
-                                  session.executor.echo("hello")
-                                  session.ipfs.unixfs().cat("/ipfs/Qm...")
+serve via RpcSystem ──────────> membrane.graft(signer) -> (host, executor, ipfs)
+                                  host.id()
+                                  host.addrs()
+                                  executor.echo("hello")
+                                  ipfs.unixfs().cat("/ipfs/Qm...")
 ```
 
 ### Outbound: guest to host
@@ -153,17 +149,17 @@ pid0 exports Membrane ──> host             host ──> pid0 imports Membran
 ### The Membrane pattern
 
 pid0 receives a `Membrane` from the host, authenticates via `graft()`,
-and obtains a `Session` with capabilities. It can then wrap, filter, or
+and obtains capabilities. It can then wrap, filter, or
 extend those capabilities into a new **Membrane**: an object that controls
 what the outside world can do.
 
 ```
 1. Host hands pid0 a Membrane reference
-2. pid0 authenticates via graft(), receives Session capabilities
-3. pid0 wraps Session into an attenuated Membrane (adds policy, filters methods)
+2. pid0 authenticates via graft(), receives capabilities (host, executor, ipfs)
+3. pid0 wraps capabilities into an attenuated Membrane (adds policy, filters methods)
 4. pid0 exports the attenuated Membrane back to the host
 5. Host serves the attenuated Membrane on a libp2p stream protocol
-6. Remote peers interact with the attenuated Membrane, not with the raw Session
+6. Remote peers interact with the attenuated Membrane, not with raw capabilities
 ```
 
 This is how pid0 controls access. The host doesn't decide what remote
@@ -297,7 +293,7 @@ pin new CID / unpin old CID on IPFS
 epoch_tx.send(Epoch { seq, head, adopted_block })
     |
     v
-EpochGuard invalidation → stale sessions fail → guest re-grafts
+EpochGuard invalidation → stale capabilities fail → guest re-grafts
 ```
 
 The epoch channel is created before the guest spawns, so the pipeline
@@ -314,7 +310,7 @@ Stub interfaces declared for future work: Block, Dag, Name, Key, Pin,
 Object, Swarm, PubSub, Routing.
 
 The host delegates to a local Kubo HTTP client (`http://localhost:5001`).
-Cap'n Proto pipelining allows `session.ipfs().unixfs().cat(path)` to
+Cap'n Proto pipelining allows `ipfs.unixfs().cat(path)` to
 resolve in a single round-trip.
 
 ## See also
