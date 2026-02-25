@@ -853,7 +853,7 @@ pub extern "C" fn _start() {
         // handler that bootstraps each incoming connection with the
         // membrane exported by the kernel.
         let result = cell.spawn_serving(stream_control).await?;
-        tracing::info!(code = result.exit_code, "Guest exited");
+        tracing::info!(code = result.exit_code, "Kernel exited");
 
         // Hold `merged` alive until after guest exits.
         drop(merged);

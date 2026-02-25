@@ -447,7 +447,6 @@ where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
 {
-    let verifying_key = signing_key.as_ref().map(|sk| *sk.verifying_key());
     let sess_builder = HostGraftBuilder::new(
         network_state,
         swarm_cmd_tx,
@@ -455,10 +454,9 @@ where
         ipfs_client,
         signing_key,
     );
-    let mut membrane_server = MembraneServer::new(epoch_rx, sess_builder);
-    if let Some(vk) = verifying_key {
-        membrane_server = membrane_server.with_verifying_key(vk);
-    }
+    // The local kernel is a trusted process — no challenge-response auth needed.
+    // Auth applies to external peers connecting via libp2p to the guest's exported membrane.
+    let membrane_server = MembraneServer::new(epoch_rx, sess_builder);
     let membrane: GuestMembrane = capnp_rpc::new_client(membrane_server);
 
     let rpc_network = VatNetwork::new(

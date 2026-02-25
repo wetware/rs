@@ -86,11 +86,6 @@ impl<F: GraftBuilder> stem_capnp::membrane::Server for MembraneServer<F> {
         params: stem_capnp::membrane::GraftParams,
         mut results: stem_capnp::membrane::GraftResults,
     ) -> Promise<(), Error> {
-        let signer: stem_capnp::signer::Client = match pry!(params.get()).get_signer() {
-            Ok(s) => s,
-            Err(_) => return Promise::err(Error::failed("missing signer".into())),
-        };
-
         let vk = match self.verifying_key {
             Some(vk) => vk,
             None => {
@@ -100,6 +95,11 @@ impl<F: GraftBuilder> stem_capnp::membrane::Server for MembraneServer<F> {
                 }
                 return Promise::ok(());
             }
+        };
+
+        let signer: stem_capnp::signer::Client = match pry!(params.get()).get_signer() {
+            Ok(s) => s,
+            Err(_) => return Promise::err(Error::failed("missing signer".into())),
         };
 
         let nonce: u64 = rand::random();
