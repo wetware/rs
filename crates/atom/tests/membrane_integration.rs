@@ -11,7 +11,7 @@ use k256::ecdsa::SigningKey;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use system::SigningDomain;
+use auth::SigningDomain;
 use tokio::sync::watch;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;

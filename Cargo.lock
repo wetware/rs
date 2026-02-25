@@ -922,6 +922,7 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "anyhow",
+ "auth",
  "capnp",
  "capnp-rpc",
  "futures-util",
@@ -934,7 +935,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha3",
- "system",
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",
@@ -3875,12 +3875,12 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 name = "membrane"
 version = "0.1.0"
 dependencies = [
+ "auth",
  "capnp",
  "capnp-rpc",
  "capnpc",
  "k256",
  "rand 0.8.5",
- "system",
  "tokio",
 ]
 

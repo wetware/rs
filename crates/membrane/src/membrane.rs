@@ -6,7 +6,7 @@ use capnp::capability::Promise;
 use capnp::Error;
 use capnp_rpc::{new_client, pry};
 use k256::ecdsa::VerifyingKey;
-use system::SigningDomain;
+use auth::SigningDomain;
 use tokio::sync::watch;
 
 /// Callback trait for populating the graft response with capabilities.
