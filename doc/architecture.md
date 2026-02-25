@@ -315,6 +315,7 @@ resolve in a single round-trip.
 
 ## See also
 
+- [routing.md](routing.md) — DHT design, capability model, bootstrap lifecycle
 - [shell.md](shell.md) — kernel shell reference (interactive + daemon modes)
 - [cli.md](cli.md) — CLI flags and usage
 - [rpc-transport.md](rpc-transport.md) — transport plumbing, scheduling model, deadlock analysis
