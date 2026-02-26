@@ -305,7 +305,7 @@ edition = "2021"
 
 # Wetware guest runtime - adjust the path if running outside the repo
 [dependencies]
-runtime = { path = "../../std/runtime" }
+system = { path = "../../std/system" }
 capnp = "0.23.2"
 capnp-rpc = "0.23.0"
 
@@ -323,12 +323,12 @@ capnpc = "0.23.3"
         // Create src/lib.rs - WASM guest entry point
         let lib_rs_content = r#"/// Simple Wetware guest that runs an async task.
 ///
-/// The `runtime::run()` function bootstraps the RPC connection to the host,
+/// The `system::run()` function bootstraps the RPC connection to the host,
 /// then executes the provided async closure.
 ///
 /// Example with host communication:
 /// ```no_run
-/// runtime::run::<capnp::capability::Client, _, _>(|host| async move {
+/// system::run::<capnp::capability::Client, _, _>(|host| async move {
 ///     let executor = host.executor_request().send().pipeline.get_executor();
 ///     executor.echo_request().send().promise.await?;
 ///     Ok(())
@@ -337,7 +337,7 @@ capnpc = "0.23.3"
 
 #[no_mangle]
 pub extern "C" fn _start() {
-    runtime::run::<capnp::capability::Client, _, _>(|_host| async move {
+    system::run::<capnp::capability::Client, _, _>(|_host| async move {
         println!("Hello from Wetware!");
         Ok(())
     });
