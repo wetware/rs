@@ -228,11 +228,12 @@ async fn wait_for_rpc(url: &str) -> Result<()> {
     anyhow::bail!("RPC not ready");
 }
 
-/// Deploy Atom contract via forge script. Run from repo root (where src/Atom.sol lives).
-/// Parses the deployed address from the broadcast artifact (works across Foundry versions).
+/// Deploy Atom contract via forge script. The Foundry project lives at `contracts/stem/`
+/// under `repo_root`. Parses the deployed address from the broadcast artifact.
 pub fn deploy_atom(repo_root: &std::path::Path, rpc_url: &str) -> Result<String> {
+    let foundry_root = repo_root.join("contracts/stem");
     let out = Command::new("forge")
-        .current_dir(repo_root)
+        .current_dir(&foundry_root)
         .args([
             "script",
             "script/Deploy.s.sol:Deploy",
@@ -251,7 +252,7 @@ pub fn deploy_atom(repo_root: &std::path::Path, rpc_url: &str) -> Result<String>
         );
     }
     // Anvil chain id is 31337
-    let artifact_path = repo_root.join("broadcast/Deploy.s.sol/31337/run-latest.json");
+    let artifact_path = foundry_root.join("broadcast/Deploy.s.sol/31337/run-latest.json");
     let bytes = std::fs::read(&artifact_path)
         .with_context(|| format!("read broadcast artifact: {}", artifact_path.display()))?;
     let json: serde_json::Value = serde_json::from_slice(&bytes).context("parse broadcast JSON")?;
