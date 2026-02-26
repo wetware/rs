@@ -1,29 +1,44 @@
-//! Epoch-guarded Routing capability backed by Kubo HTTP API.
+//! Epoch-guarded Routing capability backed by the in-process Kademlia client.
 //!
-//! Implements `routing_capnp::routing::Server` by delegating to
-//! `ipfs::HttpClient` methods.  All methods check the epoch guard
-//! before proceeding.
+//! Implements `routing_capnp::routing::Server` by dispatching to the swarm
+//! event loop via `SwarmCommand::KadProvide` / `SwarmCommand::KadFindProviders`.
+//! All methods check the epoch guard before proceeding.
 //!
 //! Only content routing (provide/findProviders) lives here.
 //! Data transfer (add/cat) is on the IPFS UnixFS capability.
 
 use capnp::capability::Promise;
 use capnp_rpc::pry;
+use cid::Cid;
+use tokio::sync::{mpsc, oneshot};
 
 use ::membrane::EpochGuard;
 
-use crate::ipfs;
+use crate::host::SwarmCommand;
 use crate::routing_capnp;
+
+/// Convert a CID string to Kademlia record key bytes (multihash).
+///
+/// Provider records in the Amino DHT are keyed by the multihash of the CID.
+fn cid_to_kad_key(cid_str: &str) -> Result<Vec<u8>, capnp::Error> {
+    let cid: Cid = cid_str
+        .parse()
+        .map_err(|e| capnp::Error::failed(format!("invalid CID '{cid_str}': {e}")))?;
+    Ok(cid.hash().to_bytes())
+}
 
 /// Routing capability served to guests via the Membrane graft.
 pub struct RoutingImpl {
-    ipfs_client: ipfs::HttpClient,
+    swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     guard: EpochGuard,
 }
 
 impl RoutingImpl {
-    pub fn new(ipfs_client: ipfs::HttpClient, guard: EpochGuard) -> Self {
-        Self { ipfs_client, guard }
+    pub fn new(swarm_cmd_tx: mpsc::Sender<SwarmCommand>, guard: EpochGuard) -> Self {
+        Self {
+            swarm_cmd_tx,
+            guard,
+        }
     }
 }
 
@@ -35,15 +50,24 @@ impl routing_capnp::routing::Server for RoutingImpl {
         _results: routing_capnp::routing::ProvideResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
-        let key = pry!(pry!(params.get()).get_key())
+        let key_str = pry!(pry!(params.get()).get_key())
             .to_string()
             .unwrap_or_default();
-        let client = self.ipfs_client.clone();
+        let key_bytes = pry!(cid_to_kad_key(&key_str));
+        let swarm_cmd_tx = self.swarm_cmd_tx.clone();
         Promise::from_future(async move {
-            client
-                .routing_provide(&key)
+            let (reply_tx, reply_rx) = oneshot::channel();
+            swarm_cmd_tx
+                .send(SwarmCommand::KadProvide {
+                    key: key_bytes,
+                    reply: reply_tx,
+                })
                 .await
-                .map_err(|e| capnp::Error::failed(format!("routing provide failed: {e}")))?;
+                .map_err(|_| capnp::Error::failed("swarm channel closed".into()))?;
+            reply_rx
+                .await
+                .map_err(|_| capnp::Error::failed("swarm reply dropped".into()))?
+                .map_err(|e| capnp::Error::failed(format!("kad provide failed: {e}")))?;
             Ok(())
         })
     }
@@ -55,26 +79,28 @@ impl routing_capnp::routing::Server for RoutingImpl {
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
         let reader = pry!(params.get());
-        let key = pry!(reader.get_key()).to_string().unwrap_or_default();
-        let count = reader.get_count();
+        let key_str = pry!(reader.get_key()).to_string().unwrap_or_default();
         let sink = pry!(reader.get_sink());
-        let client = self.ipfs_client.clone();
+        let key_bytes = pry!(cid_to_kad_key(&key_str));
+        let swarm_cmd_tx = self.swarm_cmd_tx.clone();
         Promise::from_future(async move {
-            let providers = client
-                .routing_find_providers(&key, count)
+            let (provider_tx, mut provider_rx) = mpsc::unbounded_channel();
+            swarm_cmd_tx
+                .send(SwarmCommand::KadFindProviders {
+                    key: key_bytes,
+                    reply: provider_tx,
+                })
                 .await
-                .map_err(|e| capnp::Error::failed(format!("routing findProviders failed: {e}")))?;
+                .map_err(|_| capnp::Error::failed("swarm channel closed".into()))?;
 
-            // Stream each provider into the caller's sink.
-            for provider in &providers {
+            // Stream each discovered provider into the caller's sink.
+            while let Some(peer_info) = provider_rx.recv().await {
                 let mut req = sink.provider_request();
                 let mut info = req.get().get_info()?;
-                info.set_peer_id(provider.id.as_bytes());
-                if let Some(ref addrs) = provider.addrs {
-                    let mut addr_list = info.init_addrs(addrs.len() as u32);
-                    for (j, addr) in addrs.iter().enumerate() {
-                        addr_list.set(j as u32, addr.as_bytes());
-                    }
+                info.set_peer_id(&peer_info.peer_id);
+                let mut addr_list = info.init_addrs(peer_info.addrs.len() as u32);
+                for (j, addr) in peer_info.addrs.iter().enumerate() {
+                    addr_list.set(j as u32, addr);
                 }
                 // -> stream: awaits until flow control allows the next send.
                 req.send().await?;
@@ -107,14 +133,18 @@ mod tests {
     }
 
     /// Bootstrap a Routing client/server pair over in-memory duplex.
+    ///
+    /// Uses a fake swarm channel (receiver dropped); the epoch guard fires
+    /// before the channel is ever used in the stale-epoch tests.
     fn setup_routing(guard: EpochGuard) -> routing_capnp::routing::Client {
         let (client_stream, server_stream) = io::duplex(64 * 1024);
         let (client_read, client_write) = io::split(client_stream);
         let (server_read, server_write) = io::split(server_stream);
 
-        // Server: RoutingImpl with a dummy IPFS client (epoch guard fires first).
-        let ipfs_client = ipfs::HttpClient::new("http://127.0.0.1:1".to_string());
-        let routing_impl = RoutingImpl::new(ipfs_client, guard);
+        // Fake swarm channel: receiver is dropped immediately.
+        // Epoch check fires before any send, so this is fine for rejection tests.
+        let (swarm_tx, _swarm_rx) = mpsc::channel(16);
+        let routing_impl = RoutingImpl::new(swarm_tx, guard);
         let routing_server: routing_capnp::routing::Client = capnp_rpc::new_client(routing_impl);
 
         let server_network = VatNetwork::new(

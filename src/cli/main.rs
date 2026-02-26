@@ -6,6 +6,8 @@ use membrane::Epoch;
 use std::path::{Path, PathBuf};
 use tokio::sync::watch;
 
+use libp2p::Multiaddr;
+
 use ww::cell::CellBuilder;
 use ww::host;
 use ww::image;
@@ -174,6 +176,49 @@ enum DaemonAction {
     /// prints the deactivation command. Does not touch ~/.ww/identity or
     /// ~/.ww/config.glia.
     Uninstall,
+}
+
+/// Strip the `/p2p/<peer-id>` suffix from a multiaddr string, if present.
+fn strip_p2p_suffix(addr: &str) -> &str {
+    if let Some(idx) = addr.find("/p2p/") {
+        &addr[..idx]
+    } else {
+        addr
+    }
+}
+
+/// Parse Kubo bootstrap info into a `KuboBootstrapInfo` suitable for seeding
+/// the in-process Kademlia client.
+///
+/// Prefers a loopback TCP address (the typical case when Kubo runs locally).
+/// Falls back to any parseable TCP multiaddr.  Returns `None` if no suitable
+/// address can be found.
+fn parse_kubo_bootstrap(info: &ipfs::KuboInfo) -> Option<host::KuboBootstrapInfo> {
+    let peer_id: libp2p::PeerId = info.peer_id.parse().ok()?;
+
+    // Try loopback TCP first (Kubo on same machine), then any TCP addr.
+    let addr = info
+        .swarm_addrs
+        .iter()
+        .filter_map(|s| strip_p2p_suffix(s).parse::<Multiaddr>().ok())
+        .find(|a| {
+            let s = a.to_string();
+            s.contains("/ip4/127.0.0.1/tcp/") || s.contains("/ip4/127.0.0.1/udp/")
+        })
+        .or_else(|| {
+            info.swarm_addrs
+                .iter()
+                .filter_map(|s| strip_p2p_suffix(s).parse::<Multiaddr>().ok())
+                .find(|a| a.to_string().contains("/tcp/"))
+        })?;
+
+    tracing::info!(
+        kubo_peer = %peer_id,
+        %addr,
+        "Bootstrapping Kad client against Kubo (Amino DHT)"
+    );
+
+    Some(host::KuboBootstrapInfo { peer_id, addr })
 }
 
 /// Parse a hex-encoded contract address (with or without 0x prefix) into 20 bytes.
@@ -809,8 +854,19 @@ pub extern "C" fn _start() {
 
         let keypair = ww::keys::to_libp2p(&sk)?;
 
+        // Attempt to fetch Kubo's identity so we can bootstrap the in-process
+        // Kad client against the local node (Amino DHT /ipfs/kad/1.0.0).
+        // Non-fatal: if Kubo is unreachable we still start, just without Kad.
+        let kubo_bootstrap = match ipfs_client.kubo_info().await {
+            Ok(info) => parse_kubo_bootstrap(&info),
+            Err(e) => {
+                tracing::warn!("Could not fetch Kubo identity (Kad DHT will not bootstrap): {e}");
+                None
+            }
+        };
+
         // Start the libp2p swarm.
-        let wetware_host = host::WetwareHost::new(port, keypair)?;
+        let wetware_host = host::WetwareHost::new(port, keypair, kubo_bootstrap)?;
         let network_state = wetware_host.network_state();
         let swarm_cmd_tx = wetware_host.swarm_cmd_tx();
         let stream_control = wetware_host.stream_control();
