@@ -27,7 +27,6 @@ pub enum SwarmCommand {
 /// Network behavior for Wetware hosts.
 #[derive(libp2p::swarm::NetworkBehaviour)]
 pub struct WetwareBehaviour {
-    pub kad: libp2p::kad::Behaviour<libp2p::kad::store::MemoryStore>,
     pub identify: libp2p::identify::Behaviour,
     pub stream: libp2p_stream::Behaviour,
 }
@@ -46,14 +45,11 @@ impl Libp2pHost {
     /// or supply an ephemeral key for dev/test use.
     pub fn new(port: u16, keypair: libp2p::identity::Keypair) -> Result<Self> {
         let peer_id = keypair.public().to_peer_id();
-        let kad =
-            libp2p::kad::Behaviour::new(peer_id, libp2p::kad::store::MemoryStore::new(peer_id));
 
         let stream_behaviour = libp2p_stream::Behaviour::new();
         let stream_control = stream_behaviour.new_control();
 
         let behaviour = WetwareBehaviour {
-            kad,
             identify: libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
                 "wetware/0.1.0".to_string(),
                 keypair.public(),
