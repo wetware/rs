@@ -365,6 +365,111 @@ impl HttpClient {
     }
 }
 
+// ── Routing API ────────────────────────────────────────────────────
+
+/// Provider info returned by `findProviders`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ProviderResponse {
+    #[serde(rename = "ID")]
+    pub id: String,
+    #[serde(rename = "Addrs")]
+    pub addrs: Option<Vec<String>>,
+    #[serde(rename = "Type")]
+    pub response_type: Option<u32>,
+}
+
+impl HttpClient {
+    /// Announce this node as a provider for the given CID.
+    ///
+    /// Calls Kubo's `POST /api/v0/routing/provide?arg=<cid>`.
+    pub async fn routing_provide(&self, cid: &str) -> Result<()> {
+        let url = format!("{}/api/v0/routing/provide?arg={}", self.base_url, cid);
+        let response = self
+            .http_client
+            .post(&url)
+            .send()
+            .await
+            .with_context(|| format!("routing provide failed for {cid}"))?;
+
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("routing provide failed for {cid}: {body}");
+        }
+        Ok(())
+    }
+
+    /// Find providers for a CID.
+    ///
+    /// Calls Kubo's `POST /api/v0/routing/findprovs?arg=<cid>&num-providers=<count>`.
+    /// Returns a list of providers with their peer IDs and multiaddrs.
+    pub async fn routing_find_providers(
+        &self,
+        cid: &str,
+        count: u32,
+    ) -> Result<Vec<ProviderResponse>> {
+        let url = format!(
+            "{}/api/v0/routing/findprovs?arg={}&num-providers={}",
+            self.base_url, cid, count
+        );
+        let response = self
+            .http_client
+            .post(&url)
+            .send()
+            .await
+            .with_context(|| format!("routing findprovs failed for {cid}"))?;
+
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("routing findprovs failed for {cid}: {body}");
+        }
+
+        // Kubo returns newline-delimited JSON (NDJSON)
+        let body = response.text().await?;
+        let mut providers = Vec::new();
+        for line in body.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(resp) = serde_json::from_str::<ProviderResponse>(line) {
+                // Type 4 = provider record in Kubo's NDJSON output
+                if resp.response_type == Some(4) && resp.addrs.is_some() {
+                    providers.push(resp);
+                }
+            }
+        }
+        Ok(providers)
+    }
+
+    /// Add raw bytes to IPFS, returning the CID.
+    ///
+    /// Calls Kubo's `POST /api/v0/add`.  This is a UnixFS operation, not
+    /// a routing operation — it belongs alongside `cat` and `ls`.
+    pub async fn add_bytes(&self, data: &[u8]) -> Result<String> {
+        let url = format!("{}/api/v0/add", self.base_url);
+        let part = reqwest::multipart::Part::bytes(data.to_vec()).file_name("data");
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let response = self
+            .http_client
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .context("ipfs add failed")?;
+
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("ipfs add failed: {body}");
+        }
+
+        let body: serde_json::Value = response.json().await?;
+        body.get("Hash")
+            .and_then(|h| h.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("ipfs add: missing Hash in response"))
+    }
+}
+
 /// Check if a path is a valid IPFS-family path (IPFS, IPNS, or IPLD)
 ///
 /// This centralizes IPFS path validation similar to Go's `path.NewPath(str)`.

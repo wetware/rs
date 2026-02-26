@@ -27,6 +27,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::host::SwarmCommand;
 use crate::ipfs;
 use crate::ipfs_capnp;
+use crate::routing_capnp;
 use crate::system_capnp;
 use auth::SigningDomain;
 
@@ -127,7 +128,7 @@ impl stem_capnp::signer::Server for EpochGuardedMembraneSigner {
 // HostGraftBuilder — GraftBuilder for the concrete stem graft response
 // ---------------------------------------------------------------------------
 
-/// Fills the graft response with epoch-guarded Host, Executor, IPFS Client, and node identity.
+/// Fills the graft response with epoch-guarded Host, Executor, IPFS Client, Routing, and node identity.
 pub struct HostGraftBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
@@ -181,6 +182,11 @@ impl GraftBuilder for HostGraftBuilder {
             EpochGuardedIpfsClient::new(self.ipfs_client.clone(), guard.clone()),
         );
         builder.set_ipfs(ipfs_client);
+
+        let routing: routing_capnp::routing::Client = capnp_rpc::new_client(
+            super::routing::RoutingImpl::new(self.ipfs_client.clone(), guard.clone()),
+        );
+        builder.set_routing(routing);
 
         if let Some(sk) = &self.signing_key {
             let keypair =
@@ -403,6 +409,24 @@ impl ipfs_capnp::unix_f_s::Server for EpochGuardedUnixFS {
                 });
                 builder.set_cid(entry.hash.as_bytes());
             }
+            Ok(())
+        })
+    }
+
+    fn add(
+        self: capnp::capability::Rc<Self>,
+        params: ipfs_capnp::unix_f_s::AddParams,
+        mut results: ipfs_capnp::unix_f_s::AddResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.guard.check());
+        let data = pry!(pry!(params.get()).get_data()).to_vec();
+        let client = self.ipfs_client.clone();
+        Promise::from_future(async move {
+            let cid = client
+                .add_bytes(&data)
+                .await
+                .map_err(|e| capnp::Error::failed(format!("ipfs add failed: {e}")))?;
+            results.get().set_cid(&cid);
             Ok(())
         })
     }

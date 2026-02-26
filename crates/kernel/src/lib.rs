@@ -20,6 +20,11 @@ mod ipfs_capnp {
     include!(concat!(env!("OUT_DIR"), "/ipfs_capnp.rs"));
 }
 
+#[allow(dead_code)]
+mod routing_capnp {
+    include!(concat!(env!("OUT_DIR"), "/routing_capnp.rs"));
+}
+
 /// Bootstrap capability: the concrete Membrane defined in stem.capnp.
 type Membrane = stem_capnp::membrane::Client;
 
@@ -59,6 +64,8 @@ struct ShellCtx {
     host: system_capnp::host::Client,
     executor: system_capnp::executor::Client,
     ipfs: ipfs_capnp::client::Client,
+    #[allow(dead_code)]
+    routing: routing_capnp::routing::Client,
     /// Host-side node identity hub for this session.
     ///
     /// Call `identity.signer("ww-membrane-graft")` (or another known domain) to
@@ -554,6 +561,7 @@ fn run_impl() {
             host: results.get_host()?,
             executor: results.get_executor()?,
             ipfs: results.get_ipfs()?,
+            routing: results.get_routing()?,
             identity: results.get_identity()?,
             cwd: "/".to_string(),
         };

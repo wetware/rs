@@ -25,9 +25,15 @@ interface Client {
 interface UnixFS {
   cat @0 (path :Text) -> (data :Data);
   # Fetch content at the given IPFS path.
+  # Kubo POST /api/v0/cat?arg=<path> (stable).
 
   ls  @1 (path :Text) -> (entries :List(Entry));
   # List directory entries at the given IPFS path.
+  # Kubo POST /api/v0/ls?arg=<path> (stable).
+
+  add @2 (data :Data) -> (cid :Text);
+  # Store data in IPFS, returning the content-addressed CID.
+  # Kubo POST /api/v0/add (stable).
 
   struct Entry {
     name @0 :Text;
