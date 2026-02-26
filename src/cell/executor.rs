@@ -313,34 +313,52 @@ impl Cell {
         tracing::debug!(binary = %path, "Loaded guest bytecode");
 
         let interactive = std::io::stdin().is_terminal() || std::env::var("WW_TTY").is_ok();
-        let stdin_handle: Box<dyn tokio::io::AsyncRead + Send + Sync + Unpin> = if interactive {
-            // tokio::io::stdin() returns EOF under `cargo run` because the non-blocking
-            // adapter sees no data and reports 0 bytes. Use a blocking reader thread that
-            // feeds real stdin through a duplex pipe so WASI gets a proper async stream.
+
+        // Bridge host stdin → guest regardless of interactive mode.
+        //
+        // tokio::io::stdin() is unsuitable here: tokio sets O_NONBLOCK on the fd,
+        // and macOS tty reads in non-blocking mode can return 0 bytes unexpectedly,
+        // which wasmtime-wasi treats as EOF (causing the kernel to exit instantly).
+        //
+        // spawn_blocking + Handle::block_on also silently panics: spawn_blocking
+        // threads have the tokio runtime context set, so block_on() panics with
+        // "Cannot start a runtime from within a runtime". The panic unwinds the
+        // closure, drops the duplex writer, and the guest sees EOF.
+        //
+        // Fix: a plain OS thread (no tokio context) blocks on std::io::stdin() in
+        // cooked mode and forwards bytes via mpsc. A tokio task drains the channel
+        // into the duplex writer. Both shell and daemon modes need a live stdin pipe
+        // so the guest can block on it until the host signals shutdown (closes stdin).
+        let stdin_handle: Box<dyn tokio::io::AsyncRead + Send + Sync + Unpin> = {
             let (reader, mut writer) = tokio::io::duplex(4096);
-            tokio::task::spawn_blocking(move || {
+            let (tx, mut rx) = mpsc::channel::<Vec<u8>>(4);
+
+            std::thread::spawn(move || {
                 use std::io::Read;
                 let stdin = std::io::stdin();
                 let mut handle = stdin.lock();
                 let mut buf = [0u8; 4096];
-                let rt = tokio::runtime::Handle::current();
                 loop {
                     match handle.read(&mut buf) {
-                        Ok(0) => break,
+                        Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            if rt.block_on(AsyncWriteExt::write_all(&mut writer, &buf[..n]))
-                                .is_err()
-                            {
+                            if tx.blocking_send(buf[..n].to_vec()).is_err() {
                                 break;
                             }
                         }
-                        Err(_) => break,
                     }
                 }
             });
+
+            tokio::spawn(async move {
+                while let Some(data) = rx.recv().await {
+                    if writer.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
             Box::new(reader)
-        } else {
-            Box::new(tokio::io::empty())
         };
         let stdout_handle = stdout();
         let stderr_handle = stderr();
