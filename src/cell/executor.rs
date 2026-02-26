@@ -9,7 +9,7 @@ use membrane::Epoch;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{stderr, stdin, stdout};
+use tokio::io::{stderr, stdout, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::info;
@@ -301,7 +301,49 @@ impl Cell {
         })?;
         tracing::debug!(binary = %path, "Loaded guest bytecode");
 
-        let stdin_handle = stdin();
+        let interactive = std::io::stdin().is_terminal() || std::env::var("WW_TTY").is_ok();
+
+        // Bridge host stdin → guest regardless of interactive mode.
+        //
+        // tokio::io::stdin() is unsuitable here: tokio sets O_NONBLOCK on the fd,
+        // and macOS tty reads in non-blocking mode can return 0 bytes unexpectedly,
+        // which wasmtime-wasi treats as EOF (causing the kernel to exit instantly).
+        //
+        // Fix: a plain OS thread (no tokio context) blocks on std::io::stdin() in
+        // cooked mode and forwards bytes via mpsc. A tokio task drains the channel
+        // into the duplex writer. Both shell and daemon modes need a live stdin pipe
+        // so the guest can block on it until the host signals shutdown (closes stdin).
+        let stdin_handle: Box<dyn tokio::io::AsyncRead + Send + Sync + Unpin> = {
+            let (reader, mut writer) = tokio::io::duplex(4096);
+            let (tx, mut rx) = mpsc::channel::<Vec<u8>>(4);
+
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let stdin = std::io::stdin();
+                let mut handle = stdin.lock();
+                let mut buf = [0u8; 4096];
+                loop {
+                    match handle.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+
+            tokio::spawn(async move {
+                while let Some(data) = rx.recv().await {
+                    if writer.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            Box::new(reader)
+        };
         let stdout_handle = stdout();
         let stderr_handle = stderr();
 
@@ -313,7 +355,7 @@ impl Cell {
 
         // Inject host-side environment signals for the guest.
         let mut guest_env = env.unwrap_or_default();
-        if std::io::stdin().is_terminal() {
+        if interactive {
             guest_env.push("WW_TTY=1".to_string());
         }
         if !guest_env.iter().any(|v| v.starts_with("PATH=")) {
