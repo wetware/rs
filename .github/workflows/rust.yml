@@ -43,8 +43,13 @@ jobs:
 
     - name: Install Cap'n Proto compiler
       run: |
-        sudo apt-get update
-        sudo apt-get install -y capnproto
+        CAPNP_VERSION="1.1.0"
+        curl -fsSL "https://capnproto.org/capnproto-c++-${CAPNP_VERSION}.tar.gz" | tar xz
+        cd "capnproto-c++-${CAPNP_VERSION}"
+        ./configure --prefix=/usr/local
+        make -j$(nproc)
+        sudo make install
+        cd .. && rm -rf "capnproto-c++-${CAPNP_VERSION}"
 
     - name: Cache dependencies
       uses: actions/cache@v3
@@ -76,8 +81,13 @@ jobs:
 
     - name: Install Cap'n Proto compiler
       run: |
-        sudo apt-get update
-        sudo apt-get install -y capnproto
+        CAPNP_VERSION="1.1.0"
+        curl -fsSL "https://capnproto.org/capnproto-c++-${CAPNP_VERSION}.tar.gz" | tar xz
+        cd "capnproto-c++-${CAPNP_VERSION}"
+        ./configure --prefix=/usr/local
+        make -j$(nproc)
+        sudo make install
+        cd .. && rm -rf "capnproto-c++-${CAPNP_VERSION}"
 
     - name: Install Foundry
       uses: foundry-rs/foundry-toolchain@v1
@@ -156,8 +166,13 @@ jobs:
 
     - name: Install Cap'n Proto compiler
       run: |
-        sudo apt-get update
-        sudo apt-get install -y capnproto
+        CAPNP_VERSION="1.1.0"
+        curl -fsSL "https://capnproto.org/capnproto-c++-${CAPNP_VERSION}.tar.gz" | tar xz
+        cd "capnproto-c++-${CAPNP_VERSION}"
+        ./configure --prefix=/usr/local
+        make -j$(nproc)
+        sudo make install
+        cd .. && rm -rf "capnproto-c++-${CAPNP_VERSION}"
 
     - name: Cache dependencies
       uses: actions/cache@v3

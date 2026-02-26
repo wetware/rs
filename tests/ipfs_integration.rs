@@ -73,6 +73,29 @@ async fn test_add_and_cat_roundtrip() {
     assert_eq!(fetched, payload);
 }
 
+/// Round-trip: add bytes via `HttpClient::add_bytes()`, retrieve via `unixfs().get()`.
+#[tokio::test]
+async fn test_add_bytes_and_cat_roundtrip() {
+    if !ipfs_available().await {
+        eprintln!("skipping test_add_bytes_and_cat_roundtrip: IPFS node not reachable");
+        return;
+    }
+
+    let payload = b"add_bytes integration test data";
+    let client = ww::ipfs::HttpClient::new(ipfs_api_url());
+
+    let cid = client.add_bytes(payload).await.expect("add_bytes");
+    assert!(!cid.is_empty(), "CID should not be empty");
+
+    let fetched = client
+        .unixfs()
+        .get(&format!("/ipfs/{cid}"))
+        .await
+        .expect("ipfs cat");
+
+    assert_eq!(fetched, payload);
+}
+
 /// Add a directory tree, then retrieve it with `get_dir` and verify contents.
 #[tokio::test]
 async fn test_add_dir_and_get_dir_roundtrip() {
