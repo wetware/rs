@@ -86,3 +86,117 @@ impl routing_capnp::routing::Server for RoutingImpl {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use capnp_rpc::rpc_twoparty_capnp::Side;
+    use capnp_rpc::twoparty::VatNetwork;
+    use capnp_rpc::RpcSystem;
+    use membrane::Epoch;
+    use tokio::io;
+    use tokio::sync::watch;
+    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+    fn epoch(seq: u64) -> Epoch {
+        Epoch {
+            seq,
+            head: vec![],
+            adopted_block: 0,
+        }
+    }
+
+    /// Bootstrap a Routing client/server pair over in-memory duplex.
+    fn setup_routing(guard: EpochGuard) -> routing_capnp::routing::Client {
+        let (client_stream, server_stream) = io::duplex(64 * 1024);
+        let (client_read, client_write) = io::split(client_stream);
+        let (server_read, server_write) = io::split(server_stream);
+
+        // Server: RoutingImpl with a dummy IPFS client (epoch guard fires first).
+        let ipfs_client = ipfs::HttpClient::new("http://127.0.0.1:1".to_string());
+        let routing_impl = RoutingImpl::new(ipfs_client, guard);
+        let routing_server: routing_capnp::routing::Client = capnp_rpc::new_client(routing_impl);
+
+        let server_network = VatNetwork::new(
+            server_read.compat(),
+            server_write.compat_write(),
+            Side::Server,
+            Default::default(),
+        );
+        let server_rpc = RpcSystem::new(Box::new(server_network), Some(routing_server.client));
+        tokio::task::spawn_local(async move {
+            let _ = server_rpc.await;
+        });
+
+        let client_network = VatNetwork::new(
+            client_read.compat(),
+            client_write.compat_write(),
+            Side::Client,
+            Default::default(),
+        );
+        let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
+        let client: routing_capnp::routing::Client = client_rpc.bootstrap(Side::Server);
+        tokio::task::spawn_local(async move {
+            let _ = client_rpc.await;
+        });
+
+        client
+    }
+
+    #[tokio::test]
+    async fn test_provide_rejects_stale_epoch() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (tx, rx) = watch::channel(epoch(1));
+                let guard = EpochGuard {
+                    issued_seq: 1,
+                    receiver: rx,
+                };
+                let client = setup_routing(guard);
+
+                // Advance epoch → stale.
+                tx.send(epoch(2)).unwrap();
+
+                let mut req = client.provide_request();
+                req.get().set_key("QmTest");
+                match req.send().promise.await {
+                    Err(e) => assert!(
+                        e.to_string().contains("staleEpoch"),
+                        "expected staleEpoch, got: {e}"
+                    ),
+                    Ok(_) => panic!("expected staleEpoch error"),
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_find_providers_rejects_stale_epoch() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (tx, rx) = watch::channel(epoch(1));
+                let guard = EpochGuard {
+                    issued_seq: 1,
+                    receiver: rx,
+                };
+                let client = setup_routing(guard);
+
+                // Advance epoch → stale.
+                tx.send(epoch(2)).unwrap();
+
+                // findProviders needs a sink; we don't care about it since
+                // the epoch check fires before the sink is read.
+                let req = client.find_providers_request();
+                match req.send().promise.await {
+                    Err(e) => assert!(
+                        e.to_string().contains("staleEpoch"),
+                        "expected staleEpoch, got: {e}"
+                    ),
+                    Ok(_) => panic!("expected staleEpoch error"),
+                }
+            })
+            .await;
+    }
+}
