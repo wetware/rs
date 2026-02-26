@@ -21,8 +21,8 @@ std: kernel shell
 
 kernel:
 	cargo build -p kernel --target $(WASM_TARGET) --release
-	@mkdir -p crates/kernel/boot
-	cp target/$(WASM_TARGET)/release/kernel.wasm crates/kernel/boot/main.wasm
+	@mkdir -p crates/kernel/bin
+	cp target/$(WASM_TARGET)/release/kernel.wasm crates/kernel/bin/main.wasm
 
 shell:
 	cargo build -p shell --target $(WASM_TARGET) --release
@@ -38,7 +38,7 @@ run-kernel: kernel
 
 clean:
 	cargo clean
-	rm -f crates/kernel/boot/main.wasm
+	rm -f crates/kernel/bin/main.wasm
 	rm -f std/shell/boot/main.wasm
 
 # --- Podman ------------------------------------------------------------------
