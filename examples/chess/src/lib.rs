@@ -441,7 +441,7 @@ mod tests {
 
     /// Bootstrap a ChessEngine client/server pair over in-memory duplex.
     fn setup_engine() -> chess_capnp::chess_engine::Client {
-        let (client_stream, server_stream) = io::duplex(64 * 1024);
+        let (client_stream, server_stream) = io::duplex(8 * 1024);
         let (client_read, client_write) = io::split(client_stream);
         let (server_read, server_write) = io::split(server_stream);
 
