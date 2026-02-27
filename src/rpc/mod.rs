@@ -568,8 +568,13 @@ where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
 {
-    let host: system_capnp::host::Client =
-        capnp_rpc::new_client(HostImpl::new(network_state, swarm_cmd_tx, wasm_debug, None, None));
+    let host: system_capnp::host::Client = capnp_rpc::new_client(HostImpl::new(
+        network_state,
+        swarm_cmd_tx,
+        wasm_debug,
+        None,
+        None,
+    ));
 
     let rpc_network = VatNetwork::new(
         reader.compat(),

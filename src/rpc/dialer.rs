@@ -60,10 +60,10 @@ impl system_capnp::dialer::Server for DialerImpl {
         let peer_id = pry!(PeerId::from_bytes(&peer_bytes)
             .map_err(|e| capnp::Error::failed(format!("invalid peer ID: {e}"))));
 
-        let stream_protocol = pry!(
-            StreamProtocol::try_from_owned(format!("/ww/0.1.0/{protocol_str}"))
-                .map_err(|e| capnp::Error::failed(format!("invalid protocol: {e}")))
-        );
+        let stream_protocol = pry!(StreamProtocol::try_from_owned(format!(
+            "/ww/0.1.0/{protocol_str}"
+        ))
+        .map_err(|e| capnp::Error::failed(format!("invalid protocol: {e}"))));
 
         let mut control = self.stream_control.clone();
 
@@ -94,9 +94,7 @@ impl system_capnp::dialer::Server for DialerImpl {
 
             // Pump: libp2p stream → host_side (remote writes → guest reads)
             tokio::task::spawn_local(async move {
-                if let Err(e) =
-                    io::copy(&mut stream_read.compat(), &mut host_write).await
-                {
+                if let Err(e) = io::copy(&mut stream_read.compat(), &mut host_write).await {
                     tracing::debug!("stream→host pump error: {e}");
                 }
             });

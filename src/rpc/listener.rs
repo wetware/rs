@@ -56,17 +56,18 @@ impl system_capnp::listener::Server for ListenerImpl {
         }
 
         let protocol_suffix = protocol_str.to_string();
-        let stream_protocol = pry!(
-            StreamProtocol::try_from_owned(format!("/ww/0.1.0/{protocol_suffix}"))
-                .map_err(|e| capnp::Error::failed(format!("invalid protocol: {e}")))
-        );
+        let stream_protocol = pry!(StreamProtocol::try_from_owned(format!(
+            "/ww/0.1.0/{protocol_suffix}"
+        ))
+        .map_err(|e| capnp::Error::failed(format!("invalid protocol: {e}"))));
 
         let mut control = self.stream_control.clone();
-        let mut incoming = pry!(control
-            .accept(stream_protocol.clone())
-            .map_err(|e| capnp::Error::failed(format!(
-                "failed to register protocol handler: {e}"
-            ))));
+        let mut incoming =
+            pry!(control
+                .accept(stream_protocol.clone())
+                .map_err(|e| capnp::Error::failed(format!(
+                    "failed to register protocol handler: {e}"
+                ))));
 
         tracing::info!(protocol = %stream_protocol, "Registered subprotocol handler");
 
@@ -82,9 +83,7 @@ impl system_capnp::listener::Server for ListenerImpl {
                 let handler = handler.clone();
                 let protocol = protocol_suffix.clone();
                 tokio::task::spawn_local(async move {
-                    if let Err(e) =
-                        handle_connection(executor, &handler, stream, &protocol).await
-                    {
+                    if let Err(e) = handle_connection(executor, &handler, stream, &protocol).await {
                         tracing::error!(protocol, "Handler connection error: {e}");
                     }
                 });
@@ -185,11 +184,10 @@ pub(crate) async fn pump_stdout_to_stream(
     loop {
         let mut req = stdout.read_request();
         req.get().set_max_bytes(64 * 1024);
-        let result: Result<Vec<u8>, capnp::Error> =
-            req.send().promise.await.and_then(|response| {
-                let data = response.get()?.get_data()?.to_vec();
-                Ok(data)
-            });
+        let result: Result<Vec<u8>, capnp::Error> = req.send().promise.await.and_then(|response| {
+            let data = response.get()?.get_data()?.to_vec();
+            Ok(data)
+        });
         match result {
             Ok(data) if data.is_empty() => break,
             Ok(data) => {

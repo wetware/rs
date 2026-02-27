@@ -461,9 +461,8 @@ fn drive_rpc_with_future(
             Poll::Ready(result) => {
                 if let Err(e) = result {
                     let stderr = wasip2::cli::stderr::get_stderr();
-                    let _ = stderr.blocking_write_and_flush(
-                        format!("[FATAL] guest error: {e}\n").as_bytes(),
-                    );
+                    let _ = stderr
+                        .blocking_write_and_flush(format!("[FATAL] guest error: {e}\n").as_bytes());
                 }
                 return;
             }
