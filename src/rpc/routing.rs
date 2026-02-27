@@ -10,6 +10,7 @@
 use capnp::capability::Promise;
 use capnp_rpc::pry;
 use cid::Cid;
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 
 use ::membrane::EpochGuard;
@@ -110,6 +111,21 @@ impl routing_capnp::routing::Server for RoutingImpl {
             sink.done_request().send().promise.await?;
             Ok(())
         })
+    }
+
+    fn hash(
+        self: capnp::capability::Rc<Self>,
+        params: routing_capnp::routing::HashParams,
+        mut results: routing_capnp::routing::HashResults,
+    ) -> Promise<(), capnp::Error> {
+        let data = pry!(pry!(params.get()).get_data());
+        let digest = Sha256::digest(data);
+        // multihash: varint(0x12) ++ varint(32) ++ sha256(data)
+        let mh = pry!(cid::multihash::Multihash::<64>::wrap(0x12, &digest)
+            .map_err(|e| capnp::Error::failed(format!("multihash wrap: {e}"))));
+        let c = Cid::new_v1(0x55, mh); // 0x55 = raw codec
+        results.get().set_key(c.to_string());
+        Promise::ok(())
     }
 }
 

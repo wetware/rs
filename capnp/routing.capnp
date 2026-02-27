@@ -1,9 +1,6 @@
-# Content routing capability backed by Kubo's HTTP API.
+# Content routing capability backed by the in-process Kademlia client.
 #
 # Mirrors Go's coreiface.RoutingAPI (provide/findProviders only).
-# All methods delegate to Kubo /api/v0/routing/* endpoints; there is no
-# in-process Kademlia DHT.
-#
 # Data transfer (add/cat) lives on the IPFS UnixFS capability, not here.
 # DHT key-value store (putValue/getValue) is deferred.
 #
@@ -30,10 +27,11 @@ interface ProviderSink {
 interface Routing {
   provide @0 (key :Text) -> ();
   # Announce this node as a provider for the given CID.
-  # Kubo POST /api/v0/routing/provide?arg=<key> (experimental).
 
   findProviders @1 (key :Text, count :UInt32, sink :ProviderSink) -> ();
   # Stream providers for a CID into the caller-supplied sink.
-  # Kubo POST /api/v0/routing/findprovs?arg=<key>&num-providers=<count> (stable).
-  # Each NDJSON line from Kubo becomes a sink.provider() call.
+
+  hash @2 (data :Data) -> (key :Text);
+  # Compute a deterministic CID (v1, raw codec, sha256) from data.
+  # Local operation — does not touch the network or Kubo.
 }
