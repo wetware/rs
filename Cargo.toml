@@ -59,6 +59,7 @@ libp2p-stream = "0.3.0-alpha"
 cid = "0.11"
 hex = "0.4"
 k256 = { version = "0.13", features = ["ecdsa"] }
+sha2 = "0.10"
 sha3 = "0.10"
 dirs = "5"
 
