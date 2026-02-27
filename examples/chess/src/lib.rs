@@ -430,7 +430,6 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     let results = graft_resp.get()?;
     let host = results.get_host()?;
     let executor = results.get_executor()?;
-    let ipfs = results.get_ipfs()?;
     let routing = results.get_routing()?;
 
     // Pipeline: host.network() → (listener, dialer).
@@ -457,16 +456,16 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     let self_id = id_resp.get()?.get_peer_id()?.to_vec();
     log::info!("peer id: {}", hex::encode(&self_id));
 
-    // Get UnixFS API.
-    let unixfs_resp = ipfs.unixfs_request().send().promise.await?;
-    let unixfs = unixfs_resp.get()?.get_api()?;
-
     // Hash chess namespace → deterministic CID (same on all nodes).
-    let mut add_req = unixfs.add_request();
-    add_req.get().set_data(b"wetware.chess.v1");
-    let add_resp = add_req.send().promise.await?;
-    let ns_cid = add_resp.get()?.get_cid()?.to_str()?.to_string();
+    // Local CIDv1(raw, sha256) — no Kubo HTTP dependency.
+    let mut hash_req = routing.hash_request();
+    hash_req.get().set_data(b"wetware.chess.v1");
+    let hash_resp = hash_req.send().promise.await?;
+    let ns_cid = hash_resp.get()?.get_key()?.to_str()?.to_string();
     log::info!("chess namespace CID: {ns_cid}");
+
+    // Give Kad bootstrap a head start before first provide.
+    wasi_sleep_secs(3);
 
     // Discovery loop: provide + find_providers with exponential backoff.
     // DHT records have a TTL, so re-provide each pass. find_providers is a
