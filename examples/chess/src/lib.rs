@@ -1,11 +1,15 @@
-//! Chess guest: self-play demo exercising the Wetware capability stack.
+//! Chess guest: self-play demo and subprotocol handler.
 //!
-//! Grafts the Membrane to obtain routing + IPFS capabilities, announces on the
-//! DHT as a chess player, plays a random game, and logs each move to stderr.
+//! This binary serves two roles, selected by the `WW_HANDLER` env var:
 //!
-//! The `ChessEngine` Cap'n Proto interface is defined but not exported in this
-//! PR — `system::run` (consumer-only) suffices for self-play. PR 3 switches to
-//! `system::serve` to export the engine for MCP / P2P access.
+//! **Main mode** (no `WW_HANDLER`): Grafts the Membrane to obtain routing +
+//! IPFS + Server capabilities, registers a `/ww/0.1.0/chess` subprotocol
+//! handler, announces on the DHT as a chess player, and plays a random
+//! self-play game.
+//!
+//! **Handler mode** (`WW_HANDLER=1`): Exports a `ChessEngine` capability
+//! over stdin/stdout (which the host has wired to the incoming libp2p
+//! stream). Each incoming peer connection spawns a fresh handler instance.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -239,8 +243,25 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     let graft_resp = membrane.graft_request().send().promise.await?;
     let results = graft_resp.get()?;
     let host = results.get_host()?;
+    let executor = results.get_executor()?;
     let ipfs = results.get_ipfs()?;
     let routing = results.get_routing()?;
+    let server = results.get_server()?;
+
+    // Register /ww/0.1.0/chess subprotocol handler.
+    // Read our own binary so handler instances run the same code in handler mode.
+    let wasm_bytes = std::fs::read("/bin/main.wasm")
+        .map_err(|e| capnp::Error::failed(format!("read handler wasm: {e}")))?;
+
+    // OCAP: pass our executor to server.serve(), explicitly delegating spawn rights.
+    // A future PR could wrap executor in an attenuating proxy to restrict handler
+    // resources (memory, CPU, network) before delegating — Server treats it opaquely.
+    let mut serve_req = server.serve_request();
+    serve_req.get().set_executor(executor);
+    serve_req.get().set_protocol("chess");
+    serve_req.get().set_handler(&wasm_bytes);
+    serve_req.send().promise.await?;
+    log::info!("registered /ww/0.1.0/chess subprotocol handler");
 
     // Log peer identity.
     let id_resp = host.id_request().send().promise.await?;
@@ -335,7 +356,16 @@ struct ChessGuest;
 impl Guest for ChessGuest {
     fn run() -> Result<(), ()> {
         init_logging();
-        system::run(|membrane: Membrane| async move { run_game(membrane).await });
+        if std::env::var("WW_HANDLER").is_ok() {
+            // Handler mode: export ChessEngine over stdin/stdout.
+            // The host wires stdin/stdout to the incoming libp2p stream.
+            let engine: chess_capnp::chess_engine::Client =
+                capnp_rpc::new_client(ChessEngineImpl::new());
+            system::serve_stdio(engine.client);
+        } else {
+            // Main mode: register subprotocol handler, self-play.
+            system::run(|membrane: Membrane| async move { run_game(membrane).await });
+        }
         Ok(())
     }
 }

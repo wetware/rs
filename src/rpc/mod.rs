@@ -6,6 +6,7 @@
 
 pub mod membrane;
 pub mod routing;
+pub mod server;
 
 use std::sync::Arc;
 

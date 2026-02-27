@@ -128,13 +128,14 @@ impl stem_capnp::signer::Server for EpochGuardedMembraneSigner {
 // HostGraftBuilder — GraftBuilder for the concrete stem graft response
 // ---------------------------------------------------------------------------
 
-/// Fills the graft response with epoch-guarded Host, Executor, IPFS Client, Routing, and node identity.
+/// Fills the graft response with epoch-guarded Host, Executor, IPFS Client, Routing, Server, and node identity.
 pub struct HostGraftBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
     ipfs_client: ipfs::HttpClient,
     signing_key: Option<Arc<SigningKey>>,
+    stream_control: libp2p_stream::Control,
 }
 
 impl HostGraftBuilder {
@@ -144,6 +145,7 @@ impl HostGraftBuilder {
         wasm_debug: bool,
         ipfs_client: ipfs::HttpClient,
         signing_key: Option<Arc<SigningKey>>,
+        stream_control: libp2p_stream::Control,
     ) -> Self {
         Self {
             network_state,
@@ -151,6 +153,7 @@ impl HostGraftBuilder {
             wasm_debug,
             ipfs_client,
             signing_key,
+            stream_control,
         }
     }
 }
@@ -187,6 +190,11 @@ impl GraftBuilder for HostGraftBuilder {
             super::routing::RoutingImpl::new(self.swarm_cmd_tx.clone(), guard.clone()),
         );
         builder.set_routing(routing);
+
+        let server: stem_capnp::server::Client = capnp_rpc::new_client(
+            super::server::ServerImpl::new(self.stream_control.clone(), guard.clone()),
+        );
+        builder.set_server(server);
 
         if let Some(sk) = &self.signing_key {
             let keypair =
@@ -466,6 +474,7 @@ pub fn build_membrane_rpc<R, W>(
     epoch_rx: watch::Receiver<Epoch>,
     ipfs_client: ipfs::HttpClient,
     signing_key: Option<Arc<SigningKey>>,
+    stream_control: libp2p_stream::Control,
 ) -> (RpcSystem<Side>, GuestMembrane)
 where
     R: AsyncRead + Unpin + 'static,
@@ -477,6 +486,7 @@ where
         wasm_debug,
         ipfs_client,
         signing_key,
+        stream_control,
     );
     // The local kernel is a trusted process — no challenge-response auth needed.
     // Auth applies to external peers connecting via libp2p to the guest's exported membrane.
