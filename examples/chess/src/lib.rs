@@ -396,4 +396,147 @@ mod tests {
         }
         assert_eq!(engine.status(), GameStatus::Checkmate);
     }
+
+    // -----------------------------------------------------------------------
+    // RPC round-trip tests (Cap'n Proto over in-memory duplex)
+    // -----------------------------------------------------------------------
+
+    use capnp_rpc::rpc_twoparty_capnp::Side;
+    use capnp_rpc::twoparty::VatNetwork;
+    use capnp_rpc::RpcSystem;
+    use tokio::io;
+    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+    /// Bootstrap a ChessEngine client/server pair over in-memory duplex.
+    fn setup_engine() -> chess_capnp::chess_engine::Client {
+        let (client_stream, server_stream) = io::duplex(64 * 1024);
+        let (client_read, client_write) = io::split(client_stream);
+        let (server_read, server_write) = io::split(server_stream);
+
+        let engine_server: chess_capnp::chess_engine::Client =
+            capnp_rpc::new_client(ChessEngineImpl::new());
+
+        let server_network = VatNetwork::new(
+            server_read.compat(),
+            server_write.compat_write(),
+            Side::Server,
+            Default::default(),
+        );
+        let server_rpc = RpcSystem::new(Box::new(server_network), Some(engine_server.client));
+        tokio::task::spawn_local(async move {
+            let _ = server_rpc.await;
+        });
+
+        let client_network = VatNetwork::new(
+            client_read.compat(),
+            client_write.compat_write(),
+            Side::Client,
+            Default::default(),
+        );
+        let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
+        let client: chess_capnp::chess_engine::Client = client_rpc.bootstrap(Side::Server);
+        tokio::task::spawn_local(async move {
+            let _ = client_rpc.await;
+        });
+
+        client
+    }
+
+    #[tokio::test]
+    async fn test_rpc_get_state() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let client = setup_engine();
+                let resp = client.get_state_request().send().promise.await.unwrap();
+                let fen = resp.get().unwrap().get_fen().unwrap().to_str().unwrap();
+                assert_eq!(
+                    fen,
+                    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_apply_move_and_get_state() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let client = setup_engine();
+
+                // Apply e2e4.
+                let mut req = client.apply_move_request();
+                req.get().set_uci("e2e4");
+                let resp = req.send().promise.await.unwrap();
+                let result = resp.get().unwrap();
+                assert!(result.get_ok());
+
+                // Verify FEN reflects the move.
+                let resp = client.get_state_request().send().promise.await.unwrap();
+                let fen = resp.get().unwrap().get_fen().unwrap().to_str().unwrap();
+                assert!(fen.contains("4P3"), "expected pawn on e4, got: {fen}");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_apply_illegal_move() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let client = setup_engine();
+
+                let mut req = client.apply_move_request();
+                req.get().set_uci("e1e5"); // king can't jump to e5
+                let resp = req.send().promise.await.unwrap();
+                let result = resp.get().unwrap();
+                assert!(!result.get_ok());
+                let reason = result.get_reason().unwrap().to_str().unwrap();
+                assert!(!reason.is_empty(), "expected error reason");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_get_legal_moves() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let client = setup_engine();
+                let resp = client
+                    .get_legal_moves_request()
+                    .send()
+                    .promise
+                    .await
+                    .unwrap();
+                let moves = resp.get().unwrap().get_moves().unwrap();
+                assert_eq!(moves.len(), 20); // 16 pawn + 4 knight
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_scholars_mate_status() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let client = setup_engine();
+
+                for uci in &["e2e4", "e7e5", "f1c4", "b8c6", "d1h5", "g8f6", "h5f7"] {
+                    let mut req = client.apply_move_request();
+                    req.get().set_uci(uci);
+                    let resp = req.send().promise.await.unwrap();
+                    assert!(
+                        resp.get().unwrap().get_ok(),
+                        "move {uci} rejected over RPC"
+                    );
+                }
+
+                let resp = client.get_status_request().send().promise.await.unwrap();
+                let status = resp.get().unwrap().get_status().unwrap();
+                assert_eq!(status, GameStatus::Checkmate);
+            })
+            .await;
+    }
 }

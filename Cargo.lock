@@ -1359,6 +1359,8 @@ dependencies = [
  "rand 0.9.2",
  "shakmaty",
  "system",
+ "tokio",
+ "tokio-util",
  "wasip2",
 ]
 

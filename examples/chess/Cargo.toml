@@ -17,5 +17,9 @@ system    = { path = "../../std/system" }
 [lib]
 crate-type = ["cdylib"]
 
+[dev-dependencies]
+tokio      = { version = "1", features = ["rt", "macros", "io-util"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+
 [build-dependencies]
 capnpc = "0.23.3"
