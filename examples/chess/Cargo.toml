@@ -1,0 +1,21 @@
+[package]
+name = "chess"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+capnp     = "0.23.2"
+capnp-rpc = "0.23.0"
+futures   = "0.3"
+log       = "0.4"
+wasip2    = "1.0.2"
+shakmaty  = "0.27"
+rand      = "0.9"
+hex       = "0.4"
+system    = { path = "../../std/system" }
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+capnpc = "0.23.3"
