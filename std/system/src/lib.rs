@@ -375,6 +375,61 @@ where
     }
 }
 
+/// Export a bootstrap capability over WASI stdin/stdout.
+///
+/// This is for handler processes spawned by `Server.serve()`. The host wires
+/// the handler's stdin/stdout to a libp2p stream. This function sets up a
+/// Cap'n Proto RPC VatNetwork over stdin/stdout and exports the given
+/// bootstrap capability. The remote peer bootstraps it to obtain the service.
+///
+/// Unlike [`serve`], this function does NOT use the wetware:streams connection.
+/// It reads/writes directly from WASI stdin/stdout and drives the RPC system
+/// until the connection closes. No host capabilities are available — if the
+/// handler needs IPFS/routing, it should use `system::run()` over data_streams
+/// instead.
+///
+/// # Example
+///
+/// ```no_run
+/// let engine: chess_capnp::chess_engine::Client =
+///     capnp_rpc::new_client(ChessEngineImpl::new());
+/// wetware_guest::serve_stdio(engine.client);
+/// ```
+pub fn serve_stdio(bootstrap: capnp::capability::Client) {
+    let stdin = wasip2::cli::stdin::get_stdin();
+    let stdout = wasip2::cli::stdout::get_stdout();
+
+    let reader = StreamReader::new(stdin);
+    let writer = StreamWriter::new(stdout);
+    let pollables = StreamPollables {
+        reader: reader.pollable(),
+        writer: writer.pollable(),
+    };
+
+    let network = VatNetwork::new(reader, writer, Side::Server, Default::default());
+    let mut rpc_system = RpcSystem::new(Box::new(network), Some(bootstrap));
+
+    // Drive the RPC system until the connection closes.
+    let waker = noop_waker();
+    loop {
+        let mut cx = Context::from_waker(&waker);
+        match rpc_system.poll_unpin(&mut cx) {
+            Poll::Ready(_) => break,
+            Poll::Pending => {}
+        }
+
+        if pollables.writer.ready() {
+            wasi_poll::poll(&[&pollables.reader]);
+        } else {
+            wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
+        }
+    }
+
+    // Forget resources to avoid WASI cleanup errors.
+    std::mem::forget(rpc_system);
+    std::mem::forget(pollables);
+}
+
 /// Run a guest program with an async entry point, exporting a bootstrap capability.
 ///
 /// Like [`run`], but the guest also provides `bootstrap` as its own bootstrap

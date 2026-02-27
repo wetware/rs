@@ -414,6 +414,15 @@ impl Cell {
             (Some(tx), rx)
         };
 
+        // Clone the stream control for the membrane RPC layer (Server capability).
+        // If no stream_control is provided (non-serving mode), create a dummy one.
+        let membrane_stream_control = stream_control.clone().unwrap_or_else(|| {
+            // Non-serving mode: Server.serve() will fail at accept() time,
+            // which is acceptable — guests that don't have a real swarm
+            // shouldn't be registering subprotocol handlers.
+            libp2p_stream::Behaviour::new().new_control()
+        });
+
         let (rpc_system, guest_membrane) = crate::rpc::membrane::build_membrane_rpc(
             reader,
             writer,
@@ -423,6 +432,7 @@ impl Cell {
             epoch_rx,
             ipfs_client,
             signing_key,
+            membrane_stream_control,
         );
 
         tracing::debug!("Starting streams RPC server for guest");

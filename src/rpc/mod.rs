@@ -4,6 +4,8 @@
 //! streams (no TCP listener). See [`build_peer_rpc`] for the entry point.
 #![cfg(not(target_arch = "wasm32"))]
 
+pub mod dialer;
+pub mod listener;
 pub mod membrane;
 pub mod routing;
 
@@ -98,9 +100,10 @@ impl NetworkState {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum StreamMode {
+pub(crate) enum StreamMode {
     ReadOnly,
     WriteOnly,
+    Bidirectional,
 }
 
 pub struct ByteStreamImpl {
@@ -109,7 +112,7 @@ pub struct ByteStreamImpl {
 }
 
 impl ByteStreamImpl {
-    fn new(stream: io::DuplexStream, mode: StreamMode) -> Self {
+    pub(crate) fn new(stream: io::DuplexStream, mode: StreamMode) -> Self {
         Self {
             stream: Arc::new(Mutex::new(stream)),
             mode,
@@ -134,6 +137,7 @@ impl system_capnp::byte_stream::Server for ByteStreamImpl {
                 Err(capnp::Error::failed("stream is write-only".into()))
             });
         }
+        // ReadOnly and Bidirectional both allow read
 
         let max_bytes = pry!(params.get()).get_max_bytes() as usize;
         let stream = self.stream.clone();
@@ -164,6 +168,7 @@ impl system_capnp::byte_stream::Server for ByteStreamImpl {
                 Err(capnp::Error::failed("stream is read-only".into()))
             });
         }
+        // WriteOnly and Bidirectional both allow write
 
         let data = pry!(params.get()).get_data().unwrap_or(&[]).to_vec();
         let stream = self.stream.clone();
@@ -271,6 +276,7 @@ pub struct HostImpl {
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
     guard: Option<EpochGuard>,
+    stream_control: Option<libp2p_stream::Control>,
 }
 
 impl HostImpl {
@@ -279,12 +285,14 @@ impl HostImpl {
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
         wasm_debug: bool,
         guard: Option<EpochGuard>,
+        stream_control: Option<libp2p_stream::Control>,
     ) -> Self {
         Self {
             network_state,
             swarm_cmd_tx,
             wasm_debug,
             guard,
+            stream_control,
         }
     }
 
@@ -351,51 +359,6 @@ impl system_capnp::host::Server for HostImpl {
         })
     }
 
-    fn connect(
-        self: capnp::capability::Rc<Self>,
-        params: system_capnp::host::ConnectParams,
-        _results: system_capnp::host::ConnectResults,
-    ) -> Promise<(), capnp::Error> {
-        pry!(self.check_epoch());
-        let params_reader = pry!(params.get());
-        let peer_id_bytes = read_data_result(params_reader.get_peer_id());
-        let addrs_bytes: Vec<Vec<u8>> = match params_reader.get_addrs() {
-            Ok(list) => (0..list.len())
-                .filter_map(|i| list.get(i).ok().map(|d| d.to_vec()))
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-        let swarm_cmd_tx = self.swarm_cmd_tx.clone();
-        Promise::from_future(async move {
-            use libp2p::{Multiaddr, PeerId};
-
-            let peer_id = PeerId::from_bytes(&peer_id_bytes)
-                .map_err(|e| capnp::Error::failed(format!("invalid peer ID: {e}")))?;
-
-            let addrs: Vec<Multiaddr> = addrs_bytes
-                .iter()
-                .filter_map(|bytes| Multiaddr::try_from(bytes.clone()).ok())
-                .collect();
-
-            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            swarm_cmd_tx
-                .send(SwarmCommand::Connect {
-                    peer_id,
-                    addrs,
-                    reply: reply_tx,
-                })
-                .await
-                .map_err(|_| capnp::Error::failed("swarm channel closed".into()))?;
-
-            reply_rx
-                .await
-                .map_err(|_| capnp::Error::failed("swarm reply dropped".into()))?
-                .map_err(|e| capnp::Error::failed(format!("connect failed: {e}")))?;
-
-            Ok(())
-        })
-    }
-
     fn executor(
         self: capnp::capability::Rc<Self>,
         _params: system_capnp::host::ExecutorParams,
@@ -409,6 +372,38 @@ impl system_capnp::host::Server for HostImpl {
             self.guard.clone(),
         ));
         results.get().set_executor(executor);
+        Promise::ok(())
+    }
+
+    fn network(
+        self: capnp::capability::Rc<Self>,
+        _params: system_capnp::host::NetworkParams,
+        mut results: system_capnp::host::NetworkResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
+        let guard = match &self.guard {
+            Some(g) => g.clone(),
+            None => {
+                return Promise::err(capnp::Error::failed(
+                    "network() requires an epoch-scoped Host".into(),
+                ))
+            }
+        };
+        let stream_control = match &self.stream_control {
+            Some(c) => c.clone(),
+            None => {
+                return Promise::err(capnp::Error::failed(
+                    "network() not available on this Host".into(),
+                ))
+            }
+        };
+        let listener: system_capnp::listener::Client = capnp_rpc::new_client(
+            listener::ListenerImpl::new(stream_control.clone(), guard.clone()),
+        );
+        let dialer: system_capnp::dialer::Client =
+            capnp_rpc::new_client(dialer::DialerImpl::new(stream_control, guard));
+        results.get().set_listener(listener);
+        results.get().set_dialer(dialer);
         Promise::ok(())
     }
 }
@@ -504,9 +499,9 @@ impl system_capnp::executor::Server for ExecutorImpl {
             tracing::info!("run_bytes: starting child process spawn");
             let bytecode = wasm;
 
-            let (host_stderr, guest_stderr) = io::duplex(64 * 1024);
-            let (host_stdin, guest_stdin) = io::duplex(64 * 1024);
-            let (host_stdout, guest_stdout) = io::duplex(64 * 1024);
+            let (host_stderr, guest_stderr) = io::duplex(8 * 1024);
+            let (host_stdin, guest_stdin) = io::duplex(8 * 1024);
+            let (host_stdout, guest_stdout) = io::duplex(8 * 1024);
 
             let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
 
@@ -573,8 +568,13 @@ where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
 {
-    let host: system_capnp::host::Client =
-        capnp_rpc::new_client(HostImpl::new(network_state, swarm_cmd_tx, wasm_debug, None));
+    let host: system_capnp::host::Client = capnp_rpc::new_client(HostImpl::new(
+        network_state,
+        swarm_cmd_tx,
+        wasm_debug,
+        None,
+        None,
+    ));
 
     let rpc_network = VatNetwork::new(
         reader.compat(),
@@ -596,7 +596,7 @@ mod tests {
         tokio::task::JoinHandle<()>,
         mpsc::Receiver<SwarmCommand>,
     ) {
-        let (client_stream, server_stream) = io::duplex(64 * 1024);
+        let (client_stream, server_stream) = io::duplex(8 * 1024);
         let (client_read, client_write) = io::split(client_stream);
         let (server_read, server_write) = io::split(server_stream);
 

@@ -23,10 +23,11 @@ interface Identity {
 interface Membrane {
   graft @0 (signer :Signer) -> (
     identity :Identity,                           # Host-side identity hub: maps signing domains → Signers.
-    host     :import "system.capnp".Host,         # Swarm-level operations (id, addrs, peers, connect).
+    host     :import "system.capnp".Host,         # Swarm-level operations (id, addrs, peers, network).
     executor :import "system.capnp".Executor,     # WASM execution (runBytes, echo).
     ipfs     :import "ipfs.capnp".Client,         # IPFS CoreAPI (unixfs, block, dag, ...).
     routing  :import "routing.capnp".Routing      # Content routing + data transfer via IPFS.
   );
   # Graft a signer to the membrane, returning epoch-scoped capabilities.
+  # Listener/Dialer accessed via host.network().
 }

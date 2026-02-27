@@ -5,10 +5,10 @@
 
 WASM_TARGET := wasm32-wasip2
 
-.PHONY: all host std kernel shell clean run-kernel
+.PHONY: all host std kernel shell examples chess clean run-kernel
 .PHONY: podman-build podman-run podman-clean podman-dev
 
-all: std host
+all: std examples host
 
 # --- Host --------------------------------------------------------------------
 
@@ -29,6 +29,15 @@ shell:
 	@mkdir -p std/shell/boot
 	cp target/$(WASM_TARGET)/release/shell.wasm std/shell/boot/main.wasm
 
+# --- Examples ----------------------------------------------------------------
+
+examples: chess
+
+chess:
+	cargo build -p chess --target $(WASM_TARGET) --release
+	@mkdir -p examples/chess/bin
+	cp target/$(WASM_TARGET)/release/chess.wasm examples/chess/bin/main.wasm
+
 # --- Run ---------------------------------------------------------------------
 
 run-kernel: kernel
@@ -40,6 +49,7 @@ clean:
 	cargo clean
 	rm -f crates/kernel/bin/main.wasm
 	rm -f std/shell/boot/main.wasm
+	rm -f examples/chess/bin/main.wasm
 
 # --- Podman ------------------------------------------------------------------
 

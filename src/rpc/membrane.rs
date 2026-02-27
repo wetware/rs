@@ -135,6 +135,7 @@ pub struct HostGraftBuilder {
     wasm_debug: bool,
     ipfs_client: ipfs::HttpClient,
     signing_key: Option<Arc<SigningKey>>,
+    stream_control: libp2p_stream::Control,
 }
 
 impl HostGraftBuilder {
@@ -144,6 +145,7 @@ impl HostGraftBuilder {
         wasm_debug: bool,
         ipfs_client: ipfs::HttpClient,
         signing_key: Option<Arc<SigningKey>>,
+        stream_control: libp2p_stream::Control,
     ) -> Self {
         Self {
             network_state,
@@ -151,6 +153,7 @@ impl HostGraftBuilder {
             wasm_debug,
             ipfs_client,
             signing_key,
+            stream_control,
         }
     }
 }
@@ -166,6 +169,7 @@ impl GraftBuilder for HostGraftBuilder {
             self.swarm_cmd_tx.clone(),
             self.wasm_debug,
             Some(guard.clone()),
+            Some(self.stream_control.clone()),
         ));
         builder.set_host(host);
 
@@ -466,6 +470,7 @@ pub fn build_membrane_rpc<R, W>(
     epoch_rx: watch::Receiver<Epoch>,
     ipfs_client: ipfs::HttpClient,
     signing_key: Option<Arc<SigningKey>>,
+    stream_control: libp2p_stream::Control,
 ) -> (RpcSystem<Side>, GuestMembrane)
 where
     R: AsyncRead + Unpin + 'static,
@@ -477,6 +482,7 @@ where
         wasm_debug,
         ipfs_client,
         signing_key,
+        stream_control,
     );
     // The local kernel is a trusted process — no challenge-response auth needed.
     // Auth applies to external peers connecting via libp2p to the guest's exported membrane.

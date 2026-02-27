@@ -206,23 +206,6 @@ async fn eval_host(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
                 .collect();
             Ok(Val::List(items))
         }
-        "connect" => {
-            let addr_str = match args.get(1) {
-                Some(Val::Str(s)) => s.clone(),
-                _ => return Err("(host connect \"<multiaddr>\")".into()),
-            };
-            // Parse multiaddr: extract peer ID and address.
-            // For now, pass the raw multiaddr bytes and empty peer ID.
-            let mut req = ctx.host.connect_request();
-            {
-                let mut b = req.get();
-                b.set_peer_id(&[]);
-                let mut addrs = b.init_addrs(1);
-                addrs.set(0, addr_str.as_bytes());
-            }
-            req.send().promise.await.map_err(|e| e.to_string())?;
-            Ok(Val::Sym("ok".into()))
-        }
         _ => Err(format!("unknown host method: {method}")),
     }
 }
@@ -423,7 +406,6 @@ Capabilities:
   (host id)                      Peer ID
   (host addrs)                   Listen addresses
   (host peers)                   Connected peers
-  (host connect \"<multiaddr>\")   Dial a peer
 
   (executor echo \"<msg>\")        Diagnostic echo
 
