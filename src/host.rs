@@ -218,12 +218,24 @@ impl Libp2pHost {
                             kad::Event::OutboundQueryProgressed { id, result, step, .. },
                         )) => {
                             match result {
+                                kad::QueryResult::Bootstrap(Ok(ok)) => {
+                                    tracing::info!(
+                                        peer = %ok.peer,
+                                        remaining = ok.num_remaining,
+                                        "Kad bootstrap progress"
+                                    );
+                                }
+                                kad::QueryResult::Bootstrap(Err(e)) => {
+                                    tracing::warn!("Kad bootstrap error: {e:?}");
+                                }
                                 kad::QueryResult::StartProviding(Ok(_)) => {
+                                    tracing::debug!("Kad provide succeeded");
                                     if let Some(reply) = pending_kad_provides.remove(&id) {
                                         let _ = reply.send(Ok(()));
                                     }
                                 }
                                 kad::QueryResult::StartProviding(Err(e)) => {
+                                    tracing::warn!("Kad provide FAILED: {e:?}");
                                     if let Some(reply) = pending_kad_provides.remove(&id) {
                                         let _ = reply.send(Err(format!("{e:?}")));
                                     }
@@ -231,13 +243,16 @@ impl Libp2pHost {
                                 kad::QueryResult::GetProviders(Ok(
                                     kad::GetProvidersOk::FoundProviders { providers, .. },
                                 )) => {
+                                    tracing::info!(
+                                        count = providers.len(),
+                                        "Kad found providers"
+                                    );
                                     if let Some(sender) = pending_kad_find_providers.get(&id) {
-                                        for provider in providers {
+                                        for provider in &providers {
                                             let addrs = peer_addr_book
-                                                .get(&provider)
+                                                .get(provider)
                                                 .map(|v| v.iter().map(|a| a.to_vec()).collect())
                                                 .unwrap_or_default();
-                                            // Ignore send errors (receiver dropped = caller gone).
                                             let _ = sender.send(PeerInfo {
                                                 peer_id: provider.to_bytes(),
                                                 addrs,
@@ -245,9 +260,17 @@ impl Libp2pHost {
                                         }
                                     }
                                 }
-                                // Other GetProviders outcomes (no additional record, error)
-                                // are handled below by the `step.last` cleanup.
-                                _ => {}
+                                kad::QueryResult::GetProviders(Ok(
+                                    kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. },
+                                )) => {
+                                    tracing::debug!("Kad find_providers finished (no more records)");
+                                }
+                                kad::QueryResult::GetProviders(Err(e)) => {
+                                    tracing::warn!("Kad find_providers FAILED: {e:?}");
+                                }
+                                _ => {
+                                    tracing::trace!("Kad query progress: {result:?}");
+                                }
                             }
                             // When the query finishes, close the reply channel so the
                             // receiver loop in routing.rs exits cleanly.
@@ -256,6 +279,9 @@ impl Libp2pHost {
                                 // provide queries are already removed above; remove is a no-op.
                                 pending_kad_provides.remove(&id);
                             }
+                        }
+                        SwarmEvent::Behaviour(WetwareBehaviourEvent::Kad(ref ev)) => {
+                            tracing::debug!("Kad event: {ev:?}");
                         }
                         _ => {}
                     }
@@ -283,6 +309,12 @@ impl Libp2pHost {
                             }
                         }
                         Some(SwarmCommand::KadProvide { key, reply }) => {
+                            tracing::info!(
+                                key_len = key.len(),
+                                peers_in_rt = self.swarm.behaviour_mut().kad.kbuckets()
+                                    .map(|b| b.num_entries()).sum::<usize>(),
+                                "Kad provide: starting"
+                            );
                             let record_key = kad::RecordKey::new(&key);
                             match self.swarm.behaviour_mut().kad.start_providing(record_key) {
                                 Ok(query_id) => {
@@ -294,6 +326,12 @@ impl Libp2pHost {
                             }
                         }
                         Some(SwarmCommand::KadFindProviders { key, reply }) => {
+                            tracing::info!(
+                                key_len = key.len(),
+                                peers_in_rt = self.swarm.behaviour_mut().kad.kbuckets()
+                                    .map(|b| b.num_entries()).sum::<usize>(),
+                                "Kad find_providers: starting"
+                            );
                             let record_key = kad::RecordKey::new(&key);
                             let query_id =
                                 self.swarm.behaviour_mut().kad.get_providers(record_key);
