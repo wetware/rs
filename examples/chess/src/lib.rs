@@ -246,21 +246,21 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     let executor = results.get_executor()?;
     let ipfs = results.get_ipfs()?;
     let routing = results.get_routing()?;
-    let server = results.get_server()?;
 
-    // Register /ww/0.1.0/chess subprotocol handler.
+    // Register /ww/0.1.0/chess subprotocol handler via Listener.
     // Read our own binary so handler instances run the same code in handler mode.
     let wasm_bytes = std::fs::read("/bin/main.wasm")
         .map_err(|e| capnp::Error::failed(format!("read handler wasm: {e}")))?;
 
-    // OCAP: pass our executor to server.serve(), explicitly delegating spawn rights.
-    // A future PR could wrap executor in an attenuating proxy to restrict handler
-    // resources (memory, CPU, network) before delegating — Server treats it opaquely.
-    let mut serve_req = server.serve_request();
-    serve_req.get().set_executor(executor);
-    serve_req.get().set_protocol("chess");
-    serve_req.get().set_handler(&wasm_bytes);
-    serve_req.send().promise.await?;
+    let network_resp = host.network_request().send().promise.await?;
+    let listener = network_resp.get()?.get_listener()?;
+
+    // OCAP: pass our executor to listener.listen(), explicitly delegating spawn rights.
+    let mut listen_req = listener.listen_request();
+    listen_req.get().set_executor(executor);
+    listen_req.get().set_protocol("chess");
+    listen_req.get().set_handler(&wasm_bytes);
+    listen_req.send().promise.await?;
     log::info!("registered /ww/0.1.0/chess subprotocol handler");
 
     // Log peer identity.
