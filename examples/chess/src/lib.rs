@@ -422,7 +422,9 @@ mod tests {
         let engine = ChessEngineImpl::new();
         // 1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6 4. Qxf7#
         for uci in &["e2e4", "e7e5", "f1c4", "b8c6", "d1h5", "g8f6", "h5f7"] {
-            engine.apply(uci).unwrap_or_else(|e| panic!("move {uci} failed: {e}"));
+            engine
+                .apply(uci)
+                .unwrap_or_else(|e| panic!("move {uci} failed: {e}"));
         }
         assert_eq!(engine.status(), GameStatus::Checkmate);
     }
@@ -557,10 +559,7 @@ mod tests {
                     let mut req = client.apply_move_request();
                     req.get().set_uci(uci);
                     let resp = req.send().promise.await.unwrap();
-                    assert!(
-                        resp.get().unwrap().get_ok(),
-                        "move {uci} rejected over RPC"
-                    );
+                    assert!(resp.get().unwrap().get_ok(), "move {uci} rejected over RPC");
                 }
 
                 let resp = client.get_status_request().send().promise.await.unwrap();
