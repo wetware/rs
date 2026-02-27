@@ -3406,6 +3406,7 @@ dependencies = [
  "libp2p-dns",
  "libp2p-identify",
  "libp2p-identity",
+ "libp2p-kad",
  "libp2p-mdns",
  "libp2p-metrics",
  "libp2p-noise",
@@ -3527,6 +3528,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "libp2p-kad"
+version = "0.47.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bab0466a27ebe955bcbc27328fae5429c5b48c915fd6174931414149802ec23"
+dependencies = [
+ "asynchronous-codec",
+ "bytes",
+ "either",
+ "fnv",
+ "futures",
+ "futures-bounded",
+ "futures-timer",
+ "libp2p-core",
+ "libp2p-identity",
+ "libp2p-swarm",
+ "quick-protobuf",
+ "quick-protobuf-codec",
+ "rand 0.8.5",
+ "sha2",
+ "smallvec",
+ "thiserror 2.0.17",
+ "tracing",
+ "uint 0.10.0",
+ "web-time",
+]
+
+[[package]]
 name = "libp2p-mdns"
 version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3555,6 +3583,7 @@ dependencies = [
  "libp2p-core",
  "libp2p-identify",
  "libp2p-identity",
+ "libp2p-kad",
  "libp2p-swarm",
  "pin-project",
  "prometheus-client",
@@ -4568,7 +4597,7 @@ checksum = "0b34d9fd68ae0b74a41b21c03c2f62847aa0ffea044eee893b4c140b37e244e2"
 dependencies = [
  "fixed-hash",
  "impl-codec",
- "uint",
+ "uint 0.9.5",
 ]
 
 [[package]]
@@ -6245,6 +6274,18 @@ name = "uint"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76f64bba2c53b04fcab63c01a7d7427eadc821e3bc48c34dc9ba29c501164b52"
+dependencies = [
+ "byteorder",
+ "crunchy",
+ "hex",
+ "static_assertions",
+]
+
+[[package]]
+name = "uint"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "909988d098b2f738727b161a106cfc7cab00c539c2687a8836f8e565976fb53e"
 dependencies = [
  "byteorder",
  "crunchy",

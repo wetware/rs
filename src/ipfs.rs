@@ -365,79 +365,59 @@ impl HttpClient {
     }
 }
 
-// ── Routing API ────────────────────────────────────────────────────
+// ── Routing / Node Identity API ────────────────────────────────────
 
-/// Provider info returned by `findProviders`.
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ProviderResponse {
-    #[serde(rename = "ID")]
-    pub id: String,
-    #[serde(rename = "Addrs")]
-    pub addrs: Option<Vec<String>>,
-    #[serde(rename = "Type")]
-    pub response_type: Option<u32>,
+/// Node identity returned by Kubo's `/api/v0/id` endpoint.
+///
+/// Used by the Wetware swarm to bootstrap the in-process Kademlia client
+/// against the local Kubo node (Amino DHT).
+#[derive(Debug, Clone)]
+pub struct KuboInfo {
+    /// Kubo's libp2p peer ID as a base58-encoded string (e.g. `"12D3KooW..."`).
+    pub peer_id: String,
+    /// Kubo's swarm listen addresses (may include `/p2p/<peer-id>` suffix).
+    pub swarm_addrs: Vec<String>,
 }
 
 impl HttpClient {
-    /// Announce this node as a provider for the given CID.
+    /// Fetch the local Kubo node's identity for Kad bootstrap.
     ///
-    /// Calls Kubo's `POST /api/v0/routing/provide?arg=<cid>`.
-    pub async fn routing_provide(&self, cid: &str) -> Result<()> {
-        let url = format!("{}/api/v0/routing/provide?arg={}", self.base_url, cid);
+    /// Calls `POST /api/v0/id` and returns the peer ID and swarm addresses.
+    /// Returns an error if Kubo is not reachable.
+    pub async fn kubo_info(&self) -> Result<KuboInfo> {
+        let url = format!("{}/api/v0/id", self.base_url);
         let response = self
             .http_client
             .post(&url)
             .send()
             .await
-            .with_context(|| format!("routing provide failed for {cid}"))?;
+            .with_context(|| format!("kubo id failed: {}", self.base_url))?;
 
         if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("routing provide failed for {cid}: {body}");
+            anyhow::bail!("kubo id failed: {}", response.status());
         }
-        Ok(())
-    }
 
-    /// Find providers for a CID.
-    ///
-    /// Calls Kubo's `POST /api/v0/routing/findprovs?arg=<cid>&num-providers=<count>`.
-    /// Returns a list of providers with their peer IDs and multiaddrs.
-    pub async fn routing_find_providers(
-        &self,
-        cid: &str,
-        count: u32,
-    ) -> Result<Vec<ProviderResponse>> {
-        let url = format!(
-            "{}/api/v0/routing/findprovs?arg={}&num-providers={}",
-            self.base_url, cid, count
-        );
-        let response = self
-            .http_client
-            .post(&url)
-            .send()
+        let body: serde_json::Value = response
+            .json()
             .await
-            .with_context(|| format!("routing findprovs failed for {cid}"))?;
+            .context("kubo id: failed to parse JSON response")?;
 
-        if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("routing findprovs failed for {cid}: {body}");
-        }
+        let peer_id = body["ID"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("kubo id: missing ID field"))?
+            .to_string();
 
-        // Kubo returns newline-delimited JSON (NDJSON)
-        let body = response.text().await?;
-        let mut providers = Vec::new();
-        for line in body.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            if let Ok(resp) = serde_json::from_str::<ProviderResponse>(line) {
-                // Type 4 = provider record in Kubo's NDJSON output
-                if resp.response_type == Some(4) && resp.addrs.is_some() {
-                    providers.push(resp);
-                }
-            }
-        }
-        Ok(providers)
+        let swarm_addrs = body["Addresses"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+
+        Ok(KuboInfo {
+            peer_id,
+            swarm_addrs,
+        })
     }
 
     /// Add raw bytes to IPFS, returning the CID.

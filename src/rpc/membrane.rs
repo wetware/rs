@@ -184,7 +184,7 @@ impl GraftBuilder for HostGraftBuilder {
         builder.set_ipfs(ipfs_client);
 
         let routing: routing_capnp::routing::Client = capnp_rpc::new_client(
-            super::routing::RoutingImpl::new(self.ipfs_client.clone(), guard.clone()),
+            super::routing::RoutingImpl::new(self.swarm_cmd_tx.clone(), guard.clone()),
         );
         builder.set_routing(routing);
 
