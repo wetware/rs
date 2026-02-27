@@ -590,6 +590,64 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Text protocol simulation (main-mode ↔ handler-mode game loop)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_text_protocol_game_simulation() {
+        // Simulate main-mode ↔ handler-mode text protocol exchange.
+        // Main engine = the dialer side (play_against_peer logic).
+        // Handler engine = the listener side (handle_chess_stream logic).
+        let main_engine = ChessEngineImpl::new();
+        let handler_engine = ChessEngineImpl::new();
+        let mut move_num = 0u32;
+        let max_moves = 300; // Cap to avoid infinite random play.
+
+        loop {
+            // Main side: pick a random move.
+            let moves = main_engine.legal_moves_uci();
+            if moves.is_empty() {
+                break;
+            }
+            let our_move = &moves[rand::random_range(0..moves.len())];
+            main_engine.apply(our_move).unwrap();
+            move_num += 1;
+
+            // Simulate: main sends "{our_move}\n" over the wire.
+            // Handler side: receive move, apply it.
+            handler_engine.apply(our_move).unwrap();
+
+            // Handler: check if game over after opponent's move.
+            let handler_moves = handler_engine.legal_moves_uci();
+            if handler_moves.is_empty() {
+                break;
+            }
+
+            // Handler: pick a random response.
+            let response = &handler_moves[rand::random_range(0..handler_moves.len())];
+            handler_engine.apply(response).unwrap();
+
+            // Simulate: handler sends "{response}\n" back.
+            // Main side: receive and apply response.
+            main_engine.apply(response).unwrap();
+
+            // Both engines should agree on position.
+            assert_eq!(
+                main_engine.fen(),
+                handler_engine.fen(),
+                "position mismatch after move {move_num}"
+            );
+
+            if move_num >= max_moves {
+                break;
+            }
+        }
+
+        assert!(move_num > 0, "game should have played at least one move");
+        assert_eq!(main_engine.fen(), handler_engine.fen());
+    }
+
+    // -----------------------------------------------------------------------
     // RPC round-trip tests (Cap'n Proto over in-memory duplex)
     // -----------------------------------------------------------------------
 
