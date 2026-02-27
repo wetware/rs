@@ -214,50 +214,47 @@ impl Libp2pHost {
                         SwarmEvent::NewExternalAddrOfPeer { peer_id, address } => {
                             peer_addr_book.entry(peer_id).or_default().push(address);
                         }
-                        SwarmEvent::Behaviour(WetwareBehaviourEvent::Kad(event)) => {
-                            match event {
-                                kad::Event::OutboundQueryProgressed { id, result, step, .. } => {
-                                    match result {
-                                        kad::QueryResult::StartProviding(Ok(_)) => {
-                                            if let Some(reply) = pending_kad_provides.remove(&id) {
-                                                let _ = reply.send(Ok(()));
-                                            }
-                                        }
-                                        kad::QueryResult::StartProviding(Err(e)) => {
-                                            if let Some(reply) = pending_kad_provides.remove(&id) {
-                                                let _ = reply.send(Err(format!("{e:?}")));
-                                            }
-                                        }
-                                        kad::QueryResult::GetProviders(Ok(
-                                            kad::GetProvidersOk::FoundProviders { providers, .. },
-                                        )) => {
-                                            if let Some(sender) = pending_kad_find_providers.get(&id) {
-                                                for provider in providers {
-                                                    let addrs = peer_addr_book
-                                                        .get(&provider)
-                                                        .map(|v| v.iter().map(|a| a.to_vec()).collect())
-                                                        .unwrap_or_default();
-                                                    // Ignore send errors (receiver dropped = caller gone).
-                                                    let _ = sender.send(PeerInfo {
-                                                        peer_id: provider.to_bytes(),
-                                                        addrs,
-                                                    });
-                                                }
-                                            }
-                                        }
-                                        // Other GetProviders outcomes (no additional record, error)
-                                        // are handled below by the `step.last` cleanup.
-                                        _ => {}
-                                    }
-                                    // When the query finishes, close the reply channel so the
-                                    // receiver loop in routing.rs exits cleanly.
-                                    if step.last {
-                                        pending_kad_find_providers.remove(&id);
-                                        // provide queries are already removed above; remove is a no-op.
-                                        pending_kad_provides.remove(&id);
+                        SwarmEvent::Behaviour(WetwareBehaviourEvent::Kad(
+                            kad::Event::OutboundQueryProgressed { id, result, step, .. },
+                        )) => {
+                            match result {
+                                kad::QueryResult::StartProviding(Ok(_)) => {
+                                    if let Some(reply) = pending_kad_provides.remove(&id) {
+                                        let _ = reply.send(Ok(()));
                                     }
                                 }
+                                kad::QueryResult::StartProviding(Err(e)) => {
+                                    if let Some(reply) = pending_kad_provides.remove(&id) {
+                                        let _ = reply.send(Err(format!("{e:?}")));
+                                    }
+                                }
+                                kad::QueryResult::GetProviders(Ok(
+                                    kad::GetProvidersOk::FoundProviders { providers, .. },
+                                )) => {
+                                    if let Some(sender) = pending_kad_find_providers.get(&id) {
+                                        for provider in providers {
+                                            let addrs = peer_addr_book
+                                                .get(&provider)
+                                                .map(|v| v.iter().map(|a| a.to_vec()).collect())
+                                                .unwrap_or_default();
+                                            // Ignore send errors (receiver dropped = caller gone).
+                                            let _ = sender.send(PeerInfo {
+                                                peer_id: provider.to_bytes(),
+                                                addrs,
+                                            });
+                                        }
+                                    }
+                                }
+                                // Other GetProviders outcomes (no additional record, error)
+                                // are handled below by the `step.last` cleanup.
                                 _ => {}
+                            }
+                            // When the query finishes, close the reply channel so the
+                            // receiver loop in routing.rs exits cleanly.
+                            if step.last {
+                                pending_kad_find_providers.remove(&id);
+                                // provide queries are already removed above; remove is a no-op.
+                                pending_kad_provides.remove(&id);
                             }
                         }
                         _ => {}
