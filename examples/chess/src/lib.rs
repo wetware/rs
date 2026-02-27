@@ -13,6 +13,7 @@
 //! them, picks a random legal response, writes it to stdout.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use capnp::capability::Promise;
@@ -288,6 +289,7 @@ fn handle_chess_stream() {
 struct DialingSink {
     dialer: system_capnp::dialer::Client,
     self_id: Vec<u8>,
+    seen: Rc<RefCell<HashSet<Vec<u8>>>>,
 }
 
 #[allow(refining_impl_trait)]
@@ -298,9 +300,8 @@ impl routing_capnp::provider_sink::Server for DialingSink {
     ) -> Promise<(), capnp::Error> {
         let peer_id = pry!(pry!(pry!(params.get()).get_info()).get_peer_id()).to_vec();
 
-        // Skip self.
-        if peer_id == self.self_id {
-            log::info!("discovered self, skipping");
+        // Skip self and already-seen peers.
+        if peer_id == self.self_id || !self.seen.borrow_mut().insert(peer_id.clone()) {
             return Promise::ok(());
         }
 
@@ -410,6 +411,16 @@ async fn play_against_peer(
 }
 
 // ---------------------------------------------------------------------------
+// WASI sleep via monotonic clock
+// ---------------------------------------------------------------------------
+
+fn wasi_sleep_secs(secs: u64) {
+    let pollable =
+        wasip2::clocks::monotonic_clock::subscribe_duration(secs * 1_000_000_000);
+    pollable.block();
+}
+
+// ---------------------------------------------------------------------------
 // Game loop (main mode)
 // ---------------------------------------------------------------------------
 
@@ -457,36 +468,46 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     let ns_cid = add_resp.get()?.get_cid()?.to_str()?.to_string();
     log::info!("chess namespace CID: {ns_cid}");
 
-    // Announce as chess player.
-    let mut provide_req = routing.provide_request();
-    provide_req.get().set_key(&ns_cid);
-    provide_req.send().promise.await?;
-    log::info!("providing chess namespace");
+    // Discovery loop: provide + find_providers with exponential backoff.
+    // DHT records have a TTL, so re-provide each pass. find_providers is a
+    // one-shot query, so we loop to catch peers that announce after our search.
+    let seen = Rc::new(RefCell::new(HashSet::<Vec<u8>>::new()));
+    let mut attempt = 0u32;
+    let base_secs = 2u64;
+    let max_secs = 60u64;
 
-    // Discover other chess peers; dial them as they're found.
-    let sink: routing_capnp::provider_sink::Client =
-        capnp_rpc::new_client(DialingSink { dialer, self_id });
-    let mut fp_req = routing.find_providers_request();
-    {
-        let mut b = fp_req.get();
-        b.set_key(&ns_cid);
-        b.set_count(5);
-        b.set_sink(sink);
-    }
-    fp_req.send().promise.await?;
-    log::info!("searching for chess peers...");
-
-    // Block until stdin closes (host signals shutdown).
-    let stdin = wasip2::cli::stdin::get_stdin();
     loop {
-        match stdin.blocking_read(4096) {
-            Ok(b) if b.is_empty() => break,
-            Err(_) => break,
-            Ok(_) => {}
-        }
-    }
+        // Re-provide (DHT records expire).
+        let mut provide_req = routing.provide_request();
+        provide_req.get().set_key(&ns_cid);
+        provide_req.send().promise.await?;
 
-    Ok(())
+        // Search for peers; DialingSink dials new ones automatically.
+        let sink: routing_capnp::provider_sink::Client =
+            capnp_rpc::new_client(DialingSink {
+                dialer: dialer.clone(),
+                self_id: self_id.clone(),
+                seen: seen.clone(),
+            });
+        let mut fp_req = routing.find_providers_request();
+        {
+            let mut b = fp_req.get();
+            b.set_key(&ns_cid);
+            b.set_count(5);
+            b.set_sink(sink);
+        }
+        fp_req.send().promise.await?;
+
+        let n_seen = seen.borrow().len();
+        log::info!("discovery pass {attempt}: {n_seen} peers seen");
+
+        // Capped exponential backoff with random jitter (0.5x–1.0x).
+        let delay = std::cmp::min(base_secs.saturating_mul(1 << attempt), max_secs);
+        let jitter = delay / 2 + rand::random_range(0..=delay / 2);
+        wasi_sleep_secs(jitter);
+
+        attempt = attempt.saturating_add(1);
+    }
 }
 
 // ---------------------------------------------------------------------------
