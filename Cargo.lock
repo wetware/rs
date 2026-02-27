@@ -3929,6 +3929,7 @@ dependencies = [
  "k256",
  "rand 0.8.5",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
