@@ -128,7 +128,7 @@ impl stem_capnp::signer::Server for EpochGuardedMembraneSigner {
 // HostGraftBuilder — GraftBuilder for the concrete stem graft response
 // ---------------------------------------------------------------------------
 
-/// Fills the graft response with epoch-guarded Host, Executor, IPFS Client, Routing, Server, and node identity.
+/// Fills the graft response with epoch-guarded Host, Executor, IPFS Client, Routing, and node identity.
 pub struct HostGraftBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
@@ -169,6 +169,7 @@ impl GraftBuilder for HostGraftBuilder {
             self.swarm_cmd_tx.clone(),
             self.wasm_debug,
             Some(guard.clone()),
+            Some(self.stream_control.clone()),
         ));
         builder.set_host(host);
 
@@ -190,11 +191,6 @@ impl GraftBuilder for HostGraftBuilder {
             super::routing::RoutingImpl::new(self.swarm_cmd_tx.clone(), guard.clone()),
         );
         builder.set_routing(routing);
-
-        let server: stem_capnp::server::Client = capnp_rpc::new_client(
-            super::server::ServerImpl::new(self.stream_control.clone(), guard.clone()),
-        );
-        builder.set_server(server);
 
         if let Some(sk) = &self.signing_key {
             let keypair =

@@ -1,6 +1,6 @@
-//! Server capability: guest-exported subprotocols via process-per-connection.
+//! Listener capability: guest-exported subprotocols via process-per-connection.
 //!
-//! The `Server` capability lets a guest register a libp2p subprotocol handler.
+//! The `Listener` capability lets a guest register a libp2p subprotocol handler.
 //! For each incoming stream on that subprotocol, the host spawns a fresh WASI
 //! process (via the guest-provided `Executor`) with stdin/stdout wired to the
 //! stream — the handler speaks whatever wire protocol it wants over stdio.
@@ -10,16 +10,16 @@ use capnp_rpc::pry;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use futures::StreamExt;
 use libp2p::StreamProtocol;
-use membrane::{stem_capnp, EpochGuard};
+use membrane::EpochGuard;
 
 use crate::system_capnp;
 
-pub struct ServerImpl {
+pub struct ListenerImpl {
     stream_control: libp2p_stream::Control,
     guard: EpochGuard,
 }
 
-impl ServerImpl {
+impl ListenerImpl {
     pub fn new(stream_control: libp2p_stream::Control, guard: EpochGuard) -> Self {
         Self {
             stream_control,
@@ -29,11 +29,11 @@ impl ServerImpl {
 }
 
 #[allow(refining_impl_trait)]
-impl stem_capnp::server::Server for ServerImpl {
-    fn serve(
+impl system_capnp::listener::Server for ListenerImpl {
+    fn listen(
         self: capnp::capability::Rc<Self>,
-        params: stem_capnp::server::ServeParams,
-        _results: stem_capnp::server::ServeResults,
+        params: system_capnp::listener::ListenParams,
+        _results: system_capnp::listener::ListenResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
 
@@ -82,7 +82,9 @@ impl stem_capnp::server::Server for ServerImpl {
                 let handler = handler.clone();
                 let protocol = protocol_suffix.clone();
                 tokio::task::spawn_local(async move {
-                    if let Err(e) = handle_connection(executor, &handler, stream, &protocol).await {
+                    if let Err(e) =
+                        handle_connection(executor, &handler, stream, &protocol).await
+                    {
                         tracing::error!(protocol, "Handler connection error: {e}");
                     }
                 });
@@ -94,9 +96,9 @@ impl stem_capnp::server::Server for ServerImpl {
     }
 }
 
-/// Spawn a handler process for a single incoming connection and pump
+/// Spawn a handler process for a single connection and pump
 /// stdin/stdout between the libp2p stream and the process.
-async fn handle_connection(
+pub(crate) async fn handle_connection(
     executor: system_capnp::executor::Client,
     handler_wasm: &[u8],
     stream: libp2p::Stream,
@@ -147,7 +149,7 @@ async fn handle_connection(
 }
 
 /// Read from the libp2p stream and write to the handler's stdin.
-async fn pump_stream_to_stdin(
+pub(crate) async fn pump_stream_to_stdin(
     mut reader: impl futures::io::AsyncRead + Unpin,
     stdin: system_capnp::byte_stream::Client,
 ) {
@@ -176,7 +178,7 @@ async fn pump_stream_to_stdin(
 }
 
 /// Read from the handler's stdout and write to the libp2p stream.
-async fn pump_stdout_to_stream(
+pub(crate) async fn pump_stdout_to_stream(
     stdout: system_capnp::byte_stream::Client,
     mut writer: impl futures::io::AsyncWrite + Unpin,
 ) {

@@ -22,11 +22,28 @@ interface Host {
   peers @2 () -> (peers :List(PeerInfo));
   # List currently connected peers.
 
-  connect @3 (peerId :Data, addrs :List(Data)) -> ();
-  # Dial a peer by ID and multiaddrs.
-
-  executor @4 () -> (executor :Executor);
+  executor @3 () -> (executor :Executor);
   # Obtain an Executor scoped to the same epoch as this Host.
+
+  network @4 () -> (listener :Listener, dialer :Dialer);
+  # Obtain Listener (accept incoming subprotocol streams) and
+  # Dialer (open outgoing subprotocol streams) capabilities.
+}
+
+interface Listener {
+  listen @0 (executor :Executor, protocol :Text, handler :Data) -> ();
+  # Accept incoming streams on /ww/0.1.0/{protocol}. For each stream, spawn a
+  # handler process via executor.runBytes(handler) and wire stdin/stdout to the stream.
+  #
+  # OCAP: caller delegates spawn authority via executor. Wrap executor in an attenuating
+  # proxy to restrict handler resources (memory, CPU, network).
+}
+
+interface Dialer {
+  dial @0 (peer :Data, protocol :Text) -> (stream :ByteStream);
+  # Open a stream to peer on /ww/0.1.0/{protocol}.
+  # Returns a bidirectional ByteStream: read() pulls from the remote,
+  # write() pushes to the remote, close() shuts down both directions.
 }
 
 interface Executor {
