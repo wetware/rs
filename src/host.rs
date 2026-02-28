@@ -233,7 +233,7 @@ impl Libp2pHost {
                                     tracing::warn!("Kad bootstrap error: {e:?}");
                                 }
                                 kad::QueryResult::StartProviding(Ok(_)) => {
-                                    tracing::debug!("Kad provide succeeded");
+                                    tracing::info!("Kad provide succeeded");
                                     if let Some(reply) = pending_kad_provides.remove(&id) {
                                         let _ = reply.send(Ok(()));
                                     }
@@ -249,6 +249,8 @@ impl Libp2pHost {
                                 )) => {
                                     tracing::info!(
                                         count = providers.len(),
+                                        providers = ?providers.iter()
+                                            .map(|p| p.to_string()).collect::<Vec<_>>(),
                                         "Kad found providers"
                                     );
                                     if let Some(sender) = pending_kad_find_providers.get(&id) {
@@ -265,17 +267,26 @@ impl Libp2pHost {
                                     }
                                 }
                                 kad::QueryResult::GetProviders(Ok(
-                                    kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. },
+                                    kad::GetProvidersOk::FinishedWithNoAdditionalRecord { closest_peers, .. },
                                 )) => {
-                                    tracing::debug!("Kad find_providers finished (no more records)");
+                                    tracing::info!(
+                                        closest = closest_peers.len(),
+                                        "Kad find_providers finished (no more records)"
+                                    );
                                 }
                                 kad::QueryResult::GetProviders(Err(e)) => {
                                     tracing::warn!("Kad find_providers FAILED: {e:?}");
                                 }
                                 _ => {
-                                    tracing::trace!("Kad query progress: {result:?}");
+                                    tracing::info!("Kad query progress (other): {result:?}");
                                 }
                             }
+                            tracing::info!(
+                                query_id = ?id,
+                                step_count = step.count,
+                                last = step.last,
+                                "Kad query step"
+                            );
                             // When the query finishes, close the reply channel so the
                             // receiver loop in routing.rs exits cleanly.
                             if step.last {
@@ -285,7 +296,7 @@ impl Libp2pHost {
                             }
                         }
                         SwarmEvent::Behaviour(WetwareBehaviourEvent::Kad(ref ev)) => {
-                            tracing::debug!("Kad event: {ev:?}");
+                            tracing::info!("Kad event: {ev:?}");
                         }
                         _ => {}
                     }
