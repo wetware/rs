@@ -444,7 +444,7 @@ impl Cell {
             membrane_stream_control,
         );
 
-        tracing::debug!("Starting streams RPC server for guest");
+        tracing::info!("Starting streams RPC server for guest");
         let local = tokio::task::LocalSet::new();
         local.spawn_local(rpc_system.map(|_| ()));
 

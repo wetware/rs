@@ -426,21 +426,26 @@ fn wasi_sleep_secs(secs: u64) {
 
 async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     // Graft membrane → get capabilities.
+    log::info!("run_game: requesting graft...");
     let graft_resp = membrane.graft_request().send().promise.await?;
     let results = graft_resp.get()?;
     let host = results.get_host()?;
     let executor = results.get_executor()?;
     let routing = results.get_routing()?;
+    log::info!("run_game: graft OK, requesting network...");
 
     // Pipeline: host.network() → (listener, dialer).
     let network_resp = host.network_request().send().promise.await?;
     let network = network_resp.get()?;
     let listener = network.get_listener()?;
     let dialer = network.get_dialer()?;
+    log::info!("run_game: network OK, reading handler wasm...");
 
     // Read our own binary so handler instances run the same code in handler mode.
     let wasm_bytes = std::fs::read("/bin/main.wasm")
         .map_err(|e| capnp::Error::failed(format!("read handler wasm: {e}")))?;
+
+    log::info!("run_game: handler wasm loaded ({} bytes), registering listener...", wasm_bytes.len());
 
     // Register /ww/0.1.0/chess listener.
     // OCAP: pass our executor to listener.listen(), explicitly delegating spawn rights.
@@ -523,6 +528,7 @@ impl Guest for ChessGuest {
             handle_chess_stream();
         } else {
             // Main mode: register listener, discover peers, dial, play game.
+            log::info!("chess guest starting (main mode)");
             system::run(|membrane: Membrane| async move { run_game(membrane).await });
         }
         Ok(())
