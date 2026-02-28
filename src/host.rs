@@ -93,8 +93,12 @@ impl Libp2pHost {
 
         if let Some(bootstrap) = kubo_bootstrap {
             kad_behaviour.add_address(&bootstrap.peer_id, bootstrap.addr);
-            // Start a bootstrap query so we fill our routing table early.
-            let _ = kad_behaviour.bootstrap();
+            // No bootstrap() call: as a Kad client we delegate all DHT ops
+            // to known servers.  Adding Kubo's address is sufficient — both
+            // ww nodes share the same Kubo, so provider records are stored
+            // and queried from the same place.  Bootstrapping walks the
+            // entire public Amino routing table, connecting to hundreds of
+            // peers and flooding the event loop for hours.
         }
 
         let behaviour = WetwareBehaviour {
