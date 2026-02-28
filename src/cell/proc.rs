@@ -445,7 +445,7 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
         "create-connection",
         |mut store: StoreContextMut<'_, ComponentRunStates>, (): ()| {
             Box::new(async move {
-                tracing::info!("streams#create-connection invoked");
+                tracing::debug!("streams#create-connection invoked");
                 let state = store.data_mut();
                 let guest_stream = state
                     .data_stream
@@ -464,7 +464,7 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
 
                 let conn_resource = state.resource_table.push(conn_state)?;
                 let connection = Connection::try_from_resource(conn_resource, &mut store)?;
-                tracing::info!("streams#create-connection: connection ready");
+                tracing::debug!("streams#create-connection: connection ready");
                 Ok((connection,))
             })
         },
@@ -475,7 +475,7 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
         |mut store: StoreContextMut<'_, ComponentRunStates>,
          (connection,): (Resource<ConnectionState>,)| {
             Box::new(async move {
-                tracing::info!("streams#connection.get-input-stream invoked");
+                tracing::debug!("streams#connection.get-input-stream invoked");
                 let stream = {
                     let conn_state = store.data_mut().resource_table.get_mut(&connection)?;
                     conn_state
@@ -486,7 +486,7 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
 
                 let state = store.data_mut();
                 let resource = state.resource_table.push(stream)?;
-                tracing::info!("streams#connection.get-input-stream: resource ready");
+                tracing::debug!("streams#connection.get-input-stream: resource ready");
                 Ok((resource,))
             })
         },
@@ -497,7 +497,7 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
         |mut store: StoreContextMut<'_, ComponentRunStates>,
          (connection,): (Resource<ConnectionState>,)| {
             Box::new(async move {
-                tracing::info!("streams#connection.get-output-stream invoked");
+                tracing::debug!("streams#connection.get-output-stream invoked");
                 let stream = {
                     let conn_state = store.data_mut().resource_table.get_mut(&connection)?;
                     conn_state
@@ -508,7 +508,7 @@ fn add_streams_to_linker(linker: &mut Linker<ComponentRunStates>) -> Result<()> 
 
                 let state = store.data_mut();
                 let resource = state.resource_table.push(stream)?;
-                tracing::info!("streams#connection.get-output-stream: resource ready");
+                tracing::debug!("streams#connection.get-output-stream: resource ready");
                 Ok((resource,))
             })
         },
