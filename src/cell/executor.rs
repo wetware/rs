@@ -299,7 +299,13 @@ impl Cell {
         let bytecode = loader.load(&wasm_path).await.with_context(|| {
             format!("Failed to load bin/main.wasm from image: {path} (resolved to: {wasm_path})")
         })?;
-        tracing::debug!(binary = %path, "Loaded guest bytecode");
+        let wasm_cid = {
+            let digest = blake3::hash(&bytecode);
+            let mh = cid::multihash::Multihash::<64>::wrap(0x1e, digest.as_bytes())
+                .expect("blake3 digest always fits in 64-byte multihash");
+            cid::Cid::new_v1(0x55, mh) // raw codec
+        };
+        tracing::info!(cid = %wasm_cid, bytes = bytecode.len(), "Loaded guest bytecode");
 
         let interactive = std::io::stdin().is_terminal() || std::env::var("WW_TTY").is_ok();
 
