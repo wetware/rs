@@ -97,8 +97,7 @@ impl Libp2pHost {
         // Use default parallelism α=3.  Previous α=1 caused iterative walks
         // to converge too slowly with a sparse routing table, preventing
         // provide/findProviders from reaching the correct DHT servers.
-        let mut kad_behaviour =
-            kad::Behaviour::with_config(peer_id, kad_store, kad_config);
+        let mut kad_behaviour = kad::Behaviour::with_config(peer_id, kad_store, kad_config);
         kad_behaviour.set_mode(Some(kad::Mode::Client));
 
         // Populate Kad routing table from Kubo's connected peers (K random
@@ -191,7 +190,10 @@ impl Libp2pHost {
         // Self-announcement: walk toward our own PeerId so that peers near us
         // in XOR space add us to their routing tables.  This makes us findable
         // via get_closest_peers(our_peer_id) when other nodes do peer routing.
-        self.swarm.behaviour_mut().kad.get_closest_peers(self.local_peer_id);
+        self.swarm
+            .behaviour_mut()
+            .kad
+            .get_closest_peers(self.local_peer_id);
         tracing::debug!("Kad self-announcement walk started");
 
         loop {
