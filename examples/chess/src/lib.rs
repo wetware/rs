@@ -344,18 +344,32 @@ impl routing_capnp::provider_sink::Server for DialingSink {
 // play_against_peer — dial and play a text-based chess game
 // ---------------------------------------------------------------------------
 
-/// Publish a JSON node to IPFS and return its CID.
+/// Publish a JSON node to IPFS and return its CID, or None on failure.
 ///
 /// Each node forms one link in a content-addressed linked list:
 /// `{"n":1,"w":"e2e4","b":"e7e5","prev":null}` → CID.
+///
+/// Returns `None` (with a warning log) if IPFS is unreachable or the add
+/// fails — the game continues without replay logging.
 async fn publish_node(
     unixfs: &ipfs_capnp::unix_f_s::Client,
     json: &str,
-) -> Result<String, capnp::Error> {
+) -> Option<String> {
     let mut req = unixfs.add_request();
     req.get().set_data(json.as_bytes());
-    let resp = req.send().promise.await?;
-    Ok(resp.get()?.get_cid()?.to_str()?.to_string())
+    match req.send().promise.await {
+        Ok(resp) => match resp.get().and_then(|r| r.get_cid()) {
+            Ok(cid) => cid.to_str().ok().map(|s| s.to_string()),
+            Err(e) => {
+                log::warn!("replay publish failed (reading CID): {e}");
+                None
+            }
+        },
+        Err(e) => {
+            log::warn!("replay publish failed: {e}");
+            None
+        }
+    }
 }
 
 async fn play_against_peer(
@@ -376,6 +390,20 @@ async fn play_against_peer(
 
     log::info!("game {us} vs {them}: started");
 
+    // Play the game, then always close the stream — even if the game
+    // errors out.  Without this, the remote handler blocks on stdin forever.
+    let result = play_game(&stream, unixfs, &us, &them).await;
+    let _ = stream.close_request().send().promise.await;
+    result
+}
+
+/// Inner game loop, factored out so the caller can always close the stream.
+async fn play_game(
+    stream: &system_capnp::byte_stream::Client,
+    unixfs: &ipfs_capnp::unix_f_s::Client,
+    us: &str,
+    them: &str,
+) -> Result<(), capnp::Error> {
     // Play game: send UCI moves, read responses via the single Stream capability.
     // Each move pair is published to IPFS as a JSON node linking to the previous,
     // forming a content-addressed linked list (see doc/replay.md).
@@ -397,7 +425,7 @@ async fn play_against_peer(
         if moves.is_empty() {
             // We have no legal moves — opponent wins.
             let node = format!(r#"{{"result":"0-1",{}}}"#, prev_field(&prev_cid));
-            prev_cid = Some(publish_node(unixfs, &node).await?);
+            prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
             log::info!("game {us} vs {them}: {them} wins after {move_num} moves");
             break;
         }
@@ -416,7 +444,7 @@ async fn play_against_peer(
                 r#"{{"n":{move_num},"w":"{our_move}","result":"1-0",{}}}"#,
                 prev_field(&prev_cid)
             );
-            prev_cid = Some(publish_node(unixfs, &node).await?);
+            prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
             log::info!("game {us} vs {them}: {us} wins after {move_num} moves ({our_move})");
             break;
         }
@@ -431,7 +459,7 @@ async fn play_against_peer(
                 r#"{{"n":{move_num},"w":"{our_move}","result":"*",{}}}"#,
                 prev_field(&prev_cid)
             );
-            prev_cid = Some(publish_node(unixfs, &node).await?);
+            prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
             log::info!("game {us} vs {them}: stream closed after {move_num} moves");
             break;
         }
@@ -444,7 +472,7 @@ async fn play_against_peer(
                 r#"{{"n":{move_num},"w":"{our_move}","result":"*",{}}}"#,
                 prev_field(&prev_cid)
             );
-            prev_cid = Some(publish_node(unixfs, &node).await?);
+            prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
             log::info!("game {us} vs {them}: empty response after {move_num} moves");
             break;
         }
@@ -458,7 +486,7 @@ async fn play_against_peer(
             r#"{{"n":{move_num},"w":"{our_move}","b":"{response}",{}}}"#,
             prev_field(&prev_cid)
         );
-        prev_cid = Some(publish_node(unixfs, &node).await?);
+        prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
         log::info!("  {move_num}. {our_move} {response}");
     }
 
@@ -467,9 +495,6 @@ async fn play_against_peer(
         log::info!("game {us} vs {them}: replay \u{2192} {cid}");
     }
     log::info!("game {us} vs {them}: complete ({move_num} moves)");
-
-    // Close the stream.
-    let _ = stream.close_request().send().promise.await;
 
     Ok(())
 }
