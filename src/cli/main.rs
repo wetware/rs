@@ -846,7 +846,11 @@ pub extern "C" fn _start() {
 
         // Apply all mounts into a single FHS root.
         let merged = image::apply_mounts(&all_mounts, &ipfs_client).await?;
-        let image_path = merged.path().to_string_lossy().to_string();
+
+        // Publish the merged image to IPFS so guests can resolve content via
+        // the UnixFS capability.  $WW_ROOT is set to /ipfs/<cid>.
+        let root_cid = ipfs_client.add_dir(merged.path()).await?;
+        let image_path = format!("/ipfs/{}", root_cid);
 
         // Resolve identity from /etc/identity in the merged FHS.
         let (sk, _verifying_key, identity_source) = Self::resolve_identity(merged.path())?;
@@ -865,8 +869,38 @@ pub extern "C" fn _start() {
             }
         };
 
+        // Fetch a random sample of Kubo's connected peers to seed the Kad
+        // routing table.  Capped at K_VALUE (20) — the Kademlia replication
+        // factor and the minimum for a single query to converge.  The
+        // automatic bootstrap walk (triggered when entries < K) will
+        // discover additional peers if needed.
+        let kubo_peers: Vec<(libp2p::PeerId, Multiaddr)> = match ipfs_client.swarm_peers().await {
+            Ok(raw) => {
+                use rand::seq::SliceRandom;
+                let mut parsed: Vec<_> = raw
+                    .into_iter()
+                    .filter_map(|(peer_str, addr_str)| {
+                        let peer_id: libp2p::PeerId = peer_str.parse().ok()?;
+                        let addr: Multiaddr = addr_str.parse().ok()?;
+                        Some((peer_id, addr))
+                    })
+                    .collect();
+                const MAX_KUBO_PEERS: usize = 20; // K_VALUE
+                if parsed.len() > MAX_KUBO_PEERS {
+                    let mut rng = rand::rng();
+                    parsed.shuffle(&mut rng);
+                    parsed.truncate(MAX_KUBO_PEERS);
+                }
+                parsed
+            }
+            Err(e) => {
+                tracing::warn!("Could not fetch Kubo swarm peers: {e}");
+                Vec::new()
+            }
+        };
+
         // Start the libp2p swarm.
-        let wetware_host = host::WetwareHost::new(port, keypair, kubo_bootstrap)?;
+        let wetware_host = host::WetwareHost::new(port, keypair, kubo_bootstrap, kubo_peers)?;
         let network_state = wetware_host.network_state();
         let swarm_cmd_tx = wetware_host.swarm_cmd_tx();
         let stream_control = wetware_host.stream_control();

@@ -420,6 +420,45 @@ impl HttpClient {
         })
     }
 
+    /// Fetch Kubo's connected swarm peers.
+    ///
+    /// Calls `POST /api/v0/swarm/peers` and returns `(PeerId, Multiaddr)` pairs.
+    /// Used to populate the in-process Kad client's routing table so iterative
+    /// queries have enough peers to converge.
+    pub async fn swarm_peers(&self) -> Result<Vec<(String, String)>> {
+        let url = format!("{}/api/v0/swarm/peers", self.base_url);
+        let response = self
+            .http_client
+            .post(&url)
+            .send()
+            .await
+            .with_context(|| format!("kubo swarm/peers failed: {}", self.base_url))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("kubo swarm/peers failed: {}", response.status());
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("kubo swarm/peers: failed to parse JSON response")?;
+
+        let peers = body["Peers"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|entry| {
+                        let peer_id = entry["Peer"].as_str()?.to_string();
+                        let addr = entry["Addr"].as_str()?.to_string();
+                        Some((peer_id, addr))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(peers)
+    }
+
     /// Add raw bytes to IPFS, returning the CID.
     ///
     /// Calls Kubo's `POST /api/v0/add`.  This is a UnixFS operation, not

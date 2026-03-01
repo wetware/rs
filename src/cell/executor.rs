@@ -361,6 +361,9 @@ impl Cell {
         if !guest_env.iter().any(|v| v.starts_with("PATH=")) {
             guest_env.push("PATH=/bin".to_string());
         }
+        if !guest_env.iter().any(|v| v.starts_with("WW_ROOT=")) {
+            guest_env.push(format!("WW_ROOT={}", path));
+        }
 
         let builder = builder
             .with_wasm_debug(wasm_debug)
