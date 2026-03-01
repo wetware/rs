@@ -504,11 +504,6 @@ pub extern "C" fn _start() {
         } else {
             tracing::warn!("No /etc/identity found; using ephemeral key (will be lost on exit)");
             let sk = ww::keys::generate()?;
-            // Inject so the guest can read /etc/identity via WASI.
-            let etc = merged_root.join("etc");
-            std::fs::create_dir_all(&etc).context("create /etc in merged FHS")?;
-            std::fs::write(etc.join("identity"), ww::keys::encode(&sk))
-                .context("write /etc/identity to merged FHS")?;
             let vk = *sk.verifying_key();
             Ok((sk, vk, "ephemeral"))
         }
@@ -985,4 +980,34 @@ pub extern "C" fn _start() {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     cli.command.run().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_identity_ephemeral_no_disk_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // No etc/identity in the directory.
+        let (_, _, source) = Commands::resolve_identity(dir.path()).unwrap();
+        assert_eq!(source, "ephemeral");
+        // Must NOT write back to disk.
+        assert!(!dir.path().join("etc/identity").exists());
+    }
+
+    #[test]
+    fn test_resolve_identity_loads_existing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let etc = dir.path().join("etc");
+        std::fs::create_dir_all(&etc).unwrap();
+        // Write a known key.
+        let sk = ww::keys::generate().unwrap();
+        let encoded = ww::keys::encode(&sk);
+        std::fs::write(etc.join("identity"), &encoded).unwrap();
+
+        let (loaded_sk, _, source) = Commands::resolve_identity(dir.path()).unwrap();
+        assert_eq!(source, "/etc/identity");
+        assert_eq!(ww::keys::encode(&loaded_sk), encoded);
+    }
 }
