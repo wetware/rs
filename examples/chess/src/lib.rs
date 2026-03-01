@@ -56,6 +56,12 @@ mod chess_capnp {
 /// Bootstrap capability: the concrete Membrane defined in stem.capnp.
 type Membrane = stem_capnp::membrane::Client;
 
+/// Short peer ID for human-readable logs (last 4 bytes = 8 hex chars).
+fn short_id(peer_id: &[u8]) -> String {
+    let h = hex::encode(peer_id);
+    if h.len() > 8 { format!("..{}", &h[h.len()-8..]) } else { h }
+}
+
 // ---------------------------------------------------------------------------
 // Logging (WASI stderr, same pattern as kernel)
 // ---------------------------------------------------------------------------
@@ -288,6 +294,7 @@ fn handle_chess_stream() {
 
 struct DialingSink {
     dialer: system_capnp::dialer::Client,
+    unixfs: ipfs_capnp::unix_f_s::Client,
     self_id: Vec<u8>,
     seen: Rc<RefCell<HashSet<Vec<u8>>>>,
 }
@@ -305,17 +312,14 @@ impl routing_capnp::provider_sink::Server for DialingSink {
             return Promise::ok(());
         }
 
-        log::info!(
-            "discovered chess peer: {}, dialing...",
-            hex::encode(&peer_id)
-        );
-
         let dialer = self.dialer.clone();
+        let unixfs = self.unixfs.clone();
+        let self_id = self.self_id.clone();
         let peer = peer_id.clone();
 
         Promise::from_future(async move {
-            if let Err(e) = play_against_peer(&dialer, &peer).await {
-                log::error!("game against {} failed: {e}", hex::encode(&peer));
+            if let Err(e) = play_against_peer(&dialer, &unixfs, &self_id, &peer).await {
+                log::error!("game vs {} failed: {e}", short_id(&peer));
             }
             Ok(())
         })
@@ -326,7 +330,7 @@ impl routing_capnp::provider_sink::Server for DialingSink {
         _params: routing_capnp::provider_sink::DoneParams,
         _results: routing_capnp::provider_sink::DoneResults,
     ) -> Promise<(), capnp::Error> {
-        log::info!("provider search complete");
+        log::debug!("provider search complete");
         Promise::ok(())
     }
 }
@@ -335,10 +339,29 @@ impl routing_capnp::provider_sink::Server for DialingSink {
 // play_against_peer — dial and play a text-based chess game
 // ---------------------------------------------------------------------------
 
+/// Publish a JSON node to IPFS and return its CID.
+///
+/// Each node forms one link in a content-addressed linked list:
+/// `{"n":1,"w":"e2e4","b":"e7e5","prev":null}` → CID.
+async fn publish_node(
+    unixfs: &ipfs_capnp::unix_f_s::Client,
+    json: &str,
+) -> Result<String, capnp::Error> {
+    let mut req = unixfs.add_request();
+    req.get().set_data(json.as_bytes());
+    let resp = req.send().promise.await?;
+    Ok(resp.get()?.get_cid()?.to_str()?.to_string())
+}
+
 async fn play_against_peer(
     dialer: &system_capnp::dialer::Client,
+    unixfs: &ipfs_capnp::unix_f_s::Client,
+    self_id: &[u8],
     peer_id: &[u8],
 ) -> Result<(), capnp::Error> {
+    let us = short_id(self_id);
+    let them = short_id(peer_id);
+
     // Dial peer → get bidirectional ByteStream.
     let mut req = dialer.dial_request();
     req.get().set_peer(peer_id);
@@ -346,16 +369,31 @@ async fn play_against_peer(
     let resp = req.send().promise.await?;
     let stream = resp.get()?.get_stream()?;
 
-    log::info!("connected to peer {}, starting game", hex::encode(peer_id));
+    log::info!("game {us} vs {them}: started");
 
     // Play game: send UCI moves, read responses via the single Stream capability.
+    // Each move pair is published to IPFS as a JSON node linking to the previous,
+    // forming a content-addressed linked list (see doc/replay.md).
     let engine = ChessEngineImpl::new();
     let mut move_num = 0u32;
+    let mut prev_cid: Option<String> = None;
+
+    /// Format the `"prev"` portion of a replay node.
+    fn prev_field(cid: &Option<String>) -> String {
+        match cid {
+            Some(c) => format!(r#""prev":"{c}""#),
+            None => r#""prev":null"#.to_string(),
+        }
+    }
 
     loop {
         // Pick a random move.
         let moves = engine.legal_moves_uci();
         if moves.is_empty() {
+            // We have no legal moves — opponent wins.
+            let node = format!(r#"{{"result":"0-1",{}}}"#, prev_field(&prev_cid));
+            prev_cid = Some(publish_node(unixfs, &node).await?);
+            log::info!("game {us} vs {them}: {them} wins after {move_num} moves");
             break;
         }
         let our_move = &moves[rand::random_range(0..moves.len())];
@@ -368,23 +406,28 @@ async fn play_against_peer(
         wreq.send().promise.await?;
 
         // Check if game over after our move (no legal moves for opponent).
-        // We can't know this for sure locally since we don't track opponent's
-        // perspective, but we can check if the position has no legal moves.
         if engine.legal_moves_uci().is_empty() {
-            log::info!("game over after our move {move_num}. {our_move}");
+            let node = format!(
+                r#"{{"n":{move_num},"w":"{our_move}","result":"1-0",{}}}"#,
+                prev_field(&prev_cid)
+            );
+            prev_cid = Some(publish_node(unixfs, &node).await?);
+            log::info!("game {us} vs {them}: {us} wins after {move_num} moves ({our_move})");
             break;
         }
 
         // Read response via stream.read().
-        // NOTE: assumes each read returns a complete line. This holds for small
-        // UCI moves against 8KB buffers, but a proper line-buffering accumulator
-        // (like handle_chess_stream uses) would be needed for larger payloads.
         let mut rreq = stream.read_request();
         rreq.get().set_max_bytes(4096);
         let rresp = rreq.send().promise.await?;
         let data = rresp.get()?.get_data()?;
         if data.is_empty() {
-            log::info!("stream closed after {move_num} moves");
+            let node = format!(
+                r#"{{"n":{move_num},"w":"{our_move}","result":"*",{}}}"#,
+                prev_field(&prev_cid)
+            );
+            prev_cid = Some(publish_node(unixfs, &node).await?);
+            log::info!("game {us} vs {them}: stream closed after {move_num} moves");
             break;
         }
         let response = std::str::from_utf8(data)
@@ -392,17 +435,33 @@ async fn play_against_peer(
             .trim()
             .to_string();
         if response.is_empty() {
-            log::info!("empty response after {move_num} moves");
+            let node = format!(
+                r#"{{"n":{move_num},"w":"{our_move}","result":"*",{}}}"#,
+                prev_field(&prev_cid)
+            );
+            prev_cid = Some(publish_node(unixfs, &node).await?);
+            log::info!("game {us} vs {them}: empty response after {move_num} moves");
             break;
         }
 
         engine
             .apply(&response)
             .map_err(|e| capnp::Error::failed(format!("invalid response move: {e}")))?;
-        log::info!("{move_num}. {our_move} → {response}");
+
+        // Publish this move pair as a node in the replay linked list.
+        let node = format!(
+            r#"{{"n":{move_num},"w":"{our_move}","b":"{response}",{}}}"#,
+            prev_field(&prev_cid)
+        );
+        prev_cid = Some(publish_node(unixfs, &node).await?);
+        log::info!("  {move_num}. {our_move} {response}");
     }
 
-    log::info!("game complete ({move_num} moves)");
+    // Log the root CID — the tip of the replay linked list.
+    if let Some(cid) = &prev_cid {
+        log::info!("game {us} vs {them}: replay \u{2192} {cid}");
+    }
+    log::info!("game {us} vs {them}: complete ({move_num} moves)");
 
     // Close the stream.
     let _ = stream.close_request().send().promise.await;
@@ -426,26 +485,35 @@ fn wasi_sleep_secs(secs: u64) {
 
 async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     // Graft membrane → get capabilities.
-    log::info!("run_game: requesting graft...");
+    log::debug!("run_game: requesting graft...");
     let graft_resp = membrane.graft_request().send().promise.await?;
     let results = graft_resp.get()?;
     let host = results.get_host()?;
     let executor = results.get_executor()?;
+    let ipfs = results.get_ipfs()?;
     let routing = results.get_routing()?;
-    log::info!("run_game: graft OK, requesting network...");
+    log::debug!("run_game: graft OK, requesting network...");
 
     // Pipeline: host.network() → (listener, dialer).
     let network_resp = host.network_request().send().promise.await?;
     let network = network_resp.get()?;
     let listener = network.get_listener()?;
     let dialer = network.get_dialer()?;
-    log::info!("run_game: network OK, reading handler wasm...");
+    log::debug!("run_game: network OK, loading handler wasm via UnixFS...");
 
-    // Read our own binary so handler instances run the same code in handler mode.
-    let wasm_bytes = std::fs::read("/bin/main.wasm")
-        .map_err(|e| capnp::Error::failed(format!("read handler wasm: {e}")))?;
+    // Load handler wasm via IPFS UnixFS capability.
+    // $WW_ROOT is the IPFS path to the guest's FHS root (set by the host).
+    let unixfs_resp = ipfs.unixfs_request().send().promise.await?;
+    let unixfs = unixfs_resp.get()?.get_api()?;
+    let ww_root = std::env::var("WW_ROOT")
+        .map_err(|_| capnp::Error::failed("WW_ROOT not set".into()))?;
+    let handler_path = format!("{}/bin/main.wasm", ww_root.trim_end_matches('/'));
+    let mut cat_req = unixfs.cat_request();
+    cat_req.get().set_path(&handler_path);
+    let cat_resp = cat_req.send().promise.await?;
+    let wasm_bytes = cat_resp.get()?.get_data()?.to_vec();
 
-    log::info!("run_game: handler wasm loaded ({} bytes), registering listener...", wasm_bytes.len());
+    log::debug!("run_game: handler wasm loaded ({} bytes) from {}", wasm_bytes.len(), handler_path);
 
     // Register /ww/0.1.0/chess listener.
     // OCAP: pass our executor to listener.listen(), explicitly delegating spawn rights.
@@ -459,7 +527,7 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     // Log peer identity.
     let id_resp = host.id_request().send().promise.await?;
     let self_id = id_resp.get()?.get_peer_id()?.to_vec();
-    log::info!("peer id: {}", hex::encode(&self_id));
+    log::info!("peer id: {}", short_id(&self_id));
 
     // Hash chess namespace → deterministic CID (same on all nodes).
     // Local CIDv1(raw, sha256) — no Kubo HTTP dependency.
@@ -467,20 +535,23 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     hash_req.get().set_data(b"wetware.chess.v1");
     let hash_resp = hash_req.send().promise.await?;
     let ns_cid = hash_resp.get()?.get_key()?.to_str()?.to_string();
-    log::info!("chess namespace CID: {ns_cid}");
+    log::debug!("chess namespace CID: {ns_cid}");
 
     // Give Kad bootstrap a head start before first provide.
     wasi_sleep_secs(3);
+    log::info!("looking for opponent...");
 
-    // Discovery loop: provide + find_providers with exponential backoff.
+    // Discovery loop: provide + find_providers with cooldown between passes.
     // DHT records have a TTL, so re-provide each pass. find_providers is a
     // one-shot query, so we loop to catch peers that announce after our search.
     let seen = Rc::new(RefCell::new(HashSet::<Vec<u8>>::new()));
-    let mut attempt = 0u32;
-    let base_secs = 2u64;
-    let max_secs = 60u64;
+    let mut pass = 0u32;
+    let cooldown_secs = 5u64;
 
     loop {
+        pass = pass.saturating_add(1);
+        let prev_seen = seen.borrow().len();
+
         // Re-provide (DHT records expire).
         let mut provide_req = routing.provide_request();
         provide_req.get().set_key(&ns_cid);
@@ -490,6 +561,7 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
         let sink: routing_capnp::provider_sink::Client =
             capnp_rpc::new_client(DialingSink {
                 dialer: dialer.clone(),
+                unixfs: unixfs.clone(),
                 self_id: self_id.clone(),
                 seen: seen.clone(),
             });
@@ -502,15 +574,18 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
         }
         fp_req.send().promise.await?;
 
-        let n_seen = seen.borrow().len();
-        log::info!("discovery pass {attempt}: {n_seen} peers seen");
+        // Only log when the peer count changes (state transition).
+        let now_seen = seen.borrow().len();
+        if now_seen > prev_seen {
+            log::info!("found {} opponent(s)", now_seen);
+        } else {
+            log::debug!("discovery pass {pass}: no new peers");
+        }
 
-        // Capped exponential backoff with random jitter (0.5x–1.0x).
-        let delay = std::cmp::min(base_secs.saturating_mul(1 << attempt), max_secs);
-        let jitter = delay / 2 + rand::random_range(0..=delay / 2);
-        wasi_sleep_secs(jitter);
-
-        attempt = attempt.saturating_add(1);
+        // Cool down between discovery passes.  Incoming games (via the
+        // Listener) are handled concurrently — this only gates outbound
+        // discovery.
+        wasi_sleep_secs(cooldown_secs);
     }
 }
 
