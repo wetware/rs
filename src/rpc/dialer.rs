@@ -86,7 +86,8 @@ impl system_capnp::dialer::Server for DialerImpl {
             // Create a duplex pair: guest_side ↔ host_side.
             // The guest reads/writes via ByteStream RPC on guest_side.
             // The host pumps host_side ↔ libp2p stream.
-            let (host_side, guest_side) = io::duplex(8 * 1024);
+            // 64 KiB matches the RPC pipe buffer and the listener pump size.
+            let (host_side, guest_side) = io::duplex(64 * 1024);
 
             // Split both sides for bidirectional pumping.
             let (stream_read, stream_write) = Box::pin(stream).split();
