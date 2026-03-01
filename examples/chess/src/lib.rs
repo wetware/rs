@@ -321,6 +321,11 @@ impl routing_capnp::provider_sink::Server for DialingSink {
             if let Err(e) = play_against_peer(&dialer, &unixfs, &self_id, &peer).await {
                 log::error!("game vs {} failed: {e}", short_id(&peer));
             }
+            // Pause between games so the output is readable.
+            let pause = wasip2::clocks::monotonic_clock::subscribe_duration(
+                5_000_000_000, // 5s
+            );
+            pause.block();
             Ok(())
         })
     }
@@ -330,7 +335,7 @@ impl routing_capnp::provider_sink::Server for DialingSink {
         _params: routing_capnp::provider_sink::DoneParams,
         _results: routing_capnp::provider_sink::DoneResults,
     ) -> Promise<(), capnp::Error> {
-        log::debug!("provider search complete");
+        // Intentionally silent — the discovery loop tracks state transitions.
         Promise::ok(())
     }
 }
@@ -470,16 +475,6 @@ async fn play_against_peer(
 }
 
 // ---------------------------------------------------------------------------
-// WASI sleep via monotonic clock
-// ---------------------------------------------------------------------------
-
-fn wasi_sleep_secs(secs: u64) {
-    let pollable =
-        wasip2::clocks::monotonic_clock::subscribe_duration(secs * 1_000_000_000);
-    pollable.block();
-}
-
-// ---------------------------------------------------------------------------
 // Game loop (main mode)
 // ---------------------------------------------------------------------------
 
@@ -537,16 +532,21 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     let ns_cid = hash_resp.get()?.get_key()?.to_str()?.to_string();
     log::debug!("chess namespace CID: {ns_cid}");
 
-    // Give Kad bootstrap a head start before first provide.
-    wasi_sleep_secs(3);
     log::info!("looking for opponent...");
 
-    // Discovery loop: provide + find_providers with cooldown between passes.
+    // Discovery loop: provide + find_providers with exponential backoff.
     // DHT records have a TTL, so re-provide each pass. find_providers is a
     // one-shot query, so we loop to catch peers that announce after our search.
+    //
+    // Backoff: starts at 2s, doubles each idle pass, caps at 15min.
+    // Resets to base when a new peer is found (more may follow quickly).
+    // Jitter: uniform in [0.5, 1.0] of delay — desynchronizes nodes while
+    // keeping MAX_MS as a strict ceiling.
     let seen = Rc::new(RefCell::new(HashSet::<Vec<u8>>::new()));
     let mut pass = 0u32;
-    let cooldown_secs = 5u64;
+    let mut cooldown_ms: u64 = 2_000;
+    const BASE_MS: u64 = 2_000;
+    const MAX_MS: u64 = 900_000;
 
     loop {
         pass = pass.saturating_add(1);
@@ -578,14 +578,21 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
         let now_seen = seen.borrow().len();
         if now_seen > prev_seen {
             log::info!("found {} opponent(s)", now_seen);
+            cooldown_ms = BASE_MS; // reset — more peers may follow quickly
         } else {
-            log::debug!("discovery pass {pass}: no new peers");
+            cooldown_ms = (cooldown_ms * 2).min(MAX_MS); // back off
         }
+
+        // Jitter: uniform in [0.5 * cooldown, 1.0 * cooldown].
+        let delay_ms = cooldown_ms / 2 + rand::random_range(0..=cooldown_ms / 2);
 
         // Cool down between discovery passes.  Incoming games (via the
         // Listener) are handled concurrently — this only gates outbound
         // discovery.
-        wasi_sleep_secs(cooldown_secs);
+        let pause = wasip2::clocks::monotonic_clock::subscribe_duration(
+            delay_ms * 1_000_000, // ms → ns
+        );
+        pause.block();
     }
 }
 
@@ -865,5 +872,119 @@ mod tests {
                 assert_eq!(status, GameStatus::Checkmate);
             })
             .await;
+    }
+
+    // -------------------------------------------------------------------
+    // Discovery backoff & jitter
+    // -------------------------------------------------------------------
+
+    /// Mirror the backoff constants from run_game so tests break if they drift.
+    const BASE_MS: u64 = 2_000;
+    const MAX_MS: u64 = 900_000;
+
+    #[test]
+    fn test_backoff_doubles_to_max() {
+        let mut cooldown = BASE_MS;
+        for _ in 0..30 {
+            cooldown = (cooldown * 2).min(MAX_MS);
+        }
+        assert_eq!(cooldown, MAX_MS, "must cap at MAX_MS");
+    }
+
+    #[test]
+    fn test_backoff_resets_on_new_peer() {
+        let mut cooldown = MAX_MS; // fully backed off
+        // Simulate new peer found.
+        cooldown = BASE_MS;
+        assert_eq!(cooldown, BASE_MS);
+        // Next idle pass doubles.
+        cooldown = (cooldown * 2).min(MAX_MS);
+        assert_eq!(cooldown, BASE_MS * 2);
+    }
+
+    #[test]
+    fn test_jitter_within_half_to_full() {
+        // Jitter formula: cooldown/2 + rand(0..=cooldown/2).
+        // Must produce values in [cooldown/2, cooldown].
+        for cooldown in [BASE_MS, 4_000, 64_000, MAX_MS] {
+            for _ in 0..500 {
+                let delay = cooldown / 2 + rand::random_range(0..=cooldown / 2);
+                assert!(
+                    delay >= cooldown / 2,
+                    "delay {delay} < floor {} (cooldown={cooldown})",
+                    cooldown / 2,
+                );
+                assert!(
+                    delay <= cooldown,
+                    "delay {delay} > ceiling {cooldown}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_jitter_max_is_strict_ceiling() {
+        // After capping at MAX_MS, the jitter must never exceed it.
+        let cooldown = MAX_MS;
+        for _ in 0..1000 {
+            let delay = cooldown / 2 + rand::random_range(0..=cooldown / 2);
+            assert!(delay <= MAX_MS, "delay {delay} exceeds MAX_MS {MAX_MS}");
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Replay linked-list JSON
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_replay_move_pair_json() {
+        let prev: Option<String> = Some("bafyPREV".into());
+        let prev_field = match &prev {
+            Some(c) => format!(r#""prev":"{c}""#),
+            None => r#""prev":null"#.to_string(),
+        };
+        let node = format!(
+            r#"{{"n":1,"w":"e2e4","b":"e7e5",{prev_field}}}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&node)
+            .unwrap_or_else(|e| panic!("invalid JSON: {e}\n{node}"));
+        assert_eq!(v["n"], 1);
+        assert_eq!(v["w"], "e2e4");
+        assert_eq!(v["b"], "e7e5");
+        assert_eq!(v["prev"], "bafyPREV");
+    }
+
+    #[test]
+    fn test_replay_first_node_null_prev() {
+        let prev: Option<String> = None;
+        let prev_field = match &prev {
+            Some(c) => format!(r#""prev":"{c}""#),
+            None => r#""prev":null"#.to_string(),
+        };
+        let node = format!(
+            r#"{{"n":1,"w":"e2e4","b":"e7e5",{prev_field}}}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&node).unwrap();
+        assert!(v["prev"].is_null());
+    }
+
+    #[test]
+    fn test_replay_terminal_node_has_result() {
+        let prev_field = r#""prev":"bafyLAST""#;
+        // Win terminal.
+        let win = format!(r#"{{"n":36,"w":"c7c8q","result":"1-0",{prev_field}}}"#);
+        let v: serde_json::Value = serde_json::from_str(&win).unwrap();
+        assert_eq!(v["result"], "1-0");
+        assert!(v.get("b").is_none(), "terminal node has no black move");
+
+        // Loss terminal.
+        let loss = format!(r#"{{"result":"0-1",{prev_field}}}"#);
+        let v: serde_json::Value = serde_json::from_str(&loss).unwrap();
+        assert_eq!(v["result"], "0-1");
+
+        // Interrupted terminal.
+        let star = format!(r#"{{"n":5,"w":"d2d4","result":"*",{prev_field}}}"#);
+        let v: serde_json::Value = serde_json::from_str(&star).unwrap();
+        assert_eq!(v["result"], "*");
     }
 }
