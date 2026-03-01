@@ -27,6 +27,19 @@ use crate::cell::proc::Builder as ProcBuilder;
 use crate::host::SwarmCommand;
 use crate::system_capnp;
 
+/// Maximum bytes a single ByteStream read may allocate.
+///
+/// Guards against OOM from callers requesting u32::MAX bytes.
+/// 64 KiB matches the RPC pipe buffer and the listener pump size.
+const MAX_READ_BYTES: usize = 64 * 1024;
+
+/// Maximum WASM binary size accepted by the Executor.
+///
+/// Rejects oversized binaries before compilation to bound memory and
+/// CPU spent on untrusted guest code.  2 MiB is generous for current
+/// guests (chess ≈ 1.1 MiB) while preventing abuse.
+const MAX_WASM_BYTES: usize = 2 * 1024 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct PeerInfo {
     pub peer_id: Vec<u8>,
@@ -139,7 +152,7 @@ impl system_capnp::byte_stream::Server for ByteStreamImpl {
         }
         // ReadOnly and Bidirectional both allow read
 
-        let max_bytes = pry!(params.get()).get_max_bytes() as usize;
+        let max_bytes = (pry!(params.get()).get_max_bytes() as usize).min(MAX_READ_BYTES);
         let stream = self.stream.clone();
         Promise::from_future(async move {
             if max_bytes == 0 {
@@ -496,12 +509,20 @@ impl system_capnp::executor::Server for ExecutorImpl {
         let network_state = self.network_state.clone();
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
         Promise::from_future(async move {
-            tracing::info!("run_bytes: starting child process spawn");
+            if wasm.len() > MAX_WASM_BYTES {
+                return Err(capnp::Error::failed(format!(
+                    "WASM binary too large ({} bytes, max {})",
+                    wasm.len(),
+                    MAX_WASM_BYTES,
+                )));
+            }
+            tracing::debug!("run_bytes: starting child process spawn");
             let bytecode = wasm;
 
-            let (host_stderr, guest_stderr) = io::duplex(8 * 1024);
-            let (host_stdin, guest_stdin) = io::duplex(8 * 1024);
-            let (host_stdout, guest_stdout) = io::duplex(8 * 1024);
+            // 64 KiB matches PIPE_BUFFER_SIZE (the host↔guest RPC pipe).
+            let (host_stderr, guest_stderr) = io::duplex(64 * 1024);
+            let (host_stdin, guest_stdin) = io::duplex(64 * 1024);
+            let (host_stdout, guest_stdout) = io::duplex(64 * 1024);
 
             let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
 
