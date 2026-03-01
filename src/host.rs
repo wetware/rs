@@ -89,9 +89,14 @@ impl Libp2pHost {
         // Build Kademlia client in Amino DHT mode.
         let kad_store = kad::store::MemoryStore::new(peer_id);
         let mut kad_config = kad::Config::new(kad::PROTOCOL_NAME);
-        // Disable periodic bootstrap — we trigger a one-time walk below.
+        // Disable periodic bootstrap — we trigger a one-time walk below
+        // and rely on provide/findProviders queries to keep the routing
+        // table warm.  Periodic walks would reconnect to hundreds of DHT
+        // servers every interval, flooding the swarm.
         kad_config.set_periodic_bootstrap_interval(None);
-        // Use default parallelism α=3.
+        // Use default parallelism α=3.  Previous α=1 caused iterative walks
+        // to converge too slowly with a sparse routing table, preventing
+        // provide/findProviders from reaching the correct DHT servers.
         let mut kad_behaviour =
             kad::Behaviour::with_config(peer_id, kad_store, kad_config);
         kad_behaviour.set_mode(Some(kad::Mode::Client));
@@ -102,11 +107,19 @@ impl Libp2pHost {
         for (peer_id, addr) in &kubo_peers {
             kad_behaviour.add_address(peer_id, addr.clone());
         }
-        if let Some(bootstrap) = kubo_bootstrap {
-            kad_behaviour.add_address(&bootstrap.peer_id, bootstrap.addr);
+        if let Some(ref bootstrap) = kubo_bootstrap {
+            kad_behaviour.add_address(&bootstrap.peer_id, bootstrap.addr.clone());
         }
-        if !kubo_peers.is_empty() {
-            tracing::debug!(count = kubo_peers.len(), "Populated Kad routing table from Kubo swarm peers");
+
+        // Trigger a one-time bootstrap walk to populate the routing table
+        // with diverse DHT server peers.  Without this, the table contains
+        // only K Kubo swarm peers — too sparse for iterative queries to
+        // converge to the correct K-closest servers for a given key.
+        if !kubo_peers.is_empty() || kubo_bootstrap.is_some() {
+            match kad_behaviour.bootstrap() {
+                Ok(_) => tracing::debug!("Kad bootstrap walk started"),
+                Err(e) => tracing::warn!("Kad bootstrap failed to start: {e:?}"),
+            }
         }
 
         let behaviour = WetwareBehaviour {
@@ -439,6 +452,12 @@ impl Libp2pHost {
                             }
                         }
                         Some(SwarmCommand::KadFindProviders { key, reply }) => {
+                            // Allow peer routing retries across successive queries.
+                            // The previous approach blacklisted peers permanently after
+                            // one failed routing attempt; now each find_providers query
+                            // starts fresh so transient routing failures don't prevent
+                            // later discovery once the routing table has converged.
+                            routed_peers.clear();
                             tracing::debug!(
                                 key_len = key.len(),
                                 peers_in_rt = self.swarm.behaviour_mut().kad.kbuckets()
