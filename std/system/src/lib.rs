@@ -4,9 +4,23 @@ use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
 use futures::task::noop_waker;
 use futures::FutureExt;
+use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
+
+// Tracks whether any data was written during the current poll cycle.
+//
+// The guest is single-threaded WASM, so a thread-local `Cell<bool>` is
+// race-free.  This flag replaces the racy `pollables.writer.ready()`
+// check that caused deadlocks during multi-cycle writes: the host-side
+// `AsyncWriteStream` worker could replenish the write budget between
+// the RPC poll and the readiness check, making the loop think it was
+// idle and block on reader-only — while the RPC system still had
+// pending writes.
+thread_local! {
+    static WRITE_OCCURRED: Cell<bool> = const { Cell::new(false) };
+}
 
 mod bindings {
     wit_bindgen::generate!({
@@ -120,7 +134,10 @@ impl futures::io::AsyncWrite for StreamWriter {
             Ok(budget) => {
                 let to_write = buf.len().min(budget as usize);
                 match self.stream.write(&buf[..to_write]) {
-                    Ok(_written) => std::task::Poll::Ready(Ok(to_write)),
+                    Ok(_written) => {
+                        WRITE_OCCURRED.with(|f| f.set(true));
+                        std::task::Poll::Ready(Ok(to_write))
+                    }
                     Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
                     Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
@@ -168,6 +185,29 @@ impl futures::io::AsyncWrite for StreamWriter {
 pub struct StreamPollables {
     pub reader: WasiPollable,
     pub writer: WasiPollable,
+}
+
+/// Safety-net timeout for idle poll cycles.
+///
+/// When the polling loop has no pending writes and made no progress, it blocks
+/// on the reader pollable alone.  The host streams large responses (e.g. 1 MB
+/// handler WASM) in chunks via wasmtime's `AsyncReadStream`, whose background
+/// task can race with the foreground pollable check — causing a missed wakeup
+/// that would block the guest indefinitely.
+///
+/// Adding a `wasi:clocks/monotonic-clock.subscribe-duration` pollable to the
+/// poll set provides a guaranteed wakeup (per the WASI spec, this is the
+/// canonical way to add a timeout to a poll).  In the common case the reader
+/// fires first and latency is unaffected; if a wakeup is missed, the timeout
+/// fires and the loop retries.
+///
+/// The pollable is created once before each loop and reused across iterations.
+/// Because clock pollables are level-triggered (stay ready once elapsed), we
+/// refresh only when the timeout actually fires.
+const IDLE_POLL_TIMEOUT_NS: u64 = 100_000_000; // 100ms
+
+fn new_idle_timeout() -> WasiPollable {
+    wasip2::clocks::monotonic_clock::subscribe_duration(IDLE_POLL_TIMEOUT_NS)
 }
 
 pub struct GuestStreams {
@@ -283,9 +323,11 @@ impl RpcDriver {
     ) where
         F: FnMut(&mut Context<'_>) -> DriveOutcome,
     {
+        let mut idle_timeout = new_idle_timeout();
         loop {
             let mut made_progress = false;
             let mut cx = Context::from_waker(&self.waker);
+            WRITE_OCCURRED.with(|f| f.set(false));
 
             match rpc_system.poll_unpin(&mut cx) {
                 Poll::Ready(Ok(())) | Poll::Ready(Err(_)) => {
@@ -309,11 +351,16 @@ impl RpcDriver {
                 Poll::Pending => {}
             }
 
-            if !made_progress {
-                if pollables.writer.ready() {
-                    wasi_poll::poll(&[&pollables.reader]);
-                } else {
+            let wrote = WRITE_OCCURRED.with(|f| f.get());
+
+            if wrote || made_progress {
+                if !pollables.writer.ready() {
                     wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
+                }
+            } else {
+                wasi_poll::poll(&[&pollables.reader, &idle_timeout]);
+                if idle_timeout.ready() {
+                    idle_timeout = new_idle_timeout();
                 }
             }
         }
@@ -331,9 +378,11 @@ where
 {
     let waker = noop_waker();
     let mut rpc_done = false;
+    let mut idle_timeout = new_idle_timeout();
     loop {
         let mut cx = Context::from_waker(&waker);
         let mut made_progress = false;
+        WRITE_OCCURRED.with(|f| f.set(false));
 
         if !rpc_done {
             match session.rpc_system.poll_unpin(&mut cx) {
@@ -365,11 +414,16 @@ where
             return None;
         }
 
-        if !made_progress {
-            if session.pollables.writer.ready() {
-                wasi_poll::poll(&[&session.pollables.reader]);
-            } else {
+        let wrote = WRITE_OCCURRED.with(|f| f.get());
+
+        if wrote || made_progress {
+            if !session.pollables.writer.ready() {
                 wasi_poll::poll(&[&session.pollables.reader, &session.pollables.writer]);
+            }
+        } else {
+            wasi_poll::poll(&[&session.pollables.reader, &idle_timeout]);
+            if idle_timeout.ready() {
+                idle_timeout = new_idle_timeout();
             }
         }
     }
@@ -411,17 +465,26 @@ pub fn serve_stdio(bootstrap: capnp::capability::Client) {
 
     // Drive the RPC system until the connection closes.
     let waker = noop_waker();
+    let mut idle_timeout = new_idle_timeout();
     loop {
+        WRITE_OCCURRED.with(|f| f.set(false));
         let mut cx = Context::from_waker(&waker);
         match rpc_system.poll_unpin(&mut cx) {
             Poll::Ready(_) => break,
             Poll::Pending => {}
         }
 
-        if pollables.writer.ready() {
-            wasi_poll::poll(&[&pollables.reader]);
+        let wrote = WRITE_OCCURRED.with(|f| f.get());
+
+        if wrote {
+            if !pollables.writer.ready() {
+                wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
+            }
         } else {
-            wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
+            wasi_poll::poll(&[&pollables.reader, &idle_timeout]);
+            if idle_timeout.ready() {
+                idle_timeout = new_idle_timeout();
+            }
         }
     }
 
@@ -495,9 +558,11 @@ where
 
     let waker = noop_waker();
     let mut rpc_done = false;
+    let mut idle_timeout = new_idle_timeout();
     loop {
         let mut cx = Context::from_waker(&waker);
         let mut made_progress = false;
+        WRITE_OCCURRED.with(|f| f.set(false));
 
         if !rpc_done {
             match session.rpc_system.poll_unpin(&mut cx) {
@@ -540,11 +605,16 @@ where
             return;
         }
 
-        if !made_progress {
-            if session.pollables.writer.ready() {
-                wasi_poll::poll(&[&session.pollables.reader]);
-            } else {
+        let wrote = WRITE_OCCURRED.with(|f| f.get());
+
+        if wrote || made_progress {
+            if !session.pollables.writer.ready() {
                 wasi_poll::poll(&[&session.pollables.reader, &session.pollables.writer]);
+            }
+        } else {
+            wasi_poll::poll(&[&session.pollables.reader, &idle_timeout]);
+            if idle_timeout.ready() {
+                idle_timeout = new_idle_timeout();
             }
         }
     }
