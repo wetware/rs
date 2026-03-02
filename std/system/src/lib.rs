@@ -497,6 +497,69 @@ fn drive_rpc_only(rpc_system: &mut RpcSystem<Side>, pollables: &StreamPollables)
     }
 }
 
+/// Drive an RPC system alongside a user future until the future completes
+/// or the RPC connection closes.
+fn drive_rpc_with_future(
+    rpc_system: &mut RpcSystem<Side>,
+    pollables: &StreamPollables,
+    future: &mut Pin<Box<impl Future<Output = Result<(), capnp::Error>> + ?Sized>>,
+) {
+    let waker = noop_waker();
+    let mut rpc_done = false;
+    let mut idle_timeout = new_idle_timeout();
+    loop {
+        let mut cx = Context::from_waker(&waker);
+        let mut made_progress = false;
+        WRITE_OCCURRED.with(|f| f.set(false));
+
+        if !rpc_done {
+            match rpc_system.poll_unpin(&mut cx) {
+                Poll::Ready(_) => {
+                    rpc_done = true;
+                    made_progress = true;
+                }
+                Poll::Pending => {}
+            }
+        }
+
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(_) => return,
+            Poll::Pending => {}
+        }
+
+        // Flush any writes queued by the future before blocking in wasi_poll.
+        // Without this, an RPC call queued during future.poll (e.g. echo after
+        // graft resolves) is never sent, and wasi_poll blocks forever waiting
+        // for a response that the host never received.
+        if !rpc_done {
+            match rpc_system.poll_unpin(&mut cx) {
+                Poll::Ready(_) => {
+                    rpc_done = true;
+                    made_progress = true;
+                }
+                Poll::Pending => {}
+            }
+        }
+
+        if rpc_done {
+            return;
+        }
+
+        let wrote = WRITE_OCCURRED.with(|f| f.get());
+
+        if wrote || made_progress {
+            if !pollables.writer.ready() {
+                wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
+            }
+        } else {
+            wasi_poll::poll(&[&pollables.reader, &idle_timeout]);
+            if idle_timeout.ready() {
+                idle_timeout = new_idle_timeout();
+            }
+        }
+    }
+}
+
 /// Run a guest program with an async entry point, exporting a bootstrap capability.
 ///
 /// Like [`run`], but the guest also provides `bootstrap` as its own bootstrap
@@ -566,67 +629,4 @@ where
     // WASI resource cleanup errors.
     std::mem::forget(future);
     session.forget();
-}
-
-/// Drive an RPC system alongside a user future until the future completes
-/// or the RPC connection closes.
-fn drive_rpc_with_future(
-    rpc_system: &mut RpcSystem<Side>,
-    pollables: &StreamPollables,
-    future: &mut Pin<Box<impl Future<Output = Result<(), capnp::Error>> + ?Sized>>,
-) {
-    let waker = noop_waker();
-    let mut rpc_done = false;
-    let mut idle_timeout = new_idle_timeout();
-    loop {
-        let mut cx = Context::from_waker(&waker);
-        let mut made_progress = false;
-        WRITE_OCCURRED.with(|f| f.set(false));
-
-        if !rpc_done {
-            match rpc_system.poll_unpin(&mut cx) {
-                Poll::Ready(_) => {
-                    rpc_done = true;
-                    made_progress = true;
-                }
-                Poll::Pending => {}
-            }
-        }
-
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(_) => return,
-            Poll::Pending => {}
-        }
-
-        // Flush any writes queued by the future before blocking in wasi_poll.
-        // Without this, an RPC call queued during future.poll (e.g. echo after
-        // graft resolves) is never sent, and wasi_poll blocks forever waiting
-        // for a response that the host never received.
-        if !rpc_done {
-            match rpc_system.poll_unpin(&mut cx) {
-                Poll::Ready(_) => {
-                    rpc_done = true;
-                    made_progress = true;
-                }
-                Poll::Pending => {}
-            }
-        }
-
-        if rpc_done {
-            return;
-        }
-
-        let wrote = WRITE_OCCURRED.with(|f| f.get());
-
-        if wrote || made_progress {
-            if !pollables.writer.ready() {
-                wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
-            }
-        } else {
-            wasi_poll::poll(&[&pollables.reader, &idle_timeout]);
-            if idle_timeout.ready() {
-                idle_timeout = new_idle_timeout();
-            }
-        }
-    }
 }

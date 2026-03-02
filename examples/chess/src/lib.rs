@@ -1,17 +1,19 @@
-//! Chess guest: self-play demo and subprotocol handler.
+//! Chess guest: cross-node play via subprotocol handlers.
 //!
-//! This binary serves two roles, selected by the `WW_HANDLER` env var:
+//! This binary serves two roles, selected by env vars:
 //!
-//! **Main mode** (no `WW_HANDLER`): Grafts the Membrane to obtain routing +
-//! IPFS + Server capabilities, registers a `/ww/0.1.0/chess` subprotocol
-//! handler, announces on the DHT as a chess player, and plays a random
-//! self-play game.
+//! **Main mode** (no `WW_HANDLER`): Grafts the Membrane to obtain
+//! `host.network()` → `(Listener, Dialer)`, registers a `/ww/0.1.0/chess`
+//! listener, announces on the DHT, discovers peers, and dials them.
+//! The dialer side plays random moves against the remote handler via
+//! a text-based UCI protocol over the returned ByteStream.
 //!
-//! **Handler mode** (`WW_HANDLER=1`): Exports a `ChessEngine` capability
-//! over stdin/stdout (which the host has wired to the incoming libp2p
-//! stream). Each incoming peer connection spawns a fresh handler instance.
+//! **Handler mode** (`WW_HANDLER=1`): A pure bytestream handler spawned
+//! by the Listener. Reads newline-delimited UCI moves from stdin, applies
+//! them, picks a random legal response, writes it to stdout.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use capnp::capability::Promise;
@@ -53,6 +55,16 @@ mod chess_capnp {
 
 /// Bootstrap capability: the concrete Membrane defined in stem.capnp.
 type Membrane = stem_capnp::membrane::Client;
+
+/// Short peer ID for human-readable logs (last 4 bytes = 8 hex chars).
+fn short_id(peer_id: &[u8]) -> String {
+    let h = hex::encode(peer_id);
+    if h.len() > 8 {
+        format!("..{}", &h[h.len() - 8..])
+    } else {
+        h
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Logging (WASI stderr, same pattern as kernel)
@@ -208,20 +220,118 @@ impl chess_capnp::chess_engine::Server for ChessEngineImpl {
 }
 
 // ---------------------------------------------------------------------------
-// LoggingSink — ProviderSink that logs discovered peers
+// Handler mode — pure bytestream chess engine over stdin/stdout
 // ---------------------------------------------------------------------------
 
-struct LoggingSink;
+/// Text-based chess handler for Listener-spawned processes.
+///
+/// Protocol: newline-delimited UCI moves.
+/// - Reads a UCI move from stdin (e.g. "e2e4\n")
+/// - Applies opponent's move to the local engine
+/// - Picks a random legal response
+/// - Writes it to stdout (e.g. "e7e5\n")
+/// - Repeats until game over or EOF
+fn handle_chess_stream() {
+    let engine = ChessEngineImpl::new();
+    let stdin = wasip2::cli::stdin::get_stdin();
+    let stdout = wasip2::cli::stdout::get_stdout();
+    let mut buf = Vec::new();
+
+    log::info!("handler started, waiting for moves");
+
+    loop {
+        // Accumulate data — blocking_read returns arbitrary chunks, not lines.
+        let data = match stdin.blocking_read(4096) {
+            Ok(d) if d.is_empty() => break,
+            Ok(d) => d,
+            Err(_) => break,
+        };
+        buf.extend_from_slice(&data);
+
+        // Process complete lines.
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+            let uci = match std::str::from_utf8(&line_bytes) {
+                Ok(s) => s.trim().to_string(),
+                Err(_) => continue,
+            };
+            if uci.is_empty() {
+                continue;
+            }
+
+            // Apply opponent's move.
+            if let Err(e) = engine.apply(&uci) {
+                log::error!("invalid move from peer '{uci}': {e}");
+                return;
+            }
+            log::info!("opponent: {uci}");
+
+            // Check if game over after opponent's move.
+            if engine.legal_moves_uci().is_empty() {
+                log::info!("game over after opponent's move ({})", engine.fen());
+                return;
+            }
+
+            // Pick a random response.
+            let moves = engine.legal_moves_uci();
+            let response = &moves[rand::random_range(0..moves.len())];
+            engine.apply(response).unwrap();
+            log::info!("response: {response}");
+
+            // Send response.
+            let _ = stdout.blocking_write_and_flush(format!("{response}\n").as_bytes());
+
+            // Check if game over after our move.
+            if engine.legal_moves_uci().is_empty() {
+                log::info!("game over after our move ({})", engine.fen());
+                return;
+            }
+        }
+    }
+
+    log::info!("handler: stdin closed");
+}
+
+// ---------------------------------------------------------------------------
+// DialingSink — discovers peers and dials them on the chess subprotocol
+// ---------------------------------------------------------------------------
+
+struct DialingSink {
+    dialer: system_capnp::dialer::Client,
+    unixfs: ipfs_capnp::unix_f_s::Client,
+    self_id: Vec<u8>,
+    seen: Rc<RefCell<HashSet<Vec<u8>>>>,
+}
 
 #[allow(refining_impl_trait)]
-impl routing_capnp::provider_sink::Server for LoggingSink {
+impl routing_capnp::provider_sink::Server for DialingSink {
     fn provider(
         self: Rc<Self>,
         params: routing_capnp::provider_sink::ProviderParams,
     ) -> Promise<(), capnp::Error> {
-        let peer_id = pry!(pry!(pry!(params.get()).get_info()).get_peer_id());
-        log::info!("found chess peer: {}", hex::encode(peer_id));
-        Promise::ok(())
+        let peer_id = pry!(pry!(pry!(params.get()).get_info()).get_peer_id()).to_vec();
+
+        // Skip self and already-seen peers.
+        if peer_id == self.self_id || !self.seen.borrow_mut().insert(peer_id.clone()) {
+            return Promise::ok(());
+        }
+
+        let dialer = self.dialer.clone();
+        let unixfs = self.unixfs.clone();
+        let self_id = self.self_id.clone();
+        let peer = peer_id.clone();
+
+        Promise::from_future(async move {
+            if let Err(e) = play_against_peer(&dialer, &unixfs, &self_id, &peer).await {
+                log::error!("game vs {} failed: {e}", short_id(&peer));
+            }
+            // Pause between games so the output is readable.
+            let pause = wasip2::clocks::monotonic_clock::subscribe_duration(
+                5_000_000_000, // 5s
+            );
+            pause.block();
+            Ok(())
+        })
     }
 
     fn done(
@@ -229,122 +339,290 @@ impl routing_capnp::provider_sink::Server for LoggingSink {
         _params: routing_capnp::provider_sink::DoneParams,
         _results: routing_capnp::provider_sink::DoneResults,
     ) -> Promise<(), capnp::Error> {
-        log::info!("provider search complete");
+        // Intentionally silent — the discovery loop tracks state transitions.
         Promise::ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Game loop
+// play_against_peer — dial and play a text-based chess game
+// ---------------------------------------------------------------------------
+
+/// Publish a JSON node to IPFS and return its CID, or None on failure.
+///
+/// Each node forms one link in a content-addressed linked list:
+/// `{"n":1,"w":"e2e4","b":"e7e5","prev":null}` → CID.
+///
+/// Returns `None` (with a warning log) if IPFS is unreachable or the add
+/// fails — the game continues without replay logging.
+async fn publish_node(unixfs: &ipfs_capnp::unix_f_s::Client, json: &str) -> Option<String> {
+    let mut req = unixfs.add_request();
+    req.get().set_data(json.as_bytes());
+    match req.send().promise.await {
+        Ok(resp) => match resp.get().and_then(|r| r.get_cid()) {
+            Ok(cid) => cid.to_str().ok().map(|s| s.to_string()),
+            Err(e) => {
+                log::warn!("replay publish failed (reading CID): {e}");
+                None
+            }
+        },
+        Err(e) => {
+            log::warn!("replay publish failed: {e}");
+            None
+        }
+    }
+}
+
+async fn play_against_peer(
+    dialer: &system_capnp::dialer::Client,
+    unixfs: &ipfs_capnp::unix_f_s::Client,
+    self_id: &[u8],
+    peer_id: &[u8],
+) -> Result<(), capnp::Error> {
+    let us = short_id(self_id);
+    let them = short_id(peer_id);
+
+    // Dial peer → get bidirectional ByteStream.
+    let mut req = dialer.dial_request();
+    req.get().set_peer(peer_id);
+    req.get().set_protocol("chess");
+    let resp = req.send().promise.await?;
+    let stream = resp.get()?.get_stream()?;
+
+    log::info!("game {us} vs {them}: started");
+
+    // Play the game, then always close the stream — even if the game
+    // errors out.  Without this, the remote handler blocks on stdin forever.
+    let result = play_game(&stream, unixfs, &us, &them).await;
+    let _ = stream.close_request().send().promise.await;
+    result
+}
+
+/// Inner game loop, factored out so the caller can always close the stream.
+async fn play_game(
+    stream: &system_capnp::byte_stream::Client,
+    unixfs: &ipfs_capnp::unix_f_s::Client,
+    us: &str,
+    them: &str,
+) -> Result<(), capnp::Error> {
+    // Play game: send UCI moves, read responses via the single Stream capability.
+    // Each move pair is published to IPFS as a JSON node linking to the previous,
+    // forming a content-addressed linked list (see doc/replay.md).
+    let engine = ChessEngineImpl::new();
+    let mut move_num = 0u32;
+    let mut prev_cid: Option<String> = None;
+
+    /// Format the `"prev"` portion of a replay node.
+    fn prev_field(cid: &Option<String>) -> String {
+        match cid {
+            Some(c) => format!(r#""prev":"{c}""#),
+            None => r#""prev":null"#.to_string(),
+        }
+    }
+
+    loop {
+        // Pick a random move.
+        let moves = engine.legal_moves_uci();
+        if moves.is_empty() {
+            // We have no legal moves — opponent wins.
+            let node = format!(r#"{{"result":"0-1",{}}}"#, prev_field(&prev_cid));
+            prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
+            log::info!("game {us} vs {them}: {them} wins after {move_num} moves");
+            break;
+        }
+        let our_move = &moves[rand::random_range(0..moves.len())];
+        engine.apply(our_move).unwrap();
+        move_num += 1;
+
+        // Send move via stream.write().
+        let mut wreq = stream.write_request();
+        wreq.get().set_data(format!("{our_move}\n").as_bytes());
+        wreq.send().promise.await?;
+
+        // Check if game over after our move (no legal moves for opponent).
+        if engine.legal_moves_uci().is_empty() {
+            let node = format!(
+                r#"{{"n":{move_num},"w":"{our_move}","result":"1-0",{}}}"#,
+                prev_field(&prev_cid)
+            );
+            prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
+            log::info!("game {us} vs {them}: {us} wins after {move_num} moves ({our_move})");
+            break;
+        }
+
+        // Read response via stream.read().
+        let mut rreq = stream.read_request();
+        rreq.get().set_max_bytes(4096);
+        let rresp = rreq.send().promise.await?;
+        let data = rresp.get()?.get_data()?;
+        if data.is_empty() {
+            let node = format!(
+                r#"{{"n":{move_num},"w":"{our_move}","result":"*",{}}}"#,
+                prev_field(&prev_cid)
+            );
+            prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
+            log::info!("game {us} vs {them}: stream closed after {move_num} moves");
+            break;
+        }
+        let response = std::str::from_utf8(data)
+            .map_err(|e| capnp::Error::failed(format!("invalid UTF-8: {e}")))?
+            .trim()
+            .to_string();
+        if response.is_empty() {
+            let node = format!(
+                r#"{{"n":{move_num},"w":"{our_move}","result":"*",{}}}"#,
+                prev_field(&prev_cid)
+            );
+            prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
+            log::info!("game {us} vs {them}: empty response after {move_num} moves");
+            break;
+        }
+
+        engine
+            .apply(&response)
+            .map_err(|e| capnp::Error::failed(format!("invalid response move: {e}")))?;
+
+        // Publish this move pair as a node in the replay linked list.
+        let node = format!(
+            r#"{{"n":{move_num},"w":"{our_move}","b":"{response}",{}}}"#,
+            prev_field(&prev_cid)
+        );
+        prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
+        log::info!("  {move_num}. {our_move} {response}");
+    }
+
+    // Log the root CID — the tip of the replay linked list.
+    if let Some(cid) = &prev_cid {
+        log::info!("game {us} vs {them}: replay \u{2192} {cid}");
+    }
+    log::info!("game {us} vs {them}: complete ({move_num} moves)");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Game loop (main mode)
 // ---------------------------------------------------------------------------
 
 async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     // Graft membrane → get capabilities.
+    log::debug!("run_game: requesting graft...");
     let graft_resp = membrane.graft_request().send().promise.await?;
     let results = graft_resp.get()?;
     let host = results.get_host()?;
     let executor = results.get_executor()?;
     let ipfs = results.get_ipfs()?;
     let routing = results.get_routing()?;
+    log::debug!("run_game: graft OK, requesting network...");
 
-    // Register /ww/0.1.0/chess subprotocol handler via Listener.
-    // Read our own binary so handler instances run the same code in handler mode.
-    let wasm_bytes = std::fs::read("/bin/main.wasm")
-        .map_err(|e| capnp::Error::failed(format!("read handler wasm: {e}")))?;
-
+    // Pipeline: host.network() → (listener, dialer).
     let network_resp = host.network_request().send().promise.await?;
-    let listener = network_resp.get()?.get_listener()?;
+    let network = network_resp.get()?;
+    let listener = network.get_listener()?;
+    let dialer = network.get_dialer()?;
+    log::debug!("run_game: network OK, loading handler wasm via UnixFS...");
 
+    // Load handler wasm via IPFS UnixFS capability.
+    // $WW_ROOT is the IPFS path to the guest's FHS root (set by the host).
+    let unixfs_resp = ipfs.unixfs_request().send().promise.await?;
+    let unixfs = unixfs_resp.get()?.get_api()?;
+    let ww_root =
+        std::env::var("WW_ROOT").map_err(|_| capnp::Error::failed("WW_ROOT not set".into()))?;
+    let handler_path = format!("{}/bin/main.wasm", ww_root.trim_end_matches('/'));
+    let mut cat_req = unixfs.cat_request();
+    cat_req.get().set_path(&handler_path);
+    let cat_resp = cat_req.send().promise.await?;
+    let wasm_bytes = cat_resp.get()?.get_data()?.to_vec();
+
+    log::debug!(
+        "run_game: handler wasm loaded ({} bytes) from {}",
+        wasm_bytes.len(),
+        handler_path
+    );
+
+    // Register /ww/0.1.0/chess listener.
     // OCAP: pass our executor to listener.listen(), explicitly delegating spawn rights.
     let mut listen_req = listener.listen_request();
-    listen_req.get().set_executor(executor);
+    listen_req.get().set_executor(executor.clone());
     listen_req.get().set_protocol("chess");
     listen_req.get().set_handler(&wasm_bytes);
     listen_req.send().promise.await?;
-    log::info!("registered /ww/0.1.0/chess subprotocol handler");
+    log::info!("registered /ww/0.1.0/chess listener");
 
     // Log peer identity.
     let id_resp = host.id_request().send().promise.await?;
-    let peer_id = id_resp.get()?.get_peer_id()?;
-    log::info!("peer id: {}", hex::encode(peer_id));
-
-    // Get UnixFS API.
-    let unixfs_resp = ipfs.unixfs_request().send().promise.await?;
-    let unixfs = unixfs_resp.get()?.get_api()?;
+    let self_id = id_resp.get()?.get_peer_id()?.to_vec();
+    log::info!("peer id: {}", short_id(&self_id));
 
     // Hash chess namespace → deterministic CID (same on all nodes).
-    let mut add_req = unixfs.add_request();
-    add_req.get().set_data(b"wetware.chess.v1");
-    let add_resp = add_req.send().promise.await?;
-    let ns_cid = add_resp.get()?.get_cid()?.to_str()?.to_string();
-    log::info!("chess namespace CID: {ns_cid}");
+    // Local CIDv1(raw, sha256) — no Kubo HTTP dependency.
+    let mut hash_req = routing.hash_request();
+    hash_req.get().set_data(b"wetware.chess.v1");
+    let hash_resp = hash_req.send().promise.await?;
+    let ns_cid = hash_resp.get()?.get_key()?.to_str()?.to_string();
+    log::debug!("chess namespace CID: {ns_cid}");
 
-    // Announce as chess player.
-    let mut provide_req = routing.provide_request();
-    provide_req.get().set_key(&ns_cid);
-    provide_req.send().promise.await?;
-    log::info!("providing chess namespace");
+    log::info!("looking for opponent...");
 
-    // Discover other chess peers (fire-and-forget; results logged by sink).
-    let sink: routing_capnp::provider_sink::Client = capnp_rpc::new_client(LoggingSink);
-    let mut fp_req = routing.find_providers_request();
-    {
-        let mut b = fp_req.get();
-        b.set_key(&ns_cid);
-        b.set_count(5);
-        b.set_sink(sink);
-    }
-    fp_req.send().promise.await?;
+    // Discovery loop: provide + find_providers with exponential backoff.
+    // DHT records have a TTL, so re-provide each pass. find_providers is a
+    // one-shot query, so we loop to catch peers that announce after our search.
+    //
+    // Backoff: starts at 2s, doubles each idle pass, caps at 15min.
+    // Resets to base when a new peer is found (more may follow quickly).
+    // Jitter: uniform in [0.5, 1.0] of delay — desynchronizes nodes while
+    // keeping MAX_MS as a strict ceiling.
+    let seen = Rc::new(RefCell::new(HashSet::<Vec<u8>>::new()));
+    let mut pass = 0u32;
+    let mut cooldown_ms: u64 = 2_000;
+    const BASE_MS: u64 = 2_000;
+    const MAX_MS: u64 = 900_000;
 
-    // Self-play game loop.
-    let mut pos = Chess::default();
-    let mut move_num = 0u32;
     loop {
-        let moves = pos.legal_moves();
-        if moves.is_empty() {
-            break;
-        }
+        pass = pass.saturating_add(1);
+        let prev_seen = seen.borrow().len();
 
-        // Pick a random move.
-        let idx = rand::random_range(0..moves.len());
-        let mv = moves[idx].clone();
-        pos.play_unchecked(&mv);
-        move_num += 1;
-
-        let uci = UciMove::from_standard(&mv).to_string();
-        let fen = Fen::from_position(pos.clone(), EnPassantMode::Legal).to_string();
-
-        // Store board state in IPFS.
-        let mut add_req = unixfs.add_request();
-        add_req.get().set_data(fen.as_bytes());
-        let add_resp = add_req.send().promise.await?;
-        let cid = add_resp.get()?.get_cid()?.to_str()?.to_string();
-
-        // Announce board state on DHT.
+        // Re-provide (DHT records expire).
         let mut provide_req = routing.provide_request();
-        provide_req.get().set_key(&cid);
+        provide_req.get().set_key(&ns_cid);
         provide_req.send().promise.await?;
 
-        log::info!("{move_num}. {uci} → {fen} ({cid})");
-
-        if pos.is_checkmate() || pos.is_stalemate() || pos.is_insufficient_material() {
-            break;
+        // Search for peers; DialingSink dials new ones automatically.
+        let sink: routing_capnp::provider_sink::Client = capnp_rpc::new_client(DialingSink {
+            dialer: dialer.clone(),
+            unixfs: unixfs.clone(),
+            self_id: self_id.clone(),
+            seen: seen.clone(),
+        });
+        let mut fp_req = routing.find_providers_request();
+        {
+            let mut b = fp_req.get();
+            b.set_key(&ns_cid);
+            b.set_count(5);
+            b.set_sink(sink);
         }
+        fp_req.send().promise.await?;
+
+        // Only log when the peer count changes (state transition).
+        let now_seen = seen.borrow().len();
+        if now_seen > prev_seen {
+            log::info!("found {} opponent(s)", now_seen);
+            cooldown_ms = BASE_MS; // reset — more peers may follow quickly
+        } else {
+            cooldown_ms = (cooldown_ms * 2).min(MAX_MS); // back off
+        }
+
+        // Jitter: uniform in [0.5 * cooldown, 1.0 * cooldown].
+        let delay_ms = cooldown_ms / 2 + rand::random_range(0..=cooldown_ms / 2);
+
+        // Cool down between discovery passes.  Incoming games (via the
+        // Listener) are handled concurrently — this only gates outbound
+        // discovery.
+        let pause = wasip2::clocks::monotonic_clock::subscribe_duration(
+            delay_ms * 1_000_000, // ms → ns
+        );
+        pause.block();
     }
-
-    // Log game result.
-    let status = if pos.is_checkmate() {
-        "checkmate"
-    } else if pos.is_stalemate() {
-        "stalemate"
-    } else if pos.is_insufficient_material() {
-        "draw (insufficient material)"
-    } else {
-        "unknown"
-    };
-    log::info!("game over after {move_num} moves: {status}");
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -357,13 +635,11 @@ impl Guest for ChessGuest {
     fn run() -> Result<(), ()> {
         init_logging();
         if std::env::var("WW_HANDLER").is_ok() {
-            // Handler mode: export ChessEngine over stdin/stdout.
-            // The host wires stdin/stdout to the incoming libp2p stream.
-            let engine: chess_capnp::chess_engine::Client =
-                capnp_rpc::new_client(ChessEngineImpl::new());
-            system::serve_stdio(engine.client);
+            // Handler mode: text-based chess engine over stdin/stdout.
+            handle_chess_stream();
         } else {
-            // Main mode: register subprotocol handler, self-play.
+            // Main mode: register listener, discover peers, dial, play game.
+            log::info!("chess guest starting (main mode)");
             system::run(|membrane: Membrane| async move { run_game(membrane).await });
         }
         Ok(())
@@ -427,6 +703,64 @@ mod tests {
                 .unwrap_or_else(|e| panic!("move {uci} failed: {e}"));
         }
         assert_eq!(engine.status(), GameStatus::Checkmate);
+    }
+
+    // -----------------------------------------------------------------------
+    // Text protocol simulation (main-mode ↔ handler-mode game loop)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_text_protocol_game_simulation() {
+        // Simulate main-mode ↔ handler-mode text protocol exchange.
+        // Main engine = the dialer side (play_against_peer logic).
+        // Handler engine = the listener side (handle_chess_stream logic).
+        let main_engine = ChessEngineImpl::new();
+        let handler_engine = ChessEngineImpl::new();
+        let mut move_num = 0u32;
+        let max_moves = 300; // Cap to avoid infinite random play.
+
+        loop {
+            // Main side: pick a random move.
+            let moves = main_engine.legal_moves_uci();
+            if moves.is_empty() {
+                break;
+            }
+            let our_move = &moves[rand::random_range(0..moves.len())];
+            main_engine.apply(our_move).unwrap();
+            move_num += 1;
+
+            // Simulate: main sends "{our_move}\n" over the wire.
+            // Handler side: receive move, apply it.
+            handler_engine.apply(our_move).unwrap();
+
+            // Handler: check if game over after opponent's move.
+            let handler_moves = handler_engine.legal_moves_uci();
+            if handler_moves.is_empty() {
+                break;
+            }
+
+            // Handler: pick a random response.
+            let response = &handler_moves[rand::random_range(0..handler_moves.len())];
+            handler_engine.apply(response).unwrap();
+
+            // Simulate: handler sends "{response}\n" back.
+            // Main side: receive and apply response.
+            main_engine.apply(response).unwrap();
+
+            // Both engines should agree on position.
+            assert_eq!(
+                main_engine.fen(),
+                handler_engine.fen(),
+                "position mismatch after move {move_num}"
+            );
+
+            if move_num >= max_moves {
+                break;
+            }
+        }
+
+        assert!(move_num > 0, "game should have played at least one move");
+        assert_eq!(main_engine.fen(), handler_engine.fen());
     }
 
     // -----------------------------------------------------------------------
@@ -567,5 +901,112 @@ mod tests {
                 assert_eq!(status, GameStatus::Checkmate);
             })
             .await;
+    }
+
+    // -------------------------------------------------------------------
+    // Discovery backoff & jitter
+    // -------------------------------------------------------------------
+
+    /// Mirror the backoff constants from run_game so tests break if they drift.
+    const BASE_MS: u64 = 2_000;
+    const MAX_MS: u64 = 900_000;
+
+    #[test]
+    fn test_backoff_doubles_to_max() {
+        let mut cooldown = BASE_MS;
+        for _ in 0..30 {
+            cooldown = (cooldown * 2).min(MAX_MS);
+        }
+        assert_eq!(cooldown, MAX_MS, "must cap at MAX_MS");
+    }
+
+    #[test]
+    fn test_backoff_resets_on_new_peer() {
+        let mut cooldown = MAX_MS; // fully backed off
+                                   // Simulate new peer found.
+        cooldown = BASE_MS;
+        assert_eq!(cooldown, BASE_MS);
+        // Next idle pass doubles.
+        cooldown = (cooldown * 2).min(MAX_MS);
+        assert_eq!(cooldown, BASE_MS * 2);
+    }
+
+    #[test]
+    fn test_jitter_within_half_to_full() {
+        // Jitter formula: cooldown/2 + rand(0..=cooldown/2).
+        // Must produce values in [cooldown/2, cooldown].
+        for cooldown in [BASE_MS, 4_000, 64_000, MAX_MS] {
+            for _ in 0..500 {
+                let delay = cooldown / 2 + rand::random_range(0..=cooldown / 2);
+                assert!(
+                    delay >= cooldown / 2,
+                    "delay {delay} < floor {} (cooldown={cooldown})",
+                    cooldown / 2,
+                );
+                assert!(delay <= cooldown, "delay {delay} > ceiling {cooldown}",);
+            }
+        }
+    }
+
+    #[test]
+    fn test_jitter_max_is_strict_ceiling() {
+        // After capping at MAX_MS, the jitter must never exceed it.
+        let cooldown = MAX_MS;
+        for _ in 0..1000 {
+            let delay = cooldown / 2 + rand::random_range(0..=cooldown / 2);
+            assert!(delay <= MAX_MS, "delay {delay} exceeds MAX_MS {MAX_MS}");
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Replay linked-list JSON
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_replay_move_pair_json() {
+        let prev: Option<String> = Some("bafyPREV".into());
+        let prev_field = match &prev {
+            Some(c) => format!(r#""prev":"{c}""#),
+            None => r#""prev":null"#.to_string(),
+        };
+        let node = format!(r#"{{"n":1,"w":"e2e4","b":"e7e5",{prev_field}}}"#,);
+        let v: serde_json::Value =
+            serde_json::from_str(&node).unwrap_or_else(|e| panic!("invalid JSON: {e}\n{node}"));
+        assert_eq!(v["n"], 1);
+        assert_eq!(v["w"], "e2e4");
+        assert_eq!(v["b"], "e7e5");
+        assert_eq!(v["prev"], "bafyPREV");
+    }
+
+    #[test]
+    fn test_replay_first_node_null_prev() {
+        let prev: Option<String> = None;
+        let prev_field = match &prev {
+            Some(c) => format!(r#""prev":"{c}""#),
+            None => r#""prev":null"#.to_string(),
+        };
+        let node = format!(r#"{{"n":1,"w":"e2e4","b":"e7e5",{prev_field}}}"#,);
+        let v: serde_json::Value = serde_json::from_str(&node).unwrap();
+        assert!(v["prev"].is_null());
+    }
+
+    #[test]
+    fn test_replay_terminal_node_has_result() {
+        let prev_field = r#""prev":"bafyLAST""#;
+        // Win terminal.
+        let win = format!(r#"{{"n":36,"w":"c7c8q","result":"1-0",{prev_field}}}"#);
+        let v: serde_json::Value = serde_json::from_str(&win).unwrap();
+        assert_eq!(v["result"], "1-0");
+        assert!(v.get("b").is_none(), "terminal node has no black move");
+
+        // Loss terminal.
+        let loss = format!(r#"{{"result":"0-1",{prev_field}}}"#);
+        let v: serde_json::Value = serde_json::from_str(&loss).unwrap();
+        assert_eq!(v["result"], "0-1");
+
+        // Interrupted terminal.
+        let star = format!(r#"{{"n":5,"w":"d2d4","result":"*",{prev_field}}}"#);
+        let v: serde_json::Value = serde_json::from_str(&star).unwrap();
+        assert_eq!(v["result"], "*");
     }
 }

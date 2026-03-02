@@ -36,12 +36,20 @@ actual capabilities.
 ```
 Traditional process:        Wetware guest:
   env vars     -> yes         env vars     -> only if explicitly passed
-  filesystem   -> yes         filesystem   -> image root only (read-only)
+  filesystem   -> yes         filesystem   -> none; content via UnixFS capability
   network      -> yes         network      -> no
   syscalls     -> yes         syscalls     -> WASI subset only
   ambient auth -> yes         ambient auth -> none
                               graft caps   -> the only authority (Host + Executor + IPFS)
 ```
+
+**There is no native filesystem on the guest side.** The WASI sandbox does
+not provide filesystem access. All content loading goes through capabilities
+— specifically the IPFS UnixFS capability obtained via `ipfs.unixfs().cat(path)`.
+
+The host publishes the merged FHS image to IPFS and sets `$WW_ROOT` to the
+resulting IPFS path (e.g. `/ipfs/QmHash...`). Guests resolve content relative
+to this root: `ipfs.unixfs().cat("$WW_ROOT/bin/main.wasm")`.
 
 This is the foundation that makes untrusted code execution safe. An agent can
 only do what the capabilities it holds allow. If you don't hand it the
@@ -304,7 +312,12 @@ runs concurrently with the guest via `CellBuilder::with_epoch_rx()`.
 `Ipfs.Client` (`capnp/ipfs.capnp`) mirrors Go's CoreAPI. Currently
 implemented sub-APIs:
 
-- **UnixFS**: `cat(path) -> Data`, `ls(path) -> List(Entry)`
+- **UnixFS**: `cat(path) -> Data`, `ls(path) -> List(Entry)`,
+  `add(data) -> cid`
+
+The chess example uses `add()` to publish game replays as an IPLD-like
+linked list — one JSON node per move pair, each linking to the previous
+via CID (see `examples/chess/doc/replay.md`).
 
 Stub interfaces declared for future work: Block, Dag, Name, Key, Pin,
 Object, Swarm, PubSub, Routing.
