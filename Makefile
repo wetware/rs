@@ -50,6 +50,7 @@ clean:
 	rm -f crates/kernel/bin/main.wasm
 	rm -f std/shell/boot/main.wasm
 	rm -f examples/chess/bin/chess-handler.wasm
+	rm -f examples/chess/bin/main.wasm
 
 # --- Podman ------------------------------------------------------------------
 
