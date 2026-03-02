@@ -463,7 +463,15 @@ pub fn serve_stdio(bootstrap: capnp::capability::Client) {
     let network = VatNetwork::new(reader, writer, Side::Server, Default::default());
     let mut rpc_system = RpcSystem::new(Box::new(network), Some(bootstrap));
 
-    // Drive the RPC system until the connection closes.
+    drive_rpc_only(&mut rpc_system, &pollables);
+
+    // Forget resources to avoid WASI cleanup errors.
+    std::mem::forget(rpc_system);
+    std::mem::forget(pollables);
+}
+
+/// Drive an RPC system until the connection closes (no user future).
+fn drive_rpc_only(rpc_system: &mut RpcSystem<Side>, pollables: &StreamPollables) {
     let waker = noop_waker();
     let mut idle_timeout = new_idle_timeout();
     loop {
@@ -487,10 +495,6 @@ pub fn serve_stdio(bootstrap: capnp::capability::Client) {
             }
         }
     }
-
-    // Forget resources to avoid WASI cleanup errors.
-    std::mem::forget(rpc_system);
-    std::mem::forget(pollables);
 }
 
 /// Run a guest program with an async entry point, exporting a bootstrap capability.
@@ -556,6 +560,21 @@ where
     let future = f(client);
     let mut future = Box::pin(future);
 
+    drive_rpc_with_future(&mut session.rpc_system, &session.pollables, &mut future);
+
+    // Forget to avoid dropping Cap'n Proto objects which would trigger
+    // WASI resource cleanup errors.
+    std::mem::forget(future);
+    session.forget();
+}
+
+/// Drive an RPC system alongside a user future until the future completes
+/// or the RPC connection closes.
+fn drive_rpc_with_future(
+    rpc_system: &mut RpcSystem<Side>,
+    pollables: &StreamPollables,
+    future: &mut Pin<Box<impl Future<Output = Result<(), capnp::Error>> + ?Sized>>,
+) {
     let waker = noop_waker();
     let mut rpc_done = false;
     let mut idle_timeout = new_idle_timeout();
@@ -565,7 +584,7 @@ where
         WRITE_OCCURRED.with(|f| f.set(false));
 
         if !rpc_done {
-            match session.rpc_system.poll_unpin(&mut cx) {
+            match rpc_system.poll_unpin(&mut cx) {
                 Poll::Ready(_) => {
                     rpc_done = true;
                     made_progress = true;
@@ -575,13 +594,7 @@ where
         }
 
         match future.as_mut().poll(&mut cx) {
-            Poll::Ready(_) => {
-                // Forget the future to avoid dropping Cap'n Proto objects
-                // which would trigger WASI resource cleanup errors.
-                std::mem::forget(future);
-                session.forget();
-                return;
-            }
+            Poll::Ready(_) => return,
             Poll::Pending => {}
         }
 
@@ -590,7 +603,7 @@ where
         // graft resolves) is never sent, and wasi_poll blocks forever waiting
         // for a response that the host never received.
         if !rpc_done {
-            match session.rpc_system.poll_unpin(&mut cx) {
+            match rpc_system.poll_unpin(&mut cx) {
                 Poll::Ready(_) => {
                     rpc_done = true;
                     made_progress = true;
@@ -600,19 +613,17 @@ where
         }
 
         if rpc_done {
-            std::mem::forget(future);
-            session.forget();
             return;
         }
 
         let wrote = WRITE_OCCURRED.with(|f| f.get());
 
         if wrote || made_progress {
-            if !session.pollables.writer.ready() {
-                wasi_poll::poll(&[&session.pollables.reader, &session.pollables.writer]);
+            if !pollables.writer.ready() {
+                wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
             }
         } else {
-            wasi_poll::poll(&[&session.pollables.reader, &idle_timeout]);
+            wasi_poll::poll(&[&pollables.reader, &idle_timeout]);
             if idle_timeout.ready() {
                 idle_timeout = new_idle_timeout();
             }
