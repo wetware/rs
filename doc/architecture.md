@@ -8,8 +8,8 @@ see [rpc-transport.md](rpc-transport.md).
 
 Wetware is a decentralized operating system for autonomous agents. It runs
 WASM guests in sandboxed cells with zero ambient authority: all capabilities
-are explicitly granted over Cap'n Proto RPC, and agents coordinate through
-on-chain epoch boundaries.
+are explicitly granted over Cap'n Proto RPC, and object lifetimes are managed
+through on-chain epoch boundaries.
 
 `ww run` resolves one or more image layers into a unified FHS root, loads
 `boot/main.wasm` from the result, and spawns the agent with epoch-scoped
