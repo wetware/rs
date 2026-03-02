@@ -36,7 +36,6 @@ examples: chess
 chess:
 	cargo build -p chess --target $(WASM_TARGET) --release
 	@mkdir -p examples/chess/bin
-	cp target/$(WASM_TARGET)/release/chess.wasm examples/chess/bin/main.wasm
 	cp target/$(WASM_TARGET)/release/chess.wasm examples/chess/bin/chess-handler.wasm
 
 # --- Run ---------------------------------------------------------------------
@@ -50,7 +49,6 @@ clean:
 	cargo clean
 	rm -f crates/kernel/bin/main.wasm
 	rm -f std/shell/boot/main.wasm
-	rm -f examples/chess/bin/main.wasm
 	rm -f examples/chess/bin/chess-handler.wasm
 
 # --- Podman ------------------------------------------------------------------
