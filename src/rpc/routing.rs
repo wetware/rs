@@ -189,6 +189,52 @@ mod tests {
         client
     }
 
+    // -------------------------------------------------------------------
+    // Key derivation — both nodes must agree on the same Kad key
+    // -------------------------------------------------------------------
+
+    /// Build a CID the same way the `hash` RPC method does (CIDv1, raw, sha256).
+    fn hash_to_cid(data: &[u8]) -> String {
+        let digest = Sha256::digest(data);
+        let mh = cid::multihash::Multihash::<64>::wrap(0x12, &digest).unwrap();
+        Cid::new_v1(0x55, mh).to_string()
+    }
+
+    #[test]
+    fn test_hash_is_deterministic() {
+        let a = hash_to_cid(b"wetware.chess.v1");
+        let b = hash_to_cid(b"wetware.chess.v1");
+        assert_eq!(a, b, "same input must produce same CID");
+    }
+
+    #[test]
+    fn test_cid_to_kad_key_deterministic() {
+        let cid = hash_to_cid(b"wetware.chess.v1");
+        let key_a = cid_to_kad_key(&cid).unwrap();
+        let key_b = cid_to_kad_key(&cid).unwrap();
+        assert_eq!(key_a, key_b, "same CID must produce same Kad key");
+        assert!(!key_a.is_empty());
+    }
+
+    #[test]
+    fn test_different_inputs_different_keys() {
+        let cid_a = hash_to_cid(b"wetware.chess.v1");
+        let cid_b = hash_to_cid(b"wetware.chess.v2");
+        let key_a = cid_to_kad_key(&cid_a).unwrap();
+        let key_b = cid_to_kad_key(&cid_b).unwrap();
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn test_cid_to_kad_key_rejects_invalid() {
+        assert!(cid_to_kad_key("not-a-cid").is_err());
+        assert!(cid_to_kad_key("").is_err());
+    }
+
+    // -------------------------------------------------------------------
+    // Epoch guard tests
+    // -------------------------------------------------------------------
+
     #[tokio::test]
     async fn test_provide_rejects_stale_epoch() {
         let local = tokio::task::LocalSet::new();
