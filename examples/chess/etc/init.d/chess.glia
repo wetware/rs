@@ -7,4 +7,4 @@
 
 {:protocol  "chess"
  :handler   "bin/chess-handler.wasm"
- :namespace "wetware.chess.v1"}
+ :namespace "ww.chess.v1"}

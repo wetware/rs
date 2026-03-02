@@ -585,7 +585,7 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     // Hash chess namespace → deterministic CID (same on all nodes).
     // Local CIDv1(raw, sha256) — no Kubo HTTP dependency.
     let mut hash_req = routing.hash_request();
-    hash_req.get().set_data(b"wetware.chess.v1");
+    hash_req.get().set_data(b"ww.chess.v1");
     let hash_resp = hash_req.send().promise.await?;
     let ns_cid = hash_resp.get()?.get_key()?.to_str()?.to_string();
     log::debug!("chess namespace CID: {ns_cid}");
