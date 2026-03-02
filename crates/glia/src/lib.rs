@@ -1057,7 +1057,7 @@ mod tests {
         // Exact format used by examples/chess/etc/init.d/chess.glia
         let input = r#"{:protocol  "chess"
  :handler   "bin/chess-handler.wasm"
- :namespace "ww.chess.v1"}"#;
+ :namespace "wetware.chess.v1"}"#;
 
         let val = read(input).unwrap();
         let pairs = match &val {
@@ -1067,11 +1067,8 @@ mod tests {
 
         assert_eq!(pairs.len(), 3);
         assert_eq!(map_get_str(pairs, "protocol"), Some("chess"));
-        assert_eq!(
-            map_get_str(pairs, "handler"),
-            Some("bin/chess-handler.wasm")
-        );
-        assert_eq!(map_get_str(pairs, "namespace"), Some("ww.chess.v1"));
+        assert_eq!(map_get_str(pairs, "handler"), Some("bin/chess-handler.wasm"));
+        assert_eq!(map_get_str(pairs, "namespace"), Some("wetware.chess.v1"));
     }
 
     #[test]
