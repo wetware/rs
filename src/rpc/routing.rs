@@ -202,14 +202,14 @@ mod tests {
 
     #[test]
     fn test_hash_is_deterministic() {
-        let a = hash_to_cid(b"wetware.chess.v1");
-        let b = hash_to_cid(b"wetware.chess.v1");
+        let a = hash_to_cid(b"ww.chess.v1");
+        let b = hash_to_cid(b"ww.chess.v1");
         assert_eq!(a, b, "same input must produce same CID");
     }
 
     #[test]
     fn test_cid_to_kad_key_deterministic() {
-        let cid = hash_to_cid(b"wetware.chess.v1");
+        let cid = hash_to_cid(b"ww.chess.v1");
         let key_a = cid_to_kad_key(&cid).unwrap();
         let key_b = cid_to_kad_key(&cid).unwrap();
         assert_eq!(key_a, key_b, "same CID must produce same Kad key");
@@ -218,8 +218,8 @@ mod tests {
 
     #[test]
     fn test_different_inputs_different_keys() {
-        let cid_a = hash_to_cid(b"wetware.chess.v1");
-        let cid_b = hash_to_cid(b"wetware.chess.v2");
+        let cid_a = hash_to_cid(b"ww.chess.v1");
+        let cid_b = hash_to_cid(b"ww.chess.v2");
         let key_a = cid_to_kad_key(&cid_a).unwrap();
         let key_b = cid_to_kad_key(&cid_b).unwrap();
         assert_ne!(key_a, key_b);

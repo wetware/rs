@@ -225,19 +225,47 @@ impl chess_capnp::chess_engine::Server for ChessEngineImpl {
 
 /// Text-based chess handler for Listener-spawned processes.
 ///
-/// Protocol: newline-delimited UCI moves.
-/// - Reads a UCI move from stdin (e.g. "e2e4\n")
-/// - Applies opponent's move to the local engine
-/// - Picks a random legal response
-/// - Writes it to stdout (e.g. "e7e5\n")
-/// - Repeats until game over or EOF
+/// Protocol: newline-delimited UCI moves over stdin/stdout.
+///
+/// **Responder mode** (default — incoming connections via Listener):
+/// reads a UCI move, applies it, picks a random response, writes it.
+///
+/// **Initiator mode** (`WW_INITIATOR=1` — outgoing connections via kernel
+/// init.d dial): picks a random opening move and writes it first, then
+/// enters the normal read→respond loop.
 fn handle_chess_stream() {
     let engine = ChessEngineImpl::new();
     let stdin = wasip2::cli::stdin::get_stdin();
     let stdout = wasip2::cli::stdout::get_stdout();
     let mut buf = Vec::new();
 
-    log::info!("handler started, waiting for moves");
+    let is_initiator = std::env::var("WW_INITIATOR").is_ok();
+    log::info!(
+        "handler started ({}), waiting for moves",
+        if is_initiator {
+            "initiator"
+        } else {
+            "responder"
+        }
+    );
+
+    // Initiator mode: make the first move before entering the read loop.
+    if is_initiator {
+        let moves = engine.legal_moves_uci();
+        if moves.is_empty() {
+            log::info!("no legal moves at start (impossible but handled)");
+            return;
+        }
+        let opening = &moves[rand::random_range(0..moves.len())];
+        engine.apply(opening).unwrap();
+        log::info!("opening: {opening}");
+        let _ = stdout.blocking_write_and_flush(format!("{opening}\n").as_bytes());
+
+        if engine.legal_moves_uci().is_empty() {
+            log::info!("game over after opening ({})", engine.fen());
+            return;
+        }
+    }
 
     loop {
         // Accumulate data — blocking_read returns arbitrary chunks, not lines.
@@ -557,7 +585,7 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     // Hash chess namespace → deterministic CID (same on all nodes).
     // Local CIDv1(raw, sha256) — no Kubo HTTP dependency.
     let mut hash_req = routing.hash_request();
-    hash_req.get().set_data(b"wetware.chess.v1");
+    hash_req.get().set_data(b"ww.chess.v1");
     let hash_resp = hash_req.send().promise.await?;
     let ns_cid = hash_resp.get()?.get_key()?.to_str()?.to_string();
     log::debug!("chess namespace CID: {ns_cid}");

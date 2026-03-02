@@ -434,6 +434,12 @@ fn write_prompt(stdout: &wasip2::io::streams::OutputStream, cwd: &str) {
 }
 
 async fn run_shell(mut ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
+    // Boot init.d services before dropping into the REPL.
+    // Listeners accept connections in the background (host-side).
+    // Initial DHT provide makes us discoverable. The active discovery
+    // loop only runs in daemon mode (can't interleave with blocking stdin).
+    boot_services(&ctx).await?;
+
     let stdin = get_stdin();
     let stdout = get_stdout();
     let stderr = get_stderr();
@@ -777,48 +783,31 @@ async fn pump_sequential(
 }
 
 // ---------------------------------------------------------------------------
-// Daemon boot — scan init.d, register services, run discovery loop
+// Init.d boot — shared between shell and daemon modes
 // ---------------------------------------------------------------------------
 
-async fn run_daemon(ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
-    let stderr = get_stderr();
+/// Services that were booted and are ready for the discovery loop.
+struct BootedServices {
+    services: Vec<ServiceConfig>,
+    dialer: system_capnp::dialer::Client,
+    self_id: Vec<u8>,
+}
 
-    // Log readiness with peer ID.
-    let id_resp = ctx
-        .host
-        .id_request()
-        .send()
-        .promise
-        .await
-        .map_err(|e| e.to_string())?;
-    let self_id = id_resp
-        .get()
-        .map_err(|e| e.to_string())?
-        .get_peer_id()
-        .map_err(|e| e.to_string())?
-        .to_vec();
-    let peer_id_hex = hex::encode(&self_id);
-    let _ = stderr.blocking_write_and_flush(
-        format!("{{\"event\":\"ready\",\"peer_id\":\"{peer_id_hex}\"}}\n").as_bytes(),
-    );
-
-    // Load init.d service declarations.
+/// Boot init.d services: load configs, register listeners, initial DHT provide.
+///
+/// Called at startup in both shell and daemon modes — like an OS, services
+/// start regardless of whether you get a login shell.  Returns `None` when
+/// no `etc/init.d/*.glia` files exist (kernel-only image).
+async fn boot_services(
+    ctx: &ShellCtx,
+) -> Result<Option<BootedServices>, Box<dyn std::error::Error>> {
     let services = load_initd_services(&ctx.routing)
         .await
         .map_err(|e| e.to_string())?;
 
     if services.is_empty() {
-        log::info!("init.d: no services found, entering idle loop");
-        // Fall back to blocking on stdin (original daemon behavior).
-        let stdin = get_stdin();
-        loop {
-            match stdin.blocking_read(4096) {
-                Ok(b) if b.is_empty() => break,
-                Err(_) => break,
-                Ok(_) => {} // Discard input in daemon mode.
-            }
-        }
-        return Ok(());
+        log::info!("init.d: no services found");
+        return Ok(None);
     }
 
     log::info!("init.d: loaded {} service(s)", services.len());
@@ -845,7 +834,85 @@ async fn run_daemon(ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
         log::info!("init.d: registered /ww/0.1.0/{}", svc.protocol);
     }
 
+    // Resolve peer ID.
+    let id_resp = ctx
+        .host
+        .id_request()
+        .send()
+        .promise
+        .await
+        .map_err(|e| e.to_string())?;
+    let self_id = id_resp
+        .get()
+        .map_err(|e| e.to_string())?
+        .get_peer_id()
+        .map_err(|e| e.to_string())?
+        .to_vec();
+
+    // Initial DHT provide so other nodes can find us immediately.
+    for svc in &services {
+        let mut provide_req = ctx.routing.provide_request();
+        provide_req.get().set_key(&svc.ns_cid);
+        if let Err(e) = provide_req.send().promise.await {
+            log::warn!("init.d: {}: initial provide failed: {e}", svc.protocol);
+        }
+    }
+
     log::info!("init.d: peer {}", short_id(&self_id));
+
+    Ok(Some(BootedServices {
+        services,
+        dialer,
+        self_id,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Daemon mode — discovery loop
+// ---------------------------------------------------------------------------
+
+async fn run_daemon(ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
+    let stderr = get_stderr();
+
+    // Log readiness with peer ID (machine-readable for process managers).
+    let id_resp = ctx
+        .host
+        .id_request()
+        .send()
+        .promise
+        .await
+        .map_err(|e| e.to_string())?;
+    let peer_id_hex = hex::encode(
+        id_resp
+            .get()
+            .map_err(|e| e.to_string())?
+            .get_peer_id()
+            .map_err(|e| e.to_string())?,
+    );
+    let _ = stderr.blocking_write_and_flush(
+        format!("{{\"event\":\"ready\",\"peer_id\":\"{peer_id_hex}\"}}\n").as_bytes(),
+    );
+
+    // Boot init.d services (listeners + initial provide).
+    let booted = boot_services(&ctx).await?;
+
+    let Some(BootedServices {
+        services,
+        dialer,
+        self_id,
+    }) = booted
+    else {
+        // No services — fall back to blocking on stdin (original daemon behavior).
+        let stdin = get_stdin();
+        loop {
+            match stdin.blocking_read(4096) {
+                Ok(b) if b.is_empty() => break,
+                Err(_) => break,
+                Ok(_) => {} // Discard input in daemon mode.
+            }
+        }
+        return Ok(());
+    };
 
     // Discovery loop: provide + find_providers with exponential backoff.
     // Re-provide each pass (DHT records expire). find_providers is a one-shot

@@ -1,0 +1,10 @@
+;; Chess service declaration.
+;;
+;; When this layer is stacked on top of the kernel, pid0 reads this file
+;; at boot and performs the generic plumbing:  register a Listener for the
+;; protocol, announce on the DHT, and run a discovery loop that dials
+;; new peers and wires them to handler processes.
+
+{:protocol  "chess"
+ :handler   "bin/chess-handler.wasm"
+ :namespace "ww.chess.v1"}
