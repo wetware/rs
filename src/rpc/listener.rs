@@ -74,7 +74,7 @@ impl system_capnp::listener::Server for ListenerImpl {
         // Accept loop: for each incoming connection, spawn a handler process.
         tokio::task::spawn_local(async move {
             while let Some((peer_id, stream)) = incoming.next().await {
-                tracing::info!(
+                tracing::debug!(
                     peer = %peer_id,
                     protocol = %stream_protocol,
                     "Incoming subprotocol connection"
@@ -142,7 +142,7 @@ pub(crate) async fn handle_connection(
     // Wait for the handler process to exit.
     let wait_resp = process.wait_request().send().promise.await?;
     let exit_code = wait_resp.get()?.get_exit_code();
-    tracing::info!(exit_code, protocol, "Handler process exited");
+    tracing::debug!(exit_code, protocol, "Handler process exited");
 
     Ok(())
 }
