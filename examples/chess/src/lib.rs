@@ -59,7 +59,11 @@ type Membrane = stem_capnp::membrane::Client;
 /// Short peer ID for human-readable logs (last 4 bytes = 8 hex chars).
 fn short_id(peer_id: &[u8]) -> String {
     let h = hex::encode(peer_id);
-    if h.len() > 8 { format!("..{}", &h[h.len()-8..]) } else { h }
+    if h.len() > 8 {
+        format!("..{}", &h[h.len() - 8..])
+    } else {
+        h
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -351,10 +355,7 @@ impl routing_capnp::provider_sink::Server for DialingSink {
 ///
 /// Returns `None` (with a warning log) if IPFS is unreachable or the add
 /// fails — the game continues without replay logging.
-async fn publish_node(
-    unixfs: &ipfs_capnp::unix_f_s::Client,
-    json: &str,
-) -> Option<String> {
+async fn publish_node(unixfs: &ipfs_capnp::unix_f_s::Client, json: &str) -> Option<String> {
     let mut req = unixfs.add_request();
     req.get().set_data(json.as_bytes());
     match req.send().promise.await {
@@ -525,15 +526,19 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     // $WW_ROOT is the IPFS path to the guest's FHS root (set by the host).
     let unixfs_resp = ipfs.unixfs_request().send().promise.await?;
     let unixfs = unixfs_resp.get()?.get_api()?;
-    let ww_root = std::env::var("WW_ROOT")
-        .map_err(|_| capnp::Error::failed("WW_ROOT not set".into()))?;
+    let ww_root =
+        std::env::var("WW_ROOT").map_err(|_| capnp::Error::failed("WW_ROOT not set".into()))?;
     let handler_path = format!("{}/bin/main.wasm", ww_root.trim_end_matches('/'));
     let mut cat_req = unixfs.cat_request();
     cat_req.get().set_path(&handler_path);
     let cat_resp = cat_req.send().promise.await?;
     let wasm_bytes = cat_resp.get()?.get_data()?.to_vec();
 
-    log::debug!("run_game: handler wasm loaded ({} bytes) from {}", wasm_bytes.len(), handler_path);
+    log::debug!(
+        "run_game: handler wasm loaded ({} bytes) from {}",
+        wasm_bytes.len(),
+        handler_path
+    );
 
     // Register /ww/0.1.0/chess listener.
     // OCAP: pass our executor to listener.listen(), explicitly delegating spawn rights.
@@ -583,13 +588,12 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
         provide_req.send().promise.await?;
 
         // Search for peers; DialingSink dials new ones automatically.
-        let sink: routing_capnp::provider_sink::Client =
-            capnp_rpc::new_client(DialingSink {
-                dialer: dialer.clone(),
-                unixfs: unixfs.clone(),
-                self_id: self_id.clone(),
-                seen: seen.clone(),
-            });
+        let sink: routing_capnp::provider_sink::Client = capnp_rpc::new_client(DialingSink {
+            dialer: dialer.clone(),
+            unixfs: unixfs.clone(),
+            self_id: self_id.clone(),
+            seen: seen.clone(),
+        });
         let mut fp_req = routing.find_providers_request();
         {
             let mut b = fp_req.get();
@@ -919,7 +923,7 @@ mod tests {
     #[test]
     fn test_backoff_resets_on_new_peer() {
         let mut cooldown = MAX_MS; // fully backed off
-        // Simulate new peer found.
+                                   // Simulate new peer found.
         cooldown = BASE_MS;
         assert_eq!(cooldown, BASE_MS);
         // Next idle pass doubles.
@@ -939,10 +943,7 @@ mod tests {
                     "delay {delay} < floor {} (cooldown={cooldown})",
                     cooldown / 2,
                 );
-                assert!(
-                    delay <= cooldown,
-                    "delay {delay} > ceiling {cooldown}",
-                );
+                assert!(delay <= cooldown, "delay {delay} > ceiling {cooldown}",);
             }
         }
     }
@@ -968,11 +969,9 @@ mod tests {
             Some(c) => format!(r#""prev":"{c}""#),
             None => r#""prev":null"#.to_string(),
         };
-        let node = format!(
-            r#"{{"n":1,"w":"e2e4","b":"e7e5",{prev_field}}}"#,
-        );
-        let v: serde_json::Value = serde_json::from_str(&node)
-            .unwrap_or_else(|e| panic!("invalid JSON: {e}\n{node}"));
+        let node = format!(r#"{{"n":1,"w":"e2e4","b":"e7e5",{prev_field}}}"#,);
+        let v: serde_json::Value =
+            serde_json::from_str(&node).unwrap_or_else(|e| panic!("invalid JSON: {e}\n{node}"));
         assert_eq!(v["n"], 1);
         assert_eq!(v["w"], "e2e4");
         assert_eq!(v["b"], "e7e5");
@@ -986,9 +985,7 @@ mod tests {
             Some(c) => format!(r#""prev":"{c}""#),
             None => r#""prev":null"#.to_string(),
         };
-        let node = format!(
-            r#"{{"n":1,"w":"e2e4","b":"e7e5",{prev_field}}}"#,
-        );
+        let node = format!(r#"{{"n":1,"w":"e2e4","b":"e7e5",{prev_field}}}"#,);
         let v: serde_json::Value = serde_json::from_str(&node).unwrap();
         assert!(v["prev"].is_null());
     }
