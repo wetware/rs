@@ -17,7 +17,24 @@ ipfs daemon
 
 ## Running
 
-Open two terminals and start each node on a different port:
+### Layered (kernel + chess overlay)
+
+Stack the chess layer on top of the kernel. The kernel reads
+`etc/init.d/chess.glia` and handles listener registration, DHT
+announcement, and peer discovery automatically.
+
+```sh
+# Terminal 1
+cargo run --bin ww -- run --port=2025 crates/kernel examples/chess
+
+# Terminal 2
+cargo run --bin ww -- run --port=2026 crates/kernel examples/chess
+```
+
+### Standalone (legacy)
+
+The chess binary also works as a standalone image for backward
+compatibility:
 
 ```sh
 # Terminal 1
