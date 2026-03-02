@@ -1,3 +1,9 @@
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::rc::Rc;
+
+use capnp::capability::Promise;
+use capnp_rpc::pry;
 use glia::{read, Val};
 
 use wasip2::cli::stderr::get_stderr;
@@ -64,7 +70,6 @@ struct ShellCtx {
     host: system_capnp::host::Client,
     executor: system_capnp::executor::Client,
     ipfs: ipfs_capnp::client::Client,
-    #[allow(dead_code)]
     routing: routing_capnp::routing::Client,
     /// Host-side node identity hub for this session.
     ///
@@ -482,12 +487,301 @@ async fn run_shell(mut ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 // ---------------------------------------------------------------------------
-// Daemon mode (non-TTY)
+// Daemon mode (non-TTY) — init.d service bootstrapping
+// ---------------------------------------------------------------------------
+
+/// Discovery loop backoff constants.
+const BASE_MS: u64 = 2_000;
+const MAX_MS: u64 = 900_000;
+
+/// Short peer ID for human-readable logs (last 4 bytes = 8 hex chars).
+fn short_id(peer_id: &[u8]) -> String {
+    let h = hex::encode(peer_id);
+    if h.len() > 8 {
+        format!("..{}", &h[h.len() - 8..])
+    } else {
+        h
+    }
+}
+
+/// Extract a string value for a keyword key from a glia Map.
+fn map_get_str<'a>(pairs: &'a [(Val, Val)], key: &str) -> Option<&'a str> {
+    pairs.iter().find_map(|(k, v)| match (k, v) {
+        (Val::Keyword(k), Val::Str(s)) if k == key => Some(s.as_str()),
+        _ => None,
+    })
+}
+
+/// A parsed init.d service declaration.
+struct ServiceConfig {
+    protocol: String,
+    handler_wasm: Vec<u8>,
+    ns_cid: String,
+    seen: Rc<RefCell<HashSet<Vec<u8>>>>,
+}
+
+/// Scan `etc/init.d/*.glia` and parse service declarations.
+async fn load_initd_services(
+    routing: &routing_capnp::routing::Client,
+) -> Result<Vec<ServiceConfig>, Box<dyn std::error::Error>> {
+    let mut services = Vec::new();
+
+    let dir = match std::fs::read_dir("etc/init.d") {
+        Ok(d) => d,
+        Err(e) => {
+            log::debug!("init.d: no etc/init.d directory ({e}), skipping");
+            return Ok(services);
+        }
+    };
+
+    for entry in dir {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.extension().and_then(|e| e.to_str()) != Some("glia") {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(&path)?;
+        let config = glia::read(&content)
+            .map_err(|e| format!("init.d: parse error in {}: {e}", path.display()))?;
+
+        let pairs = match &config {
+            Val::Map(pairs) => pairs,
+            _ => {
+                log::warn!("init.d: {} is not a map, skipping", path.display());
+                continue;
+            }
+        };
+
+        let protocol = match map_get_str(pairs, "protocol") {
+            Some(p) => p.to_string(),
+            None => {
+                log::warn!("init.d: {} missing :protocol, skipping", path.display());
+                continue;
+            }
+        };
+
+        let handler_path = match map_get_str(pairs, "handler") {
+            Some(h) => h.to_string(),
+            None => {
+                log::warn!("init.d: {} missing :handler, skipping", path.display());
+                continue;
+            }
+        };
+
+        let namespace = match map_get_str(pairs, "namespace") {
+            Some(n) => n.to_string(),
+            None => {
+                log::warn!("init.d: {} missing :namespace, skipping", path.display());
+                continue;
+            }
+        };
+
+        // Load handler WASM from the FHS filesystem.
+        let handler_wasm = std::fs::read(&handler_path)
+            .map_err(|e| format!("init.d: failed to read {handler_path}: {e}"))?;
+        log::debug!(
+            "init.d: loaded handler {} ({} bytes)",
+            handler_path,
+            handler_wasm.len()
+        );
+
+        // Hash namespace → deterministic CID for DHT.
+        let mut hash_req = routing.hash_request();
+        hash_req.get().set_data(namespace.as_bytes());
+        let hash_resp = hash_req
+            .send()
+            .promise
+            .await
+            .map_err(|e| format!("init.d: hash failed for {namespace}: {e}"))?;
+        let ns_cid = hash_resp
+            .get()
+            .map_err(|e| format!("init.d: hash result error: {e}"))?
+            .get_key()
+            .map_err(|e| format!("init.d: hash key error: {e}"))?
+            .to_str()
+            .map_err(|e| format!("init.d: hash key UTF-8 error: {e}"))?
+            .to_string();
+
+        services.push(ServiceConfig {
+            protocol,
+            handler_wasm,
+            ns_cid,
+            seen: Rc::new(RefCell::new(HashSet::new())),
+        });
+    }
+
+    Ok(services)
+}
+
+// ---------------------------------------------------------------------------
+// InitdSink — generic discovery sink that dials peers and spawns handlers
+// ---------------------------------------------------------------------------
+
+struct InitdSink {
+    dialer: system_capnp::dialer::Client,
+    executor: system_capnp::executor::Client,
+    handler_wasm: Vec<u8>,
+    protocol: String,
+    self_id: Vec<u8>,
+    seen: Rc<RefCell<HashSet<Vec<u8>>>>,
+}
+
+#[allow(refining_impl_trait)]
+impl routing_capnp::provider_sink::Server for InitdSink {
+    fn provider(
+        self: Rc<Self>,
+        params: routing_capnp::provider_sink::ProviderParams,
+    ) -> Promise<(), capnp::Error> {
+        let peer_id = pry!(pry!(pry!(params.get()).get_info()).get_peer_id()).to_vec();
+
+        // Skip self and already-seen peers.
+        if peer_id == self.self_id || !self.seen.borrow_mut().insert(peer_id.clone()) {
+            return Promise::ok(());
+        }
+
+        let dialer = self.dialer.clone();
+        let executor = self.executor.clone();
+        let handler_wasm = self.handler_wasm.clone();
+        let protocol = self.protocol.clone();
+        let peer = peer_id.clone();
+
+        Promise::from_future(async move {
+            if let Err(e) = dial_and_pump(&dialer, &executor, &handler_wasm, &protocol, &peer).await
+            {
+                log::error!(
+                    "init.d: {}: connection to {} failed: {e}",
+                    protocol,
+                    short_id(&peer)
+                );
+            }
+            // Brief pause between connections so output is readable.
+            let pause = wasip2::clocks::monotonic_clock::subscribe_duration(5_000_000_000); // 5s
+            pause.block();
+            Ok(())
+        })
+    }
+
+    fn done(
+        self: Rc<Self>,
+        _params: routing_capnp::provider_sink::DoneParams,
+        _results: routing_capnp::provider_sink::DoneResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dial + pump — connect to a discovered peer and wire a handler process
+// ---------------------------------------------------------------------------
+
+/// Dial a peer, spawn an initiator handler, and pump data between the
+/// dialed stream and the handler's stdin/stdout.
+async fn dial_and_pump(
+    dialer: &system_capnp::dialer::Client,
+    executor: &system_capnp::executor::Client,
+    handler_wasm: &[u8],
+    protocol: &str,
+    peer_id: &[u8],
+) -> Result<(), capnp::Error> {
+    let them = short_id(peer_id);
+
+    // Dial peer → bidirectional ByteStream.
+    let mut dial_req = dialer.dial_request();
+    dial_req.get().set_peer(peer_id);
+    dial_req.get().set_protocol(protocol);
+    let dial_resp = dial_req.send().promise.await?;
+    let stream = dial_resp.get()?.get_stream()?;
+
+    log::info!("init.d: {protocol}: dialed {them}");
+
+    // Spawn handler in initiator mode.
+    let mut run_req = executor.run_bytes_request();
+    run_req.get().set_wasm(handler_wasm);
+    {
+        let mut env = run_req.get().init_env(4);
+        env.set(0, "WW_HANDLER=1");
+        env.set(1, "WW_INITIATOR=1");
+        env.set(2, format!("WW_PROTOCOL={protocol}"));
+        env.set(3, "PATH=/bin");
+    }
+    let run_resp = run_req.send().promise.await?;
+    let process = run_resp.get()?.get_process()?;
+
+    // Get handler stdin/stdout.
+    let stdin_resp = process.stdin_request().send().promise.await?;
+    let handler_stdin = stdin_resp.get()?.get_stream()?;
+
+    let stdout_resp = process.stdout_request().send().promise.await?;
+    let handler_stdout = stdout_resp.get()?.get_stream()?;
+
+    // Pump: handler stdout → dialed stream, dialed stream → handler stdin.
+    // Sequential alternating pump — works for turn-based protocols (POC).
+    let result = pump_sequential(&stream, &handler_stdin, &handler_stdout).await;
+
+    // Clean up: close handler stdin and the dialed stream.
+    let _ = handler_stdin.close_request().send().promise.await;
+    let _ = stream.close_request().send().promise.await;
+
+    // Wait for handler process to exit.
+    let wait_resp = process.wait_request().send().promise.await?;
+    let exit_code = wait_resp.get()?.get_exit_code();
+    log::debug!("init.d: {protocol}: handler for {them} exited ({exit_code})");
+
+    result
+}
+
+/// Sequential alternating pump between a dialed stream and handler stdio.
+///
+/// Reads handler stdout → writes to dialed stream, reads dialed stream →
+/// writes to handler stdin. This works for turn-based protocols where the
+/// initiator writes first. For streaming protocols, a concurrent pump
+/// would be needed (future work).
+async fn pump_sequential(
+    dialed: &system_capnp::byte_stream::Client,
+    handler_stdin: &system_capnp::byte_stream::Client,
+    handler_stdout: &system_capnp::byte_stream::Client,
+) -> Result<(), capnp::Error> {
+    loop {
+        // Handler wrote a message → read it from stdout.
+        let mut read_req = handler_stdout.read_request();
+        read_req.get().set_max_bytes(4096);
+        let read_resp = read_req.send().promise.await?;
+        let data = read_resp.get()?.get_data()?;
+        if data.is_empty() {
+            break; // Handler closed stdout (game over).
+        }
+
+        // Forward to the dialed stream.
+        let mut write_req = dialed.write_request();
+        write_req.get().set_data(data);
+        write_req.send().promise.await?;
+
+        // Read response from the dialed stream.
+        let mut read_req = dialed.read_request();
+        read_req.get().set_max_bytes(4096);
+        let read_resp = read_req.send().promise.await?;
+        let data = read_resp.get()?.get_data()?;
+        if data.is_empty() {
+            break; // Remote closed the stream.
+        }
+
+        // Forward response to handler stdin.
+        let mut write_req = handler_stdin.write_request();
+        write_req.get().set_data(data);
+        write_req.send().promise.await?;
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Daemon boot — scan init.d, register services, run discovery loop
 // ---------------------------------------------------------------------------
 
 async fn run_daemon(ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
     let stderr = get_stderr();
-    let stdin = get_stdin();
 
     // Log readiness with peer ID.
     let id_resp = ctx
@@ -497,26 +791,124 @@ async fn run_daemon(ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
         .promise
         .await
         .map_err(|e| e.to_string())?;
-    let peer_id = id_resp
+    let self_id = id_resp
         .get()
         .map_err(|e| e.to_string())?
         .get_peer_id()
-        .map_err(|e| e.to_string())?;
-    let peer_id_hex = hex::encode(peer_id);
+        .map_err(|e| e.to_string())?
+        .to_vec();
+    let peer_id_hex = hex::encode(&self_id);
     let _ = stderr.blocking_write_and_flush(
         format!("{{\"event\":\"ready\",\"peer_id\":\"{peer_id_hex}\"}}\n").as_bytes(),
     );
 
-    // Block until stdin is closed (host signals shutdown).
-    loop {
-        match stdin.blocking_read(4096) {
-            Ok(b) if b.is_empty() => break,
-            Err(_) => break,
-            Ok(_) => {} // Discard input in daemon mode.
+    // Load init.d service declarations.
+    let services = load_initd_services(&ctx.routing)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if services.is_empty() {
+        log::info!("init.d: no services found, entering idle loop");
+        // Fall back to blocking on stdin (original daemon behavior).
+        let stdin = get_stdin();
+        loop {
+            match stdin.blocking_read(4096) {
+                Ok(b) if b.is_empty() => break,
+                Err(_) => break,
+                Ok(_) => {} // Discard input in daemon mode.
+            }
         }
+        return Ok(());
     }
 
-    Ok(())
+    log::info!("init.d: loaded {} service(s)", services.len());
+
+    // Get network capabilities.
+    let network_resp = ctx
+        .host
+        .network_request()
+        .send()
+        .promise
+        .await
+        .map_err(|e| e.to_string())?;
+    let network = network_resp.get().map_err(|e| e.to_string())?;
+    let listener = network.get_listener().map_err(|e| e.to_string())?;
+    let dialer = network.get_dialer().map_err(|e| e.to_string())?;
+
+    // Register all listeners.
+    for svc in &services {
+        let mut req = listener.listen_request();
+        req.get().set_executor(ctx.executor.clone());
+        req.get().set_protocol(&svc.protocol);
+        req.get().set_handler(&svc.handler_wasm);
+        req.send().promise.await.map_err(|e| e.to_string())?;
+        log::info!("init.d: registered /ww/0.1.0/{}", svc.protocol);
+    }
+
+    log::info!("init.d: peer {}", short_id(&self_id));
+
+    // Discovery loop: provide + find_providers with exponential backoff.
+    // Re-provide each pass (DHT records expire). find_providers is a one-shot
+    // query, so we loop to catch peers that announce after our search.
+    let mut cooldown_ms: u64 = BASE_MS;
+
+    loop {
+        let mut found_new = false;
+
+        for svc in &services {
+            let prev_seen = svc.seen.borrow().len();
+
+            // Re-provide (DHT records expire).
+            let mut provide_req = ctx.routing.provide_request();
+            provide_req.get().set_key(&svc.ns_cid);
+            if let Err(e) = provide_req.send().promise.await {
+                log::warn!("init.d: {}: provide failed: {e}", svc.protocol);
+                continue;
+            }
+
+            // Search — InitdSink dials new peers automatically.
+            let sink: routing_capnp::provider_sink::Client = capnp_rpc::new_client(InitdSink {
+                dialer: dialer.clone(),
+                executor: ctx.executor.clone(),
+                handler_wasm: svc.handler_wasm.clone(),
+                protocol: svc.protocol.clone(),
+                self_id: self_id.clone(),
+                seen: svc.seen.clone(),
+            });
+            let mut fp_req = ctx.routing.find_providers_request();
+            {
+                let mut b = fp_req.get();
+                b.set_key(&svc.ns_cid);
+                b.set_count(5);
+                b.set_sink(sink);
+            }
+            if let Err(e) = fp_req.send().promise.await {
+                log::warn!("init.d: {}: findProviders failed: {e}", svc.protocol);
+                continue;
+            }
+
+            let now_seen = svc.seen.borrow().len();
+            if now_seen > prev_seen {
+                log::info!("init.d: {}: found {} peer(s)", svc.protocol, now_seen);
+                found_new = true;
+            }
+        }
+
+        // Backoff: reset on new peer, double on idle, cap at MAX.
+        if found_new {
+            cooldown_ms = BASE_MS;
+        } else {
+            cooldown_ms = (cooldown_ms * 2).min(MAX_MS);
+        }
+
+        // Jitter: uniform in [0.5 * cooldown, cooldown].
+        let delay_ms = cooldown_ms / 2 + rand::random_range(0..=cooldown_ms / 2);
+
+        let pause = wasip2::clocks::monotonic_clock::subscribe_duration(
+            delay_ms * 1_000_000, // ms → ns
+        );
+        pause.block();
+    }
 }
 
 // ---------------------------------------------------------------------------

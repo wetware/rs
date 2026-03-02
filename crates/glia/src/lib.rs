@@ -1040,4 +1040,61 @@ mod tests {
             other => panic!("expected List, got {other:?}"),
         }
     }
+
+    // --- init.d service declaration parsing ---
+
+    /// Helper matching the kernel's `map_get_str` — extract a string value
+    /// for a keyword key from a glia Map.
+    fn map_get_str<'a>(pairs: &'a [(Val, Val)], key: &str) -> Option<&'a str> {
+        pairs.iter().find_map(|(k, v)| match (k, v) {
+            (Val::Keyword(k), Val::Str(s)) if k == key => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn parse_initd_service_declaration() {
+        // Exact format used by examples/chess/etc/init.d/chess.glia
+        let input = r#"{:protocol  "chess"
+ :handler   "bin/chess-handler.wasm"
+ :namespace "ww.chess.v1"}"#;
+
+        let val = read(input).unwrap();
+        let pairs = match &val {
+            Val::Map(pairs) => pairs,
+            other => panic!("expected Map, got {other:?}"),
+        };
+
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(map_get_str(pairs, "protocol"), Some("chess"));
+        assert_eq!(
+            map_get_str(pairs, "handler"),
+            Some("bin/chess-handler.wasm")
+        );
+        assert_eq!(map_get_str(pairs, "namespace"), Some("ww.chess.v1"));
+    }
+
+    #[test]
+    fn initd_missing_key_returns_none() {
+        let val = read(r#"{:protocol "chess"}"#).unwrap();
+        let pairs = match &val {
+            Val::Map(pairs) => pairs,
+            other => panic!("expected Map, got {other:?}"),
+        };
+        assert_eq!(map_get_str(pairs, "protocol"), Some("chess"));
+        assert_eq!(map_get_str(pairs, "handler"), None);
+        assert_eq!(map_get_str(pairs, "namespace"), None);
+    }
+
+    #[test]
+    fn initd_wrong_value_type_returns_none() {
+        // :handler with a keyword value instead of a string
+        let val = read(r#"{:protocol "chess" :handler :not-a-string}"#).unwrap();
+        let pairs = match &val {
+            Val::Map(pairs) => pairs,
+            other => panic!("expected Map, got {other:?}"),
+        };
+        assert_eq!(map_get_str(pairs, "protocol"), Some("chess"));
+        assert_eq!(map_get_str(pairs, "handler"), None);
+    }
 }
