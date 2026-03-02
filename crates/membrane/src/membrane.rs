@@ -86,6 +86,7 @@ impl<F: GraftBuilder> stem_capnp::membrane::Server for MembraneServer<F> {
         params: stem_capnp::membrane::GraftParams,
         mut results: stem_capnp::membrane::GraftResults,
     ) -> Promise<(), Error> {
+        tracing::debug!("Membrane graft() called");
         let vk = match self.verifying_key {
             Some(vk) => vk,
             None => {
@@ -93,6 +94,7 @@ impl<F: GraftBuilder> stem_capnp::membrane::Server for MembraneServer<F> {
                 if let Err(e) = self.build_graft(&mut results) {
                     return Promise::err(e);
                 }
+                tracing::debug!("Membrane graft() completed (no auth)");
                 return Promise::ok(());
             }
         };

@@ -14,6 +14,7 @@ k256 = { version = "0.13", features = ["ecdsa"] }
 rand = "0.8"
 auth = { path = "../auth" }
 tokio = { version = "1", features = ["sync"] }
+tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

@@ -68,7 +68,7 @@ impl system_capnp::dialer::Server for DialerImpl {
         let mut control = self.stream_control.clone();
 
         Promise::from_future(async move {
-            tracing::info!(
+            tracing::debug!(
                 peer = %peer_id,
                 protocol = %stream_protocol,
                 "Dialing subprotocol"
