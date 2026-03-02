@@ -1067,7 +1067,10 @@ mod tests {
 
         assert_eq!(pairs.len(), 3);
         assert_eq!(map_get_str(pairs, "protocol"), Some("chess"));
-        assert_eq!(map_get_str(pairs, "handler"), Some("bin/chess-handler.wasm"));
+        assert_eq!(
+            map_get_str(pairs, "handler"),
+            Some("bin/chess-handler.wasm")
+        );
         assert_eq!(map_get_str(pairs, "namespace"), Some("wetware.chess.v1"));
     }
 
