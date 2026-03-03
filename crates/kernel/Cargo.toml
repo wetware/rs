@@ -5,12 +5,9 @@ edition = "2021"
 
 [dependencies]
 capnp = "0.23.2"
-capnp-rpc = "0.23.0"
-futures = "0.3"
 log = "0.4.29"
 wasip2 = "1.0.2"
 hex = "0.4"
-rand = "0.9"
 glia = { path = "../glia" }
 system = { path = "../../std/system" }
 

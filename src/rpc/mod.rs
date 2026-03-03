@@ -612,6 +612,7 @@ impl system_capnp::executor::Server for ExecutorImpl {
                         tracing::info!("{}", line);
                     }
                 });
+
                 local
                     .run_until(async move {
                         let exit_code = match proc.run().await {
@@ -621,8 +622,8 @@ impl system_capnp::executor::Server for ExecutorImpl {
                                 1
                             }
                         };
-                        let _ = exit_tx.send(exit_code);
                         tracing::info!("run_bytes: child process exited with code {}", exit_code);
+                        let _ = exit_tx.send(exit_code);
                     })
                     .await;
             });

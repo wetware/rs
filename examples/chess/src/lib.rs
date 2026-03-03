@@ -1,16 +1,18 @@
 //! Chess guest: cross-node play via subprotocol handlers.
 //!
-//! This binary serves two roles, selected by env vars:
-//!
-//! **Main mode** (no `WW_HANDLER`): Grafts the Membrane to obtain
-//! `host.network()` → `(Listener, Dialer)`, registers a `/ww/0.1.0/chess`
-//! listener, announces on the DHT, discovers peers, and dials them.
-//! The dialer side plays random moves against the remote handler via
-//! a text-based UCI protocol over the returned ByteStream.
+//! This binary serves three roles, selected by env vars:
 //!
 //! **Handler mode** (`WW_HANDLER=1`): A pure bytestream handler spawned
 //! by the Listener. Reads newline-delimited UCI moves from stdin, applies
 //! them, picks a random legal response, writes it to stdout.
+//!
+//! **Service mode** (`WW_SERVICE=1`): Spawned by an init.d script after
+//! the listener is already registered. Runs the discovery loop (provide +
+//! findProviders + dial) reading config from env vars. This is the
+//! foreground process that keeps the node alive.
+//!
+//! **Legacy mode** (neither): Grafts the Membrane, registers a listener,
+//! and runs the discovery loop itself (standalone, pre-init.d).
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -225,19 +227,47 @@ impl chess_capnp::chess_engine::Server for ChessEngineImpl {
 
 /// Text-based chess handler for Listener-spawned processes.
 ///
-/// Protocol: newline-delimited UCI moves.
-/// - Reads a UCI move from stdin (e.g. "e2e4\n")
-/// - Applies opponent's move to the local engine
-/// - Picks a random legal response
-/// - Writes it to stdout (e.g. "e7e5\n")
-/// - Repeats until game over or EOF
+/// Protocol: newline-delimited UCI moves over stdin/stdout.
+///
+/// **Responder mode** (default — incoming connections via Listener):
+/// reads a UCI move, applies it, picks a random response, writes it.
+///
+/// **Initiator mode** (`WW_INITIATOR=1` — outgoing connections via kernel
+/// init.d dial): picks a random opening move and writes it first, then
+/// enters the normal read→respond loop.
 fn handle_chess_stream() {
     let engine = ChessEngineImpl::new();
     let stdin = wasip2::cli::stdin::get_stdin();
     let stdout = wasip2::cli::stdout::get_stdout();
     let mut buf = Vec::new();
 
-    log::info!("handler started, waiting for moves");
+    let is_initiator = std::env::var("WW_INITIATOR").is_ok();
+    log::info!(
+        "handler started ({}), waiting for moves",
+        if is_initiator {
+            "initiator"
+        } else {
+            "responder"
+        }
+    );
+
+    // Initiator mode: make the first move before entering the read loop.
+    if is_initiator {
+        let moves = engine.legal_moves_uci();
+        if moves.is_empty() {
+            log::info!("no legal moves at start (impossible but handled)");
+            return;
+        }
+        let opening = &moves[rand::random_range(0..moves.len())];
+        engine.apply(opening).unwrap();
+        log::info!("opening: {opening}");
+        let _ = stdout.blocking_write_and_flush(format!("{opening}\n").as_bytes());
+
+        if engine.legal_moves_uci().is_empty() {
+            log::info!("game over after opening ({})", engine.fen());
+            return;
+        }
+    }
 
     loop {
         // Accumulate data — blocking_read returns arbitrary chunks, not lines.
@@ -501,7 +531,91 @@ async fn play_game(
 }
 
 // ---------------------------------------------------------------------------
-// Game loop (main mode)
+// Service mode — discovery loop only (listener registered by init.d)
+// ---------------------------------------------------------------------------
+
+async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
+    let graft_resp = membrane.graft_request().send().promise.await?;
+    let results = graft_resp.get()?;
+    let host = results.get_host()?;
+    let ipfs = results.get_ipfs()?;
+    let routing = results.get_routing()?;
+
+    // Read config from env vars (set by init.d script).
+    let namespace = std::env::var("WW_NAMESPACE")
+        .map_err(|_| capnp::Error::failed("WW_NAMESPACE not set".into()))?;
+
+    // Get network dialer.
+    let network_resp = host.network_request().send().promise.await?;
+    let network = network_resp.get()?;
+    let dialer = network.get_dialer()?;
+
+    // Get UnixFS for replay publishing.
+    let unixfs_resp = ipfs.unixfs_request().send().promise.await?;
+    let unixfs = unixfs_resp.get()?.get_api()?;
+
+    // Resolve peer identity.
+    let id_resp = host.id_request().send().promise.await?;
+    let self_id = id_resp.get()?.get_peer_id()?.to_vec();
+    log::info!("service: peer {}", short_id(&self_id));
+
+    // Hash namespace → deterministic CID.
+    let mut hash_req = routing.hash_request();
+    hash_req.get().set_data(namespace.as_bytes());
+    let hash_resp = hash_req.send().promise.await?;
+    let ns_cid = hash_resp.get()?.get_key()?.to_str()?.to_string();
+    log::debug!("service: namespace CID: {ns_cid}");
+
+    log::info!("service: looking for opponent...");
+
+    // Discovery loop: same backoff logic as run_game.
+    let seen = Rc::new(RefCell::new(HashSet::<Vec<u8>>::new()));
+    let mut cooldown_ms: u64 = 2_000;
+    const BASE_MS: u64 = 2_000;
+    const MAX_MS: u64 = 900_000;
+
+    loop {
+        let prev_seen = seen.borrow().len();
+
+        // Re-provide (DHT records expire).
+        let mut provide_req = routing.provide_request();
+        provide_req.get().set_key(&ns_cid);
+        provide_req.send().promise.await?;
+
+        // Search for peers; DialingSink dials new ones automatically.
+        let sink: routing_capnp::provider_sink::Client = capnp_rpc::new_client(DialingSink {
+            dialer: dialer.clone(),
+            unixfs: unixfs.clone(),
+            self_id: self_id.clone(),
+            seen: seen.clone(),
+        });
+        let mut fp_req = routing.find_providers_request();
+        {
+            let mut b = fp_req.get();
+            b.set_key(&ns_cid);
+            b.set_count(5);
+            b.set_sink(sink);
+        }
+        fp_req.send().promise.await?;
+
+        let now_seen = seen.borrow().len();
+        if now_seen > prev_seen {
+            log::info!("service: found {} opponent(s)", now_seen);
+            cooldown_ms = BASE_MS;
+        } else {
+            cooldown_ms = (cooldown_ms * 2).min(MAX_MS);
+        }
+
+        let delay_ms = cooldown_ms / 2 + rand::random_range(0..=cooldown_ms / 2);
+        let pause = wasip2::clocks::monotonic_clock::subscribe_duration(
+            delay_ms * 1_000_000, // ms → ns
+        );
+        pause.block();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Game loop (legacy mode)
 // ---------------------------------------------------------------------------
 
 async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
@@ -557,7 +671,7 @@ async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
     // Hash chess namespace → deterministic CID (same on all nodes).
     // Local CIDv1(raw, sha256) — no Kubo HTTP dependency.
     let mut hash_req = routing.hash_request();
-    hash_req.get().set_data(b"wetware.chess.v1");
+    hash_req.get().set_data(b"ww.chess.v1");
     let hash_resp = hash_req.send().promise.await?;
     let ns_cid = hash_resp.get()?.get_key()?.to_str()?.to_string();
     log::debug!("chess namespace CID: {ns_cid}");
@@ -637,9 +751,13 @@ impl Guest for ChessGuest {
         if std::env::var("WW_HANDLER").is_ok() {
             // Handler mode: text-based chess engine over stdin/stdout.
             handle_chess_stream();
+        } else if std::env::var("WW_SERVICE").is_ok() {
+            // Service mode: discovery loop only (listener already registered by init.d).
+            log::info!("chess guest starting (service mode)");
+            system::run(|membrane: Membrane| async move { run_service(membrane).await });
         } else {
-            // Main mode: register listener, discover peers, dial, play game.
-            log::info!("chess guest starting (main mode)");
+            // Legacy mode: register listener + discovery loop (standalone).
+            log::info!("chess guest starting (legacy mode)");
             system::run(|membrane: Membrane| async move { run_game(membrane).await });
         }
         Ok(())

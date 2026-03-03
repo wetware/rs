@@ -3397,9 +3397,7 @@ name = "kernel"
 version = "0.1.0"
 dependencies = [
  "capnp",
- "capnp-rpc",
  "capnpc",
- "futures",
  "glia",
  "hex",
  "log",
