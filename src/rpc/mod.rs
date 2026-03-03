@@ -426,6 +426,11 @@ pub struct ExecutorImpl {
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
     guard: Option<EpochGuard>,
+    // When present, child processes get a full Membrane bootstrap (not bare Host).
+    epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
+    ipfs_client: Option<crate::ipfs::HttpClient>,
+    signing_key: Option<Arc<k256::ecdsa::SigningKey>>,
+    stream_control: Option<libp2p_stream::Control>,
 }
 
 impl ExecutorImpl {
@@ -440,6 +445,35 @@ impl ExecutorImpl {
             swarm_cmd_tx,
             wasm_debug,
             guard,
+            epoch_rx: None,
+            ipfs_client: None,
+            signing_key: None,
+            stream_control: None,
+        }
+    }
+
+    /// Construct with full Membrane propagation fields, so child processes
+    /// spawned via `run_bytes` get a Membrane bootstrap (not bare Host).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_full(
+        network_state: NetworkState,
+        swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
+        wasm_debug: bool,
+        guard: Option<EpochGuard>,
+        epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
+        ipfs_client: Option<crate::ipfs::HttpClient>,
+        signing_key: Option<Arc<k256::ecdsa::SigningKey>>,
+        stream_control: Option<libp2p_stream::Control>,
+    ) -> Self {
+        Self {
+            network_state,
+            swarm_cmd_tx,
+            wasm_debug,
+            guard,
+            epoch_rx,
+            ipfs_client,
+            signing_key,
+            stream_control,
         }
     }
 
@@ -508,6 +542,10 @@ impl system_capnp::executor::Server for ExecutorImpl {
         let wasm_debug = self.wasm_debug;
         let network_state = self.network_state.clone();
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
+        let epoch_rx = self.epoch_rx.clone();
+        let ipfs_client = self.ipfs_client.clone();
+        let signing_key = self.signing_key.clone();
+        let stream_control = self.stream_control.clone();
         Promise::from_future(async move {
             if wasm.len() > MAX_WASM_BYTES {
                 return Err(capnp::Error::failed(format!(
@@ -543,7 +581,22 @@ impl system_capnp::executor::Server for ExecutorImpl {
                 .take_host_split()
                 .ok_or_else(|| capnp::Error::failed("host stream missing".into()))?;
             let child_rpc_system =
-                build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug);
+                if let (Some(erx), Some(ic), Some(sc)) = (epoch_rx, ipfs_client, stream_control) {
+                    let (rpc, _guest) = membrane::build_membrane_rpc(
+                        reader,
+                        writer,
+                        network_state,
+                        swarm_cmd_tx,
+                        wasm_debug,
+                        erx,
+                        ic,
+                        signing_key,
+                        sc,
+                    );
+                    rpc
+                } else {
+                    build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug)
+                };
 
             tokio::task::spawn_local(async move {
                 let local = tokio::task::LocalSet::new();
@@ -747,7 +800,7 @@ mod tests {
                 let mut futures = Vec::new();
                 for i in 0..5 {
                     let mut req = executor.echo_request();
-                    req.get().set_message(&format!("msg-{i}"));
+                    req.get().set_message(format!("msg-{i}"));
                     futures.push(req.send().promise);
                 }
 

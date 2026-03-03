@@ -136,6 +136,7 @@ pub struct HostGraftBuilder {
     ipfs_client: ipfs::HttpClient,
     signing_key: Option<Arc<SigningKey>>,
     stream_control: libp2p_stream::Control,
+    epoch_rx: watch::Receiver<Epoch>,
 }
 
 impl HostGraftBuilder {
@@ -146,6 +147,7 @@ impl HostGraftBuilder {
         ipfs_client: ipfs::HttpClient,
         signing_key: Option<Arc<SigningKey>>,
         stream_control: libp2p_stream::Control,
+        epoch_rx: watch::Receiver<Epoch>,
     ) -> Self {
         Self {
             network_state,
@@ -154,6 +156,7 @@ impl HostGraftBuilder {
             ipfs_client,
             signing_key,
             stream_control,
+            epoch_rx,
         }
     }
 }
@@ -174,11 +177,15 @@ impl GraftBuilder for HostGraftBuilder {
         builder.set_host(host);
 
         let executor: system_capnp::executor::Client =
-            capnp_rpc::new_client(super::ExecutorImpl::new(
+            capnp_rpc::new_client(super::ExecutorImpl::new_full(
                 self.network_state.clone(),
                 self.swarm_cmd_tx.clone(),
                 self.wasm_debug,
                 Some(guard.clone()),
+                Some(self.epoch_rx.clone()),
+                Some(self.ipfs_client.clone()),
+                self.signing_key.clone(),
+                Some(self.stream_control.clone()),
             ));
         builder.set_executor(executor);
 
@@ -483,6 +490,7 @@ where
         ipfs_client,
         signing_key,
         stream_control,
+        epoch_rx.clone(),
     );
     // The local kernel is a trusted process — no challenge-response auth needed.
     // Auth applies to external peers connecting via libp2p to the guest's exported membrane.
