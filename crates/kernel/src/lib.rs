@@ -1,10 +1,4 @@
-use std::cell::RefCell;
-use std::collections::HashSet;
-use std::rc::Rc;
-
-use capnp::capability::Promise;
-use capnp_rpc::pry;
-use glia::{read, Val};
+use glia::{read, read_many, Val};
 
 use wasip2::cli::stderr::get_stderr;
 use wasip2::cli::stdin::get_stdin;
@@ -81,61 +75,91 @@ struct ShellCtx {
     cwd: String,
 }
 
-async fn eval(expr: &Val, ctx: &mut ShellCtx) -> Result<Val, String> {
-    match expr {
-        Val::List(items) if items.is_empty() => Ok(Val::Nil),
-        Val::List(items) => {
-            let cmd = match &items[0] {
-                Val::Sym(s) => s.as_str(),
-                _ => return Err(format!("expected symbol, got {}", items[0])),
-            };
-            // Resolve session::cap or session.cap compound symbols to the capability name.
-            let (resolved_cap, args) = if let Some(cap) = cmd
-                .strip_prefix("session::")
-                .or_else(|| cmd.strip_prefix("session."))
-            {
-                (cap, &items[1..])
-            } else {
-                (cmd, &items[1..])
-            };
-            match resolved_cap {
-                "host" => eval_host(args, ctx).await,
-                "executor" => eval_executor(args, ctx).await,
-                "ipfs" => eval_ipfs(args, ctx).await,
-                "session" => {
-                    // (session <cap> <method> [args...]) — session-qualified dispatch
-                    let cap = match args.first() {
-                        Some(Val::Sym(s)) => s.as_str(),
-                        _ => return Err("(session <capability> <method> [args...])".into()),
-                    };
-                    match cap {
-                        "host" => eval_host(&args[1..], ctx).await,
-                        "executor" => eval_executor(&args[1..], ctx).await,
-                        "ipfs" => eval_ipfs(&args[1..], ctx).await,
-                        _ => Err(format!("unknown capability: {cap}")),
-                    }
-                }
-                "cd" => {
-                    let path = match args.first() {
-                        Some(Val::Str(s)) => s.clone(),
-                        Some(Val::Sym(s)) => s.clone(),
-                        None => "/".to_string(),
-                        _ => return Err("(cd \"<path>\")".into()),
-                    };
-                    ctx.cwd = path;
-                    Ok(Val::Nil)
-                }
-                "help" => Ok(Val::Str(HELP_TEXT.to_string())),
-                "exit" => std::process::exit(0),
-                _ => eval_path_lookup(resolved_cap, args, ctx).await,
-            }
-        }
-        // Self-evaluating forms.
-        other => Ok(other.clone()),
+/// Resolve the IPFS path for a relative reference.
+///
+/// If `path` starts with `/ipfs/`, it is returned as-is.
+/// Otherwise, prepend `$WW_ROOT/` so that paths like `"bin/chess-demo.wasm"`
+/// resolve to `<WW_ROOT>/bin/chess-demo.wasm`.
+fn resolve_ipfs_path(path: &str) -> String {
+    if path.starts_with("/ipfs/") {
+        return path.to_string();
     }
+    let root = std::env::var("WW_ROOT").unwrap_or_default();
+    let root = root.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    format!("{root}/{path}")
 }
 
-async fn eval_host(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
+fn eval<'a>(
+    expr: &'a Val,
+    ctx: &'a mut ShellCtx,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Val, String>> + 'a>> {
+    Box::pin(async move {
+        match expr {
+            Val::List(items) if items.is_empty() => Ok(Val::Nil),
+            Val::List(items) => {
+                let cmd = match &items[0] {
+                    Val::Sym(s) => s.as_str(),
+                    _ => return Err(format!("expected symbol, got {}", items[0])),
+                };
+                let raw_args = &items[1..];
+
+                // Recursively evaluate any nested list args before dispatching.
+                let mut args = Vec::with_capacity(raw_args.len());
+                for a in raw_args {
+                    match a {
+                        Val::List(_) => args.push(eval(a, ctx).await?),
+                        other => args.push(other.clone()),
+                    }
+                }
+
+                // Resolve session::cap or session.cap compound symbols to the capability name.
+                let resolved_cap = cmd
+                    .strip_prefix("session::")
+                    .or_else(|| cmd.strip_prefix("session."))
+                    .unwrap_or(cmd);
+
+                match resolved_cap {
+                    "host" => eval_host(&args, ctx).await,
+                    "executor" => eval_executor(&args, ctx).await,
+                    "ipfs" => eval_ipfs(&args, ctx).await,
+                    "routing" => eval_routing(&args, ctx).await,
+                    "session" => {
+                        // (session <cap> <method> [args...]) — session-qualified dispatch
+                        let cap = match args.first() {
+                            Some(Val::Sym(s)) => s.as_str(),
+                            _ => return Err("(session <capability> <method> [args...])".into()),
+                        };
+                        match cap {
+                            "host" => eval_host(&args[1..], ctx).await,
+                            "executor" => eval_executor(&args[1..], ctx).await,
+                            "ipfs" => eval_ipfs(&args[1..], ctx).await,
+                            "routing" => eval_routing(&args[1..], ctx).await,
+                            _ => Err(format!("unknown capability: {cap}")),
+                        }
+                    }
+                    "cd" => {
+                        let path = match args.first() {
+                            Some(Val::Str(s)) => s.clone(),
+                            Some(Val::Sym(s)) => s.clone(),
+                            None => "/".to_string(),
+                            _ => return Err("(cd \"<path>\")".into()),
+                        };
+                        ctx.cwd = path;
+                        Ok(Val::Nil)
+                    }
+                    "help" => Ok(Val::Str(HELP_TEXT.to_string())),
+                    "exit" => std::process::exit(0),
+                    _ => eval_path_lookup(resolved_cap, &args, ctx).await,
+                }
+            }
+            // Self-evaluating forms.
+            other => Ok(other.clone()),
+        }
+    }) // Box::pin
+}
+
+async fn eval_host(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
     let method = match args.first() {
         Some(Val::Sym(s)) => s.as_str(),
         _ => return Err("(host <method> [args...])".into()),
@@ -211,11 +235,41 @@ async fn eval_host(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
                 .collect();
             Ok(Val::List(items))
         }
+        "listen" => {
+            // (host listen "protocol" <wasm-bytes>)
+            let protocol = match args.get(1) {
+                Some(Val::Str(s)) => s.clone(),
+                _ => return Err("(host listen \"<protocol>\" <wasm-bytes>)".into()),
+            };
+            let wasm = match args.get(2) {
+                Some(Val::Bytes(b)) => b.clone(),
+                _ => return Err("(host listen \"<protocol>\" <wasm-bytes>): handler must be bytes (use (ipfs cat ...))".into()),
+            };
+
+            let network_resp = ctx
+                .host
+                .network_request()
+                .send()
+                .promise
+                .await
+                .map_err(|e| e.to_string())?;
+            let network = network_resp.get().map_err(|e| e.to_string())?;
+            let listener = network.get_listener().map_err(|e| e.to_string())?;
+
+            let mut req = listener.listen_request();
+            req.get().set_executor(ctx.executor.clone());
+            req.get().set_protocol(&protocol);
+            req.get().set_handler(&wasm);
+            req.send().promise.await.map_err(|e| e.to_string())?;
+
+            log::info!("init.d: registered /ww/0.1.0/{protocol}");
+            Ok(Val::Nil)
+        }
         _ => Err(format!("unknown host method: {method}")),
     }
 }
 
-async fn eval_executor(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
+async fn eval_executor(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
     let method = match args.first() {
         Some(Val::Sym(s)) => s.as_str(),
         _ => return Err("(executor <method> [args...])".into()),
@@ -239,6 +293,81 @@ async fn eval_executor(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
                 .map_err(|e| e.to_string())?;
             Ok(Val::Str(text.to_string()))
         }
+        "run" => {
+            // (executor run <wasm-bytes> :env {"KEY" "VAL" ...})
+            let wasm = match args.get(1) {
+                Some(Val::Bytes(b)) => b.clone(),
+                _ => {
+                    return Err(
+                        "(executor run <wasm-bytes> [:env {map}]): wasm must be bytes".into(),
+                    )
+                }
+            };
+
+            // Parse optional keyword args: :env {map}
+            let mut env_pairs: Vec<String> = Vec::new();
+            let mut i = 2;
+            while i < args.len() {
+                match &args[i] {
+                    Val::Keyword(k) if k == "env" => {
+                        i += 1;
+                        if let Some(Val::Map(pairs)) = args.get(i) {
+                            for (k, v) in pairs {
+                                let key = match k {
+                                    Val::Str(s) => s.clone(),
+                                    Val::Sym(s) => s.clone(),
+                                    other => format!("{other}"),
+                                };
+                                let val = match v {
+                                    Val::Str(s) => s.clone(),
+                                    Val::Sym(s) => s.clone(),
+                                    other => format!("{other}"),
+                                };
+                                env_pairs.push(format!("{key}={val}"));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+
+            log::info!(
+                "executor run: spawning process ({} bytes, {} env vars)",
+                wasm.len(),
+                env_pairs.len()
+            );
+
+            let mut req = ctx.executor.run_bytes_request();
+            {
+                let mut b = req.get();
+                b.set_wasm(&wasm);
+                if !env_pairs.is_empty() {
+                    let mut env_list = b.init_env(env_pairs.len() as u32);
+                    for (j, e) in env_pairs.iter().enumerate() {
+                        env_list.set(j as u32, e);
+                    }
+                }
+            }
+            let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+            let process = resp
+                .get()
+                .map_err(|e| e.to_string())?
+                .get_process()
+                .map_err(|e| e.to_string())?;
+
+            // Block until the process exits.
+            log::info!("executor run: process spawned, waiting for exit");
+            let wait_resp = process
+                .wait_request()
+                .send()
+                .promise
+                .await
+                .map_err(|e| e.to_string())?;
+            let exit_code = wait_resp.get().map_err(|e| e.to_string())?.get_exit_code();
+            log::info!("executor run: process exited ({})", exit_code);
+            Ok(Val::Int(exit_code as i64))
+        }
         _ => Err(format!("unknown executor method: {method}")),
     }
 }
@@ -250,10 +379,12 @@ async fn eval_ipfs(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
     };
     match method {
         "cat" => {
-            let path = match args.get(1) {
+            let raw_path = match args.get(1) {
                 Some(Val::Str(s)) => s.clone(),
                 _ => return Err("(ipfs cat \"<path>\")".into()),
             };
+            let path = resolve_ipfs_path(&raw_path);
+
             let unixfs_resp = ctx
                 .ipfs
                 .unixfs_request()
@@ -274,17 +405,15 @@ async fn eval_ipfs(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
                 .map_err(|e| e.to_string())?
                 .get_data()
                 .map_err(|e| e.to_string())?;
-            // Try as UTF-8, fall back to hex.
-            match std::str::from_utf8(data) {
-                Ok(s) => Ok(Val::Str(s.to_string())),
-                Err(_) => Ok(Val::Str(format!("<{} bytes>", data.len()))),
-            }
+            Ok(Val::Bytes(data.to_vec()))
         }
         "ls" => {
-            let path = match args.get(1) {
+            let raw_path = match args.get(1) {
                 Some(Val::Str(s)) => s.clone(),
                 _ => return Err("(ipfs ls \"<path>\")".into()),
             };
+            let path = resolve_ipfs_path(&raw_path);
+
             let unixfs_resp = ctx
                 .ipfs
                 .unixfs_request()
@@ -319,6 +448,46 @@ async fn eval_ipfs(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
             Ok(Val::List(items))
         }
         _ => Err(format!("unknown ipfs method: {method}")),
+    }
+}
+
+async fn eval_routing(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
+    let method = match args.first() {
+        Some(Val::Sym(s)) => s.as_str(),
+        _ => return Err("(routing <method> [args...])".into()),
+    };
+    match method {
+        "provide" => {
+            // (routing provide "key")
+            let key = match args.get(1) {
+                Some(Val::Str(s)) => s.clone(),
+                _ => return Err("(routing provide \"<key>\")".into()),
+            };
+            let mut req = ctx.routing.provide_request();
+            req.get().set_key(&key);
+            req.send().promise.await.map_err(|e| e.to_string())?;
+            Ok(Val::Nil)
+        }
+        "hash" => {
+            // (routing hash "data")
+            let data = match args.get(1) {
+                Some(Val::Str(s)) => s.as_bytes().to_vec(),
+                Some(Val::Bytes(b)) => b.clone(),
+                _ => return Err("(routing hash \"<data>\")".into()),
+            };
+            let mut req = ctx.routing.hash_request();
+            req.get().set_data(&data);
+            let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+            let key = resp
+                .get()
+                .map_err(|e| e.to_string())?
+                .get_key()
+                .map_err(|e| e.to_string())?
+                .to_str()
+                .map_err(|e| e.to_string())?;
+            Ok(Val::Str(key.to_string()))
+        }
+        _ => Err(format!("unknown routing method: {method}")),
     }
 }
 
@@ -411,11 +580,16 @@ Capabilities:
   (host id)                      Peer ID
   (host addrs)                   Listen addresses
   (host peers)                   Connected peers
+  (host listen \"p\" <wasm>)       Register protocol handler
 
   (executor echo \"<msg>\")        Diagnostic echo
+  (executor run <wasm> :env {})  Spawn foreground process
 
-  (ipfs cat \"<path>\")            Fetch IPFS content
+  (ipfs cat \"<path>\")            Fetch IPFS content (bytes)
   (ipfs ls \"<path>\")             List IPFS directory
+
+  (routing provide \"<key>\")      Announce to DHT
+  (routing hash \"<data>\")        Hash data to CID
 
 Built-ins:
   (cd \"<path>\")                  Change working directory
@@ -423,6 +597,117 @@ Built-ins:
   (exit)                         Quit
 
 Unrecognized commands are looked up in PATH (default /bin).";
+
+// ---------------------------------------------------------------------------
+// Init.d — evaluate scripts from $WW_ROOT/etc/init.d/*.glia
+// ---------------------------------------------------------------------------
+
+/// Scan `$WW_ROOT/etc/init.d/*.glia` via IPFS UnixFS, parse and evaluate
+/// each file as a glia script. Returns true if any expression blocked
+/// (i.e. a foreground process ran to completion via `(executor run ...)`).
+async fn run_initd(ctx: &mut ShellCtx) -> Result<bool, Box<dyn std::error::Error>> {
+    let ww_root = std::env::var("WW_ROOT").unwrap_or_default();
+    if ww_root.is_empty() {
+        log::debug!("init.d: WW_ROOT not set, skipping");
+        return Ok(false);
+    }
+    let root = ww_root.trim_end_matches('/');
+
+    // Get the UnixFS API.
+    let unixfs_resp = ctx
+        .ipfs
+        .unixfs_request()
+        .send()
+        .promise
+        .await
+        .map_err(|e| e.to_string())?;
+    let unixfs = unixfs_resp
+        .get()
+        .map_err(|e| e.to_string())?
+        .get_api()
+        .map_err(|e| e.to_string())?;
+
+    // ls $WW_ROOT/etc/init.d — gracefully return empty on error
+    // (no /etc or no /etc/init.d = nothing configured).
+    let initd_path = format!("{root}/etc/init.d");
+    let mut ls_req = unixfs.ls_request();
+    ls_req.get().set_path(&initd_path);
+    let entries = match ls_req.send().promise.await {
+        Ok(resp) => {
+            let reader = resp.get().map_err(|e| e.to_string())?;
+            let list = reader.get_entries().map_err(|e| e.to_string())?;
+            let mut names = Vec::new();
+            for i in 0..list.len() {
+                let entry = list.get(i);
+                if let Ok(name) = entry.get_name() {
+                    if let Ok(s) = name.to_str() {
+                        if s.ends_with(".glia") {
+                            names.push(s.to_string());
+                        }
+                    }
+                }
+            }
+            names
+        }
+        Err(e) => {
+            log::debug!("init.d: ls {initd_path} failed ({e}), skipping");
+            return Ok(false);
+        }
+    };
+
+    if entries.is_empty() {
+        log::info!("init.d: no scripts found");
+        return Ok(false);
+    }
+
+    log::info!("init.d: found {} script(s)", entries.len());
+    let mut blocked = false;
+
+    for name in &entries {
+        // cat the glia script.
+        let script_path = format!("{initd_path}/{name}");
+        let mut cat_req = unixfs.cat_request();
+        cat_req.get().set_path(&script_path);
+        let cat_resp = cat_req
+            .send()
+            .promise
+            .await
+            .map_err(|e| format!("init.d: cat {script_path}: {e}"))?;
+        let data = cat_resp
+            .get()
+            .map_err(|e| format!("init.d: cat {script_path} result: {e}"))?
+            .get_data()
+            .map_err(|e| format!("init.d: cat {script_path} data: {e}"))?;
+        let content = std::str::from_utf8(data)
+            .map_err(|e| format!("init.d: {script_path} is not UTF-8: {e}"))?;
+
+        let forms =
+            read_many(content).map_err(|e| format!("init.d: parse error in {script_path}: {e}"))?;
+
+        log::info!("init.d: evaluating {name} ({} form(s))", forms.len());
+
+        for (i, form) in forms.iter().enumerate() {
+            log::info!("init.d: {name}: evaluating form {}/{}", i + 1, forms.len());
+            match eval(form, ctx).await {
+                Ok(Val::Nil) => {}
+                Ok(Val::Int(code)) => {
+                    // An (executor run ...) that returned an exit code means
+                    // a foreground process ran to completion.
+                    log::info!("init.d: {name}: foreground process exited ({code})");
+                    blocked = true;
+                }
+                Ok(result) => {
+                    log::debug!("init.d: {name}: {result}");
+                }
+                Err(e) => {
+                    log::error!("init.d: {name}: {e}");
+                }
+            }
+        }
+    }
+
+    Ok(blocked)
+}
 
 // ---------------------------------------------------------------------------
 // Shell mode (TTY)
@@ -487,428 +772,19 @@ async fn run_shell(mut ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 // ---------------------------------------------------------------------------
-// Daemon mode (non-TTY) — init.d service bootstrapping
+// Daemon mode (non-TTY) — block on stdin
 // ---------------------------------------------------------------------------
 
-/// Discovery loop backoff constants.
-const BASE_MS: u64 = 2_000;
-const MAX_MS: u64 = 900_000;
-
-/// Short peer ID for human-readable logs (last 4 bytes = 8 hex chars).
-fn short_id(peer_id: &[u8]) -> String {
-    let h = hex::encode(peer_id);
-    if h.len() > 8 {
-        format!("..{}", &h[h.len() - 8..])
-    } else {
-        h
-    }
-}
-
-/// Extract a string value for a keyword key from a glia Map.
-fn map_get_str<'a>(pairs: &'a [(Val, Val)], key: &str) -> Option<&'a str> {
-    pairs.iter().find_map(|(k, v)| match (k, v) {
-        (Val::Keyword(k), Val::Str(s)) if k == key => Some(s.as_str()),
-        _ => None,
-    })
-}
-
-/// A parsed init.d service declaration.
-struct ServiceConfig {
-    protocol: String,
-    handler_wasm: Vec<u8>,
-    ns_cid: String,
-    seen: Rc<RefCell<HashSet<Vec<u8>>>>,
-}
-
-/// Scan `etc/init.d/*.glia` and parse service declarations.
-async fn load_initd_services(
-    routing: &routing_capnp::routing::Client,
-) -> Result<Vec<ServiceConfig>, Box<dyn std::error::Error>> {
-    let mut services = Vec::new();
-
-    let dir = match std::fs::read_dir("etc/init.d") {
-        Ok(d) => d,
-        Err(e) => {
-            log::debug!("init.d: no etc/init.d directory ({e}), skipping");
-            return Ok(services);
-        }
-    };
-
-    for entry in dir {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.extension().and_then(|e| e.to_str()) != Some("glia") {
-            continue;
-        }
-
-        let content = std::fs::read_to_string(&path)?;
-        let config = glia::read(&content)
-            .map_err(|e| format!("init.d: parse error in {}: {e}", path.display()))?;
-
-        let pairs = match &config {
-            Val::Map(pairs) => pairs,
-            _ => {
-                log::warn!("init.d: {} is not a map, skipping", path.display());
-                continue;
-            }
-        };
-
-        let protocol = match map_get_str(pairs, "protocol") {
-            Some(p) => p.to_string(),
-            None => {
-                log::warn!("init.d: {} missing :protocol, skipping", path.display());
-                continue;
-            }
-        };
-
-        let handler_path = match map_get_str(pairs, "handler") {
-            Some(h) => h.to_string(),
-            None => {
-                log::warn!("init.d: {} missing :handler, skipping", path.display());
-                continue;
-            }
-        };
-
-        let namespace = match map_get_str(pairs, "namespace") {
-            Some(n) => n.to_string(),
-            None => {
-                log::warn!("init.d: {} missing :namespace, skipping", path.display());
-                continue;
-            }
-        };
-
-        // Load handler WASM from the FHS filesystem.
-        let handler_wasm = std::fs::read(&handler_path)
-            .map_err(|e| format!("init.d: failed to read {handler_path}: {e}"))?;
-        log::debug!(
-            "init.d: loaded handler {} ({} bytes)",
-            handler_path,
-            handler_wasm.len()
-        );
-
-        // Hash namespace → deterministic CID for DHT.
-        let mut hash_req = routing.hash_request();
-        hash_req.get().set_data(namespace.as_bytes());
-        let hash_resp = hash_req
-            .send()
-            .promise
-            .await
-            .map_err(|e| format!("init.d: hash failed for {namespace}: {e}"))?;
-        let ns_cid = hash_resp
-            .get()
-            .map_err(|e| format!("init.d: hash result error: {e}"))?
-            .get_key()
-            .map_err(|e| format!("init.d: hash key error: {e}"))?
-            .to_str()
-            .map_err(|e| format!("init.d: hash key UTF-8 error: {e}"))?
-            .to_string();
-
-        services.push(ServiceConfig {
-            protocol,
-            handler_wasm,
-            ns_cid,
-            seen: Rc::new(RefCell::new(HashSet::new())),
-        });
-    }
-
-    Ok(services)
-}
-
-// ---------------------------------------------------------------------------
-// InitdSink — generic discovery sink that dials peers and spawns handlers
-// ---------------------------------------------------------------------------
-
-struct InitdSink {
-    dialer: system_capnp::dialer::Client,
-    executor: system_capnp::executor::Client,
-    handler_wasm: Vec<u8>,
-    protocol: String,
-    self_id: Vec<u8>,
-    seen: Rc<RefCell<HashSet<Vec<u8>>>>,
-}
-
-#[allow(refining_impl_trait)]
-impl routing_capnp::provider_sink::Server for InitdSink {
-    fn provider(
-        self: Rc<Self>,
-        params: routing_capnp::provider_sink::ProviderParams,
-    ) -> Promise<(), capnp::Error> {
-        let peer_id = pry!(pry!(pry!(params.get()).get_info()).get_peer_id()).to_vec();
-
-        // Skip self and already-seen peers.
-        if peer_id == self.self_id || !self.seen.borrow_mut().insert(peer_id.clone()) {
-            return Promise::ok(());
-        }
-
-        let dialer = self.dialer.clone();
-        let executor = self.executor.clone();
-        let handler_wasm = self.handler_wasm.clone();
-        let protocol = self.protocol.clone();
-        let peer = peer_id.clone();
-
-        Promise::from_future(async move {
-            if let Err(e) = dial_and_pump(&dialer, &executor, &handler_wasm, &protocol, &peer).await
-            {
-                log::error!(
-                    "init.d: {}: connection to {} failed: {e}",
-                    protocol,
-                    short_id(&peer)
-                );
-            }
-            // Brief pause between connections so output is readable.
-            let pause = wasip2::clocks::monotonic_clock::subscribe_duration(5_000_000_000); // 5s
-            pause.block();
-            Ok(())
-        })
-    }
-
-    fn done(
-        self: Rc<Self>,
-        _params: routing_capnp::provider_sink::DoneParams,
-        _results: routing_capnp::provider_sink::DoneResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Dial + pump — connect to a discovered peer and wire a handler process
-// ---------------------------------------------------------------------------
-
-/// Dial a peer, spawn an initiator handler, and pump data between the
-/// dialed stream and the handler's stdin/stdout.
-async fn dial_and_pump(
-    dialer: &system_capnp::dialer::Client,
-    executor: &system_capnp::executor::Client,
-    handler_wasm: &[u8],
-    protocol: &str,
-    peer_id: &[u8],
-) -> Result<(), capnp::Error> {
-    let them = short_id(peer_id);
-
-    // Dial peer → bidirectional ByteStream.
-    let mut dial_req = dialer.dial_request();
-    dial_req.get().set_peer(peer_id);
-    dial_req.get().set_protocol(protocol);
-    let dial_resp = dial_req.send().promise.await?;
-    let stream = dial_resp.get()?.get_stream()?;
-
-    log::info!("init.d: {protocol}: dialed {them}");
-
-    // Spawn handler in initiator mode.
-    let mut run_req = executor.run_bytes_request();
-    run_req.get().set_wasm(handler_wasm);
-    {
-        let mut env = run_req.get().init_env(4);
-        env.set(0, "WW_HANDLER=1");
-        env.set(1, "WW_INITIATOR=1");
-        env.set(2, format!("WW_PROTOCOL={protocol}"));
-        env.set(3, "PATH=/bin");
-    }
-    let run_resp = run_req.send().promise.await?;
-    let process = run_resp.get()?.get_process()?;
-
-    // Get handler stdin/stdout.
-    let stdin_resp = process.stdin_request().send().promise.await?;
-    let handler_stdin = stdin_resp.get()?.get_stream()?;
-
-    let stdout_resp = process.stdout_request().send().promise.await?;
-    let handler_stdout = stdout_resp.get()?.get_stream()?;
-
-    // Pump: handler stdout → dialed stream, dialed stream → handler stdin.
-    // Sequential alternating pump — works for turn-based protocols (POC).
-    let result = pump_sequential(&stream, &handler_stdin, &handler_stdout).await;
-
-    // Clean up: close handler stdin and the dialed stream.
-    let _ = handler_stdin.close_request().send().promise.await;
-    let _ = stream.close_request().send().promise.await;
-
-    // Wait for handler process to exit.
-    let wait_resp = process.wait_request().send().promise.await?;
-    let exit_code = wait_resp.get()?.get_exit_code();
-    log::debug!("init.d: {protocol}: handler for {them} exited ({exit_code})");
-
-    result
-}
-
-/// Sequential alternating pump between a dialed stream and handler stdio.
-///
-/// Reads handler stdout → writes to dialed stream, reads dialed stream →
-/// writes to handler stdin. This works for turn-based protocols where the
-/// initiator writes first. For streaming protocols, a concurrent pump
-/// would be needed (future work).
-async fn pump_sequential(
-    dialed: &system_capnp::byte_stream::Client,
-    handler_stdin: &system_capnp::byte_stream::Client,
-    handler_stdout: &system_capnp::byte_stream::Client,
-) -> Result<(), capnp::Error> {
+async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
+    let stdin = get_stdin();
     loop {
-        // Handler wrote a message → read it from stdout.
-        let mut read_req = handler_stdout.read_request();
-        read_req.get().set_max_bytes(4096);
-        let read_resp = read_req.send().promise.await?;
-        let data = read_resp.get()?.get_data()?;
-        if data.is_empty() {
-            break; // Handler closed stdout (game over).
+        match stdin.blocking_read(4096) {
+            Ok(b) if b.is_empty() => break,
+            Err(_) => break,
+            Ok(_) => {} // Discard input in daemon mode.
         }
-
-        // Forward to the dialed stream.
-        let mut write_req = dialed.write_request();
-        write_req.get().set_data(data);
-        write_req.send().promise.await?;
-
-        // Read response from the dialed stream.
-        let mut read_req = dialed.read_request();
-        read_req.get().set_max_bytes(4096);
-        let read_resp = read_req.send().promise.await?;
-        let data = read_resp.get()?.get_data()?;
-        if data.is_empty() {
-            break; // Remote closed the stream.
-        }
-
-        // Forward response to handler stdin.
-        let mut write_req = handler_stdin.write_request();
-        write_req.get().set_data(data);
-        write_req.send().promise.await?;
     }
-
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Daemon boot — scan init.d, register services, run discovery loop
-// ---------------------------------------------------------------------------
-
-async fn run_daemon(ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
-    let stderr = get_stderr();
-
-    // Log readiness with peer ID.
-    let id_resp = ctx
-        .host
-        .id_request()
-        .send()
-        .promise
-        .await
-        .map_err(|e| e.to_string())?;
-    let self_id = id_resp
-        .get()
-        .map_err(|e| e.to_string())?
-        .get_peer_id()
-        .map_err(|e| e.to_string())?
-        .to_vec();
-    let peer_id_hex = hex::encode(&self_id);
-    let _ = stderr.blocking_write_and_flush(
-        format!("{{\"event\":\"ready\",\"peer_id\":\"{peer_id_hex}\"}}\n").as_bytes(),
-    );
-
-    // Load init.d service declarations.
-    let services = load_initd_services(&ctx.routing)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if services.is_empty() {
-        log::info!("init.d: no services found, entering idle loop");
-        // Fall back to blocking on stdin (original daemon behavior).
-        let stdin = get_stdin();
-        loop {
-            match stdin.blocking_read(4096) {
-                Ok(b) if b.is_empty() => break,
-                Err(_) => break,
-                Ok(_) => {} // Discard input in daemon mode.
-            }
-        }
-        return Ok(());
-    }
-
-    log::info!("init.d: loaded {} service(s)", services.len());
-
-    // Get network capabilities.
-    let network_resp = ctx
-        .host
-        .network_request()
-        .send()
-        .promise
-        .await
-        .map_err(|e| e.to_string())?;
-    let network = network_resp.get().map_err(|e| e.to_string())?;
-    let listener = network.get_listener().map_err(|e| e.to_string())?;
-    let dialer = network.get_dialer().map_err(|e| e.to_string())?;
-
-    // Register all listeners.
-    for svc in &services {
-        let mut req = listener.listen_request();
-        req.get().set_executor(ctx.executor.clone());
-        req.get().set_protocol(&svc.protocol);
-        req.get().set_handler(&svc.handler_wasm);
-        req.send().promise.await.map_err(|e| e.to_string())?;
-        log::info!("init.d: registered /ww/0.1.0/{}", svc.protocol);
-    }
-
-    log::info!("init.d: peer {}", short_id(&self_id));
-
-    // Discovery loop: provide + find_providers with exponential backoff.
-    // Re-provide each pass (DHT records expire). find_providers is a one-shot
-    // query, so we loop to catch peers that announce after our search.
-    let mut cooldown_ms: u64 = BASE_MS;
-
-    loop {
-        let mut found_new = false;
-
-        for svc in &services {
-            let prev_seen = svc.seen.borrow().len();
-
-            // Re-provide (DHT records expire).
-            let mut provide_req = ctx.routing.provide_request();
-            provide_req.get().set_key(&svc.ns_cid);
-            if let Err(e) = provide_req.send().promise.await {
-                log::warn!("init.d: {}: provide failed: {e}", svc.protocol);
-                continue;
-            }
-
-            // Search — InitdSink dials new peers automatically.
-            let sink: routing_capnp::provider_sink::Client = capnp_rpc::new_client(InitdSink {
-                dialer: dialer.clone(),
-                executor: ctx.executor.clone(),
-                handler_wasm: svc.handler_wasm.clone(),
-                protocol: svc.protocol.clone(),
-                self_id: self_id.clone(),
-                seen: svc.seen.clone(),
-            });
-            let mut fp_req = ctx.routing.find_providers_request();
-            {
-                let mut b = fp_req.get();
-                b.set_key(&svc.ns_cid);
-                b.set_count(5);
-                b.set_sink(sink);
-            }
-            if let Err(e) = fp_req.send().promise.await {
-                log::warn!("init.d: {}: findProviders failed: {e}", svc.protocol);
-                continue;
-            }
-
-            let now_seen = svc.seen.borrow().len();
-            if now_seen > prev_seen {
-                log::info!("init.d: {}: found {} peer(s)", svc.protocol, now_seen);
-                found_new = true;
-            }
-        }
-
-        // Backoff: reset on new peer, double on idle, cap at MAX.
-        if found_new {
-            cooldown_ms = BASE_MS;
-        } else {
-            cooldown_ms = (cooldown_ms * 2).min(MAX_MS);
-        }
-
-        // Jitter: uniform in [0.5 * cooldown, cooldown].
-        let delay_ms = cooldown_ms / 2 + rand::random_range(0..=cooldown_ms / 2);
-
-        let pause = wasip2::clocks::monotonic_clock::subscribe_duration(
-            delay_ms * 1_000_000, // ms → ns
-        );
-        pause.block();
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -931,7 +807,7 @@ fn run_impl() {
         let graft_resp = membrane.graft_request().send().promise.await?;
         let results = graft_resp.get()?;
 
-        let ctx = ShellCtx {
+        let mut ctx = ShellCtx {
             host: results.get_host()?,
             executor: results.get_executor()?,
             ipfs: results.get_ipfs()?,
@@ -940,15 +816,24 @@ fn run_impl() {
             cwd: "/".to_string(),
         };
 
-        let is_tty = std::env::var("WW_TTY").is_ok();
-        let result = if is_tty {
-            run_shell(ctx).await
-        } else {
-            run_daemon(ctx).await
-        };
+        // Run init.d scripts first. If a foreground process blocked
+        // (e.g. `(executor run ...)` in the script), we're done.
+        let blocked = run_initd(&mut ctx).await.unwrap_or_else(|e| {
+            log::error!("init.d: {e}");
+            false
+        });
 
-        if let Err(e) = result {
-            log::error!("kernel error: {e}");
+        if !blocked {
+            let is_tty = std::env::var("WW_TTY").is_ok();
+            let result = if is_tty {
+                run_shell(ctx).await
+            } else {
+                run_daemon().await
+            };
+
+            if let Err(e) = result {
+                log::error!("kernel error: {e}");
+            }
         }
 
         Ok(())
@@ -956,3 +841,50 @@ fn run_impl() {
 }
 
 wasip2::cli::command::export!(Kernel);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_ipfs_path_absolute_passthrough() {
+        let p = "/ipfs/QmXXX/bin/main.wasm";
+        assert_eq!(resolve_ipfs_path(p), p);
+    }
+
+    #[test]
+    fn resolve_ipfs_path_relative() {
+        std::env::set_var("WW_ROOT", "/ipfs/QmABC");
+        assert_eq!(
+            resolve_ipfs_path("bin/chess-demo.wasm"),
+            "/ipfs/QmABC/bin/chess-demo.wasm"
+        );
+    }
+
+    #[test]
+    fn resolve_ipfs_path_trailing_slash_no_double() {
+        std::env::set_var("WW_ROOT", "/ipfs/QmABC/");
+        assert_eq!(
+            resolve_ipfs_path("bin/chess-demo.wasm"),
+            "/ipfs/QmABC/bin/chess-demo.wasm"
+        );
+    }
+
+    #[test]
+    fn resolve_ipfs_path_leading_slash_trimmed() {
+        std::env::set_var("WW_ROOT", "/ipfs/QmABC");
+        assert_eq!(
+            resolve_ipfs_path("/bin/chess-demo.wasm"),
+            "/ipfs/QmABC/bin/chess-demo.wasm"
+        );
+    }
+
+    #[test]
+    fn resolve_ipfs_path_empty_root() {
+        std::env::remove_var("WW_ROOT");
+        assert_eq!(
+            resolve_ipfs_path("bin/chess-demo.wasm"),
+            "/bin/chess-demo.wasm"
+        );
+    }
+}
