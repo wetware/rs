@@ -548,6 +548,17 @@ impl system_capnp::executor::Server for ExecutorImpl {
             tokio::task::spawn_local(async move {
                 let local = tokio::task::LocalSet::new();
                 local.spawn_local(child_rpc_system.map(|_| ()));
+
+                // Drain child stderr → host tracing so child logs are visible.
+                // Without this, the 64 KiB duplex buffer fills and the child blocks.
+                local.spawn_local(async move {
+                    use tokio::io::AsyncBufReadExt;
+                    let reader = tokio::io::BufReader::new(host_stderr);
+                    let mut lines = reader.lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        tracing::info!("{}", line);
+                    }
+                });
                 local
                     .run_until(async move {
                         let exit_code = match proc.run().await {
@@ -558,16 +569,21 @@ impl system_capnp::executor::Server for ExecutorImpl {
                             }
                         };
                         let _ = exit_tx.send(exit_code);
+                        tracing::info!("run_bytes: child process exited with code {}", exit_code);
                     })
                     .await;
             });
+
+            tracing::info!("run_bytes: child process started, RPC system active");
 
             let stdin =
                 capnp_rpc::new_client(ByteStreamImpl::new(host_stdin, StreamMode::WriteOnly));
             let stdout =
                 capnp_rpc::new_client(ByteStreamImpl::new(host_stdout, StreamMode::ReadOnly));
+            // Child stderr is drained above; provide a no-op stream for the Process interface.
+            let (dummy_stderr, _) = io::duplex(1);
             let stderr =
-                capnp_rpc::new_client(ByteStreamImpl::new(host_stderr, StreamMode::ReadOnly));
+                capnp_rpc::new_client(ByteStreamImpl::new(dummy_stderr, StreamMode::ReadOnly));
 
             let process_client: system_capnp::process::Client =
                 capnp_rpc::new_client(ProcessImpl::new(stdin, stdout, stderr, exit_rx));
