@@ -906,8 +906,7 @@ mod tests {
 (host listen "chess" (ipfs cat "bin/chess-demo.wasm"))
 (routing provide (routing hash "ww.chess.v1"))
 (executor run (ipfs cat "bin/chess-demo.wasm")
-  :env {"WW_SERVICE" "1"
-        "WW_NAMESPACE" "ww.chess.v1"})
+  :env {"WW_NS" "ww.chess.v1"})
 "#;
         let forms = read_many(script).unwrap();
         assert_eq!(forms.len(), 3);
@@ -942,7 +941,7 @@ mod tests {
                 assert_eq!(items[3], Val::Keyword("env".into()));
                 match &items[4] {
                     Val::Map(pairs) => {
-                        assert_eq!(pairs.len(), 2);
+                        assert_eq!(pairs.len(), 1);
                     }
                     other => panic!("expected map, got {other}"),
                 }

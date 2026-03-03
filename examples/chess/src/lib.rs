@@ -1,18 +1,16 @@
 //! Chess guest: cross-node play via subprotocol handlers.
 //!
-//! This binary serves three roles, selected by env vars:
+//! This binary serves two roles, selected by env vars set in the
+//! init.d script (`etc/init.d/chess.glia`):
 //!
 //! **Handler mode** (`WW_HANDLER=1`): A pure bytestream handler spawned
 //! by the Listener. Reads newline-delimited UCI moves from stdin, applies
 //! them, picks a random legal response, writes it to stdout.
 //!
-//! **Service mode** (`WW_SERVICE=1`): Spawned by an init.d script after
-//! the listener is already registered. Runs the discovery loop (provide +
+//! **Service mode** (default): Spawned by an init.d script after the
+//! listener is already registered. Runs the discovery loop (provide +
 //! findProviders + dial) reading config from env vars. This is the
 //! foreground process that keeps the node alive.
-//!
-//! **Legacy mode** (neither): Grafts the Membrane, registers a listener,
-//! and runs the discovery loop itself (standalone, pre-init.d).
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -542,8 +540,8 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
     let routing = results.get_routing()?;
 
     // Read config from env vars (set by init.d script).
-    let namespace = std::env::var("WW_NAMESPACE")
-        .map_err(|_| capnp::Error::failed("WW_NAMESPACE not set".into()))?;
+    let namespace = std::env::var("WW_NS")
+        .map_err(|_| capnp::Error::failed("WW_NS not set".into()))?;
 
     // Get network dialer.
     let network_resp = host.network_request().send().promise.await?;
@@ -615,131 +613,6 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
 }
 
 // ---------------------------------------------------------------------------
-// Game loop (legacy mode)
-// ---------------------------------------------------------------------------
-
-async fn run_game(membrane: Membrane) -> Result<(), capnp::Error> {
-    // Graft membrane → get capabilities.
-    log::debug!("run_game: requesting graft...");
-    let graft_resp = membrane.graft_request().send().promise.await?;
-    let results = graft_resp.get()?;
-    let host = results.get_host()?;
-    let executor = results.get_executor()?;
-    let ipfs = results.get_ipfs()?;
-    let routing = results.get_routing()?;
-    log::debug!("run_game: graft OK, requesting network...");
-
-    // Pipeline: host.network() → (listener, dialer).
-    let network_resp = host.network_request().send().promise.await?;
-    let network = network_resp.get()?;
-    let listener = network.get_listener()?;
-    let dialer = network.get_dialer()?;
-    log::debug!("run_game: network OK, loading handler wasm via UnixFS...");
-
-    // Load handler wasm via IPFS UnixFS capability.
-    // $WW_ROOT is the IPFS path to the guest's FHS root (set by the host).
-    let unixfs_resp = ipfs.unixfs_request().send().promise.await?;
-    let unixfs = unixfs_resp.get()?.get_api()?;
-    let ww_root =
-        std::env::var("WW_ROOT").map_err(|_| capnp::Error::failed("WW_ROOT not set".into()))?;
-    let handler_path = format!("{}/bin/main.wasm", ww_root.trim_end_matches('/'));
-    let mut cat_req = unixfs.cat_request();
-    cat_req.get().set_path(&handler_path);
-    let cat_resp = cat_req.send().promise.await?;
-    let wasm_bytes = cat_resp.get()?.get_data()?.to_vec();
-
-    log::debug!(
-        "run_game: handler wasm loaded ({} bytes) from {}",
-        wasm_bytes.len(),
-        handler_path
-    );
-
-    // Register /ww/0.1.0/chess listener.
-    // OCAP: pass our executor to listener.listen(), explicitly delegating spawn rights.
-    let mut listen_req = listener.listen_request();
-    listen_req.get().set_executor(executor.clone());
-    listen_req.get().set_protocol("chess");
-    listen_req.get().set_handler(&wasm_bytes);
-    listen_req.send().promise.await?;
-    log::info!("registered /ww/0.1.0/chess listener");
-
-    // Log peer identity.
-    let id_resp = host.id_request().send().promise.await?;
-    let self_id = id_resp.get()?.get_peer_id()?.to_vec();
-    log::info!("peer id: {}", short_id(&self_id));
-
-    // Hash chess namespace → deterministic CID (same on all nodes).
-    // Local CIDv1(raw, sha256) — no Kubo HTTP dependency.
-    let mut hash_req = routing.hash_request();
-    hash_req.get().set_data(b"ww.chess.v1");
-    let hash_resp = hash_req.send().promise.await?;
-    let ns_cid = hash_resp.get()?.get_key()?.to_str()?.to_string();
-    log::debug!("chess namespace CID: {ns_cid}");
-
-    log::info!("looking for opponent...");
-
-    // Discovery loop: provide + find_providers with exponential backoff.
-    // DHT records have a TTL, so re-provide each pass. find_providers is a
-    // one-shot query, so we loop to catch peers that announce after our search.
-    //
-    // Backoff: starts at 2s, doubles each idle pass, caps at 15min.
-    // Resets to base when a new peer is found (more may follow quickly).
-    // Jitter: uniform in [0.5, 1.0] of delay — desynchronizes nodes while
-    // keeping MAX_MS as a strict ceiling.
-    let seen = Rc::new(RefCell::new(HashSet::<Vec<u8>>::new()));
-    let mut pass = 0u32;
-    let mut cooldown_ms: u64 = 2_000;
-    const BASE_MS: u64 = 2_000;
-    const MAX_MS: u64 = 900_000;
-
-    loop {
-        pass = pass.saturating_add(1);
-        let prev_seen = seen.borrow().len();
-
-        // Re-provide (DHT records expire).
-        let mut provide_req = routing.provide_request();
-        provide_req.get().set_key(&ns_cid);
-        provide_req.send().promise.await?;
-
-        // Search for peers; DialingSink dials new ones automatically.
-        let sink: routing_capnp::provider_sink::Client = capnp_rpc::new_client(DialingSink {
-            dialer: dialer.clone(),
-            unixfs: unixfs.clone(),
-            self_id: self_id.clone(),
-            seen: seen.clone(),
-        });
-        let mut fp_req = routing.find_providers_request();
-        {
-            let mut b = fp_req.get();
-            b.set_key(&ns_cid);
-            b.set_count(5);
-            b.set_sink(sink);
-        }
-        fp_req.send().promise.await?;
-
-        // Only log when the peer count changes (state transition).
-        let now_seen = seen.borrow().len();
-        if now_seen > prev_seen {
-            log::info!("found {} opponent(s)", now_seen);
-            cooldown_ms = BASE_MS; // reset — more peers may follow quickly
-        } else {
-            cooldown_ms = (cooldown_ms * 2).min(MAX_MS); // back off
-        }
-
-        // Jitter: uniform in [0.5 * cooldown, 1.0 * cooldown].
-        let delay_ms = cooldown_ms / 2 + rand::random_range(0..=cooldown_ms / 2);
-
-        // Cool down between discovery passes.  Incoming games (via the
-        // Listener) are handled concurrently — this only gates outbound
-        // discovery.
-        let pause = wasip2::clocks::monotonic_clock::subscribe_duration(
-            delay_ms * 1_000_000, // ms → ns
-        );
-        pause.block();
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -751,14 +624,10 @@ impl Guest for ChessGuest {
         if std::env::var("WW_HANDLER").is_ok() {
             // Handler mode: text-based chess engine over stdin/stdout.
             handle_chess_stream();
-        } else if std::env::var("WW_SERVICE").is_ok() {
-            // Service mode: discovery loop only (listener already registered by init.d).
+        } else {
+            // Service mode: discovery loop (listener already registered by init.d).
             log::info!("chess guest starting (service mode)");
             system::run(|membrane: Membrane| async move { run_service(membrane).await });
-        } else {
-            // Legacy mode: register listener + discovery loop (standalone).
-            log::info!("chess guest starting (legacy mode)");
-            system::run(|membrane: Membrane| async move { run_game(membrane).await });
         }
         Ok(())
     }
@@ -1025,7 +894,7 @@ mod tests {
     // Discovery backoff & jitter
     // -------------------------------------------------------------------
 
-    /// Mirror the backoff constants from run_game so tests break if they drift.
+    /// Mirror the backoff constants from run_service so tests break if they drift.
     const BASE_MS: u64 = 2_000;
     const MAX_MS: u64 = 900_000;
 
