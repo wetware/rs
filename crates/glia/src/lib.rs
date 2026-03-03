@@ -39,6 +39,9 @@ pub enum Val {
     Vector(Vec<Val>),
     Map(Vec<(Val, Val)>),
     Set(Vec<Val>),
+    /// Opaque binary data — a runtime value, not parseable from text.
+    /// Produced by evaluating expressions like `(ipfs cat "...")`.
+    Bytes(Vec<u8>),
 }
 
 impl PartialEq for Val {
@@ -55,6 +58,7 @@ impl PartialEq for Val {
             (Val::Vector(a), Val::Vector(b)) => a == b,
             (Val::Map(a), Val::Map(b)) => a == b,
             (Val::Set(a), Val::Set(b)) => a == b,
+            (Val::Bytes(a), Val::Bytes(b)) => a == b,
             _ => false,
         }
     }
@@ -90,6 +94,7 @@ impl core::fmt::Display for Val {
                 write!(f, "}}")
             }
             Val::Set(items) => fmt_seq(f, "#{", "}", items),
+            Val::Bytes(b) => write!(f, "<{} bytes>", b.len()),
         }
     }
 }
@@ -894,6 +899,58 @@ mod tests {
         assert!(vals.is_empty());
     }
 
+    #[test]
+    fn read_many_initd_script() {
+        let script = r#"
+; Chess init.d script
+(host listen "chess" (ipfs cat "bin/chess-demo.wasm"))
+(routing provide (routing hash "ww.chess.v1"))
+(executor run (ipfs cat "bin/chess-demo.wasm")
+  :env {"WW_SERVICE" "1"
+        "WW_NAMESPACE" "ww.chess.v1"})
+"#;
+        let forms = read_many(script).unwrap();
+        assert_eq!(forms.len(), 3);
+
+        // First form: (host listen "chess" (ipfs cat "bin/chess-demo.wasm"))
+        match &forms[0] {
+            Val::List(items) => {
+                assert_eq!(items.len(), 4);
+                assert_eq!(items[0], Val::Sym("host".into()));
+                assert_eq!(items[1], Val::Sym("listen".into()));
+                assert_eq!(items[2], Val::Str("chess".into()));
+                // Nested list: (ipfs cat "bin/chess-demo.wasm")
+                match &items[3] {
+                    Val::List(inner) => {
+                        assert_eq!(inner.len(), 3);
+                        assert_eq!(inner[0], Val::Sym("ipfs".into()));
+                        assert_eq!(inner[1], Val::Sym("cat".into()));
+                        assert_eq!(inner[2], Val::Str("bin/chess-demo.wasm".into()));
+                    }
+                    other => panic!("expected nested list, got {other}"),
+                }
+            }
+            other => panic!("expected list, got {other}"),
+        }
+
+        // Third form has :env keyword and a map
+        match &forms[2] {
+            Val::List(items) => {
+                assert_eq!(items[0], Val::Sym("executor".into()));
+                assert_eq!(items[1], Val::Sym("run".into()));
+                // items[2] is nested (ipfs cat ...)
+                assert_eq!(items[3], Val::Keyword("env".into()));
+                match &items[4] {
+                    Val::Map(pairs) => {
+                        assert_eq!(pairs.len(), 2);
+                    }
+                    other => panic!("expected map, got {other}"),
+                }
+            }
+            other => panic!("expected list, got {other}"),
+        }
+    }
+
     // --- Display ---
 
     #[test]
@@ -1096,5 +1153,24 @@ mod tests {
         };
         assert_eq!(map_get_str(pairs, "protocol"), Some("chess"));
         assert_eq!(map_get_str(pairs, "handler"), None);
+    }
+
+    // --- Val::Bytes ---
+
+    #[test]
+    fn display_bytes_empty() {
+        assert_eq!(format!("{}", Val::Bytes(vec![])), "<0 bytes>");
+    }
+
+    #[test]
+    fn display_bytes_nonempty() {
+        assert_eq!(format!("{}", Val::Bytes(vec![1, 2, 3])), "<3 bytes>");
+    }
+
+    #[test]
+    fn partial_eq_bytes() {
+        assert_eq!(Val::Bytes(vec![1, 2]), Val::Bytes(vec![1, 2]));
+        assert_ne!(Val::Bytes(vec![1, 2]), Val::Bytes(vec![1, 3]));
+        assert_ne!(Val::Bytes(vec![1, 2]), Val::Nil);
     }
 }
