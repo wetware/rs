@@ -268,6 +268,11 @@ impl<C: FromClientHook> RpcSession<C> {
         }
     }
 
+    /// Leak resources to avoid WASI cleanup panics at process exit.
+    ///
+    /// Cap'n Proto destructors try to close handles that are already dead
+    /// when the host tears down the RPC channel. This is a WASI-P2 wart;
+    /// revisit when wasmtime/WASI stabilises resource cleanup ordering.
     pub fn forget(self) {
         std::mem::forget(self.client);
         std::mem::forget(self.rpc_system);

@@ -243,8 +243,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             }
             _ => {
                 let mut atom = String::new();
-                while chars.peek().is_some_and(|&c| {
-                    !matches!(
+                while let Some(&c) = chars.peek() {
+                    if matches!(
                         c,
                         ' ' | '\t'
                             | '\r'
@@ -258,9 +258,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                             | '}'
                             | '"'
                             | ';'
-                    )
-                }) {
-                    atom.push(chars.next().unwrap());
+                    ) {
+                        break;
+                    }
+                    atom.push(chars.next().expect("peek succeeded"));
                 }
                 tokens.push(Token::Atom(atom));
             }

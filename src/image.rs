@@ -172,10 +172,13 @@ fn apply_local_mount(src: &Path, dst: &Path) -> Result<()> {
 fn apply_local_layer(src: &Path, dst: &Path) -> Result<()> {
     for entry in WalkDir::new(src).min_depth(1) {
         let entry = entry.with_context(|| format!("Error walking {}", src.display()))?;
-        let relative = entry
-            .path()
-            .strip_prefix(src)
-            .expect("walkdir entry must be under src");
+        let relative = entry.path().strip_prefix(src).with_context(|| {
+            format!(
+                "walkdir entry {} not under {}",
+                entry.path().display(),
+                src.display()
+            )
+        })?;
         let target = dst.join(relative);
 
         if entry.file_type().is_dir() {
@@ -353,7 +356,10 @@ async fn merge_overlay_recursive_inner(
 
         if mfs_names.contains(entry.name.as_str()) {
             // Entry exists in base. Check if both are directories.
-            let existing = mfs_entries.iter().find(|e| e.name == entry.name).unwrap();
+            let existing = mfs_entries
+                .iter()
+                .find(|e| e.name == entry.name)
+                .context("entry in mfs_names but not in mfs_entries")?;
             let is_existing_dir = existing.entry_type == 1;
 
             if is_overlay_dir && is_existing_dir {
