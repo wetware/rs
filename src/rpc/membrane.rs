@@ -507,3 +507,158 @@ where
     let guest_membrane: GuestMembrane = rpc_system.bootstrap(Side::Client);
     (rpc_system, guest_membrane)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use capnp_rpc::rpc_twoparty_capnp::Side;
+    use capnp_rpc::twoparty::VatNetwork;
+    use capnp_rpc::RpcSystem;
+    use membrane::{Epoch, EpochGuard};
+    use tokio::io;
+    use tokio::sync::watch;
+    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+    fn epoch(seq: u64) -> Epoch {
+        Epoch {
+            seq,
+            head: vec![],
+            adopted_block: 0,
+        }
+    }
+
+    /// Bootstrap an EpochGuardedUnixFS client/server pair backed by a mock
+    /// HTTP server that mimics Kubo's `/api/v0/add` endpoint.
+    async fn setup_unixfs_with_mock_kubo(
+        guard: EpochGuard,
+    ) -> (ipfs_capnp::unix_f_s::Client, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // Start a mock HTTP server.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mock_addr = listener.local_addr().unwrap();
+        let mock_url = format!("http://{mock_addr}");
+
+        let mock_handle = tokio::spawn(async move {
+            // Accept connections in a loop so we can handle multiple requests.
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]);
+
+                    if request.contains("/api/v0/add") {
+                        let body = r#"{"Name":"data","Hash":"QmMockCid12345","Size":"42"}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    } else {
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                            .await;
+                    }
+                });
+            }
+        });
+
+        let ipfs_client = ipfs::HttpClient::new(mock_url);
+        let unixfs_impl = EpochGuardedUnixFS::new(ipfs_client, guard);
+        let unixfs_server: ipfs_capnp::unix_f_s::Client = capnp_rpc::new_client(unixfs_impl);
+
+        let (client_stream, server_stream) = io::duplex(64 * 1024);
+        let (client_read, client_write) = io::split(client_stream);
+        let (server_read, server_write) = io::split(server_stream);
+
+        let server_network = VatNetwork::new(
+            server_read.compat(),
+            server_write.compat_write(),
+            Side::Server,
+            Default::default(),
+        );
+        let server_rpc = RpcSystem::new(Box::new(server_network), Some(unixfs_server.client));
+        tokio::task::spawn_local(async move {
+            let _ = server_rpc.await;
+        });
+
+        let client_network = VatNetwork::new(
+            client_read.compat(),
+            client_write.compat_write(),
+            Side::Client,
+            Default::default(),
+        );
+        let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
+        let client: ipfs_capnp::unix_f_s::Client = client_rpc.bootstrap(Side::Server);
+        tokio::task::spawn_local(async move {
+            let _ = client_rpc.await;
+        });
+
+        (client, mock_handle)
+    }
+
+    /// RPC round-trip for `UnixFS::add`: data → CID through Cap'n Proto.
+    #[tokio::test]
+    async fn test_unixfs_add_rpc_round_trip() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, rx) = watch::channel(epoch(1));
+                let guard = EpochGuard {
+                    issued_seq: 1,
+                    receiver: rx,
+                };
+                let (client, mock_handle) = setup_unixfs_with_mock_kubo(guard).await;
+
+                let mut req = client.add_request();
+                req.get().set_data(b"hello from RPC test");
+                let response = req.send().promise.await.expect("add RPC");
+                let cid = response
+                    .get()
+                    .expect("get results")
+                    .get_cid()
+                    .expect("get cid");
+
+                assert_eq!(cid, "QmMockCid12345", "should return CID from mock Kubo");
+
+                mock_handle.abort();
+            })
+            .await;
+    }
+
+    /// `UnixFS::add` rejects stale epochs.
+    #[tokio::test]
+    async fn test_unixfs_add_rejects_stale_epoch() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (tx, rx) = watch::channel(epoch(1));
+                let guard = EpochGuard {
+                    issued_seq: 1,
+                    receiver: rx,
+                };
+                let (client, mock_handle) = setup_unixfs_with_mock_kubo(guard).await;
+
+                // Advance epoch → stale.
+                tx.send(epoch(2)).unwrap();
+
+                let mut req = client.add_request();
+                req.get().set_data(b"stale data");
+                match req.send().promise.await {
+                    Err(e) => assert!(
+                        e.to_string().contains("staleEpoch"),
+                        "expected staleEpoch, got: {e}"
+                    ),
+                    Ok(_) => panic!("expected staleEpoch error"),
+                }
+
+                mock_handle.abort();
+            })
+            .await;
+    }
+}

@@ -132,6 +132,8 @@ impl routing_capnp::routing::Server for RoutingImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::SwarmCommand;
+    use crate::rpc::PeerInfo;
     use capnp_rpc::rpc_twoparty_capnp::Side;
     use capnp_rpc::twoparty::VatNetwork;
     use capnp_rpc::RpcSystem;
@@ -153,13 +155,20 @@ mod tests {
     /// Uses a fake swarm channel (receiver dropped); the epoch guard fires
     /// before the channel is ever used in the stale-epoch tests.
     fn setup_routing(guard: EpochGuard) -> routing_capnp::routing::Client {
+        let (_rx, client) = setup_routing_with_swarm(guard);
+        client
+    }
+
+    /// Bootstrap a Routing client/server pair, returning the swarm command
+    /// receiver so the caller can mock swarm responses.
+    fn setup_routing_with_swarm(
+        guard: EpochGuard,
+    ) -> (mpsc::Receiver<SwarmCommand>, routing_capnp::routing::Client) {
         let (client_stream, server_stream) = io::duplex(64 * 1024);
         let (client_read, client_write) = io::split(client_stream);
         let (server_read, server_write) = io::split(server_stream);
 
-        // Fake swarm channel: receiver is dropped immediately.
-        // Epoch check fires before any send, so this is fine for rejection tests.
-        let (swarm_tx, _swarm_rx) = mpsc::channel(16);
+        let (swarm_tx, swarm_rx) = mpsc::channel(16);
         let routing_impl = RoutingImpl::new(swarm_tx, guard);
         let routing_server: routing_capnp::routing::Client = capnp_rpc::new_client(routing_impl);
 
@@ -186,7 +195,7 @@ mod tests {
             let _ = client_rpc.await;
         });
 
-        client
+        (swarm_rx, client)
     }
 
     // -------------------------------------------------------------------
@@ -288,6 +297,275 @@ mod tests {
                     ),
                     Ok(_) => panic!("expected staleEpoch error"),
                 }
+            })
+            .await;
+    }
+
+    // -------------------------------------------------------------------
+    // RPC round-trip tests — happy path through Cap'n Proto serialization
+    // -------------------------------------------------------------------
+
+    /// RPC round-trip for `hash`: data → CIDv1 (raw, sha256).
+    ///
+    /// Exercises Cap'n Proto serialization of the Data param and Text result.
+    #[tokio::test]
+    async fn test_hash_rpc_round_trip() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, rx) = watch::channel(epoch(1));
+                let guard = EpochGuard {
+                    issued_seq: 1,
+                    receiver: rx,
+                };
+                let client = setup_routing(guard);
+
+                let data = b"ww.chess.v1";
+                let mut req = client.hash_request();
+                req.get().set_data(data);
+                let response = req.send().promise.await.expect("hash RPC");
+                let key = response
+                    .get()
+                    .expect("get results")
+                    .get_key()
+                    .expect("get key")
+                    .to_str()
+                    .expect("key utf8");
+
+                // Must match local computation.
+                let expected = hash_to_cid(data);
+                assert_eq!(key, expected, "RPC hash must match local hash_to_cid");
+
+                // Must be a valid CIDv1.
+                let cid: Cid = key.parse().expect("result should be a valid CID");
+                assert_eq!(cid.version(), cid::Version::V1);
+                assert_eq!(cid.codec(), 0x55, "codec should be raw");
+            })
+            .await;
+    }
+
+    /// RPC round-trip for `provide`: server dispatches SwarmCommand::KadProvide,
+    /// mock swarm replies Ok.
+    #[tokio::test]
+    async fn test_provide_rpc_round_trip() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, rx) = watch::channel(epoch(1));
+                let guard = EpochGuard {
+                    issued_seq: 1,
+                    receiver: rx,
+                };
+                let (mut swarm_rx, client) = setup_routing_with_swarm(guard);
+
+                let cid = hash_to_cid(b"ww.chess.v1");
+                let expected_key = cid_to_kad_key(&cid).unwrap();
+
+                // Mock swarm: accept the provide command and reply Ok.
+                let cid_clone = cid.clone();
+                tokio::task::spawn_local(async move {
+                    match swarm_rx.recv().await {
+                        Some(SwarmCommand::KadProvide { key, reply }) => {
+                            let expected = cid_to_kad_key(&cid_clone).unwrap();
+                            assert_eq!(key, expected, "swarm should receive correct key");
+                            reply.send(Ok(())).ok();
+                        }
+                        _ => panic!("expected KadProvide command"),
+                    }
+                });
+
+                let mut req = client.provide_request();
+                req.get().set_key(&cid);
+                req.send().promise.await.expect("provide should succeed");
+
+                // Verify the key bytes match what we expect.
+                assert!(!expected_key.is_empty());
+            })
+            .await;
+    }
+
+    /// `provide` with an invalid CID should fail at the RPC level.
+    #[tokio::test]
+    async fn test_provide_rejects_invalid_cid() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, rx) = watch::channel(epoch(1));
+                let guard = EpochGuard {
+                    issued_seq: 1,
+                    receiver: rx,
+                };
+                let (_swarm_rx, client) = setup_routing_with_swarm(guard);
+
+                let mut req = client.provide_request();
+                req.get().set_key("not-a-valid-cid");
+                match req.send().promise.await {
+                    Err(e) => assert!(
+                        e.to_string().contains("invalid CID"),
+                        "expected 'invalid CID' error, got: {e}"
+                    ),
+                    Ok(_) => panic!("expected error for invalid CID"),
+                }
+            })
+            .await;
+    }
+
+    // -- ProviderSink implementation for testing --------------------------
+
+    /// Collects providers streamed via the ProviderSink protocol.
+    struct CollectorSink {
+        tx: mpsc::UnboundedSender<PeerInfo>,
+    }
+
+    impl routing_capnp::provider_sink::Server for CollectorSink {
+        // `-> stream` method: takes only Params, returns Future (no Results).
+        async fn provider(
+            self: capnp::capability::Rc<Self>,
+            params: routing_capnp::provider_sink::ProviderParams,
+        ) -> Result<(), capnp::Error> {
+            let reader = params.get()?;
+            let info = reader.get_info()?;
+            let peer_id = info.get_peer_id()?.to_vec();
+            let addrs_reader = info.get_addrs()?;
+            let addrs: Vec<Vec<u8>> = (0..addrs_reader.len())
+                .map(|i| addrs_reader.get(i).expect("get addr").to_vec())
+                .collect();
+            let _ = self.tx.send(PeerInfo { peer_id, addrs });
+            Ok(())
+        }
+
+        async fn done(
+            self: capnp::capability::Rc<Self>,
+            _params: routing_capnp::provider_sink::DoneParams,
+            _results: routing_capnp::provider_sink::DoneResults,
+        ) -> Result<(), capnp::Error> {
+            Ok(())
+        }
+    }
+
+    /// RPC round-trip for `find_providers`: mock swarm sends providers,
+    /// CollectorSink receives them through Cap'n Proto streaming.
+    #[tokio::test]
+    async fn test_find_providers_rpc_round_trip() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, rx) = watch::channel(epoch(1));
+                let guard = EpochGuard {
+                    issued_seq: 1,
+                    receiver: rx,
+                };
+                let (mut swarm_rx, client) = setup_routing_with_swarm(guard);
+
+                let cid = hash_to_cid(b"ww.chess.v1");
+
+                // Fake providers to stream.
+                let fake_providers = vec![
+                    PeerInfo {
+                        peer_id: b"peer-a".to_vec(),
+                        addrs: vec![b"/ip4/1.2.3.4/tcp/4001".to_vec()],
+                    },
+                    PeerInfo {
+                        peer_id: b"peer-b".to_vec(),
+                        addrs: vec![
+                            b"/ip4/5.6.7.8/tcp/4001".to_vec(),
+                            b"/ip4/9.10.11.12/udp/4001/quic-v1".to_vec(),
+                        ],
+                    },
+                ];
+                let providers_clone = fake_providers.clone();
+
+                // Mock swarm: send fake providers then drop the channel.
+                tokio::task::spawn_local(async move {
+                    match swarm_rx.recv().await {
+                        Some(SwarmCommand::KadFindProviders { key: _, reply }) => {
+                            for p in providers_clone {
+                                reply.send(p).ok();
+                            }
+                            // Drop reply to signal end of stream.
+                        }
+                        _ => panic!("expected KadFindProviders command"),
+                    }
+                });
+
+                // Collector sink to receive streamed providers.
+                let (collector_tx, mut collector_rx) = mpsc::unbounded_channel();
+                let sink: routing_capnp::provider_sink::Client =
+                    capnp_rpc::new_client(CollectorSink { tx: collector_tx });
+
+                let mut req = client.find_providers_request();
+                req.get().set_key(&cid);
+                req.get().set_count(10);
+                req.get().set_sink(sink);
+                req.send()
+                    .promise
+                    .await
+                    .expect("findProviders should succeed");
+
+                // Collect all received providers.
+                let mut received = Vec::new();
+                while let Ok(info) = collector_rx.try_recv() {
+                    received.push(info);
+                }
+
+                assert_eq!(
+                    received.len(),
+                    fake_providers.len(),
+                    "should receive all providers"
+                );
+                assert_eq!(received[0].peer_id, b"peer-a");
+                assert_eq!(received[1].peer_id, b"peer-b");
+                assert_eq!(
+                    received[1].addrs.len(),
+                    2,
+                    "second provider should have 2 addrs"
+                );
+            })
+            .await;
+    }
+
+    /// `find_providers` with zero providers: swarm drops channel immediately.
+    #[tokio::test]
+    async fn test_find_providers_empty_result() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, rx) = watch::channel(epoch(1));
+                let guard = EpochGuard {
+                    issued_seq: 1,
+                    receiver: rx,
+                };
+                let (mut swarm_rx, client) = setup_routing_with_swarm(guard);
+
+                let cid = hash_to_cid(b"nonexistent");
+
+                // Mock swarm: drop channel immediately (no providers).
+                tokio::task::spawn_local(async move {
+                    match swarm_rx.recv().await {
+                        Some(SwarmCommand::KadFindProviders { key: _, reply }) => {
+                            drop(reply); // no providers
+                        }
+                        _ => panic!("expected KadFindProviders command"),
+                    }
+                });
+
+                let (collector_tx, mut collector_rx) = mpsc::unbounded_channel();
+                let sink: routing_capnp::provider_sink::Client =
+                    capnp_rpc::new_client(CollectorSink { tx: collector_tx });
+
+                let mut req = client.find_providers_request();
+                req.get().set_key(&cid);
+                req.get().set_count(10);
+                req.get().set_sink(sink);
+                req.send()
+                    .promise
+                    .await
+                    .expect("findProviders (empty) should succeed");
+
+                assert!(
+                    collector_rx.try_recv().is_err(),
+                    "should receive zero providers"
+                );
             })
             .await;
     }
