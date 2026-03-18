@@ -24,9 +24,7 @@ async fn ipfs_available() -> bool {
 }
 
 /// Parse raw `(String, String)` swarm peers into typed `(PeerId, Multiaddr)`.
-fn parse_peers(
-    raw: Vec<(String, String)>,
-) -> Vec<(libp2p::PeerId, libp2p::Multiaddr)> {
+fn parse_peers(raw: Vec<(String, String)>) -> Vec<(libp2p::PeerId, libp2p::Multiaddr)> {
     raw.into_iter()
         .filter_map(|(p, a)| {
             let peer_id: libp2p::PeerId = p.parse().ok()?;
@@ -197,10 +195,7 @@ async fn test_real_cid_to_kad_record_key() {
         .unwrap_or_else(|e| panic!("CID '{cid_str}' from Kubo should parse: {e}"));
 
     let mh_bytes = cid.hash().to_bytes();
-    assert!(
-        !mh_bytes.is_empty(),
-        "Multihash bytes should not be empty"
-    );
+    assert!(!mh_bytes.is_empty(), "Multihash bytes should not be empty");
 
     let record_key = kad::RecordKey::new(&mh_bytes);
     assert!(
@@ -232,16 +227,8 @@ async fn test_distinct_cids_produce_distinct_kad_keys() {
 
     assert_ne!(cid_a, cid_b, "distinct data should yield distinct CIDs");
 
-    let key_a = cid_a
-        .parse::<cid::Cid>()
-        .unwrap()
-        .hash()
-        .to_bytes();
-    let key_b = cid_b
-        .parse::<cid::Cid>()
-        .unwrap()
-        .hash()
-        .to_bytes();
+    let key_a = cid_a.parse::<cid::Cid>().unwrap().hash().to_bytes();
+    let key_b = cid_b.parse::<cid::Cid>().unwrap().hash().to_bytes();
 
     assert_ne!(key_a, key_b, "distinct CIDs should yield distinct Kad keys");
 
@@ -282,9 +269,5 @@ async fn test_swarm_peers_dedup_by_peer_id() {
         "Should have at least one unique peer after dedup"
     );
 
-    eprintln!(
-        "OK: {} raw entries → {} unique peers",
-        total,
-        unique.len(),
-    );
+    eprintln!("OK: {} raw entries → {} unique peers", total, unique.len(),);
 }
