@@ -76,7 +76,11 @@ pub fn decode_log_to_observed(log_value: &Value) -> Result<HeadUpdatedObserved> 
         if t1.len() < 8 {
             anyhow::bail!("topic1 too short for uint64");
         }
-        u64::from_be_bytes(t1[t1.len() - 8..].try_into().unwrap())
+        u64::from_be_bytes(
+            t1[t1.len() - 8..]
+                .try_into()
+                .context("topic1 last 8 bytes for uint64")?,
+        )
     };
     let writer = parse_hex_bytes_20(
         topics[2]
@@ -123,13 +127,24 @@ fn decode_head_return_manual(data: &[u8]) -> Result<CurrentHead> {
     if data.len() < 64 {
         anyhow::bail!("head() return too short");
     }
-    let seq = u64::from_be_bytes(data[24..32].try_into().unwrap());
-    let cid_offset = u32::from_be_bytes(data[60..64].try_into().unwrap()) as usize;
+    let seq = u64::from_be_bytes(
+        data[24..32]
+            .try_into()
+            .context("head() seq bytes [24..32]")?,
+    );
+    let cid_offset = u32::from_be_bytes(
+        data[60..64]
+            .try_into()
+            .context("head() cid offset bytes [60..64]")?,
+    ) as usize;
     if data.len() < cid_offset + 32 {
         anyhow::bail!("head() return too short for cid offset");
     }
-    let cid_len =
-        u32::from_be_bytes(data[cid_offset + 28..cid_offset + 32].try_into().unwrap()) as usize;
+    let cid_len = u32::from_be_bytes(
+        data[cid_offset + 28..cid_offset + 32]
+            .try_into()
+            .context("head() cid length bytes")?,
+    ) as usize;
     if data.len() < cid_offset + 32 + cid_len {
         anyhow::bail!("head() return too short for cid");
     }
@@ -151,12 +166,19 @@ fn decode_event_data_bytes_manual(data: &[u8]) -> Result<Vec<u8>> {
     if data.len() < 32 {
         anyhow::bail!("event data too short");
     }
-    let cid_offset = u32::from_be_bytes(data[28..32].try_into().unwrap()) as usize;
+    let cid_offset = u32::from_be_bytes(
+        data[28..32]
+            .try_into()
+            .context("event data offset bytes [28..32]")?,
+    ) as usize;
     if data.len() < cid_offset + 32 {
         anyhow::bail!("event data too short for cid offset");
     }
-    let len =
-        u32::from_be_bytes(data[cid_offset + 28..cid_offset + 32].try_into().unwrap()) as usize;
+    let len = u32::from_be_bytes(
+        data[cid_offset + 28..cid_offset + 32]
+            .try_into()
+            .context("event data cid length bytes")?,
+    ) as usize;
     if data.len() < cid_offset + 32 + len {
         anyhow::bail!("event data too short for cid len {}", len);
     }
