@@ -253,6 +253,57 @@ mod tests {
         assert_eq!(head.cid.as_slice(), cid);
     }
 
+    // -- Error path tests for defensive unwrap→? migration --
+
+    #[test]
+    fn decode_head_return_too_short() {
+        let data = vec![0u8; 10]; // way too short
+        assert!(decode_head_return(&data).is_err());
+    }
+
+    #[test]
+    fn decode_head_return_bad_cid_offset() {
+        // 64 bytes passes the length check, but cid_offset points past end
+        let mut data = vec![0u8; 64];
+        // word1 bytes [60..64] = cid_offset, set to 9999
+        data[60..64].copy_from_slice(&9999u32.to_be_bytes());
+        assert!(decode_head_return(&data).is_err());
+    }
+
+    #[test]
+    fn decode_head_return_cid_len_overflow() {
+        // Valid offset but cid_len exceeds remaining data
+        let mut data = vec![0u8; 128];
+        // cid_offset = 64 (valid, data[64..] exists)
+        data[60..64].copy_from_slice(&64u32.to_be_bytes());
+        // cid_len at offset 64+28..64+32 = 9999 (way past end)
+        data[92..96].copy_from_slice(&9999u32.to_be_bytes());
+        assert!(decode_head_return(&data).is_err());
+    }
+
+    #[test]
+    fn decode_event_data_too_short() {
+        let data = vec![0u8; 4]; // way too short
+        assert!(decode_event_data_bytes(&data).is_err());
+    }
+
+    #[test]
+    fn decode_event_data_bad_offset() {
+        let mut data = vec![0u8; 32];
+        // offset points past end
+        data[28..32].copy_from_slice(&9999u32.to_be_bytes());
+        assert!(decode_event_data_bytes(&data).is_err());
+    }
+
+    #[test]
+    fn decode_event_data_len_overflow() {
+        // Valid offset but length exceeds remaining data
+        let mut data = vec![0u8; 96];
+        data[28..32].copy_from_slice(&32u32.to_be_bytes()); // offset = 32
+        data[60..64].copy_from_slice(&9999u32.to_be_bytes()); // len = 9999
+        assert!(decode_event_data_bytes(&data).is_err());
+    }
+
     #[test]
     fn decode_event_data_bytes_standard() {
         use alloy::sol_types::sol_data::Bytes;
