@@ -540,8 +540,8 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
     let routing = results.get_routing()?;
 
     // Read config from env vars (set by init.d script).
-    let namespace = std::env::var("WW_NS")
-        .map_err(|_| capnp::Error::failed("WW_NS not set".into()))?;
+    let namespace =
+        std::env::var("WW_NS").map_err(|_| capnp::Error::failed("WW_NS not set".into()))?;
 
     // Get network dialer.
     let network_resp = host.network_request().send().promise.await?;

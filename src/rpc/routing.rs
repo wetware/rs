@@ -163,10 +163,7 @@ mod tests {
     /// receiver so the caller can mock swarm responses.
     fn setup_routing_with_swarm(
         guard: EpochGuard,
-    ) -> (
-        mpsc::Receiver<SwarmCommand>,
-        routing_capnp::routing::Client,
-    ) {
+    ) -> (mpsc::Receiver<SwarmCommand>, routing_capnp::routing::Client) {
         let (client_stream, server_stream) = io::duplex(64 * 1024);
         let (client_read, client_write) = io::split(client_stream);
         let (server_read, server_write) = io::split(server_stream);
@@ -500,7 +497,10 @@ mod tests {
                 req.get().set_key(&cid);
                 req.get().set_count(10);
                 req.get().set_sink(sink);
-                req.send().promise.await.expect("findProviders should succeed");
+                req.send()
+                    .promise
+                    .await
+                    .expect("findProviders should succeed");
 
                 // Collect all received providers.
                 let mut received = Vec::new();
@@ -557,7 +557,10 @@ mod tests {
                 req.get().set_key(&cid);
                 req.get().set_count(10);
                 req.get().set_sink(sink);
-                req.send().promise.await.expect("findProviders (empty) should succeed");
+                req.send()
+                    .promise
+                    .await
+                    .expect("findProviders (empty) should succeed");
 
                 assert!(
                     collector_rx.try_recv().is_err(),
