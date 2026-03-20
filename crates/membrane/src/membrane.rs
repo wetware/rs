@@ -1,12 +1,14 @@
 //! Membrane server: issues epoch-scoped capabilities via `graft()`.
+//!
+//! Pure capability provisioning (ocap model): having a Membrane reference IS
+//! authorization. For authentication, wrap in `Terminal(Membrane)` — see
+//! [`TerminalServer`].
 
 use crate::epoch::{Epoch, EpochGuard};
 use crate::stem_capnp;
-use auth::SigningDomain;
 use capnp::capability::Promise;
 use capnp::Error;
-use capnp_rpc::{new_client, pry};
-use k256::ecdsa::VerifyingKey;
+use capnp_rpc::new_client;
 use tokio::sync::watch;
 
 /// Callback trait for populating the graft response with capabilities.
@@ -40,13 +42,11 @@ impl GraftBuilder for NoExtension {
 /// Membrane server: stable across epochs, backed by a watch receiver for the adopted epoch.
 ///
 /// The `graft_builder` callback fills the result fields when `graft()` is called.
-/// When `verifying_key` is set, `graft()` performs challenge-response authentication:
-/// the caller's signer is challenged with a random nonce, and the returned signature
-/// is verified against the configured public key before issuing capabilities.
+/// No authentication — having a reference to the Membrane IS authorization (ocap).
+/// To gate access, wrap in [`TerminalServer`].
 pub struct MembraneServer<F: GraftBuilder> {
     receiver: watch::Receiver<Epoch>,
     graft_builder: F,
-    verifying_key: Option<VerifyingKey>,
 }
 
 impl<F: GraftBuilder> MembraneServer<F> {
@@ -54,14 +54,7 @@ impl<F: GraftBuilder> MembraneServer<F> {
         Self {
             receiver,
             graft_builder,
-            verifying_key: None,
         }
-    }
-
-    /// Set the secp256k1 verifying key used to authenticate `graft()` callers.
-    pub fn with_verifying_key(mut self, vk: VerifyingKey) -> Self {
-        self.verifying_key = Some(vk);
-        self
     }
 
     fn get_current_epoch(&self) -> Epoch {
@@ -83,47 +76,15 @@ impl<F: GraftBuilder> MembraneServer<F> {
 impl<F: GraftBuilder> stem_capnp::membrane::Server for MembraneServer<F> {
     fn graft(
         self: capnp::capability::Rc<Self>,
-        params: stem_capnp::membrane::GraftParams,
+        _params: stem_capnp::membrane::GraftParams,
         mut results: stem_capnp::membrane::GraftResults,
     ) -> Promise<(), Error> {
         tracing::debug!("Membrane graft() called");
-        let vk = match self.verifying_key {
-            Some(vk) => vk,
-            None => {
-                // No verifying key configured — skip authentication.
-                if let Err(e) = self.build_graft(&mut results) {
-                    return Promise::err(e);
-                }
-                tracing::debug!("Membrane graft() completed (no auth)");
-                return Promise::ok(());
-            }
-        };
-
-        let signer: stem_capnp::signer::Client = match pry!(params.get()).get_signer() {
-            Ok(s) => s,
-            Err(_) => return Promise::err(Error::failed("missing signer".into())),
-        };
-
-        let nonce: u64 = rand::random();
-        let mut sign_req = signer.sign_request();
-        sign_req.get().set_nonce(nonce);
-
-        Promise::from_future(async move {
-            let sign_resp = sign_req.send().promise.await?;
-            let sig_bytes = sign_resp.get()?.get_sig()?;
-
-            // Reconstruct the domain-separated signing buffer and verify.
-            let signing_buffer = SigningDomain::MembraneGraft.signing_buffer(&nonce.to_be_bytes());
-            let signature = k256::ecdsa::Signature::from_slice(sig_bytes)
-                .map_err(|e| Error::failed(format!("invalid signature encoding: {e}")))?;
-
-            use k256::ecdsa::signature::Verifier;
-            vk.verify(&signing_buffer, &signature).map_err(|_| {
-                Error::failed("graft auth failed: signature verification failed".into())
-            })?;
-
-            self.build_graft(&mut results)
-        })
+        if let Err(e) = self.build_graft(&mut results) {
+            return Promise::err(e);
+        }
+        tracing::debug!("Membrane graft() completed");
+        Promise::ok(())
     }
 }
 
