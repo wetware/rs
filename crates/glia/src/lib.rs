@@ -1155,6 +1155,41 @@ mod tests {
         assert_eq!(map_get_str(pairs, "handler"), None);
     }
 
+    // --- read_many error paths (exercises init.d SysV recovery) ---
+
+    #[test]
+    fn read_many_unclosed_paren() {
+        assert!(read_many("(a b").is_err());
+    }
+
+    #[test]
+    fn read_many_unbalanced_bracket() {
+        assert!(read_many("[1 2 3").is_err());
+    }
+
+    #[test]
+    fn read_many_unexpected_close() {
+        assert!(read_many(")").is_err());
+    }
+
+    #[test]
+    fn read_many_malformed_mid_script() {
+        // First form is valid, second is malformed — entire parse fails.
+        assert!(read_many("(host id) (executor echo").is_err());
+    }
+
+    #[test]
+    fn read_many_unclosed_string() {
+        assert!(read_many("(host listen \"unterminated)").is_err());
+    }
+
+    #[test]
+    fn read_many_valid_forms_before_error_still_fails() {
+        // Verifies read_many is atomic: partial success is still Err.
+        let result = read_many("(a) (b) (c");
+        assert!(result.is_err());
+    }
+
     // --- Val::Bytes ---
 
     #[test]

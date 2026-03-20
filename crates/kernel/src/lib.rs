@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+
 use glia::{read, read_many, Val};
 
 use wasip2::cli::stderr::get_stderr;
@@ -90,10 +94,58 @@ fn resolve_ipfs_path(path: &str) -> String {
     format!("{root}/{path}")
 }
 
+// ---------------------------------------------------------------------------
+// Dispatch table — single source of truth for command routing
+// ---------------------------------------------------------------------------
+
+/// Async handler: takes evaluated args and the shell context.
+type HandlerFn = for<'a> fn(
+    &'a [Val],
+    &'a mut ShellCtx,
+) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>>;
+
+/// Build the dispatch table. Each capability and built-in is registered here.
+/// Adding a new verb = one `table.insert(...)` call.
+fn build_dispatch() -> HashMap<&'static str, HandlerFn> {
+    let mut t: HashMap<&'static str, HandlerFn> = HashMap::new();
+    t.insert("host", |a, c| Box::pin(eval_host(a, c)));
+    t.insert("executor", |a, c| Box::pin(eval_executor(a, c)));
+    t.insert("ipfs", |a, c| Box::pin(eval_ipfs(a, c)));
+    t.insert("routing", |a, c| Box::pin(eval_routing(a, c)));
+    t.insert("cd", |a, c| Box::pin(std::future::ready(eval_cd(a, c))));
+    t.insert("help", |_, _| {
+        Box::pin(std::future::ready(Ok(Val::Str(HELP_TEXT.to_string()))))
+    });
+    t.insert("exit", |_, _| {
+        Box::pin(std::future::ready({
+            std::process::exit(0);
+            #[allow(unreachable_code)]
+            Ok(Val::Nil)
+        }))
+    });
+    t
+}
+
+fn eval_cd(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
+    let path = match args.first() {
+        Some(Val::Str(s)) => s.clone(),
+        Some(Val::Sym(s)) => s.clone(),
+        None => "/".to_string(),
+        _ => return Err("(cd \"<path>\")".into()),
+    };
+    ctx.cwd = path;
+    Ok(Val::Nil)
+}
+
+// ---------------------------------------------------------------------------
+// Evaluator — resolves expressions via dispatch table + PATH lookup
+// ---------------------------------------------------------------------------
+
 fn eval<'a>(
     expr: &'a Val,
     ctx: &'a mut ShellCtx,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Val, String>> + 'a>> {
+    dispatch: &'a HashMap<&'static str, HandlerFn>,
+) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
     Box::pin(async move {
         match expr {
             Val::List(items) if items.is_empty() => Ok(Val::Nil),
@@ -108,49 +160,15 @@ fn eval<'a>(
                 let mut args = Vec::with_capacity(raw_args.len());
                 for a in raw_args {
                     match a {
-                        Val::List(_) => args.push(eval(a, ctx).await?),
+                        Val::List(_) => args.push(eval(a, ctx, dispatch).await?),
                         other => args.push(other.clone()),
                     }
                 }
 
-                // Resolve session::cap or session.cap compound symbols to the capability name.
-                let resolved_cap = cmd
-                    .strip_prefix("session::")
-                    .or_else(|| cmd.strip_prefix("session."))
-                    .unwrap_or(cmd);
-
-                match resolved_cap {
-                    "host" => eval_host(&args, ctx).await,
-                    "executor" => eval_executor(&args, ctx).await,
-                    "ipfs" => eval_ipfs(&args, ctx).await,
-                    "routing" => eval_routing(&args, ctx).await,
-                    "session" => {
-                        // (session <cap> <method> [args...]) — session-qualified dispatch
-                        let cap = match args.first() {
-                            Some(Val::Sym(s)) => s.as_str(),
-                            _ => return Err("(session <capability> <method> [args...])".into()),
-                        };
-                        match cap {
-                            "host" => eval_host(&args[1..], ctx).await,
-                            "executor" => eval_executor(&args[1..], ctx).await,
-                            "ipfs" => eval_ipfs(&args[1..], ctx).await,
-                            "routing" => eval_routing(&args[1..], ctx).await,
-                            _ => Err(format!("unknown capability: {cap}")),
-                        }
-                    }
-                    "cd" => {
-                        let path = match args.first() {
-                            Some(Val::Str(s)) => s.clone(),
-                            Some(Val::Sym(s)) => s.clone(),
-                            None => "/".to_string(),
-                            _ => return Err("(cd \"<path>\")".into()),
-                        };
-                        ctx.cwd = path;
-                        Ok(Val::Nil)
-                    }
-                    "help" => Ok(Val::Str(HELP_TEXT.to_string())),
-                    "exit" => std::process::exit(0),
-                    _ => eval_path_lookup(resolved_cap, &args, ctx).await,
+                // Look up in dispatch table, fall through to PATH lookup.
+                match dispatch.get(cmd) {
+                    Some(handler) => handler(&args, ctx).await,
+                    None => eval_path_lookup(cmd, &args, ctx).await,
                 }
             }
             // Self-evaluating forms.
@@ -372,7 +390,7 @@ async fn eval_executor(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> 
     }
 }
 
-async fn eval_ipfs(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
+async fn eval_ipfs(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
     let method = match args.first() {
         Some(Val::Sym(s)) => s.as_str(),
         _ => return Err("(ipfs <method> [args...])".into()),
@@ -451,7 +469,7 @@ async fn eval_ipfs(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
     }
 }
 
-async fn eval_routing(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
+async fn eval_routing(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
     let method = match args.first() {
         Some(Val::Sym(s)) => s.as_str(),
         _ => return Err("(routing <method> [args...])".into()),
@@ -491,7 +509,7 @@ async fn eval_routing(args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
     }
 }
 
-async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &ShellCtx) -> Result<Val, String> {
+async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
     // Convert args to strings once — used for whichever candidate we find.
     let str_args: Vec<String> = args
         .iter()
@@ -602,10 +620,36 @@ Unrecognized commands are looked up in PATH (default /bin).";
 // Init.d — evaluate scripts from $WW_ROOT/etc/init.d/*.glia
 // ---------------------------------------------------------------------------
 
+/// Parse an init.d script from raw bytes. Returns `None` on error (logs details).
+/// Extracted from `run_initd` for testability — the caller uses `None` to skip
+/// the failed script and continue (SysV best-effort model).
+fn parse_initd_script(name: &str, data: &[u8]) -> Option<Vec<Val>> {
+    let content = match std::str::from_utf8(data) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("init.d: {name}: not valid UTF-8: {e}");
+            return None;
+        }
+    };
+    match read_many(content) {
+        Ok(forms) => {
+            log::info!("init.d: parsed {name} ({} form(s))", forms.len());
+            Some(forms)
+        }
+        Err(e) => {
+            log::error!("init.d: {name}: parse error: {e}");
+            None
+        }
+    }
+}
+
 /// Scan `$WW_ROOT/etc/init.d/*.glia` via IPFS UnixFS, parse and evaluate
 /// each file as a glia script. Returns true if any expression blocked
 /// (i.e. a foreground process ran to completion via `(executor run ...)`).
-async fn run_initd(ctx: &mut ShellCtx) -> Result<bool, Box<dyn std::error::Error>> {
+async fn run_initd(
+    ctx: &mut ShellCtx,
+    dispatch: &HashMap<&'static str, HandlerFn>,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let ww_root = std::env::var("WW_ROOT").unwrap_or_default();
     if ww_root.is_empty() {
         log::debug!("init.d: WW_ROOT not set, skipping");
@@ -663,32 +707,36 @@ async fn run_initd(ctx: &mut ShellCtx) -> Result<bool, Box<dyn std::error::Error
     log::info!("init.d: found {} script(s)", entries.len());
     let mut blocked = false;
 
+    // SysV init: execute each script in lexicographic order, best-effort.
+    // On failure: log with full context, continue to next script.
     for name in &entries {
-        // cat the glia script.
         let script_path = format!("{initd_path}/{name}");
+
+        // cat the glia script — failure skips this script.
         let mut cat_req = unixfs.cat_request();
         cat_req.get().set_path(&script_path);
-        let cat_resp = cat_req
-            .send()
-            .promise
-            .await
-            .map_err(|e| format!("init.d: cat {script_path}: {e}"))?;
-        let data = cat_resp
-            .get()
-            .map_err(|e| format!("init.d: cat {script_path} result: {e}"))?
-            .get_data()
-            .map_err(|e| format!("init.d: cat {script_path} data: {e}"))?;
-        let content = std::str::from_utf8(data)
-            .map_err(|e| format!("init.d: {script_path} is not UTF-8: {e}"))?;
+        let data = match cat_req.send().promise.await {
+            Ok(resp) => match resp.get().and_then(|r| r.get_data()) {
+                Ok(d) => d.to_vec(),
+                Err(e) => {
+                    log::error!("init.d: {name}: failed to read response: {e}");
+                    continue;
+                }
+            },
+            Err(e) => {
+                log::error!("init.d: {name}: cat failed: {e}");
+                continue;
+            }
+        };
 
-        let forms =
-            read_many(content).map_err(|e| format!("init.d: parse error in {script_path}: {e}"))?;
-
-        log::info!("init.d: evaluating {name} ({} form(s))", forms.len());
+        let forms = match parse_initd_script(name, &data) {
+            Some(f) => f,
+            None => continue, // SysV: skip failed script
+        };
 
         for (i, form) in forms.iter().enumerate() {
             log::info!("init.d: {name}: evaluating form {}/{}", i + 1, forms.len());
-            match eval(form, ctx).await {
+            match eval(form, ctx, dispatch).await {
                 Ok(Val::Nil) => {}
                 Ok(Val::Int(code)) => {
                     // An (executor run ...) that returned an exit code means
@@ -700,7 +748,7 @@ async fn run_initd(ctx: &mut ShellCtx) -> Result<bool, Box<dyn std::error::Error
                     log::debug!("init.d: {name}: {result}");
                 }
                 Err(e) => {
-                    log::error!("init.d: {name}: {e}");
+                    log::error!("init.d: {name}: form {}: {e}", i + 1);
                 }
             }
         }
@@ -718,7 +766,10 @@ fn write_prompt(stdout: &wasip2::io::streams::OutputStream, cwd: &str) {
     let _ = stdout.blocking_write_and_flush(prompt.as_bytes());
 }
 
-async fn run_shell(mut ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_shell(
+    mut ctx: ShellCtx,
+    dispatch: &HashMap<&'static str, HandlerFn>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let stdin = get_stdin();
     let stdout = get_stdout();
     let stderr = get_stderr();
@@ -749,7 +800,7 @@ async fn run_shell(mut ctx: ShellCtx) -> Result<(), Box<dyn std::error::Error>> 
             }
 
             match read(line) {
-                Ok(expr) => match eval(&expr, &mut ctx).await {
+                Ok(expr) => match eval(&expr, &mut ctx, dispatch).await {
                     Ok(Val::Nil) => {}
                     Ok(result) => {
                         let _ = stdout.blocking_write_and_flush(format!("{result}\n").as_bytes());
@@ -816,9 +867,11 @@ fn run_impl() {
             cwd: "/".to_string(),
         };
 
+        let dispatch = build_dispatch();
+
         // Run init.d scripts first. If a foreground process blocked
         // (e.g. `(executor run ...)` in the script), we're done.
-        let blocked = run_initd(&mut ctx).await.unwrap_or_else(|e| {
+        let blocked = run_initd(&mut ctx, &dispatch).await.unwrap_or_else(|e| {
             log::error!("init.d: {e}");
             false
         });
@@ -826,7 +879,7 @@ fn run_impl() {
         if !blocked {
             let is_tty = std::env::var("WW_TTY").is_ok();
             let result = if is_tty {
-                run_shell(ctx).await
+                run_shell(ctx, &dispatch).await
             } else {
                 run_daemon().await
             };
@@ -885,6 +938,88 @@ mod tests {
         assert_eq!(
             resolve_ipfs_path("bin/chess-demo.wasm"),
             "/bin/chess-demo.wasm"
+        );
+    }
+
+    // --- init.d parse + SysV error recovery ---
+
+    #[test]
+    fn parse_initd_script_valid() {
+        let data = b"(cd \"/foo\") (cd \"/bar\")";
+        let forms = parse_initd_script("test.glia", data).unwrap();
+        assert_eq!(forms.len(), 2);
+    }
+
+    #[test]
+    fn parse_initd_script_malformed() {
+        let data = b"(cd \"/foo\") (broken";
+        assert!(parse_initd_script("bad.glia", data).is_none());
+    }
+
+    #[test]
+    fn parse_initd_script_invalid_utf8() {
+        assert!(parse_initd_script("binary.glia", &[0xFF, 0xFE]).is_none());
+    }
+
+    #[test]
+    fn parse_initd_script_empty() {
+        let forms = parse_initd_script("empty.glia", b"").unwrap();
+        assert!(forms.is_empty());
+    }
+
+    #[test]
+    fn parse_initd_script_comments_only() {
+        let data = b"; just a comment\n; another one\n";
+        let forms = parse_initd_script("comments.glia", data).unwrap();
+        assert!(forms.is_empty());
+    }
+
+    #[test]
+    fn sysv_continues_past_failed_scripts() {
+        // SysV contract: each script is processed independently.
+        // parse_initd_script returns None on failure, enabling the caller
+        // to `continue` to the next script.
+        let scripts: Vec<(&str, &[u8])> = vec![
+            ("01-bad.glia", &[0xFF, 0xFE]),           // invalid UTF-8
+            ("02-broken.glia", b"(unclosed"),         // parse error
+            ("03-good.glia", b"(cd \"/ok\")"),        // valid
+            ("04-also-bad.glia", b"(a) )unexpected"), // parse error
+            ("05-also-good.glia", b"(help)"),         // valid
+        ];
+
+        let results: Vec<Option<Vec<Val>>> = scripts
+            .iter()
+            .map(|(name, data)| parse_initd_script(name, data))
+            .collect();
+
+        assert!(results[0].is_none(), "invalid UTF-8 should fail");
+        assert!(results[1].is_none(), "unclosed paren should fail");
+        assert_eq!(
+            results[2].as_ref().unwrap().len(),
+            1,
+            "valid script should parse"
+        );
+        assert!(results[3].is_none(), "unexpected close should fail");
+        assert_eq!(
+            results[4].as_ref().unwrap().len(),
+            1,
+            "valid script should parse"
+        );
+    }
+
+    // --- dispatch table ---
+
+    #[test]
+    fn dispatch_table_has_all_verbs() {
+        let table = build_dispatch();
+        let expected = ["host", "executor", "ipfs", "routing", "cd", "help", "exit"];
+        for verb in &expected {
+            assert!(table.contains_key(verb), "missing dispatch entry: {verb}");
+        }
+        assert_eq!(
+            table.len(),
+            expected.len(),
+            "unexpected extra entries in dispatch table"
         );
     }
 }
