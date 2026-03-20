@@ -165,28 +165,10 @@ fn eval<'a>(
                     }
                 }
 
-                // Resolve session::cap or session.cap compound symbols.
-                let resolved = cmd
-                    .strip_prefix("session::")
-                    .or_else(|| cmd.strip_prefix("session."))
-                    .unwrap_or(cmd);
-
-                // Handle (session <cap> <method> [args...]) qualified form.
-                if resolved == "session" {
-                    let cap = match args.first() {
-                        Some(Val::Sym(s)) => s.as_str(),
-                        _ => return Err("(session <capability> <method> [args...])".into()),
-                    };
-                    return match dispatch.get(cap) {
-                        Some(handler) => handler(&args[1..], ctx).await,
-                        None => Err(format!("unknown capability: {cap}")),
-                    };
-                }
-
                 // Look up in dispatch table, fall through to PATH lookup.
-                match dispatch.get(resolved) {
+                match dispatch.get(cmd) {
                     Some(handler) => handler(&args, ctx).await,
-                    None => eval_path_lookup(resolved, &args, ctx).await,
+                    None => eval_path_lookup(cmd, &args, ctx).await,
                 }
             }
             // Self-evaluating forms.
