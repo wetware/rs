@@ -30,8 +30,10 @@ files, open sockets, inspect environment variables, and call any syscall the OS
 allows. A Wetware agent has none of that. Its WASI sandbox provides stdio
 (bound to the host terminal) and a data stream (bound to the RPC connection).
 That's it. The agent's only connection to the outside world is the `Membrane`
-the host hands it at boot — and it must authenticate via `graft()` to obtain
-actual capabilities.
+the host hands it at boot — and it calls `graft()` to obtain actual
+capabilities. (Having a Membrane reference IS authorization — ocap model.
+Authentication, if needed, is handled by wrapping the Membrane in a
+`Terminal(Membrane)` challenge-response layer.)
 
 ```
 Traditional process:        Wetware guest:
@@ -87,9 +89,9 @@ Proto RPC. It knows nothing about the rest of the image layout — `bin/`,
 `svc/`, `etc/` are opaque directories as far as the host is concerned.
 
 **pid0** (the kernel agent loaded from `boot/main.wasm`) is init. It
-receives a `Membrane`, authenticates via `graft()`, and uses the resulting
-capabilities to interpret the image layout: look up executables from `bin/`,
-spawn services from `svc/`, apply configuration from `etc/`. pid0 is where
+receives a `Membrane`, calls `graft()`, and uses the resulting capabilities
+to interpret the image layout: look up executables from `bin/`, spawn
+services from `svc/`, apply configuration from `etc/`. pid0 is where
 policy lives.
 
 **Children** are agents spawned by pid0 (or by other children) via
@@ -102,15 +104,22 @@ giving a child a restricted view of the host.
 ### Inbound: host to guest
 
 The host creates a Membrane and bootstraps it to pid0 over in-memory
-Cap'n Proto RPC. pid0 calls `membrane.graft()` to obtain three
-epoch-guarded capabilities as flat return fields:
+Cap'n Proto RPC. pid0 calls `membrane.graft()` to obtain epoch-guarded
+capabilities as flat return fields:
 
+- **identity** (`Identity`) — host-side signing (maps domains → Signers)
 - **host** (`Peer.Host`) — network identity and peer management
 - **executor** (`Peer.Executor`) — child process execution, diagnostic echo
 - **ipfs** (`Ipfs.Client`) — IPFS CoreAPI (UnixFS, Block, Dag, ...)
+- **routing** (`Routing`) — Kademlia DHT (provide, findProviders)
 
 All capabilities are epoch-guarded: they become stale when the on-chain
 head advances. The guest must re-graft to obtain fresh capabilities.
+
+Having a Membrane reference IS authorization (ocap model). `graft()` is
+parameterless — no signer needed. To gate access for remote peers, wrap
+the Membrane in `Terminal(Membrane)`, which requires challenge-response
+authentication before handing out the Membrane reference.
 
 ```
 Host                             pid0
@@ -120,7 +129,7 @@ create Membrane
     Host (network state)
     Executor (engine, loader)
     IPFS Client (Kubo HTTP)
-serve via RpcSystem ──────────> membrane.graft(signer) -> (host, executor, ipfs)
+serve via RpcSystem ──────────> membrane.graft() -> (identity, host, executor, ipfs, routing)
                                   host.id()
                                   host.addrs()
                                   executor.echo("hello")
@@ -156,18 +165,17 @@ pid0 exports Membrane ──> host             host ──> pid0 imports Membran
 
 ### The Membrane pattern
 
-pid0 receives a `Membrane` from the host, authenticates via `graft()`,
-and obtains capabilities. It can then wrap, filter, or
-extend those capabilities into a new **Membrane**: an object that controls
-what the outside world can do.
+pid0 receives a `Membrane` from the host, calls `graft()`, and obtains
+capabilities. It can then wrap, filter, or extend those capabilities into
+a new **Membrane**: an object that controls what the outside world can do.
 
 ```
 1. Host hands pid0 a Membrane reference
-2. pid0 authenticates via graft(), receives capabilities (host, executor, ipfs)
+2. pid0 calls graft(), receives capabilities (identity, host, executor, ipfs, routing)
 3. pid0 wraps capabilities into an attenuated Membrane (adds policy, filters methods)
-4. pid0 exports the attenuated Membrane back to the host
-5. Host serves the attenuated Membrane on a libp2p stream protocol
-6. Remote peers interact with the attenuated Membrane, not with raw capabilities
+4. pid0 exports the attenuated Membrane back to the host (optionally wrapped in Terminal)
+5. Host serves the exported capability on a libp2p stream protocol
+6. Remote peers authenticate via Terminal (if present), then interact with the Membrane
 ```
 
 This is how pid0 controls access. The host doesn't decide what remote
