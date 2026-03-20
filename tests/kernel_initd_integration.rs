@@ -44,18 +44,12 @@ fn seed_initd_store(root: &str) -> Arc<MemoryStore> {
     let initd = format!("{root}/etc/init.d");
 
     // Scripts that the kernel will `cat` via IPFS.
-    store.insert(
-        &format!("{initd}/01-good.glia"),
-        b"(help)".to_vec(),
-    );
+    store.insert(&format!("{initd}/01-good.glia"), b"(help)".to_vec());
     store.insert(
         &format!("{initd}/02-bad.glia"),
         b"(broken".to_vec(), // unclosed paren — parse error
     );
-    store.insert(
-        &format!("{initd}/03-good.glia"),
-        b"(help)".to_vec(),
-    );
+    store.insert(&format!("{initd}/03-good.glia"), b"(help)".to_vec());
 
     Arc::new(store)
 }
