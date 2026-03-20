@@ -68,7 +68,7 @@ pub struct CellBuilder {
     swarm_cmd_tx: Option<mpsc::Sender<SwarmCommand>>,
     image_root: Option<PathBuf>,
     initial_epoch: Option<Epoch>,
-    ipfs_client: Option<crate::ipfs::HttpClient>,
+    content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
     epoch_rx: Option<watch::Receiver<Epoch>>,
     signing_key: Option<Arc<SigningKey>>,
 }
@@ -90,7 +90,7 @@ impl CellBuilder {
             swarm_cmd_tx: None,
             image_root: None,
             initial_epoch: None,
-            ipfs_client: None,
+            content_store: None,
             epoch_rx: None,
             signing_key: None,
         }
@@ -168,9 +168,9 @@ impl CellBuilder {
         self
     }
 
-    /// Set the IPFS HTTP client for the CoreAPI capability.
-    pub fn with_ipfs_client(mut self, client: crate::ipfs::HttpClient) -> Self {
-        self.ipfs_client = Some(client);
+    /// Set the content store for the IPFS CoreAPI capability.
+    pub fn with_content_store(mut self, store: Arc<dyn crate::ipfs::ContentStore>) -> Self {
+        self.content_store = Some(store);
         self
     }
 
@@ -204,9 +204,9 @@ impl CellBuilder {
             swarm_cmd_tx: self.swarm_cmd_tx.expect("swarm_cmd_tx must be set"),
             image_root: self.image_root,
             initial_epoch: self.initial_epoch,
-            ipfs_client: self
-                .ipfs_client
-                .unwrap_or_else(|| crate::ipfs::HttpClient::new("http://localhost:5001".into())),
+            content_store: self.content_store.unwrap_or_else(|| {
+                Arc::new(crate::ipfs::HttpClient::new("http://localhost:5001".into()))
+            }),
             epoch_rx: self.epoch_rx,
             signing_key: self.signing_key,
         }
@@ -232,7 +232,7 @@ pub struct Cell {
     pub swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     pub image_root: Option<PathBuf>,
     pub initial_epoch: Option<Epoch>,
-    pub ipfs_client: crate::ipfs::HttpClient,
+    pub content_store: Arc<dyn crate::ipfs::ContentStore>,
     pub epoch_rx: Option<watch::Receiver<Epoch>>,
     pub signing_key: Option<Arc<SigningKey>>,
 }
@@ -285,7 +285,7 @@ impl Cell {
             swarm_cmd_tx: _,
             image_root,
             initial_epoch: _,
-            ipfs_client: _,
+            content_store: _,
             epoch_rx: _,
             signing_key: _,
         } = self;
@@ -400,7 +400,7 @@ impl Cell {
         let wasm_debug = self.wasm_debug;
         let network_state = self.network_state.clone();
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
-        let ipfs_client = self.ipfs_client.clone();
+        let content_store = self.content_store.clone();
         let signing_key = self.signing_key.take();
         let pre_epoch_rx = self.epoch_rx.take();
         let initial_epoch = self.initial_epoch.clone().unwrap_or(Epoch {
@@ -439,7 +439,7 @@ impl Cell {
             swarm_cmd_tx,
             wasm_debug,
             epoch_rx,
-            ipfs_client,
+            content_store,
             signing_key,
             membrane_stream_control,
         );

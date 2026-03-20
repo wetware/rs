@@ -786,6 +786,8 @@ pub extern "C" fn _start() {
 
         // Build a chain loader: try IPFS first (if reachable), fall back to host FS.
         let ipfs_client = ipfs::HttpClient::new("http://localhost:5001".into());
+        let content_store: std::sync::Arc<dyn ipfs::ContentStore> =
+            std::sync::Arc::new(ipfs_client.clone());
         let loader = ChainLoader::new(vec![
             Box::new(IpfsUnixfsLoader::new(ipfs_client.clone())),
             Box::new(HostPathLoader),
@@ -914,7 +916,7 @@ pub extern "C" fn _start() {
             .with_swarm_cmd_tx(swarm_cmd_tx)
             .with_wasm_debug(wasm_debug)
             .with_image_root(merged.path().into())
-            .with_ipfs_client(ipfs_client.clone())
+            .with_content_store(content_store.clone())
             .with_signing_key(std::sync::Arc::new(sk));
 
         // If we have an epoch channel, give the receiver to the cell

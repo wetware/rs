@@ -133,7 +133,7 @@ pub struct HostGraftBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
-    ipfs_client: ipfs::HttpClient,
+    content_store: Arc<dyn ipfs::ContentStore>,
     signing_key: Option<Arc<SigningKey>>,
     stream_control: libp2p_stream::Control,
     epoch_rx: watch::Receiver<Epoch>,
@@ -144,7 +144,7 @@ impl HostGraftBuilder {
         network_state: NetworkState,
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
         wasm_debug: bool,
-        ipfs_client: ipfs::HttpClient,
+        content_store: Arc<dyn ipfs::ContentStore>,
         signing_key: Option<Arc<SigningKey>>,
         stream_control: libp2p_stream::Control,
         epoch_rx: watch::Receiver<Epoch>,
@@ -153,7 +153,7 @@ impl HostGraftBuilder {
             network_state,
             swarm_cmd_tx,
             wasm_debug,
-            ipfs_client,
+            content_store,
             signing_key,
             stream_control,
             epoch_rx,
@@ -183,14 +183,14 @@ impl GraftBuilder for HostGraftBuilder {
                 self.wasm_debug,
                 Some(guard.clone()),
                 Some(self.epoch_rx.clone()),
-                Some(self.ipfs_client.clone()),
+                Some(self.content_store.clone()),
                 self.signing_key.clone(),
                 Some(self.stream_control.clone()),
             ));
         builder.set_executor(executor);
 
         let ipfs_client: ipfs_capnp::client::Client = capnp_rpc::new_client(
-            EpochGuardedIpfsClient::new(self.ipfs_client.clone(), guard.clone()),
+            EpochGuardedIpfsClient::new(self.content_store.clone(), guard.clone()),
         );
         builder.set_ipfs(ipfs_client);
 
@@ -217,13 +217,16 @@ impl GraftBuilder for HostGraftBuilder {
 
 /// IPFS Client capability that checks epoch validity and delegates to sub-APIs.
 struct EpochGuardedIpfsClient {
-    ipfs_client: ipfs::HttpClient,
+    content_store: Arc<dyn ipfs::ContentStore>,
     guard: EpochGuard,
 }
 
 impl EpochGuardedIpfsClient {
-    fn new(ipfs_client: ipfs::HttpClient, guard: EpochGuard) -> Self {
-        Self { ipfs_client, guard }
+    fn new(content_store: Arc<dyn ipfs::ContentStore>, guard: EpochGuard) -> Self {
+        Self {
+            content_store,
+            guard,
+        }
     }
 }
 
@@ -236,7 +239,7 @@ impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
         let api: ipfs_capnp::unix_f_s::Client = capnp_rpc::new_client(EpochGuardedUnixFS::new(
-            self.ipfs_client.clone(),
+            self.content_store.clone(),
             self.guard.clone(),
         ));
         results.get().set_api(api);
@@ -358,15 +361,18 @@ impl ipfs_capnp::client::Server for EpochGuardedIpfsClient {
 // EpochGuardedUnixFS
 // ---------------------------------------------------------------------------
 
-/// UnixFS capability backed by Kubo HTTP API.
+/// UnixFS capability backed by a [`ContentStore`](ipfs::ContentStore) implementation.
 struct EpochGuardedUnixFS {
-    ipfs_client: ipfs::HttpClient,
+    content_store: Arc<dyn ipfs::ContentStore>,
     guard: EpochGuard,
 }
 
 impl EpochGuardedUnixFS {
-    fn new(ipfs_client: ipfs::HttpClient, guard: EpochGuard) -> Self {
-        Self { ipfs_client, guard }
+    fn new(content_store: Arc<dyn ipfs::ContentStore>, guard: EpochGuard) -> Self {
+        Self {
+            content_store,
+            guard,
+        }
     }
 }
 
@@ -381,11 +387,10 @@ impl ipfs_capnp::unix_f_s::Server for EpochGuardedUnixFS {
         let path = pry!(pry!(params.get()).get_path())
             .to_string()
             .unwrap_or_default();
-        let client = self.ipfs_client.clone();
+        let store = self.content_store.clone();
         Promise::from_future(async move {
-            let data = client
-                .unixfs()
-                .get(&path)
+            let data = store
+                .cat(&path)
                 .await
                 .map_err(|e| capnp::Error::failed(format!("ipfs cat failed: {e}")))?;
             results.get().set_data(&data);
@@ -402,9 +407,9 @@ impl ipfs_capnp::unix_f_s::Server for EpochGuardedUnixFS {
         let path = pry!(pry!(params.get()).get_path())
             .to_string()
             .unwrap_or_default();
-        let client = self.ipfs_client.clone();
+        let store = self.content_store.clone();
         Promise::from_future(async move {
-            let entries = client
+            let entries = store
                 .ls(&path)
                 .await
                 .map_err(|e| capnp::Error::failed(format!("ipfs ls failed: {e}")))?;
@@ -431,10 +436,10 @@ impl ipfs_capnp::unix_f_s::Server for EpochGuardedUnixFS {
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
         let data = pry!(pry!(params.get()).get_data()).to_vec();
-        let client = self.ipfs_client.clone();
+        let store = self.content_store.clone();
         Promise::from_future(async move {
-            let cid = client
-                .add_bytes(&data)
+            let cid = store
+                .add(&data)
                 .await
                 .map_err(|e| capnp::Error::failed(format!("ipfs add failed: {e}")))?;
             results.get().set_cid(&cid);
@@ -475,7 +480,7 @@ pub fn build_membrane_rpc<R, W>(
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
     epoch_rx: watch::Receiver<Epoch>,
-    ipfs_client: ipfs::HttpClient,
+    content_store: Arc<dyn ipfs::ContentStore>,
     signing_key: Option<Arc<SigningKey>>,
     stream_control: libp2p_stream::Control,
 ) -> (RpcSystem<Side>, GuestMembrane)
@@ -487,7 +492,7 @@ where
         network_state,
         swarm_cmd_tx,
         wasm_debug,
-        ipfs_client,
+        content_store,
         signing_key,
         stream_control,
         epoch_rx.clone(),
@@ -568,7 +573,7 @@ mod tests {
             }
         });
 
-        let ipfs_client = ipfs::HttpClient::new(mock_url);
+        let ipfs_client: Arc<dyn ipfs::ContentStore> = Arc::new(ipfs::HttpClient::new(mock_url));
         let unixfs_impl = EpochGuardedUnixFS::new(ipfs_client, guard);
         let unixfs_server: ipfs_capnp::unix_f_s::Client = capnp_rpc::new_client(unixfs_impl);
 
@@ -658,6 +663,229 @@ mod tests {
                 }
 
                 mock_handle.abort();
+            })
+            .await;
+    }
+
+    // ── MemoryStore-backed tests (no HTTP, no Kubo) ────────────────
+
+    /// Bootstrap an EpochGuardedUnixFS client/server pair backed by a MemoryStore.
+    async fn setup_unixfs_with_memory_store(
+        store: Arc<dyn ipfs::ContentStore>,
+        guard: EpochGuard,
+    ) -> ipfs_capnp::unix_f_s::Client {
+        let unixfs_impl = EpochGuardedUnixFS::new(store, guard);
+        let unixfs_server: ipfs_capnp::unix_f_s::Client = capnp_rpc::new_client(unixfs_impl);
+
+        let (client_stream, server_stream) = io::duplex(64 * 1024);
+        let (client_read, client_write) = io::split(client_stream);
+        let (server_read, server_write) = io::split(server_stream);
+
+        let server_network = VatNetwork::new(
+            server_read.compat(),
+            server_write.compat_write(),
+            Side::Server,
+            Default::default(),
+        );
+        let server_rpc = RpcSystem::new(Box::new(server_network), Some(unixfs_server.client));
+        tokio::task::spawn_local(async move {
+            let _ = server_rpc.await;
+        });
+
+        let client_network = VatNetwork::new(
+            client_read.compat(),
+            client_write.compat_write(),
+            Side::Client,
+            Default::default(),
+        );
+        let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
+        let client: ipfs_capnp::unix_f_s::Client = client_rpc.bootstrap(Side::Server);
+        tokio::task::spawn_local(async move {
+            let _ = client_rpc.await;
+        });
+
+        client
+    }
+
+    /// Round-trip add → cat through Cap'n Proto with MemoryStore (no HTTP).
+    #[tokio::test]
+    async fn test_memory_store_add_then_cat() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let store = Arc::new(ipfs::MemoryStore::new());
+                let (_tx, rx) = watch::channel(epoch(1));
+                let guard = EpochGuard {
+                    issued_seq: 1,
+                    receiver: rx,
+                };
+                let client = setup_unixfs_with_memory_store(
+                    store.clone() as Arc<dyn ipfs::ContentStore>,
+                    guard,
+                )
+                .await;
+
+                // Add data through RPC.
+                let mut add_req = client.add_request();
+                add_req.get().set_data(b"hello wetware");
+                let add_resp = add_req.send().promise.await.expect("add RPC");
+                let cid = add_resp
+                    .get()
+                    .expect("get results")
+                    .get_cid()
+                    .expect("get cid");
+                let cid = cid.to_str().expect("valid utf8");
+                assert!(
+                    cid.starts_with("/ipfs/"),
+                    "CID should be an IPFS path: {cid}"
+                );
+                let cid = cid.to_string();
+
+                // Cat the data back through RPC.
+                let mut cat_req = client.cat_request();
+                cat_req.get().set_path(&cid);
+                let cat_resp = cat_req.send().promise.await.expect("cat RPC");
+                let data = cat_resp
+                    .get()
+                    .expect("get results")
+                    .get_data()
+                    .expect("get data");
+                assert_eq!(data, b"hello wetware");
+            })
+            .await;
+    }
+
+    /// Cat a pre-seeded entry through Cap'n Proto with MemoryStore.
+    #[tokio::test]
+    async fn test_memory_store_cat_preseeded() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let store = Arc::new(ipfs::MemoryStore::new());
+                store.insert("/ipfs/QmTest123", b"pre-seeded content".to_vec());
+
+                let (_tx, rx) = watch::channel(epoch(1));
+                let guard = EpochGuard {
+                    issued_seq: 1,
+                    receiver: rx,
+                };
+                let client =
+                    setup_unixfs_with_memory_store(store as Arc<dyn ipfs::ContentStore>, guard)
+                        .await;
+
+                let mut req = client.cat_request();
+                req.get().set_path("/ipfs/QmTest123");
+                let resp = req.send().promise.await.expect("cat RPC");
+                let data = resp
+                    .get()
+                    .expect("get results")
+                    .get_data()
+                    .expect("get data");
+                assert_eq!(data, b"pre-seeded content");
+            })
+            .await;
+    }
+
+    /// Ls lists pre-seeded directory entries through Cap'n Proto with MemoryStore.
+    #[tokio::test]
+    async fn test_memory_store_ls() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let store = Arc::new(ipfs::MemoryStore::new());
+                store.insert("/ipfs/QmDir/file_a.txt", b"aaa".to_vec());
+                store.insert("/ipfs/QmDir/file_b.txt", b"bbb".to_vec());
+
+                let (_tx, rx) = watch::channel(epoch(1));
+                let guard = EpochGuard {
+                    issued_seq: 1,
+                    receiver: rx,
+                };
+                let client =
+                    setup_unixfs_with_memory_store(store as Arc<dyn ipfs::ContentStore>, guard)
+                        .await;
+
+                let mut req = client.ls_request();
+                req.get().set_path("/ipfs/QmDir");
+                let resp = req.send().promise.await.expect("ls RPC");
+                let entries = resp
+                    .get()
+                    .expect("get results")
+                    .get_entries()
+                    .expect("get entries");
+                assert_eq!(entries.len(), 2);
+
+                let mut names: Vec<String> = (0..entries.len())
+                    .map(|i| {
+                        entries
+                            .get(i)
+                            .get_name()
+                            .expect("get name")
+                            .to_str()
+                            .expect("valid utf8")
+                            .to_string()
+                    })
+                    .collect();
+                names.sort();
+                assert_eq!(names, vec!["file_a.txt", "file_b.txt"]);
+            })
+            .await;
+    }
+
+    /// Cat on a missing path returns an error through Cap'n Proto.
+    #[tokio::test]
+    async fn test_memory_store_cat_not_found() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let store: Arc<dyn ipfs::ContentStore> = Arc::new(ipfs::MemoryStore::new());
+                let (_tx, rx) = watch::channel(epoch(1));
+                let guard = EpochGuard {
+                    issued_seq: 1,
+                    receiver: rx,
+                };
+                let client = setup_unixfs_with_memory_store(store, guard).await;
+
+                let mut req = client.cat_request();
+                req.get().set_path("/ipfs/QmNonexistent");
+                match req.send().promise.await {
+                    Err(e) => assert!(
+                        e.to_string().contains("not found"),
+                        "error should mention 'not found': {}",
+                        e
+                    ),
+                    Ok(_) => panic!("cat of missing path should fail"),
+                }
+            })
+            .await;
+    }
+
+    /// MemoryStore-backed UnixFS rejects stale epochs.
+    #[tokio::test]
+    async fn test_memory_store_rejects_stale_epoch() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let store: Arc<dyn ipfs::ContentStore> = Arc::new(ipfs::MemoryStore::new());
+                let (tx, rx) = watch::channel(epoch(1));
+                let guard = EpochGuard {
+                    issued_seq: 1,
+                    receiver: rx,
+                };
+                let client = setup_unixfs_with_memory_store(store, guard).await;
+
+                // Advance epoch → stale.
+                tx.send(epoch(2)).unwrap();
+
+                let mut req = client.add_request();
+                req.get().set_data(b"stale data");
+                match req.send().promise.await {
+                    Err(e) => assert!(
+                        e.to_string().contains("staleEpoch"),
+                        "expected staleEpoch, got: {e}"
+                    ),
+                    Ok(_) => panic!("expected staleEpoch error"),
+                }
             })
             .await;
     }
