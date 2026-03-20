@@ -930,4 +930,14 @@ mod tests {
             "/bin/chess-demo.wasm"
         );
     }
+
+    #[test]
+    fn dispatch_table_has_all_verbs() {
+        let table = build_dispatch();
+        let expected = ["host", "executor", "ipfs", "routing", "cd", "help", "exit"];
+        for verb in &expected {
+            assert!(table.contains_key(verb), "missing dispatch entry: {verb}");
+        }
+        assert_eq!(table.len(), expected.len(), "unexpected extra entries in dispatch table");
+    }
 }
