@@ -980,11 +980,11 @@ mod tests {
         // parse_initd_script returns None on failure, enabling the caller
         // to `continue` to the next script.
         let scripts: Vec<(&str, &[u8])> = vec![
-            ("01-bad.glia", &[0xFF, 0xFE]),             // invalid UTF-8
-            ("02-broken.glia", b"(unclosed"),            // parse error
-            ("03-good.glia", b"(cd \"/ok\")"),           // valid
-            ("04-also-bad.glia", b"(a) )unexpected"),    // parse error
-            ("05-also-good.glia", b"(help)"),            // valid
+            ("01-bad.glia", &[0xFF, 0xFE]),           // invalid UTF-8
+            ("02-broken.glia", b"(unclosed"),         // parse error
+            ("03-good.glia", b"(cd \"/ok\")"),        // valid
+            ("04-also-bad.glia", b"(a) )unexpected"), // parse error
+            ("05-also-good.glia", b"(help)"),         // valid
         ];
 
         let results: Vec<Option<Vec<Val>>> = scripts
@@ -994,9 +994,17 @@ mod tests {
 
         assert!(results[0].is_none(), "invalid UTF-8 should fail");
         assert!(results[1].is_none(), "unclosed paren should fail");
-        assert_eq!(results[2].as_ref().unwrap().len(), 1, "valid script should parse");
+        assert_eq!(
+            results[2].as_ref().unwrap().len(),
+            1,
+            "valid script should parse"
+        );
         assert!(results[3].is_none(), "unexpected close should fail");
-        assert_eq!(results[4].as_ref().unwrap().len(), 1, "valid script should parse");
+        assert_eq!(
+            results[4].as_ref().unwrap().len(),
+            1,
+            "valid script should parse"
+        );
     }
 
     // --- dispatch table ---
