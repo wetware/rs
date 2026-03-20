@@ -620,6 +620,29 @@ Unrecognized commands are looked up in PATH (default /bin).";
 // Init.d — evaluate scripts from $WW_ROOT/etc/init.d/*.glia
 // ---------------------------------------------------------------------------
 
+/// Parse an init.d script from raw bytes. Returns `None` on error (logs details).
+/// Extracted from `run_initd` for testability — the caller uses `None` to skip
+/// the failed script and continue (SysV best-effort model).
+fn parse_initd_script(name: &str, data: &[u8]) -> Option<Vec<Val>> {
+    let content = match std::str::from_utf8(data) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("init.d: {name}: not valid UTF-8: {e}");
+            return None;
+        }
+    };
+    match read_many(content) {
+        Ok(forms) => {
+            log::info!("init.d: parsed {name} ({} form(s))", forms.len());
+            Some(forms)
+        }
+        Err(e) => {
+            log::error!("init.d: {name}: parse error: {e}");
+            None
+        }
+    }
+}
+
 /// Scan `$WW_ROOT/etc/init.d/*.glia` via IPFS UnixFS, parse and evaluate
 /// each file as a glia script. Returns true if any expression blocked
 /// (i.e. a foreground process ran to completion via `(executor run ...)`).
@@ -706,23 +729,10 @@ async fn run_initd(
             }
         };
 
-        let content = match std::str::from_utf8(&data) {
-            Ok(s) => s,
-            Err(e) => {
-                log::error!("init.d: {name}: not valid UTF-8: {e}");
-                continue;
-            }
+        let forms = match parse_initd_script(name, &data) {
+            Some(f) => f,
+            None => continue, // SysV: skip failed script
         };
-
-        let forms = match read_many(content) {
-            Ok(f) => f,
-            Err(e) => {
-                log::error!("init.d: {name}: parse error: {e}");
-                continue;
-            }
-        };
-
-        log::info!("init.d: evaluating {name} ({} form(s))", forms.len());
 
         for (i, form) in forms.iter().enumerate() {
             log::info!("init.d: {name}: evaluating form {}/{}", i + 1, forms.len());
@@ -930,6 +940,66 @@ mod tests {
             "/bin/chess-demo.wasm"
         );
     }
+
+    // --- init.d parse + SysV error recovery ---
+
+    #[test]
+    fn parse_initd_script_valid() {
+        let data = b"(cd \"/foo\") (cd \"/bar\")";
+        let forms = parse_initd_script("test.glia", data).unwrap();
+        assert_eq!(forms.len(), 2);
+    }
+
+    #[test]
+    fn parse_initd_script_malformed() {
+        let data = b"(cd \"/foo\") (broken";
+        assert!(parse_initd_script("bad.glia", data).is_none());
+    }
+
+    #[test]
+    fn parse_initd_script_invalid_utf8() {
+        assert!(parse_initd_script("binary.glia", &[0xFF, 0xFE]).is_none());
+    }
+
+    #[test]
+    fn parse_initd_script_empty() {
+        let forms = parse_initd_script("empty.glia", b"").unwrap();
+        assert!(forms.is_empty());
+    }
+
+    #[test]
+    fn parse_initd_script_comments_only() {
+        let data = b"; just a comment\n; another one\n";
+        let forms = parse_initd_script("comments.glia", data).unwrap();
+        assert!(forms.is_empty());
+    }
+
+    #[test]
+    fn sysv_continues_past_failed_scripts() {
+        // SysV contract: each script is processed independently.
+        // parse_initd_script returns None on failure, enabling the caller
+        // to `continue` to the next script.
+        let scripts: Vec<(&str, &[u8])> = vec![
+            ("01-bad.glia", &[0xFF, 0xFE]),             // invalid UTF-8
+            ("02-broken.glia", b"(unclosed"),            // parse error
+            ("03-good.glia", b"(cd \"/ok\")"),           // valid
+            ("04-also-bad.glia", b"(a) )unexpected"),    // parse error
+            ("05-also-good.glia", b"(help)"),            // valid
+        ];
+
+        let results: Vec<Option<Vec<Val>>> = scripts
+            .iter()
+            .map(|(name, data)| parse_initd_script(name, data))
+            .collect();
+
+        assert!(results[0].is_none(), "invalid UTF-8 should fail");
+        assert!(results[1].is_none(), "unclosed paren should fail");
+        assert_eq!(results[2].as_ref().unwrap().len(), 1, "valid script should parse");
+        assert!(results[3].is_none(), "unexpected close should fail");
+        assert_eq!(results[4].as_ref().unwrap().len(), 1, "valid script should parse");
+    }
+
+    // --- dispatch table ---
 
     #[test]
     fn dispatch_table_has_all_verbs() {
