@@ -11,7 +11,7 @@ The same 32-byte private key serves:
    identifies the node on the p2p network.
 2. **EVM / Monad address** — the standard Ethereum address (Keccak256 of the
    uncompressed public key, last 20 bytes) is used for on-chain operations
-   against the Stem contract and for Membrane session signing.
+   against the Stem contract and for Terminal challenge-response signing.
 
 This was a deliberate choice against maintaining two separate keys (ed25519 for
 p2p, secp256k1 for EVM). One key means:

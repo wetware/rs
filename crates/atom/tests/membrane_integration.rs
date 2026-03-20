@@ -1,10 +1,13 @@
-//! Integration test: Epoch → Membrane → graft → executor.echo (epoch-guarded).
-//! All local: membrane server and client are in-process (capnp-rpc local dispatch).
+//! Integration test: Epoch → Terminal → Membrane → graft → executor.echo (epoch-guarded).
+//! All local: servers and clients are in-process (capnp-rpc local dispatch).
+//!
+//! Terminal = authentication gate (challenge-response).
+//! Membrane = capability provisioning (ocap: having the reference IS authorization).
 
 mod common;
 
 use atom::stem_capnp;
-use atom::{AtomIndexer, Epoch, IndexerConfig, MembraneServer};
+use atom::{AtomIndexer, Epoch, IndexerConfig, MembraneServer, TerminalServer};
 use auth::SigningDomain;
 use capnp_rpc::new_client;
 use common::{deploy_atom, set_head, spawn_anvil, StubSessionBuilder};
@@ -16,10 +19,7 @@ use tokio::sync::watch;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 
-/// Signer that produces real secp256k1 ECDSA signatures for graft challenge-response.
-///
-/// Constructs the domain-separated signing buffer (matching the host verifier) and
-/// returns the 64-byte compact ECDSA signature.
+/// Signer that produces real secp256k1 ECDSA signatures for Terminal challenge-response.
 struct TestSigner {
     sk: SigningKey,
 }
@@ -49,12 +49,20 @@ fn observed_to_epoch(ev: &atom::HeadUpdatedObserved) -> Epoch {
     }
 }
 
-/// Helper: create an authenticated membrane client backed by StubSessionBuilder.
-fn auth_membrane(
+/// Helper: create a Membrane client (no auth — pure ocap).
+fn stub_membrane(rx: watch::Receiver<Epoch>) -> stem_capnp::membrane::Client {
+    new_client(MembraneServer::new(rx, StubSessionBuilder))
+}
+
+/// Helper: wrap a Membrane client in Terminal (challenge-response auth gate).
+fn terminal_membrane(
     rx: watch::Receiver<Epoch>,
     vk: k256::ecdsa::VerifyingKey,
-) -> stem_capnp::membrane::Client {
-    new_client(MembraneServer::new(rx, StubSessionBuilder).with_verifying_key(vk))
+) -> stem_capnp::terminal::Client<stem_capnp::membrane::Owned> {
+    let membrane = stub_membrane(rx);
+    new_client(TerminalServer::<stem_capnp::membrane::Owned>::new(
+        vk, membrane,
+    ))
 }
 
 #[tokio::test]
@@ -127,19 +135,29 @@ async fn test_membrane_graft_echo_against_anvil() {
         adopted_block: first_ev.block_number + 1,
     };
 
-    // Generate a test keypair for graft authentication.
     let sk = SigningKey::random(&mut rand::thread_rng());
     let vk = *sk.verifying_key();
 
     let (tx, rx) = watch::channel(epoch1.clone());
-    let membrane = auth_membrane(rx, vk);
+    let terminal = terminal_membrane(rx, vk);
     let signer_client: stem_capnp::signer::Client = new_client(TestSigner { sk });
 
-    // Graft → echo → Ok
-    let mut graft_req = membrane.graft_request();
-    graft_req.get().set_signer(signer_client);
+    // Login via Terminal → get Membrane → graft → echo → Ok
+    let mut login_req = terminal.login_request();
+    login_req.get().set_signer(signer_client);
+    let login_resp = login_req.send().promise.await.expect("login RPC");
+    let membrane = login_resp
+        .get()
+        .expect("login results")
+        .get_session()
+        .expect("session");
 
-    let graft_rpc_response = graft_req.send().promise.await.expect("graft RPC");
+    let graft_rpc_response = membrane
+        .graft_request()
+        .send()
+        .promise
+        .await
+        .expect("graft RPC");
     let graft_response = graft_rpc_response.get().expect("graft results");
     let executor = graft_response.get_executor().expect("executor");
 
@@ -166,7 +184,40 @@ async fn test_membrane_graft_echo_against_anvil() {
     }
 }
 
-/// No-chain regression test: echo fails with staleEpoch after epoch advance, then re-graft recovers.
+/// No-chain regression test: Membrane graft works without auth (pure ocap).
+#[tokio::test]
+async fn test_membrane_graft_no_auth() {
+    let epoch = Epoch {
+        seq: 1,
+        head: b"head1".to_vec(),
+        adopted_block: 100,
+    };
+
+    let (_tx, rx) = watch::channel(epoch);
+    let membrane = stub_membrane(rx);
+
+    // graft() is parameterless — having the reference IS authorization.
+    let graft_resp = membrane
+        .graft_request()
+        .send()
+        .promise
+        .await
+        .expect("graft RPC");
+    let results = graft_resp.get().expect("graft results");
+    let executor = results.get_executor().expect("executor");
+
+    let mut echo_req = executor.echo_request();
+    echo_req.get().set_message("ping");
+    let echo_resp = echo_req.send().promise.await.expect("echo RPC");
+    let response = echo_resp
+        .get()
+        .expect("echo results")
+        .get_response()
+        .expect("response");
+    assert_eq!(response.to_str().unwrap(), "pong");
+}
+
+/// No-chain: echo fails with staleEpoch after epoch advance, then re-graft recovers.
 #[tokio::test]
 async fn test_membrane_stale_epoch_then_recovery_no_chain() {
     let epoch1 = Epoch {
@@ -180,19 +231,21 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
         adopted_block: 101,
     };
 
-    let sk = SigningKey::random(&mut rand::thread_rng());
-    let vk = *sk.verifying_key();
-
     let (tx, rx) = watch::channel(epoch1.clone());
-    let membrane = auth_membrane(rx, vk);
-    let signer_client: stem_capnp::signer::Client = new_client(TestSigner { sk });
+    let membrane = stub_membrane(rx);
 
     // Graft → echo → Ok
-    let mut graft_req = membrane.graft_request();
-    graft_req.get().set_signer(signer_client.clone());
-    let graft_rpc_response = graft_req.send().promise.await.expect("graft RPC");
-    let graft_response = graft_rpc_response.get().expect("graft results");
-    let executor = graft_response.get_executor().expect("executor");
+    let graft_resp = membrane
+        .graft_request()
+        .send()
+        .promise
+        .await
+        .expect("graft RPC");
+    let executor = graft_resp
+        .get()
+        .expect("graft results")
+        .get_executor()
+        .expect("executor");
 
     let mut echo_req = executor.echo_request();
     echo_req.get().set_message("ping");
@@ -221,11 +274,17 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
     }
 
     // Re-graft → new executor.echo → Ok
-    let mut graft_req2 = membrane.graft_request();
-    graft_req2.get().set_signer(signer_client.clone());
-    let graft_rpc_response2 = graft_req2.send().promise.await.expect("re-graft RPC");
-    let graft_response2 = graft_rpc_response2.get().expect("re-graft results");
-    let executor2 = graft_response2.get_executor().expect("executor");
+    let graft_resp2 = membrane
+        .graft_request()
+        .send()
+        .promise
+        .await
+        .expect("re-graft RPC");
+    let executor2 = graft_resp2
+        .get()
+        .expect("re-graft results")
+        .get_executor()
+        .expect("executor");
 
     let mut echo_req3 = executor2.echo_request();
     echo_req3.get().set_message("ping");
@@ -242,45 +301,45 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
     assert_eq!(response3.to_str().unwrap(), "pong", "re-graft should be ok");
 }
 
-/// Graft with wrong key should fail authentication.
+/// Terminal login with wrong key should fail authentication.
 #[tokio::test]
-async fn test_membrane_graft_wrong_key_rejected() {
+async fn test_terminal_wrong_key_rejected() {
     let epoch = Epoch {
         seq: 1,
         head: b"head".to_vec(),
         adopted_block: 100,
     };
 
-    // Membrane expects key A, signer holds key B.
+    // Terminal expects key A, signer holds key B.
     let sk_a = SigningKey::random(&mut rand::thread_rng());
     let sk_b = SigningKey::random(&mut rand::thread_rng());
     let vk_a = *sk_a.verifying_key();
 
     let (_tx, rx) = watch::channel(epoch);
-    let membrane = auth_membrane(rx, vk_a);
+    let terminal = terminal_membrane(rx, vk_a);
     let signer_client: stem_capnp::signer::Client = new_client(TestSigner { sk: sk_b });
 
-    let mut graft_req = membrane.graft_request();
-    graft_req.get().set_signer(signer_client);
+    let mut login_req = terminal.login_request();
+    login_req.get().set_signer(signer_client);
 
-    match graft_req.send().promise.await {
+    match login_req.send().promise.await {
         Ok(resp) => match resp.get() {
-            Ok(_) => panic!("graft should fail with wrong key"),
+            Ok(_) => panic!("login should fail with wrong key"),
             Err(e) => assert!(
-                e.to_string().contains("graft auth failed"),
-                "error should mention auth failure, got: {e}"
+                e.to_string().contains("signature verification failed"),
+                "error should mention verification failure, got: {e}"
             ),
         },
         Err(e) => assert!(
-            e.to_string().contains("graft auth failed"),
-            "error should mention auth failure, got: {e}"
+            e.to_string().contains("signature verification failed"),
+            "error should mention verification failure, got: {e}"
         ),
     }
 }
 
-/// Graft without signer should fail.
+/// Terminal login without signer should fail.
 #[tokio::test]
-async fn test_membrane_graft_missing_signer_rejected() {
+async fn test_terminal_missing_signer_rejected() {
     let epoch = Epoch {
         seq: 1,
         head: b"head".to_vec(),
@@ -291,13 +350,13 @@ async fn test_membrane_graft_missing_signer_rejected() {
     let vk = *sk.verifying_key();
 
     let (_tx, rx) = watch::channel(epoch);
-    let membrane = auth_membrane(rx, vk);
+    let terminal = terminal_membrane(rx, vk);
 
-    // Call graft without setting signer.
-    let graft_req = membrane.graft_request();
-    match graft_req.send().promise.await {
+    // Call login without setting signer.
+    let login_req = terminal.login_request();
+    match login_req.send().promise.await {
         Ok(resp) => match resp.get() {
-            Ok(_) => panic!("graft should fail without signer"),
+            Ok(_) => panic!("login should fail without signer"),
             Err(e) => assert!(
                 e.to_string().contains("missing signer"),
                 "error should mention missing signer, got: {e}"

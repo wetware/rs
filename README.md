@@ -75,10 +75,12 @@ ww run --help
    capability hub that grants access to host, network, IPFS, and
    identity services via Cap'n Proto RPC
 
-The agent authenticates to the Membrane (`graft()`) and receives
-epoch-scoped capabilities. When the on-chain epoch advances (new code
-deployed, configuration changed), all capabilities are revoked and the
-agent must re-graft, picking up the new state automatically.
+The agent calls `membrane.graft()` to receive epoch-scoped capabilities.
+(Having a Membrane reference IS authorization — ocap model. To gate
+access, wrap the Membrane in a `Terminal(Membrane)` challenge-response
+auth layer.) When the on-chain epoch advances (new code deployed,
+configuration changed), all capabilities are revoked and the agent must
+re-graft, picking up the new state automatically.
 
 ### Capabilities
 
@@ -252,7 +254,7 @@ cargo test -p atom --lib
 Cap'n Proto schemas in `capnp/`:
 
 - **`system.capnp`** — Host, Executor, Process, ByteStream, Listener, Dialer
-- **`stem.capnp`** — Membrane, Epoch, Signer, Identity
+- **`stem.capnp`** — Terminal, Membrane, Epoch, Signer, Identity
 - **`ipfs.capnp`** — IPFS CoreAPI (UnixFS, Block, Pin, …)
 - **`routing.capnp`** — Kademlia DHT (provide, findProviders, hash)
 

@@ -31,6 +31,8 @@ pub mod stem_capnp {
 
 pub mod epoch;
 pub mod membrane;
+pub mod terminal;
 
 pub use epoch::{Epoch, EpochGuard};
 pub use membrane::{membrane_client, GraftBuilder, MembraneServer, NoExtension};
+pub use terminal::TerminalServer;

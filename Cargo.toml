@@ -4,7 +4,7 @@ members = [
     "crates/atom",
     "crates/glia",
     "crates/membrane",
-    "crates/auth",
+    "crates/guest/auth",
     "std/system",
     "crates/kernel",
     "std/shell",
@@ -36,7 +36,7 @@ libc = "0.2.177"
 tempfile = "3.23.0"
 walkdir = "2"
 glia = { path = "crates/glia" }
-auth = { path = "crates/auth" }
+auth = { path = "crates/guest/auth" }
 blake3 = "1.8.3"
 
 # Host-only dependencies (not needed for WASM guests)
