@@ -428,7 +428,7 @@ pub struct ExecutorImpl {
     guard: Option<EpochGuard>,
     // When present, child processes get a full Membrane bootstrap (not bare Host).
     epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
-    ipfs_client: Option<crate::ipfs::HttpClient>,
+    content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
     signing_key: Option<Arc<k256::ecdsa::SigningKey>>,
     stream_control: Option<libp2p_stream::Control>,
 }
@@ -446,7 +446,7 @@ impl ExecutorImpl {
             wasm_debug,
             guard,
             epoch_rx: None,
-            ipfs_client: None,
+            content_store: None,
             signing_key: None,
             stream_control: None,
         }
@@ -461,7 +461,7 @@ impl ExecutorImpl {
         wasm_debug: bool,
         guard: Option<EpochGuard>,
         epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
-        ipfs_client: Option<crate::ipfs::HttpClient>,
+        content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
         signing_key: Option<Arc<k256::ecdsa::SigningKey>>,
         stream_control: Option<libp2p_stream::Control>,
     ) -> Self {
@@ -471,7 +471,7 @@ impl ExecutorImpl {
             wasm_debug,
             guard,
             epoch_rx,
-            ipfs_client,
+            content_store,
             signing_key,
             stream_control,
         }
@@ -543,7 +543,7 @@ impl system_capnp::executor::Server for ExecutorImpl {
         let network_state = self.network_state.clone();
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
         let epoch_rx = self.epoch_rx.clone();
-        let ipfs_client = self.ipfs_client.clone();
+        let content_store = self.content_store.clone();
         let signing_key = self.signing_key.clone();
         let stream_control = self.stream_control.clone();
         Promise::from_future(async move {
@@ -580,23 +580,24 @@ impl system_capnp::executor::Server for ExecutorImpl {
             let (reader, writer) = handles
                 .take_host_split()
                 .ok_or_else(|| capnp::Error::failed("host stream missing".into()))?;
-            let child_rpc_system =
-                if let (Some(erx), Some(ic), Some(sc)) = (epoch_rx, ipfs_client, stream_control) {
-                    let (rpc, _guest) = membrane::build_membrane_rpc(
-                        reader,
-                        writer,
-                        network_state,
-                        swarm_cmd_tx,
-                        wasm_debug,
-                        erx,
-                        ic,
-                        signing_key,
-                        sc,
-                    );
-                    rpc
-                } else {
-                    build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug)
-                };
+            let child_rpc_system = if let (Some(erx), Some(ic), Some(sc)) =
+                (epoch_rx, content_store, stream_control)
+            {
+                let (rpc, _guest) = membrane::build_membrane_rpc(
+                    reader,
+                    writer,
+                    network_state,
+                    swarm_cmd_tx,
+                    wasm_debug,
+                    erx,
+                    ic,
+                    signing_key,
+                    sc,
+                );
+                rpc
+            } else {
+                build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug)
+            };
 
             tokio::task::spawn_local(async move {
                 let local = tokio::task::LocalSet::new();

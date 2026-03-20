@@ -5,9 +5,30 @@
 //!
 //! Currently implements only the methods needed for file retrieval operations.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
+
+/// Core content-addressed storage operations used by the epoch-guarded IPFS capability.
+///
+/// This trait abstracts the three UnixFS operations that the Cap'n Proto RPC layer
+/// delegates to: reading files (`cat`), listing directories (`ls`), and adding data (`add`).
+/// `HttpClient` implements this against a live Kubo node; `MemoryStore` provides an
+/// in-memory test double.
+#[async_trait]
+pub trait ContentStore: Send + Sync {
+    /// Retrieve file content by IPFS path (equivalent to `ipfs cat`).
+    async fn cat(&self, path: &str) -> Result<Vec<u8>>;
+
+    /// List directory entries at an IPFS path (equivalent to `ipfs ls`).
+    async fn ls(&self, path: &str) -> Result<Vec<LsEntry>>;
+
+    /// Add raw bytes and return the CID (equivalent to `ipfs add`).
+    async fn add(&self, data: &[u8]) -> Result<String>;
+}
 
 /// IPFS client for interacting with an IPFS node via HTTP API
 ///
@@ -489,6 +510,41 @@ impl HttpClient {
     }
 }
 
+#[async_trait]
+impl ContentStore for HttpClient {
+    async fn cat(&self, path: &str) -> Result<Vec<u8>> {
+        let url = format!("{}/api/v0/cat?arg={}", self.base_url, path);
+        let response = self
+            .http_client
+            .post(&url)
+            .send()
+            .await
+            .with_context(|| format!("Failed to connect to IPFS node at {}", self.base_url))?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to retrieve file from IPFS: {} (path: {})",
+                response.status(),
+                path
+            ));
+        }
+
+        response
+            .bytes()
+            .await
+            .with_context(|| format!("Failed to read IPFS content from {path}"))
+            .map(|b| b.to_vec())
+    }
+
+    async fn ls(&self, path: &str) -> Result<Vec<LsEntry>> {
+        HttpClient::ls(self, path).await
+    }
+
+    async fn add(&self, data: &[u8]) -> Result<String> {
+        self.add_bytes(data).await
+    }
+}
+
 /// Check if a path is a valid IPFS-family path (IPFS, IPNS, or IPLD)
 ///
 /// This centralizes IPFS path validation similar to Go's `path.NewPath(str)`.
@@ -660,5 +716,76 @@ impl MFS<'_> {
             anyhow::bail!("MFS rm failed for {path}: {body}");
         }
         Ok(())
+    }
+}
+
+// ── MemoryStore — in-memory ContentStore for testing ───────────────
+
+/// In-memory [`ContentStore`] for testing the Cap'n Proto IPFS chain without Kubo.
+///
+/// `add` stores data keyed by a deterministic blake3 hash prefixed with `"/ipfs/"`.
+/// `cat` and `ls` look up entries in the same map. Directory listing treats
+/// stored paths with a matching prefix as children.
+#[derive(Clone, Default)]
+pub struct MemoryStore {
+    files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+}
+
+impl MemoryStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pre-seed the store with content at a given path.
+    pub fn insert(&self, path: impl Into<String>, data: Vec<u8>) {
+        self.files.lock().unwrap().insert(path.into(), data);
+    }
+}
+
+#[async_trait]
+impl ContentStore for MemoryStore {
+    async fn cat(&self, path: &str) -> Result<Vec<u8>> {
+        self.files
+            .lock()
+            .unwrap()
+            .get(path)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("MemoryStore: not found: {path}"))
+    }
+
+    async fn ls(&self, path: &str) -> Result<Vec<LsEntry>> {
+        let prefix = if path.ends_with('/') {
+            path.to_string()
+        } else {
+            format!("{path}/")
+        };
+        let files = self.files.lock().unwrap();
+        let entries = files
+            .keys()
+            .filter_map(|k| {
+                let rest = k.strip_prefix(&prefix)?;
+                // Only direct children (no further '/')
+                if rest.contains('/') {
+                    return None;
+                }
+                Some(LsEntry {
+                    name: rest.to_string(),
+                    hash: String::new(),
+                    size: files.get(k).map_or(0, |v| v.len() as u64),
+                    entry_type: 2, // file
+                })
+            })
+            .collect();
+        Ok(entries)
+    }
+
+    async fn add(&self, data: &[u8]) -> Result<String> {
+        let hash = blake3::hash(data);
+        let cid = format!("/ipfs/{}", hash.to_hex());
+        self.files
+            .lock()
+            .unwrap()
+            .insert(cid.clone(), data.to_vec());
+        Ok(cid)
     }
 }
