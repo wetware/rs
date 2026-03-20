@@ -938,6 +938,10 @@ mod tests {
         for verb in &expected {
             assert!(table.contains_key(verb), "missing dispatch entry: {verb}");
         }
-        assert_eq!(table.len(), expected.len(), "unexpected extra entries in dispatch table");
+        assert_eq!(
+            table.len(),
+            expected.len(),
+            "unexpected extra entries in dispatch table"
+        );
     }
 }
