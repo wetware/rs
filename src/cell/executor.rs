@@ -177,8 +177,9 @@ impl CellBuilder {
     /// Set the secp256k1 signing key for the node identity.
     ///
     /// When set:
-    /// - The `VerifyingKey` is threaded to `MembraneServer` for challenge-response
-    ///   authentication in `graft()` (issue #57).
+    /// - Incoming libp2p streams on `/ww/0.1.0` are served behind a
+    ///   `Terminal(Membrane)` auth gate — remote peers must prove identity
+    ///   via challenge-response before receiving capabilities.
     /// - An [`EpochGuardedIdentity`] hub backed by this key is injected into every
     ///   `Session` so the kernel can request domain-scoped signers without holding
     ///   the private key.
@@ -257,13 +258,13 @@ impl Cell {
         self.spawn_rpc_inner(None).await
     }
 
-    /// Like [`spawn`], but also accepts incoming libp2p streams for
-    /// `/wetware/capnp/1.0.0` and bootstraps each one with the guest's
-    /// exported [`GuestMembrane`].
+    /// Like [`spawn`], but also accepts incoming libp2p streams on
+    /// `/ww/0.1.0`.
     ///
-    /// This is the production entry point: Ganglion (and other peers) connect
-    /// to the host's libp2p swarm and open a stream on this protocol to obtain
-    /// the kernel's capability surface.
+    /// When a signing key is present, streams are served behind a
+    /// `Terminal(Membrane)` auth gate — remote peers must `login(signer)` to
+    /// obtain the kernel's capability surface.  Without a signing key
+    /// (ephemeral node), the raw membrane is served directly.
     pub async fn spawn_serving(self, control: libp2p_stream::Control) -> Result<SpawnResult> {
         self.spawn_rpc_inner(Some(control)).await
     }
@@ -402,6 +403,9 @@ impl Cell {
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
         let content_store = self.content_store.clone();
         let signing_key = self.signing_key.take();
+        // Clone before build_membrane_rpc consumes it — we need it for the
+        // Terminal-gated network accept loop.
+        let terminal_signing_key = signing_key.clone();
         let pre_epoch_rx = self.epoch_rx.take();
         let initial_epoch = self.initial_epoch.clone().unwrap_or(Epoch {
             seq: 0,
@@ -450,7 +454,16 @@ impl Cell {
 
         if let Some(control) = stream_control {
             let membrane = guest_membrane.clone();
-            local.spawn_local(accept_capnp_streams(control, membrane));
+            match terminal_signing_key {
+                Some(sk) => {
+                    local.spawn_local(accept_terminal_streams(control, membrane, sk));
+                }
+                None => {
+                    // No signing key (ephemeral node) — serve raw membrane without
+                    // Terminal auth gate.  Remote peers get full capabilities.
+                    local.spawn_local(accept_capnp_streams(control, membrane));
+                }
+            }
         }
 
         let exit_code = local
@@ -500,5 +513,52 @@ async fn serve_one_capnp_stream(stream: libp2p::Stream, membrane: GuestMembrane)
     let (reader, writer) = Box::pin(stream).split();
     let network = VatNetwork::new(reader, writer, Side::Server, Default::default());
     let rpc_system = RpcSystem::new(Box::new(network), Some(membrane.client));
+    let _ = rpc_system.await;
+}
+
+/// Accept incoming libp2p streams on `/ww/0.1.0` and serve each behind a
+/// `Terminal(Membrane)` auth gate.  Remote peers must call `login(signer)` with
+/// the host's verifying key to obtain the guest's exported membrane.
+async fn accept_terminal_streams(
+    mut control: libp2p_stream::Control,
+    membrane: GuestMembrane,
+    signing_key: Arc<SigningKey>,
+) {
+    let mut incoming = match control.accept(CAPNP_PROTOCOL) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("failed to register terminal stream handler: {}", e);
+            return;
+        }
+    };
+    let vk = *signing_key.verifying_key();
+    tracing::info!(protocol = %CAPNP_PROTOCOL, "Accepting Terminal-gated streams");
+    use futures::StreamExt;
+    while let Some((peer_id, stream)) = incoming.next().await {
+        tracing::debug!(%peer_id, "Terminal stream accepted");
+        let m = membrane.clone();
+        tokio::task::spawn_local(serve_one_terminal_stream(stream, m, vk));
+    }
+}
+
+/// Serve a single libp2p stream behind a Terminal auth gate.  The remote peer
+/// bootstraps a `Terminal<membrane::Owned>` and must `login(signer)` to receive
+/// the underlying membrane.
+async fn serve_one_terminal_stream(
+    stream: libp2p::Stream,
+    membrane: GuestMembrane,
+    vk: k256::ecdsa::VerifyingKey,
+) {
+    use futures::AsyncReadExt;
+    use membrane::stem_capnp;
+    use membrane::TerminalServer;
+
+    let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(vk, membrane);
+    let terminal_client: stem_capnp::terminal::Client<stem_capnp::membrane::Owned> =
+        capnp_rpc::new_client(terminal);
+
+    let (reader, writer) = Box::pin(stream).split();
+    let network = VatNetwork::new(reader, writer, Side::Server, Default::default());
+    let rpc_system = RpcSystem::new(Box::new(network), Some(terminal_client.client));
     let _ = rpc_system.await;
 }

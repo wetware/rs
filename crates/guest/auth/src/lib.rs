@@ -15,6 +15,8 @@
 pub enum SigningDomain {
     /// Challenge-response domain for `Membrane::graft`.
     MembraneGraft,
+    /// Challenge-response domain for `Terminal::login`.
+    TerminalLogin,
 }
 
 impl SigningDomain {
@@ -22,6 +24,7 @@ impl SigningDomain {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MembraneGraft => "ww-membrane-graft",
+            Self::TerminalLogin => "ww-terminal-login",
         }
     }
 
@@ -29,6 +32,7 @@ impl SigningDomain {
     pub fn payload_type(self) -> &'static [u8] {
         match self {
             Self::MembraneGraft => b"/ww/membrane/graft-nonce",
+            Self::TerminalLogin => b"/ww/terminal/login-nonce",
         }
     }
 
@@ -36,6 +40,7 @@ impl SigningDomain {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "ww-membrane-graft" => Some(Self::MembraneGraft),
+            "ww-terminal-login" => Some(Self::TerminalLogin),
             _ => None,
         }
     }

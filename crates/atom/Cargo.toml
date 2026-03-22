@@ -29,6 +29,8 @@ k256 = { version = "0.13", features = ["ecdsa"] }
 rlp = "0.5"
 auth = { path = "../guest/auth" }
 tokio-test = "0.4"
+tokio-util = { version = "0.7", features = ["compat"] }
+futures = "0.3"
 
 [[example]]
 name = "atom_indexer"
