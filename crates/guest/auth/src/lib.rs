@@ -2,47 +2,62 @@
 //!
 //! Zero-dependency crate usable from both the host binary and WASM guests.
 
-/// Signing domain for libp2p `SignedEnvelope` operations.
+/// Domain separator for challenge-response signing.
 ///
-/// New domains must be added here explicitly, keeping the set finite and auditable.
+/// Each signing context gets its own domain so that a signature produced
+/// for one purpose (e.g. Terminal login for a Membrane) cannot be replayed
+/// in another context (e.g. Terminal login for a Wallet).
+///
+/// Well-known domains are available via factory methods. User-defined
+/// domains can be created with [`SigningDomain::new`].
 ///
 /// # Wire format
 ///
 /// The domain string is carried over Cap'n Proto RPC as `Text` (UTF-8).
-/// Use [`SigningDomain::as_str`] to get the canonical wire form and
-/// [`SigningDomain::parse`] to validate an incoming domain string.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SigningDomain {
-    /// Challenge-response domain for `Membrane::graft`.
-    MembraneGraft,
-    /// Challenge-response domain for `Terminal::login`.
-    TerminalLogin,
+/// Use [`SigningDomain::as_str`] to get the wire form.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SigningDomain {
+    domain: String,
+    payload_type: String,
 }
 
 impl SigningDomain {
-    /// Canonical libp2p signed-envelope domain string.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::MembraneGraft => "ww-membrane-graft",
-            Self::TerminalLogin => "ww-terminal-login",
+    /// Create a signing domain.
+    ///
+    /// `domain` is the libp2p signed-envelope domain string (e.g. `"ww-terminal-membrane"`).
+    /// The payload type is derived deterministically as `"/{domain}/nonce"`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `domain` is empty.
+    pub fn new(domain: impl Into<String>) -> Self {
+        let domain = domain.into();
+        assert!(!domain.is_empty(), "signing domain must not be empty");
+        let payload_type = format!("/{domain}/nonce");
+        Self {
+            domain,
+            payload_type,
         }
     }
 
-    /// Payload type for the libp2p signed envelope.
-    pub fn payload_type(self) -> &'static [u8] {
-        match self {
-            Self::MembraneGraft => b"/ww/membrane/graft-nonce",
-            Self::TerminalLogin => b"/ww/terminal/login-nonce",
-        }
+    /// Terminal login guarding a Membrane capability.
+    pub fn terminal_membrane() -> Self {
+        Self::new("ww-terminal-membrane")
     }
 
-    /// Parse from the wire domain string.  Returns `None` for unknown domains.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "ww-membrane-graft" => Some(Self::MembraneGraft),
-            "ww-terminal-login" => Some(Self::TerminalLogin),
-            _ => None,
-        }
+    /// Legacy domain for direct Membrane graft signing (pre-Terminal).
+    pub fn membrane_graft() -> Self {
+        Self::new("ww-membrane-graft")
+    }
+
+    /// The domain string for wire transmission.
+    pub fn as_str(&self) -> &str {
+        &self.domain
+    }
+
+    /// The payload type bytes for the signed envelope.
+    pub fn payload_type(&self) -> &[u8] {
+        self.payload_type.as_bytes()
     }
 
     /// Construct the domain-separated signing buffer for the given payload.
@@ -55,9 +70,9 @@ impl SigningDomain {
     ///
     /// Both the kernel signer and the host verifier must produce identical
     /// buffers for the same `(domain, payload)` pair.
-    pub fn signing_buffer(self, payload: &[u8]) -> Vec<u8> {
-        let domain = self.as_str().as_bytes();
-        let payload_type = self.payload_type();
+    pub fn signing_buffer(&self, payload: &[u8]) -> Vec<u8> {
+        let domain = self.domain.as_bytes();
+        let payload_type = self.payload_type.as_bytes();
         let mut buf = Vec::with_capacity(
             varint_len(domain.len())
                 + domain.len()
@@ -104,25 +119,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signing_buffer_membrane_graft_structure() {
+    fn signing_buffer_terminal_membrane_structure() {
         let nonce: u64 = 0x0102030405060708;
-        let buf = SigningDomain::MembraneGraft.signing_buffer(&nonce.to_be_bytes());
+        let buf = SigningDomain::terminal_membrane().signing_buffer(&nonce.to_be_bytes());
 
-        // Expected layout:
-        //   varint(17) "ww-membrane-graft"     (17 bytes)
-        //   varint(24) "/ww/membrane/graft-nonce"  (24 bytes)
-        //   varint(8)  <8-byte nonce>
-        let domain = b"ww-membrane-graft";
-        let payload_type = b"/ww/membrane/graft-nonce";
-        assert_eq!(domain.len(), 17);
-        assert_eq!(payload_type.len(), 24);
+        let domain = b"ww-terminal-membrane";
+        let payload_type = b"/ww-terminal-membrane/nonce";
 
         let mut expected = Vec::new();
-        expected.push(17u8); // varint(17)
+        push_varint(domain.len(), &mut expected);
         expected.extend_from_slice(domain);
-        expected.push(24u8); // varint(24)
+        push_varint(payload_type.len(), &mut expected);
         expected.extend_from_slice(payload_type);
-        expected.push(8u8); // varint(8)
+        push_varint(8, &mut expected);
         expected.extend_from_slice(&nonce.to_be_bytes());
 
         assert_eq!(buf, expected);
@@ -131,9 +140,31 @@ mod tests {
     #[test]
     fn signing_buffer_deterministic() {
         let payload = b"test-payload";
-        let a = SigningDomain::MembraneGraft.signing_buffer(payload);
-        let b = SigningDomain::MembraneGraft.signing_buffer(payload);
+        let domain = SigningDomain::terminal_membrane();
+        let a = domain.signing_buffer(payload);
+        let b = domain.signing_buffer(payload);
         assert_eq!(a, b, "same inputs must produce identical buffers");
+    }
+
+    #[test]
+    fn different_domains_produce_different_buffers() {
+        let payload = b"test-payload";
+        let a = SigningDomain::terminal_membrane().signing_buffer(payload);
+        let b = SigningDomain::membrane_graft().signing_buffer(payload);
+        assert_ne!(a, b, "different domains must produce different buffers");
+    }
+
+    #[test]
+    fn custom_domain() {
+        let domain = SigningDomain::new("ww-terminal-wallet");
+        assert_eq!(domain.as_str(), "ww-terminal-wallet");
+        assert_eq!(domain.payload_type(), b"/ww-terminal-wallet/nonce");
+    }
+
+    #[test]
+    #[should_panic(expected = "signing domain must not be empty")]
+    fn empty_domain_panics() {
+        SigningDomain::new("");
     }
 
     #[test]

@@ -32,7 +32,8 @@ impl stem_capnp::signer::Server for TestSigner {
         mut results: stem_capnp::signer::SignResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let nonce = capnp_rpc::pry!(params.get()).get_nonce();
-        let signing_buffer = SigningDomain::TerminalLogin.signing_buffer(&nonce.to_be_bytes());
+        let signing_buffer =
+            SigningDomain::terminal_membrane().signing_buffer(&nonce.to_be_bytes());
 
         use k256::ecdsa::signature::Signer;
         let signature: k256::ecdsa::Signature = self.sk.sign(&signing_buffer);
@@ -61,7 +62,9 @@ fn terminal_membrane(
 ) -> stem_capnp::terminal::Client<stem_capnp::membrane::Owned> {
     let membrane = stub_membrane(rx);
     new_client(TerminalServer::<stem_capnp::membrane::Owned>::new(
-        vk, membrane,
+        vk,
+        membrane,
+        SigningDomain::terminal_membrane(),
     ))
 }
 
@@ -446,7 +449,11 @@ async fn test_terminal_over_stream_pair() {
     let (_tx, rx) = watch::channel(epoch);
     let membrane = full_stub_membrane(rx);
 
-    let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(vk, membrane);
+    let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(
+        vk,
+        membrane,
+        SigningDomain::terminal_membrane(),
+    );
     let terminal_client: stem_capnp::terminal::Client<stem_capnp::membrane::Owned> =
         new_client(terminal);
 
@@ -538,7 +545,11 @@ async fn test_terminal_over_stream_wrong_key_rejected() {
     let (_tx, rx) = watch::channel(epoch);
     let membrane = full_stub_membrane(rx);
 
-    let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(host_vk, membrane);
+    let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(
+        host_vk,
+        membrane,
+        SigningDomain::terminal_membrane(),
+    );
     let terminal_client: stem_capnp::terminal::Client<stem_capnp::membrane::Owned> =
         new_client(terminal);
 
