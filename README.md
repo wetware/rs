@@ -42,9 +42,16 @@ Capabilities:
   (host addrs)                   Listen addresses
   (host peers)                   Connected peers
   (host connect "<multiaddr>")   Dial a peer
+
   (executor echo "<msg>")        Diagnostic echo
-  (ipfs cat "<path>")            Fetch IPFS content
+  (executor run <wasm> :env {})  Spawn foreground process
+
+  (ipfs cat "<path>")            Fetch IPFS content (bytes)
   (ipfs ls "<path>")             List IPFS directory
+
+  (routing provide "<name>")     Announce to DHT (hashes internally)
+  (routing find "<name>" [:count N])  Discover providers (default 20)
+  (routing hash "<data>")        Hash data to CID
 
 Built-ins:
   (cd "<path>")                  Change working directory
@@ -54,7 +61,7 @@ Built-ins:
 Unrecognized commands are looked up in PATH (default /bin).
 
 / ❯ (host id)
-"00240801122025c7ea..."
+"12D3KooWAbcDef..."
 / ❯ (exit)
 ```
 

@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bs58 = "0.5"
 capnp = "0.23.2"
+capnp-rpc = "0.23.0"
 log = "0.4.29"
+multiaddr = "0.18"
 wasip2 = "1.0.2"
 hex = "0.4"
 glia = { path = "../glia" }
