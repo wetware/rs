@@ -96,3 +96,103 @@ impl<F: GraftBuilder> stem_capnp::membrane::Server for MembraneServer<F> {
 pub fn membrane_client(receiver: watch::Receiver<Epoch>) -> stem_capnp::membrane::Client {
     new_client(MembraneServer::new(receiver, NoExtension))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_epoch(seq: u64) -> Epoch {
+        Epoch {
+            seq,
+            head: vec![0xAB, 0xCD],
+            adopted_block: 42,
+        }
+    }
+
+    #[test]
+    fn membrane_server_constructs_with_no_extension() {
+        let (_tx, rx) = watch::channel(test_epoch(1));
+        let server = MembraneServer::new(rx, NoExtension);
+        let epoch = server.get_current_epoch();
+        assert_eq!(epoch.seq, 1);
+        assert_eq!(epoch.head, vec![0xAB, 0xCD]);
+        assert_eq!(epoch.adopted_block, 42);
+    }
+
+    #[test]
+    fn membrane_server_tracks_epoch_updates() {
+        let (tx, rx) = watch::channel(test_epoch(1));
+        let server = MembraneServer::new(rx, NoExtension);
+        assert_eq!(server.get_current_epoch().seq, 1);
+
+        tx.send(test_epoch(2)).unwrap();
+        assert_eq!(server.get_current_epoch().seq, 2);
+
+        tx.send(test_epoch(5)).unwrap();
+        assert_eq!(server.get_current_epoch().seq, 5);
+    }
+
+    /// Custom GraftBuilder that records whether build() was called.
+    struct RecordingBuilder {
+        called: std::cell::Cell<bool>,
+    }
+
+    impl GraftBuilder for RecordingBuilder {
+        fn build(
+            &self,
+            _guard: &EpochGuard,
+            _builder: stem_capnp::membrane::graft_results::Builder<'_>,
+        ) -> Result<(), capnp::Error> {
+            self.called.set(true);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn membrane_server_constructs_with_custom_graft_builder() {
+        let (_tx, rx) = watch::channel(test_epoch(1));
+        let builder = RecordingBuilder {
+            called: std::cell::Cell::new(false),
+        };
+        let _server = MembraneServer::new(rx, builder);
+        // Construction succeeds — GraftBuilder is stored, not yet invoked.
+    }
+
+    /// GraftBuilder that always fails.
+    struct FailingBuilder;
+
+    impl GraftBuilder for FailingBuilder {
+        fn build(
+            &self,
+            _guard: &EpochGuard,
+            _builder: stem_capnp::membrane::graft_results::Builder<'_>,
+        ) -> Result<(), capnp::Error> {
+            Err(capnp::Error::failed("intentional failure".into()))
+        }
+    }
+
+    #[test]
+    fn membrane_server_constructs_with_failing_builder() {
+        let (_tx, rx) = watch::channel(test_epoch(1));
+        let _server = MembraneServer::new(rx, FailingBuilder);
+    }
+
+    #[test]
+    fn membrane_client_constructs_without_panic() {
+        let (_tx, rx) = watch::channel(test_epoch(1));
+        let _client = membrane_client(rx);
+    }
+
+    #[test]
+    fn no_extension_build_succeeds() {
+        let (_tx, rx) = watch::channel(test_epoch(1));
+        let guard = EpochGuard {
+            issued_seq: 1,
+            receiver: rx,
+        };
+        let mut message = capnp::message::Builder::new_default();
+        let builder = message.init_root::<stem_capnp::membrane::graft_results::Builder<'_>>();
+        let result = NoExtension.build(&guard, builder);
+        assert!(result.is_ok());
+    }
+}

@@ -10,7 +10,7 @@ use atom::stem_capnp;
 use atom::{AtomIndexer, Epoch, IndexerConfig, MembraneServer, TerminalServer};
 use auth::SigningDomain;
 use capnp_rpc::new_client;
-use common::{deploy_atom, set_head, spawn_anvil, StubSessionBuilder};
+use common::{deploy_atom, set_head, spawn_anvil, FullStubSessionBuilder, StubSessionBuilder};
 use k256::ecdsa::SigningKey;
 use std::path::Path;
 use std::sync::Arc;
@@ -365,6 +365,111 @@ async fn test_terminal_missing_signer_rejected() {
         Err(e) => assert!(
             e.to_string().contains("missing signer"),
             "error should mention missing signer, got: {e}"
+        ),
+    }
+}
+
+/// Helper: create a Membrane client with all 5 capabilities populated.
+fn full_stub_membrane(rx: watch::Receiver<Epoch>) -> stem_capnp::membrane::Client {
+    new_client(MembraneServer::new(rx, FullStubSessionBuilder))
+}
+
+/// Verify that graft() returns all 5 capabilities: identity, host, executor, ipfs, routing.
+#[tokio::test]
+async fn test_graft_returns_all_five_capabilities() {
+    let epoch = Epoch {
+        seq: 1,
+        head: b"head".to_vec(),
+        adopted_block: 100,
+    };
+
+    let (_tx, rx) = watch::channel(epoch);
+    let membrane = full_stub_membrane(rx);
+
+    let graft_resp = membrane
+        .graft_request()
+        .send()
+        .promise
+        .await
+        .expect("graft RPC");
+    let results = graft_resp.get().expect("graft results");
+
+    // All 5 capability fields must be non-null.
+    results
+        .get_identity()
+        .expect("identity capability should be present");
+    results
+        .get_host()
+        .expect("host capability should be present");
+    results
+        .get_executor()
+        .expect("executor capability should be present");
+    results
+        .get_ipfs()
+        .expect("ipfs capability should be present");
+    results
+        .get_routing()
+        .expect("routing capability should be present");
+
+    // Verify executor actually works (echo).
+    let executor = results.get_executor().expect("executor");
+    let mut echo_req = executor.echo_request();
+    echo_req.get().set_message("all-caps");
+    let echo_resp = echo_req.send().promise.await.expect("echo RPC");
+    let response = echo_resp
+        .get()
+        .expect("echo results")
+        .get_response()
+        .expect("response");
+    assert_eq!(response.to_str().unwrap(), "pong");
+}
+
+/// Signer that returns malformed (non-k256) signature bytes.
+struct MalformedSigner;
+
+#[allow(refining_impl_trait)]
+impl stem_capnp::signer::Server for MalformedSigner {
+    fn sign(
+        self: capnp::capability::Rc<Self>,
+        _params: stem_capnp::signer::SignParams,
+        mut results: stem_capnp::signer::SignResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        // 64 bytes of 0xFF is not a valid secp256k1 ECDSA signature.
+        results.get().set_sig(&[0xFF; 64]);
+        capnp::capability::Promise::ok(())
+    }
+}
+
+/// Terminal should reject login when the signer returns malformed signature bytes.
+#[tokio::test]
+async fn test_terminal_malformed_signature_rejected() {
+    let epoch = Epoch {
+        seq: 1,
+        head: b"head".to_vec(),
+        adopted_block: 100,
+    };
+
+    let sk = SigningKey::random(&mut rand::thread_rng());
+    let vk = *sk.verifying_key();
+
+    let (_tx, rx) = watch::channel(epoch);
+    let terminal = terminal_membrane(rx, vk);
+    let signer_client: stem_capnp::signer::Client = new_client(MalformedSigner);
+
+    let mut login_req = terminal.login_request();
+    login_req.get().set_signer(signer_client);
+
+    match login_req.send().promise.await {
+        Ok(resp) => match resp.get() {
+            Ok(_) => panic!("login should fail with malformed signature"),
+            Err(e) => assert!(
+                e.to_string().contains("invalid signature encoding"),
+                "error should mention invalid signature encoding, got: {e}"
+            ),
+        },
+        Err(e) => assert!(
+            e.to_string().contains("invalid signature encoding"),
+            "error should mention invalid signature encoding, got: {e}"
         ),
     }
 }

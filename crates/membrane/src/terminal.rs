@@ -90,3 +90,41 @@ where
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k256::ecdsa::SigningKey;
+
+    #[test]
+    fn terminal_server_constructs_with_membrane_owned() {
+        let sk = SigningKey::random(&mut rand::thread_rng());
+        let vk = *sk.verifying_key();
+
+        // Build a null membrane client to use as session.
+        let (_tx, rx) = tokio::sync::watch::channel(crate::epoch::Epoch {
+            seq: 1,
+            head: vec![],
+            adopted_block: 0,
+        });
+        let membrane: stem_capnp::membrane::Client = crate::membrane::membrane_client(rx);
+
+        let _terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(vk, membrane);
+    }
+
+    #[test]
+    fn terminal_server_verifying_key_is_stored() {
+        let sk = SigningKey::random(&mut rand::thread_rng());
+        let vk = *sk.verifying_key();
+
+        let (_tx, rx) = tokio::sync::watch::channel(crate::epoch::Epoch {
+            seq: 1,
+            head: vec![],
+            adopted_block: 0,
+        });
+        let membrane: stem_capnp::membrane::Client = crate::membrane::membrane_client(rx);
+
+        let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(vk, membrane);
+        assert_eq!(terminal.verifying_key, vk);
+    }
+}
