@@ -14,6 +14,7 @@ use capnp::capability::Promise;
 use capnp::Error;
 use capnp_rpc::pry;
 use k256::ecdsa::VerifyingKey;
+use libp2p_core::SignedEnvelope;
 
 /// Authentication gate that guards access to a capability via challenge-response.
 ///
@@ -24,8 +25,10 @@ use k256::ecdsa::VerifyingKey;
 ///
 /// 1. Caller sends `login(signer)` request
 /// 2. Terminal generates a random nonce, sends `signer.sign(nonce)`
-/// 3. Terminal verifies the signature against its `verifying_key`
-/// 4. On success, returns the guarded `session` capability
+/// 3. Signer returns a libp2p `SignedEnvelope` (RFC 0002) containing the nonce
+/// 4. Terminal decodes the envelope, verifies the signature + domain + nonce,
+///    and checks the signing key matches the expected `verifying_key`
+/// 5. On success, returns the guarded `session` capability
 pub struct TerminalServer<Session: capnp::traits::Owned> {
     verifying_key: VerifyingKey,
     session: <Session as capnp::traits::Owned>::Reader<'static>,
@@ -83,15 +86,33 @@ where
             let sign_resp = sign_req.send().promise.await?;
             let sig_bytes = sign_resp.get()?.get_sig()?;
 
-            // Reconstruct the domain-separated signing buffer and verify.
-            let signing_buffer = domain.signing_buffer(&nonce.to_be_bytes());
-            let signature = k256::ecdsa::Signature::from_slice(sig_bytes)
-                .map_err(|e| Error::failed(format!("invalid signature encoding: {e}")))?;
+            // Decode the libp2p SignedEnvelope (RFC 0002).
+            let envelope = SignedEnvelope::from_protobuf_encoding(sig_bytes)
+                .map_err(|e| Error::failed(format!("invalid signed envelope: {e}")))?;
 
-            use k256::ecdsa::signature::Verifier;
-            vk.verify(&signing_buffer, &signature).map_err(|_| {
-                Error::failed("login auth failed: signature verification failed".into())
-            })?;
+            // Verify signature and extract payload + signing key.
+            // This checks domain separation and payload type in one step.
+            let (payload, pubkey) = envelope
+                .payload_and_signing_key(domain.as_str().to_string(), domain.payload_type())
+                .map_err(|e| Error::failed(format!("login auth failed: {e}")))?;
+
+            // Check the nonce matches our challenge.
+            let expected_payload = nonce.to_be_bytes();
+            if payload != expected_payload {
+                return Err(Error::failed("login auth failed: nonce mismatch".into()));
+            }
+
+            // Check the signing key matches the expected verifying key.
+            let envelope_secp = pubkey
+                .clone()
+                .try_into_secp256k1()
+                .map_err(|_| Error::failed("login auth failed: not a secp256k1 key".into()))?;
+            let expected_bytes = vk.to_encoded_point(true);
+            if envelope_secp.to_bytes() != expected_bytes.as_bytes() {
+                return Err(Error::failed(
+                    "login auth failed: signing key does not match expected identity".into(),
+                ));
+            }
 
             results.get().set_session(session)?;
             Ok(())

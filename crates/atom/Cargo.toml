@@ -26,6 +26,8 @@ capnp-rpc = "0.23.0"
 
 [dev-dependencies]
 k256 = { version = "0.13", features = ["ecdsa"] }
+libp2p-core = "0.43"
+libp2p-identity = { version = "0.2", features = ["secp256k1"] }
 rlp = "0.5"
 auth = { path = "../guest/auth" }
 tokio-test = "0.4"
