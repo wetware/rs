@@ -3400,11 +3400,14 @@ dependencies = [
 name = "kernel"
 version = "0.1.0"
 dependencies = [
+ "bs58",
  "capnp",
+ "capnp-rpc",
  "capnpc",
  "glia",
  "hex",
  "log",
+ "multiaddr 0.18.2",
  "system",
  "wasip2",
 ]

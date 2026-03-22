@@ -202,7 +202,7 @@ async fn eval_host(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
                 .map_err(|e| e.to_string())?
                 .get_peer_id()
                 .map_err(|e| e.to_string())?;
-            Ok(Val::Str(hex::encode(id)))
+            Ok(Val::Str(bs58::encode(id).into_string()))
         }
         "addrs" => {
             let resp = ctx
@@ -222,8 +222,8 @@ async fn eval_host(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
                     addrs
                         .get(i)
                         .ok()
-                        .and_then(|d| String::from_utf8(d.to_vec()).ok())
-                        .map(Val::Str)
+                        .and_then(|d| multiaddr::Multiaddr::try_from(d.to_vec()).ok())
+                        .map(|m| Val::Str(m.to_string()))
                 })
                 .collect();
             Ok(Val::List(items))
@@ -244,17 +244,24 @@ async fn eval_host(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
             let items: Vec<Val> = (0..peers.len())
                 .filter_map(|i| {
                     let peer = peers.get(i);
-                    let id = peer.get_peer_id().ok().map(hex::encode)?;
+                    let id = peer
+                        .get_peer_id()
+                        .ok()
+                        .map(|b| bs58::encode(b).into_string())?;
                     let addrs = peer.get_addrs().ok()?;
-                    let mut entry = vec![Val::Str(id)];
-                    for j in 0..addrs.len() {
-                        if let Ok(a) = addrs.get(j) {
-                            if let Ok(s) = String::from_utf8(a.to_vec()) {
-                                entry.push(Val::Str(s));
-                            }
-                        }
-                    }
-                    Some(Val::List(entry))
+                    let addr_vals: Vec<Val> = (0..addrs.len())
+                        .filter_map(|j| {
+                            addrs
+                                .get(j)
+                                .ok()
+                                .and_then(|a| multiaddr::Multiaddr::try_from(a.to_vec()).ok())
+                                .map(|m| Val::Str(m.to_string()))
+                        })
+                        .collect();
+                    Some(Val::Map(vec![
+                        (Val::Keyword("peer-id".into()), Val::Str(id)),
+                        (Val::Keyword("addrs".into()), Val::List(addr_vals)),
+                    ]))
                 })
                 .collect();
             Ok(Val::List(items))
@@ -475,6 +482,56 @@ async fn eval_ipfs(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
     }
 }
 
+/// Hash a name to a CID via the host's routing.hash() RPC.
+async fn routing_hash(
+    routing: &routing_capnp::routing::Client,
+    name: &str,
+) -> Result<String, String> {
+    let mut req = routing.hash_request();
+    req.get().set_data(name.as_bytes());
+    let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+    resp.get()
+        .map_err(|e| e.to_string())?
+        .get_key()
+        .map_err(|e| e.to_string())?
+        .to_str()
+        .map(|s| s.to_string())
+        .map_err(|e| e.to_string())
+}
+
+/// ProviderSink that collects streamed results into a channel.
+/// The guest is single-threaded WASM — the capnp-rpc event loop
+/// dispatches all provider() and done() callbacks before findProviders
+/// resolves, so try_recv() on the consumer side drains the full result set.
+struct CollectorSink {
+    tx: std::sync::mpsc::Sender<(Vec<u8>, Vec<Vec<u8>>)>,
+}
+
+impl routing_capnp::provider_sink::Server for CollectorSink {
+    async fn provider(
+        self: capnp::capability::Rc<Self>,
+        params: routing_capnp::provider_sink::ProviderParams,
+    ) -> Result<(), capnp::Error> {
+        let reader = params.get()?;
+        let info = reader.get_info()?;
+        let peer_id = info.get_peer_id()?.to_vec();
+        let addrs_reader = info.get_addrs()?;
+        let addrs: Vec<Vec<u8>> = (0..addrs_reader.len())
+            .filter_map(|i| addrs_reader.get(i).ok().map(|a| a.to_vec()))
+            .collect();
+        let _ = self.tx.send((peer_id, addrs));
+        Ok(())
+    }
+
+    async fn done(
+        self: capnp::capability::Rc<Self>,
+        _params: routing_capnp::provider_sink::DoneParams,
+        _results: routing_capnp::provider_sink::DoneResults,
+    ) -> Result<(), capnp::Error> {
+        Ok(())
+    }
+}
+
 async fn eval_routing(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
     let method = match args.first() {
         Some(Val::Sym(s)) => s.as_str(),
@@ -482,18 +539,73 @@ async fn eval_routing(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
     };
     match method {
         "provide" => {
-            // (routing provide "key")
-            let key = match args.get(1) {
+            // (routing provide "name") — hashes internally, then announces to DHT.
+            let name = match args.get(1) {
                 Some(Val::Str(s)) => s.clone(),
-                _ => return Err("(routing provide \"<key>\")".into()),
+                _ => return Err("(routing provide \"<name>\")".into()),
             };
+            let cid = routing_hash(&ctx.routing, &name).await?;
             let mut req = ctx.routing.provide_request();
-            req.get().set_key(&key);
+            req.get().set_key(&cid);
             req.send().promise.await.map_err(|e| e.to_string())?;
             Ok(Val::Nil)
         }
+        "find" => {
+            // (routing find "name")            — default count 20
+            // (routing find "name" :count 5)   — override count
+            let name = match args.get(1) {
+                Some(Val::Str(s)) => s.clone(),
+                _ => return Err("(routing find \"<name>\" [:count N])".into()),
+            };
+            // Parse optional :count keyword.
+            // Positive value = limit; zero or negative = no limit (u32::MAX).
+            let mut count: u32 = 20;
+            let mut i = 2;
+            while i < args.len() {
+                if let Val::Keyword(k) = &args[i] {
+                    if k == "count" {
+                        i += 1;
+                        if let Some(Val::Int(n)) = args.get(i) {
+                            count = if *n <= 0 { u32::MAX } else { *n as u32 };
+                        }
+                    }
+                }
+                i += 1;
+            }
+
+            let cid = routing_hash(&ctx.routing, &name).await?;
+
+            // Create a CollectorSink to receive streamed providers.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let sink: routing_capnp::provider_sink::Client =
+                capnp_rpc::new_client(CollectorSink { tx });
+
+            let mut req = ctx.routing.find_providers_request();
+            req.get().set_key(&cid);
+            req.get().set_count(count);
+            req.get().set_sink(sink);
+            req.send().promise.await.map_err(|e| e.to_string())?;
+
+            // Collect results from the channel. Single-threaded capnp-rpc
+            // guarantees all provider() callbacks complete before findProviders
+            // resolves, so try_recv() drains the full result set.
+            let mut providers = Vec::new();
+            while let Ok((peer_id, addrs)) = rx.try_recv() {
+                let id_str = bs58::encode(&peer_id).into_string();
+                let addr_vals: Vec<Val> = addrs
+                    .into_iter()
+                    .filter_map(|a| multiaddr::Multiaddr::try_from(a).ok())
+                    .map(|m| Val::Str(m.to_string()))
+                    .collect();
+                providers.push(Val::Map(vec![
+                    (Val::Keyword("peer-id".into()), Val::Str(id_str)),
+                    (Val::Keyword("addrs".into()), Val::List(addr_vals)),
+                ]));
+            }
+            Ok(Val::List(providers))
+        }
         "hash" => {
-            // (routing hash "data")
+            // (routing hash "data") — exposed for advanced use; provide hashes internally.
             let data = match args.get(1) {
                 Some(Val::Str(s)) => s.as_bytes().to_vec(),
                 Some(Val::Bytes(b)) => b.clone(),
@@ -612,7 +724,8 @@ Capabilities:
   (ipfs cat \"<path>\")            Fetch IPFS content (bytes)
   (ipfs ls \"<path>\")             List IPFS directory
 
-  (routing provide \"<key>\")      Announce to DHT
+  (routing provide \"<name>\")      Announce to DHT (hashes internally)
+  (routing find \"<name>\" [:count N])  Discover providers (default 20)
   (routing hash \"<data>\")        Hash data to CID
 
 Built-ins:
