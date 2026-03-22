@@ -32,7 +32,7 @@ impl stem_capnp::signer::Server for TestSigner {
         mut results: stem_capnp::signer::SignResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let nonce = capnp_rpc::pry!(params.get()).get_nonce();
-        let signing_buffer = SigningDomain::MembraneGraft.signing_buffer(&nonce.to_be_bytes());
+        let signing_buffer = SigningDomain::TerminalLogin.signing_buffer(&nonce.to_be_bytes());
 
         use k256::ecdsa::signature::Signer;
         let signature: k256::ecdsa::Signature = self.sk.sign(&signing_buffer);

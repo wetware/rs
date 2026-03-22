@@ -76,7 +76,7 @@ where
             let sig_bytes = sign_resp.get()?.get_sig()?;
 
             // Reconstruct the domain-separated signing buffer and verify.
-            let signing_buffer = SigningDomain::MembraneGraft.signing_buffer(&nonce.to_be_bytes());
+            let signing_buffer = SigningDomain::TerminalLogin.signing_buffer(&nonce.to_be_bytes());
             let signature = k256::ecdsa::Signature::from_slice(sig_bytes)
                 .map_err(|e| Error::failed(format!("invalid signature encoding: {e}")))?;
 
