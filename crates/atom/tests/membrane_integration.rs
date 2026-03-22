@@ -424,6 +424,173 @@ async fn test_graft_returns_all_five_capabilities() {
     assert_eq!(response.to_str().unwrap(), "pong");
 }
 
+/// Test Terminal-gated Membrane over a VatNetwork stream pair (simulates the
+/// libp2p `/ww/0.1.0` path from `serve_one_terminal_stream` in executor.rs).
+///
+/// Server side: bootstrap = Terminal(Membrane).
+/// Client side: bootstrap Terminal → login(signer) → get Membrane → graft → echo.
+#[tokio::test]
+async fn test_terminal_over_stream_pair() {
+    use capnp_rpc::rpc_twoparty_capnp::Side;
+    use capnp_rpc::twoparty::VatNetwork;
+    use capnp_rpc::RpcSystem;
+    use futures::AsyncReadExt;
+
+    let epoch = Epoch {
+        seq: 1,
+        head: b"head".to_vec(),
+        adopted_block: 100,
+    };
+    let sk = SigningKey::random(&mut rand::thread_rng());
+    let vk = *sk.verifying_key();
+    let (_tx, rx) = watch::channel(epoch);
+    let membrane = full_stub_membrane(rx);
+
+    let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(vk, membrane);
+    let terminal_client: stem_capnp::terminal::Client<stem_capnp::membrane::Owned> =
+        new_client(terminal);
+
+    let (client_stream, server_stream) = tokio::io::duplex(4096);
+
+    // RpcSystem is !Send, so we need a LocalSet.
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            let (sr, sw) =
+                tokio_util::compat::TokioAsyncReadCompatExt::compat(server_stream).split();
+            let server_network = VatNetwork::new(sr, sw, Side::Server, Default::default());
+            let server_rpc = RpcSystem::new(Box::new(server_network), Some(terminal_client.client));
+
+            let (cr, cw) =
+                tokio_util::compat::TokioAsyncReadCompatExt::compat(client_stream).split();
+            let client_network = VatNetwork::new(cr, cw, Side::Client, Default::default());
+            let mut client_rpc =
+                RpcSystem::new(Box::new(client_network), None::<capnp::capability::Client>);
+            let remote_terminal: stem_capnp::terminal::Client<stem_capnp::membrane::Owned> =
+                client_rpc.bootstrap(Side::Server);
+
+            tokio::task::spawn_local(async move {
+                let _ = server_rpc.await;
+            });
+            tokio::task::spawn_local(async move {
+                let _ = client_rpc.await;
+            });
+
+            // Login with correct signer → get Membrane → graft → echo.
+            let signer_client: stem_capnp::signer::Client = new_client(TestSigner { sk });
+            let mut login_req = remote_terminal.login_request();
+            login_req.get().set_signer(signer_client);
+
+            let login_resp = timeout(Duration::from_secs(5), login_req.send().promise)
+                .await
+                .expect("login timed out")
+                .expect("login RPC");
+
+            let remote_membrane: stem_capnp::membrane::Client = login_resp
+                .get()
+                .expect("login results")
+                .get_session()
+                .expect("session");
+
+            let graft_resp = timeout(
+                Duration::from_secs(5),
+                remote_membrane.graft_request().send().promise,
+            )
+            .await
+            .expect("graft timed out")
+            .expect("graft RPC");
+
+            let results = graft_resp.get().expect("graft results");
+            let executor = results.get_executor().expect("executor");
+            let mut echo_req = executor.echo_request();
+            echo_req.get().set_message("over-the-wire");
+            let echo_resp = timeout(Duration::from_secs(5), echo_req.send().promise)
+                .await
+                .expect("echo timed out")
+                .expect("echo RPC");
+            let response = echo_resp
+                .get()
+                .expect("echo results")
+                .get_response()
+                .expect("response");
+            assert_eq!(response.to_str().unwrap(), "pong");
+        })
+        .await;
+}
+
+/// Test that Terminal-over-stream rejects login with wrong key.
+#[tokio::test]
+async fn test_terminal_over_stream_wrong_key_rejected() {
+    use capnp_rpc::rpc_twoparty_capnp::Side;
+    use capnp_rpc::twoparty::VatNetwork;
+    use capnp_rpc::RpcSystem;
+    use futures::AsyncReadExt;
+
+    let epoch = Epoch {
+        seq: 1,
+        head: b"head".to_vec(),
+        adopted_block: 100,
+    };
+    let host_sk = SigningKey::random(&mut rand::thread_rng());
+    let host_vk = *host_sk.verifying_key();
+    let wrong_sk = SigningKey::random(&mut rand::thread_rng());
+
+    let (_tx, rx) = watch::channel(epoch);
+    let membrane = full_stub_membrane(rx);
+
+    let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(host_vk, membrane);
+    let terminal_client: stem_capnp::terminal::Client<stem_capnp::membrane::Owned> =
+        new_client(terminal);
+
+    let (client_stream, server_stream) = tokio::io::duplex(4096);
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            let (sr, sw) =
+                tokio_util::compat::TokioAsyncReadCompatExt::compat(server_stream).split();
+            let server_network = VatNetwork::new(sr, sw, Side::Server, Default::default());
+            let server_rpc = RpcSystem::new(Box::new(server_network), Some(terminal_client.client));
+
+            let (cr, cw) =
+                tokio_util::compat::TokioAsyncReadCompatExt::compat(client_stream).split();
+            let client_network = VatNetwork::new(cr, cw, Side::Client, Default::default());
+            let mut client_rpc =
+                RpcSystem::new(Box::new(client_network), None::<capnp::capability::Client>);
+            let remote_terminal: stem_capnp::terminal::Client<stem_capnp::membrane::Owned> =
+                client_rpc.bootstrap(Side::Server);
+
+            tokio::task::spawn_local(async move {
+                let _ = server_rpc.await;
+            });
+            tokio::task::spawn_local(async move {
+                let _ = client_rpc.await;
+            });
+
+            // Login with wrong key — should fail.
+            let signer_client: stem_capnp::signer::Client = new_client(TestSigner { sk: wrong_sk });
+            let mut login_req = remote_terminal.login_request();
+            login_req.get().set_signer(signer_client);
+
+            let result = timeout(Duration::from_secs(5), login_req.send().promise).await;
+            match result {
+                Ok(Ok(resp)) => match resp.get() {
+                    Ok(_) => panic!("login should fail with wrong key"),
+                    Err(e) => assert!(
+                        e.to_string().contains("signature verification failed"),
+                        "expected signature verification error, got: {e}"
+                    ),
+                },
+                Ok(Err(e)) => assert!(
+                    e.to_string().contains("signature verification failed"),
+                    "expected signature verification error, got: {e}"
+                ),
+                Err(_) => panic!("login timed out — expected auth failure"),
+            }
+        })
+        .await;
+}
+
 /// Signer that returns malformed (non-k256) signature bytes.
 struct MalformedSigner;
 
