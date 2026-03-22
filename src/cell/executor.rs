@@ -531,11 +531,12 @@ async fn accept_terminal_streams(
             return;
         }
     };
+    let vk = *signing_key.verifying_key();
     tracing::info!(protocol = %CAPNP_PROTOCOL, "Accepting Terminal-gated streams");
     use futures::StreamExt;
-    while let Some((_peer_id, stream)) = incoming.next().await {
+    while let Some((peer_id, stream)) = incoming.next().await {
+        tracing::debug!(%peer_id, "Terminal stream accepted");
         let m = membrane.clone();
-        let vk = *signing_key.verifying_key();
         tokio::task::spawn_local(serve_one_terminal_stream(stream, m, vk));
     }
 }
