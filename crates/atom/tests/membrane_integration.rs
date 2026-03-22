@@ -19,9 +19,21 @@ use tokio::sync::watch;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 
-/// Signer that produces real secp256k1 ECDSA signatures for Terminal challenge-response.
+/// Signer that produces libp2p SignedEnvelopes for Terminal challenge-response.
 struct TestSigner {
-    sk: SigningKey,
+    keypair: libp2p_identity::Keypair,
+}
+
+impl TestSigner {
+    fn from_k256(sk: &SigningKey) -> Self {
+        let mut sk_bytes = sk.to_bytes().to_vec();
+        let secp_secret = libp2p_identity::secp256k1::SecretKey::try_from_bytes(&mut sk_bytes)
+            .expect("valid key");
+        let secp_kp: libp2p_identity::secp256k1::Keypair = secp_secret.into();
+        Self {
+            keypair: secp_kp.into(),
+        }
+    }
 }
 
 #[allow(refining_impl_trait)]
@@ -32,11 +44,17 @@ impl stem_capnp::signer::Server for TestSigner {
         mut results: stem_capnp::signer::SignResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let nonce = capnp_rpc::pry!(params.get()).get_nonce();
-        let signing_buffer = SigningDomain::TerminalLogin.signing_buffer(&nonce.to_be_bytes());
+        let domain = SigningDomain::terminal_membrane();
 
-        use k256::ecdsa::signature::Signer;
-        let signature: k256::ecdsa::Signature = self.sk.sign(&signing_buffer);
-        results.get().set_sig(signature.to_bytes().as_slice());
+        let envelope = capnp_rpc::pry!(libp2p_core::SignedEnvelope::new(
+            &self.keypair,
+            domain.as_str().to_string(),
+            domain.payload_type().to_vec(),
+            nonce.to_be_bytes().to_vec(),
+        )
+        .map_err(|e| capnp::Error::failed(format!("signing failed: {e}"))));
+
+        results.get().set_sig(&envelope.into_protobuf_encoding());
         capnp::capability::Promise::ok(())
     }
 }
@@ -61,7 +79,9 @@ fn terminal_membrane(
 ) -> stem_capnp::terminal::Client<stem_capnp::membrane::Owned> {
     let membrane = stub_membrane(rx);
     new_client(TerminalServer::<stem_capnp::membrane::Owned>::new(
-        vk, membrane,
+        vk,
+        membrane,
+        SigningDomain::terminal_membrane(),
     ))
 }
 
@@ -140,7 +160,7 @@ async fn test_membrane_graft_echo_against_anvil() {
 
     let (tx, rx) = watch::channel(epoch1.clone());
     let terminal = terminal_membrane(rx, vk);
-    let signer_client: stem_capnp::signer::Client = new_client(TestSigner { sk });
+    let signer_client: stem_capnp::signer::Client = new_client(TestSigner::from_k256(&sk));
 
     // Login via Terminal → get Membrane → graft → echo → Ok
     let mut login_req = terminal.login_request();
@@ -317,7 +337,7 @@ async fn test_terminal_wrong_key_rejected() {
 
     let (_tx, rx) = watch::channel(epoch);
     let terminal = terminal_membrane(rx, vk_a);
-    let signer_client: stem_capnp::signer::Client = new_client(TestSigner { sk: sk_b });
+    let signer_client: stem_capnp::signer::Client = new_client(TestSigner::from_k256(&sk_b));
 
     let mut login_req = terminal.login_request();
     login_req.get().set_signer(signer_client);
@@ -326,13 +346,13 @@ async fn test_terminal_wrong_key_rejected() {
         Ok(resp) => match resp.get() {
             Ok(_) => panic!("login should fail with wrong key"),
             Err(e) => assert!(
-                e.to_string().contains("signature verification failed"),
-                "error should mention verification failure, got: {e}"
+                e.to_string().contains("login auth failed"),
+                "error should mention login auth failure, got: {e}"
             ),
         },
         Err(e) => assert!(
-            e.to_string().contains("signature verification failed"),
-            "error should mention verification failure, got: {e}"
+            e.to_string().contains("login auth failed"),
+            "error should mention login auth failure, got: {e}"
         ),
     }
 }
@@ -446,7 +466,11 @@ async fn test_terminal_over_stream_pair() {
     let (_tx, rx) = watch::channel(epoch);
     let membrane = full_stub_membrane(rx);
 
-    let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(vk, membrane);
+    let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(
+        vk,
+        membrane,
+        SigningDomain::terminal_membrane(),
+    );
     let terminal_client: stem_capnp::terminal::Client<stem_capnp::membrane::Owned> =
         new_client(terminal);
 
@@ -477,7 +501,7 @@ async fn test_terminal_over_stream_pair() {
             });
 
             // Login with correct signer → get Membrane → graft → echo.
-            let signer_client: stem_capnp::signer::Client = new_client(TestSigner { sk });
+            let signer_client: stem_capnp::signer::Client = new_client(TestSigner::from_k256(&sk));
             let mut login_req = remote_terminal.login_request();
             login_req.get().set_signer(signer_client);
 
@@ -538,7 +562,11 @@ async fn test_terminal_over_stream_wrong_key_rejected() {
     let (_tx, rx) = watch::channel(epoch);
     let membrane = full_stub_membrane(rx);
 
-    let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(host_vk, membrane);
+    let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(
+        host_vk,
+        membrane,
+        SigningDomain::terminal_membrane(),
+    );
     let terminal_client: stem_capnp::terminal::Client<stem_capnp::membrane::Owned> =
         new_client(terminal);
 
@@ -568,7 +596,8 @@ async fn test_terminal_over_stream_wrong_key_rejected() {
             });
 
             // Login with wrong key — should fail.
-            let signer_client: stem_capnp::signer::Client = new_client(TestSigner { sk: wrong_sk });
+            let signer_client: stem_capnp::signer::Client =
+                new_client(TestSigner::from_k256(&wrong_sk));
             let mut login_req = remote_terminal.login_request();
             login_req.get().set_signer(signer_client);
 
@@ -577,13 +606,13 @@ async fn test_terminal_over_stream_wrong_key_rejected() {
                 Ok(Ok(resp)) => match resp.get() {
                     Ok(_) => panic!("login should fail with wrong key"),
                     Err(e) => assert!(
-                        e.to_string().contains("signature verification failed"),
-                        "expected signature verification error, got: {e}"
+                        e.to_string().contains("login auth failed"),
+                        "expected login auth failure error, got: {e}"
                     ),
                 },
                 Ok(Err(e)) => assert!(
-                    e.to_string().contains("signature verification failed"),
-                    "expected signature verification error, got: {e}"
+                    e.to_string().contains("login auth failed"),
+                    "expected login auth failure error, got: {e}"
                 ),
                 Err(_) => panic!("login timed out — expected auth failure"),
             }
@@ -630,13 +659,13 @@ async fn test_terminal_malformed_signature_rejected() {
         Ok(resp) => match resp.get() {
             Ok(_) => panic!("login should fail with malformed signature"),
             Err(e) => assert!(
-                e.to_string().contains("invalid signature encoding"),
-                "error should mention invalid signature encoding, got: {e}"
+                e.to_string().contains("invalid signed envelope"),
+                "error should mention invalid signed envelope, got: {e}"
             ),
         },
         Err(e) => assert!(
-            e.to_string().contains("invalid signature encoding"),
-            "error should mention invalid signature encoding, got: {e}"
+            e.to_string().contains("invalid signed envelope"),
+            "error should mention invalid signed envelope, got: {e}"
         ),
     }
 }

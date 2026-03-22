@@ -553,7 +553,11 @@ async fn serve_one_terminal_stream(
     use membrane::stem_capnp;
     use membrane::TerminalServer;
 
-    let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(vk, membrane);
+    let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(
+        vk,
+        membrane,
+        auth::SigningDomain::terminal_membrane(),
+    );
     let terminal_client: stem_capnp::terminal::Client<stem_capnp::membrane::Owned> =
         capnp_rpc::new_client(terminal);
 

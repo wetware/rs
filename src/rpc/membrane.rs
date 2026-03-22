@@ -47,8 +47,8 @@ use super::NetworkState;
 /// Epoch-guarded: the hub and all domain signers it issues fail with `staleEpoch`
 /// once the epoch advances.
 ///
-/// Incoming domain strings are validated against [`system::SigningDomain`].
-/// Unknown domains are rejected with an RPC error before any signing occurs.
+/// Incoming domain strings are accepted if non-empty — the guest chooses
+/// the signing context. Empty domains are rejected with an RPC error.
 struct EpochGuardedIdentity {
     /// Pre-converted libp2p keypair (k256 → Keypair done once at session construction).
     keypair: Keypair,
@@ -73,11 +73,15 @@ impl stem_capnp::identity::Server for EpochGuardedIdentity {
         let domain_str = pry!(domain_reader
             .to_str()
             .map_err(|e| capnp::Error::failed(e.to_string())));
-        let domain = pry!(
-            SigningDomain::parse(domain_str).ok_or_else(|| capnp::Error::failed(format!(
-                "unknown signing domain: {domain_str:?}"
-            )))
-        );
+        if domain_str.is_empty() {
+            return Promise::err(capnp::Error::failed(
+                "signing domain must not be empty".into(),
+            ));
+        }
+        // Accept any non-empty domain — the guest chooses the signing context.
+        // The domain string is opaque to the host; it just constructs the
+        // domain-separated signing buffer using whatever the guest requested.
+        let domain = SigningDomain::new(domain_str);
         let signer: stem_capnp::signer::Client = capnp_rpc::new_client(EpochGuardedDomainSigner {
             domain,
             keypair: self.keypair.clone(),
@@ -92,7 +96,7 @@ impl stem_capnp::identity::Server for EpochGuardedIdentity {
 // EpochGuardedDomainSigner — domain-scoped signer
 // ---------------------------------------------------------------------------
 
-/// Signs nonces for a specific [`SigningDomain`] (e.g. TerminalLogin, MembraneGraft).
+/// Signs nonces for a specific [`SigningDomain`] (e.g. `terminal_membrane`, `membrane_graft`).
 ///
 /// Constructed by [`EpochGuardedIdentity::signer()`] after validating the
 /// requested domain.  Returns a protobuf-encoded `libp2p_core::SignedEnvelope`.
