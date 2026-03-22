@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
+use glia::eval::{self, Dispatch, Env};
 use glia::{read, read_many, Val};
 
 use wasip2::cli::stderr::get_stderr;
@@ -138,7 +139,33 @@ fn eval_cd(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Evaluator — resolves expressions via dispatch table + PATH lookup
+// Kernel dispatch — bridges glia's evaluator to kernel capabilities
+// ---------------------------------------------------------------------------
+
+/// Bundles the capability context and dispatch table so the kernel can
+/// implement [`glia::eval::Dispatch`].
+struct KernelDispatch<'k> {
+    ctx: &'k mut ShellCtx,
+    table: &'k HashMap<&'static str, HandlerFn>,
+}
+
+impl<'k> Dispatch for KernelDispatch<'k> {
+    fn call<'a>(
+        &'a mut self,
+        name: &'a str,
+        args: &'a [Val],
+    ) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
+        Box::pin(async move {
+            match self.table.get(name) {
+                Some(handler) => handler(args, self.ctx).await,
+                None => eval_path_lookup(name, args, self.ctx).await,
+            }
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Evaluator — delegates to glia with kernel dispatch
 // ---------------------------------------------------------------------------
 
 fn eval<'a>(
@@ -147,34 +174,13 @@ fn eval<'a>(
     dispatch: &'a HashMap<&'static str, HandlerFn>,
 ) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
     Box::pin(async move {
-        match expr {
-            Val::List(items) if items.is_empty() => Ok(Val::Nil),
-            Val::List(items) => {
-                let cmd = match &items[0] {
-                    Val::Sym(s) => s.as_str(),
-                    _ => return Err(format!("expected symbol, got {}", items[0])),
-                };
-                let raw_args = &items[1..];
-
-                // Recursively evaluate any nested list args before dispatching.
-                let mut args = Vec::with_capacity(raw_args.len());
-                for a in raw_args {
-                    match a {
-                        Val::List(_) => args.push(eval(a, ctx, dispatch).await?),
-                        other => args.push(other.clone()),
-                    }
-                }
-
-                // Look up in dispatch table, fall through to PATH lookup.
-                match dispatch.get(cmd) {
-                    Some(handler) => handler(&args, ctx).await,
-                    None => eval_path_lookup(cmd, &args, ctx).await,
-                }
-            }
-            // Self-evaluating forms.
-            other => Ok(other.clone()),
-        }
-    }) // Box::pin
+        let mut env = Env::new();
+        let mut kd = KernelDispatch {
+            ctx,
+            table: dispatch,
+        };
+        eval::eval(expr, &mut env, &mut kd).await
+    })
 }
 
 async fn eval_host(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
