@@ -62,6 +62,11 @@ pub enum Val {
     },
     /// Internal sentinel returned by `recur` — never escapes `loop`.
     Recur(Vec<Val>),
+    /// A macro: like a fn but receives unevaluated args and its result is re-evaluated.
+    Macro {
+        arities: Vec<FnArity>,
+        env: eval::Env,
+    },
 }
 
 impl PartialEq for Val {
@@ -79,8 +84,9 @@ impl PartialEq for Val {
             (Val::Map(a), Val::Map(b)) => a == b,
             (Val::Set(a), Val::Set(b)) => a == b,
             (Val::Bytes(a), Val::Bytes(b)) => a == b,
-            // Closures are never equal (identity semantics, like Clojure).
+            // Closures and macros are never equal (identity semantics, like Clojure).
             (Val::Fn { .. }, Val::Fn { .. }) => false,
+            (Val::Macro { .. }, Val::Macro { .. }) => false,
             // Recur is an internal sentinel — never equal.
             (Val::Recur(_), _) | (_, Val::Recur(_)) => false,
             _ => false,
@@ -121,21 +127,28 @@ impl core::fmt::Display for Val {
             Val::Bytes(b) => write!(f, "<{} bytes>", b.len()),
             Val::Recur(_) => write!(f, "#<recur>"),
             Val::Fn { arities, .. } => {
-                let arity_desc: Vec<String> = arities
-                    .iter()
-                    .map(|a| {
-                        let n = a.params.len();
-                        if a.variadic.is_some() {
-                            format!("{n}+")
-                        } else {
-                            n.to_string()
-                        }
-                    })
-                    .collect();
-                write!(f, "#<fn [{}]>", arity_desc.join("/"))
+                write!(f, "#<fn [{}]>", fmt_arity_desc(arities))
+            }
+            Val::Macro { arities, .. } => {
+                write!(f, "#<macro [{}]>", fmt_arity_desc(arities))
             }
         }
     }
+}
+
+fn fmt_arity_desc(arities: &[FnArity]) -> String {
+    arities
+        .iter()
+        .map(|a| {
+            let n = a.params.len();
+            if a.variadic.is_some() {
+                format!("{n}+")
+            } else {
+                n.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn fmt_seq(
