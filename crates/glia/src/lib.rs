@@ -167,6 +167,7 @@ enum Token {
     MapOpen,  // {
     MapClose, // }
     SetOpen,  // #{
+    Quote,    // '
     Atom(String),
 }
 
@@ -202,6 +203,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             }
             '}' => {
                 tokens.push(Token::MapClose);
+                chars.next();
+            }
+            '\'' => {
+                tokens.push(Token::Quote);
                 chars.next();
             }
             '#' => {
@@ -258,6 +263,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                             | ']'
                             | '{'
                             | '}'
+                            | '\''
                             | '"'
                             | ';'
                     ) {
@@ -285,6 +291,10 @@ fn parse_tokens(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
         Token::VecOpen => parse_seq(&tokens[1..], Token::VecClose, Val::Vector),
         Token::MapOpen => parse_map(&tokens[1..]),
         Token::SetOpen => parse_set(&tokens[1..]),
+        Token::Quote => {
+            let (inner, rest) = parse_tokens(&tokens[1..])?;
+            Ok((Val::List(vec![Val::Sym("quote".into()), inner]), rest))
+        }
         Token::Close => Err("unexpected )".into()),
         Token::VecClose => Err("unexpected ]".into()),
         Token::MapClose => Err("unexpected }".into()),
@@ -1209,5 +1219,79 @@ mod tests {
         assert_eq!(Val::Bytes(vec![1, 2]), Val::Bytes(vec![1, 2]));
         assert_ne!(Val::Bytes(vec![1, 2]), Val::Bytes(vec![1, 3]));
         assert_ne!(Val::Bytes(vec![1, 2]), Val::Nil);
+    }
+
+    // --- quote reader sugar ---
+
+    #[test]
+    fn tokenize_quote_symbol() {
+        let tokens = tokenize("'foo").unwrap();
+        assert_eq!(tokens, vec![Token::Quote, Token::Atom("foo".into())]);
+    }
+
+    #[test]
+    fn quote_symbol() {
+        let val = read("'foo").unwrap();
+        assert_eq!(
+            val,
+            Val::List(vec![Val::Sym("quote".into()), Val::Sym("foo".into())])
+        );
+    }
+
+    #[test]
+    fn quote_list() {
+        let val = read("'(+ 1 2)").unwrap();
+        assert_eq!(
+            val,
+            Val::List(vec![
+                Val::Sym("quote".into()),
+                Val::List(vec![Val::Sym("+".into()), Val::Int(1), Val::Int(2),]),
+            ])
+        );
+    }
+
+    #[test]
+    fn quote_nested() {
+        let val = read("''x").unwrap();
+        assert_eq!(
+            val,
+            Val::List(vec![
+                Val::Sym("quote".into()),
+                Val::List(vec![Val::Sym("quote".into()), Val::Sym("x".into()),]),
+            ])
+        );
+    }
+
+    #[test]
+    fn quote_integer() {
+        let val = read("'42").unwrap();
+        assert_eq!(val, Val::List(vec![Val::Sym("quote".into()), Val::Int(42)]));
+    }
+
+    #[test]
+    fn quote_vector() {
+        let val = read("'[1 2 3]").unwrap();
+        assert_eq!(
+            val,
+            Val::List(vec![
+                Val::Sym("quote".into()),
+                Val::Vector(vec![Val::Int(1), Val::Int(2), Val::Int(3)]),
+            ])
+        );
+    }
+
+    #[test]
+    fn quote_display_roundtrip() {
+        // Quote sugar parses to (quote ...) and displays as (quote ...)
+        let val = read("'foo").unwrap();
+        assert_eq!(format!("{val}"), "(quote foo)");
+
+        let val2 = read("'(+ 1 2)").unwrap();
+        assert_eq!(format!("{val2}"), "(quote (+ 1 2))");
+    }
+
+    #[test]
+    fn quote_eof_error() {
+        assert!(read("'").is_err());
     }
 }
