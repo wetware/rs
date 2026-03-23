@@ -356,7 +356,7 @@ fn builtin_count(args: &[Val]) -> Result<Val, String> {
     let n = match &args[0] {
         Val::List(v) | Val::Vector(v) | Val::Set(v) => v.len() as i64,
         Val::Map(pairs) => pairs.len() as i64,
-        Val::Str(s) => s.len() as i64,
+        Val::Str(s) => s.chars().count() as i64,
         Val::Nil => 0,
         other => return Err(format!("count: expected collection, got {other}")),
     };
@@ -440,9 +440,10 @@ fn builtin_conj(args: &[Val]) -> Result<Val, String> {
     }
     match &args[0] {
         Val::List(v) => {
+            // Clojure: conj on lists prepends (like cons).
             let mut result = v.clone();
-            for item in &args[1..] {
-                result.push(item.clone());
+            for item in args[1..].iter().rev() {
+                result.insert(0, item.clone());
             }
             Ok(Val::List(result))
         }
