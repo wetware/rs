@@ -1,9 +1,12 @@
 //! Evaluator for Glia expressions.
 //!
-//! The evaluator handles:
-//! - Self-evaluating forms (non-lists return as-is)
-//! - Symbol lookup in [`Env`]
-//! - List evaluation: eval head, eval args, delegate to [`Dispatch`]
+//! Resolution order for list forms:
+//! 1. Special forms (`def`, `if`, `do`, `let`, `quote`) — unevaluated args
+//! 2. (future: macro expansion, fn invocation — #207, #209)
+//! 3. Generic dispatch — eval args, delegate to [`Dispatch`]
+//!
+//! Non-list values are self-evaluating (returned as-is), except symbols
+//! which are looked up in [`Env`] (unbound symbols pass through).
 //!
 //! Capability dispatch (host, executor, ipfs, etc.) is provided by the
 //! caller via the [`Dispatch`] trait — the evaluator itself is host-agnostic.
@@ -212,27 +215,33 @@ async fn eval_let<'a, D: Dispatch>(
     }
 
     env.push_frame();
-    for pair in bindings.chunks(2) {
-        let name = match &pair[0] {
-            Val::Sym(s) => s.clone(),
-            other => {
-                env.pop_frame();
-                return Err(format!("let: binding name must be a symbol, got {other}"));
-            }
-        };
-        let val = eval(&pair[1], env, dispatch).await?;
-        env.set(name, val);
-    }
 
-    // Body forms (implicit do).
-    let body = &args[1..];
-    let mut result = Val::Nil;
-    for form in body {
-        result = eval(form, env, dispatch).await?;
+    // Evaluate bindings and body in a block so we always pop the frame,
+    // even if an eval error occurs mid-binding or mid-body.
+    let result = async {
+        for pair in bindings.chunks(2) {
+            let name = match &pair[0] {
+                Val::Sym(s) => s.clone(),
+                other => {
+                    return Err(format!("let: binding name must be a symbol, got {other}"));
+                }
+            };
+            let val = eval(&pair[1], env, dispatch).await?;
+            env.set(name, val);
+        }
+
+        // Body forms (implicit do).
+        let body = &args[1..];
+        let mut result = Val::Nil;
+        for form in body {
+            result = eval(form, env, dispatch).await?;
+        }
+        Ok(result)
     }
+    .await;
 
     env.pop_frame();
-    Ok(result)
+    result
 }
 
 /// Evaluate a Glia expression.
