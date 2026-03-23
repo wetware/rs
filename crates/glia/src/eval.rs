@@ -1,9 +1,9 @@
 //! Evaluator for Glia expressions.
 //!
 //! Resolution order for list forms:
-//! 1. Special forms (`def`, `if`, `do`, `let`, `fn`, `quote`) — unevaluated args
-//! 2. Env lookup — if head resolves to `Val::Fn`, invoke the closure
-//! 3. (future: macro expansion — #209)
+//! 1. Special forms (`def`, `if`, `do`, `let`, `fn`, `quote`, `defmacro`) — unevaluated args
+//! 2. Macro expansion — if head resolves to `Val::Macro`, expand with raw args then re-eval
+//! 3. Env lookup — if head resolves to `Val::Fn`, invoke the closure
 //! 4. Generic dispatch — eval args, delegate to [`Dispatch`]
 //!
 //! Non-list values are self-evaluating (returned as-is), except symbols
@@ -352,6 +352,151 @@ fn eval_fn(args: &[Val], env: &Env) -> Result<Val, String> {
     })
 }
 
+/// `(defmacro name [params] body...)` or `(defmacro name ([params] body...) ...)` — define a macro.
+///
+/// Like `fn` but stores a `Val::Macro` in the root frame. Macros receive
+/// unevaluated arguments and their return value is re-evaluated in the caller's env.
+async fn eval_defmacro(args: &[Val], env: &mut Env) -> Result<Val, String> {
+    if args.is_empty() {
+        return Err("defmacro: expected (defmacro name [params] body...)".into());
+    }
+    let name = match &args[0] {
+        Val::Sym(s) => s.clone(),
+        other => return Err(format!("defmacro: expected symbol for name, got {other}")),
+    };
+    let fn_args = &args[1..];
+    if fn_args.is_empty() {
+        return Err("defmacro: expected params after name".into());
+    }
+
+    // Reuse the same parsing as eval_fn
+    let arities = match &fn_args[0] {
+        // Single-arity: (defmacro name [x y] body...)
+        Val::Vector(params) => {
+            let arity = parse_params(params, &fn_args[1..])?;
+            vec![arity]
+        }
+        // Multi-arity: (defmacro name ([x] body1) ([x y] body2) ...)
+        Val::List(_) => {
+            let mut result = Vec::new();
+            for arg in fn_args {
+                match arg {
+                    Val::List(items) if !items.is_empty() => {
+                        let param_vec = match &items[0] {
+                            Val::Vector(v) => v,
+                            other => {
+                                return Err(format!(
+                                    "defmacro: multi-arity clause must start with [params], got {other}"
+                                ))
+                            }
+                        };
+                        result.push(parse_params(param_vec, &items[1..])?);
+                    }
+                    other => {
+                        return Err(format!(
+                            "defmacro: expected arity clause (list), got {other}"
+                        ))
+                    }
+                }
+            }
+            // Check for overlapping arities
+            let mut seen_counts = std::collections::HashSet::new();
+            let mut has_variadic = false;
+            for a in &result {
+                if a.variadic.is_some() {
+                    if has_variadic {
+                        return Err("defmacro: only one variadic arity allowed".into());
+                    }
+                    has_variadic = true;
+                } else if !seen_counts.insert(a.params.len()) {
+                    return Err(format!(
+                        "defmacro: duplicate arity for {} args",
+                        a.params.len()
+                    ));
+                }
+            }
+            result
+        }
+        other => {
+            return Err(format!(
+                "defmacro: expected [params] or arity clauses, got {other}"
+            ))
+        }
+    };
+
+    let val = Val::Macro {
+        arities,
+        env: env.snapshot(),
+    };
+    env.set_root(name, val.clone());
+    Ok(val)
+}
+
+/// Invoke a macro: like invoke_fn but receives raw (unevaluated) args.
+/// The macro body evaluates in the captured env; the result is a new form
+/// that the caller will re-evaluate in their own env.
+async fn invoke_macro<'a, D: Dispatch>(
+    arities: &'a [FnArity],
+    captured_env: &'a Env,
+    raw_args: &[Val],
+    dispatch: &'a mut D,
+) -> Result<Val, String> {
+    // Find matching arity (same logic as invoke_fn)
+    let arity = arities
+        .iter()
+        .find(|a| a.variadic.is_none() && raw_args.len() == a.params.len())
+        .or_else(|| {
+            arities
+                .iter()
+                .find(|a| a.variadic.is_some() && raw_args.len() >= a.params.len())
+        })
+        .ok_or_else(|| {
+            let expected: Vec<String> = arities
+                .iter()
+                .map(|a| {
+                    if a.variadic.is_some() {
+                        format!("{}+", a.params.len())
+                    } else {
+                        a.params.len().to_string()
+                    }
+                })
+                .collect();
+            format!(
+                "wrong number of args ({}) passed to macro, expected {}",
+                raw_args.len(),
+                expected.join(" or ")
+            )
+        })?;
+
+    // Build macro environment: captured env + new frame with raw arg bindings
+    let mut macro_env = captured_env.clone();
+    macro_env.push_frame();
+
+    // Bind positional params to RAW (unevaluated) args
+    for (name, val) in arity.params.iter().zip(raw_args.iter()) {
+        macro_env.set(name.clone(), val.clone());
+    }
+
+    // Bind variadic rest param
+    if let Some(rest_name) = &arity.variadic {
+        let rest_args: Vec<Val> = raw_args[arity.params.len()..].to_vec();
+        macro_env.set(rest_name.clone(), Val::List(rest_args));
+    }
+
+    // Evaluate body (implicit do) in the macro's captured env
+    let result = async {
+        let mut result = Val::Nil;
+        for form in &arity.body {
+            result = eval(form, &mut macro_env, dispatch).await?;
+        }
+        Ok(result)
+    }
+    .await;
+
+    macro_env.pop_frame();
+    result
+}
+
 /// Invoke a Val::Fn with evaluated arguments. Matches arity and evaluates body.
 async fn invoke_fn<'a, D: Dispatch>(
     arities: &'a [FnArity],
@@ -421,8 +566,8 @@ async fn invoke_fn<'a, D: Dispatch>(
 ///
 /// Resolution order:
 /// 1. Special forms — matched by name, receive unevaluated args
-/// 2. Env lookup — if head resolves to Val::Fn, invoke it
-/// 3. (future: macro check — #209)
+/// 2. Macro expansion — if head resolves to Val::Macro, expand + re-eval
+/// 3. Env lookup — if head resolves to Val::Fn, invoke it
 /// 4. Generic path — eval args, delegate to Dispatch (capability calls)
 ///
 /// Non-list values are self-evaluating (returned as-is), except symbols
@@ -457,13 +602,28 @@ pub fn eval<'a, D: Dispatch>(
                     }
 
                     "fn" => return eval_fn(raw_args, env),
+                    "defmacro" => return eval_defmacro(raw_args, env).await,
 
-                    // Reserved for future special forms (#208, #209).
+                    // Reserved for future special forms (#208).
                     "loop" => return Err("loop: not yet implemented (see #208)".into()),
                     "recur" => return Err("recur: not yet implemented (see #208)".into()),
-                    "defmacro" => return Err("defmacro: not yet implemented (see #209)".into()),
 
-                    _ => {} // fall through to env lookup / dispatch
+                    _ => {} // fall through to macro / fn / dispatch
+                }
+
+                // --- Macro expansion: if head resolves to a macro, expand + eval ---
+                if let Some(Val::Macro {
+                    arities,
+                    env: captured_env,
+                }) = env.get(head)
+                {
+                    let arities = arities.clone();
+                    let captured_env = captured_env.clone();
+                    // Macro receives RAW (unevaluated) args, body runs in captured env
+                    let expanded =
+                        invoke_macro(&arities, &captured_env, raw_args, dispatch).await?;
+                    // Re-evaluate the expanded form in the CALLER's env
+                    return eval(&expanded, env, dispatch).await;
                 }
 
                 // --- Env lookup: if head resolves to a fn, invoke it ---
@@ -1098,7 +1258,7 @@ mod tests {
     fn reserved_forms_error_not_dispatch() {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
-        for form in &["loop", "recur", "defmacro"] {
+        for form in &["loop", "recur"] {
             let expr = Val::List(vec![Val::Sym(form.to_string())]);
             let result = eval_blocking(&expr, &mut env, &mut d);
             assert!(result.is_err(), "{form} should error, not dispatch");
@@ -1297,5 +1457,154 @@ mod tests {
         // (fn) — no params at all
         let expr = Val::List(vec![Val::Sym("fn".into())]);
         assert!(eval_blocking(&expr, &mut env, &mut d).is_err());
+    }
+
+    // --- defmacro ---
+
+    /// Helper: parse + eval multiple forms sequentially, return the last result.
+    fn eval_program(src: &str, env: &mut Env, d: &mut RecordingDispatch) -> Result<Val, String> {
+        let forms = crate::read_many(src)?;
+        let mut result = Val::Nil;
+        for form in &forms {
+            result = eval_blocking(form, env, d)?;
+        }
+        Ok(result)
+    }
+
+    #[test]
+    fn test_defmacro_basic() {
+        // (defmacro my-nil [] nil) (my-nil) => nil
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_program("(defmacro my-nil [] nil) (my-nil)", &mut env, &mut d);
+        assert_eq!(result, Ok(Val::Nil));
+    }
+
+    #[test]
+    fn test_defmacro_receives_unevaluated() {
+        // A macro that returns its first arg as-is (a quote-like macro).
+        // (defmacro my-quote [x] x)
+        // (my-quote (+ 1 2)) should return the raw list (+ 1 2), not 3.
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_program("(defmacro my-quote [x] x)", &mut env, &mut d).unwrap();
+
+        // (my-quote (foo bar baz)) — the macro returns (foo bar baz) unevaluated,
+        // then eval tries to call it. Since the macro body just returns x = the raw form,
+        // the result is re-evaluated. We need to test that the macro *receives* the raw form.
+        //
+        // Use quote inside the macro body to prevent re-evaluation of the expanded form:
+        // (defmacro capture [x] (quote x)) won't work because quote returns literal x.
+        //
+        // Instead, verify by having the macro return a form that only makes sense if args
+        // were NOT evaluated:
+        // (defmacro identity-form [x] (quote captured))
+        // Just test that expansion + re-eval works by wrapping in quote:
+        let mut env2 = Env::new();
+        let mut d2 = RecordingDispatch::new();
+        // (defmacro pass-through [x] x)
+        // (pass-through (quote hello)) → macro receives (quote hello) raw, returns it,
+        // then eval sees (quote hello) and returns the symbol hello.
+        let result = eval_program(
+            "(defmacro pass-through [x] x) (pass-through (quote hello))",
+            &mut env2,
+            &mut d2,
+        );
+        assert_eq!(result, Ok(Val::Sym("hello".into())));
+
+        // Definitive test: pass an expression that would ERROR if evaluated,
+        // but the macro ignores the arg. If args were evaluated, (loop) would error.
+        let mut env4 = Env::new();
+        let mut d4 = RecordingDispatch::new();
+        let result = eval_program(
+            "(defmacro ignore-arg [x] nil) (ignore-arg (loop))",
+            &mut env4,
+            &mut d4,
+        );
+        assert_eq!(
+            result,
+            Ok(Val::Nil),
+            "macro should receive raw args without evaluating them"
+        );
+    }
+
+    #[test]
+    fn test_macro_expanding_to_special_form() {
+        // Macro that returns (quote something) — the expanded form is a special form.
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // We build (quote something) manually since we don't have list/cons builtins.
+        // The macro body itself uses quote to return the literal form.
+        //
+        // (defmacro always-hello [] (quote (quote hello)))
+        // Body evaluates: (quote (quote hello)) => (quote hello)
+        // Expansion is (quote hello), which re-evals to hello.
+        let result = eval_program(
+            "(defmacro always-hello [] (quote (quote hello))) (always-hello)",
+            &mut env,
+            &mut d,
+        );
+        assert_eq!(result, Ok(Val::Sym("hello".into())));
+    }
+
+    #[test]
+    fn test_defmacro_stores_in_root() {
+        // Macro defined inside let is visible outside (stored in root frame).
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_program(
+            "(let [x 1] (defmacro my-nil [] nil)) (my-nil)",
+            &mut env,
+            &mut d,
+        );
+        assert_eq!(result, Ok(Val::Nil));
+    }
+
+    #[test]
+    fn test_macro_expansion_error() {
+        // Macro body that errors during expansion.
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_program("(defmacro bad [] (loop))", &mut env, &mut d).unwrap();
+        let result = eval_program("(bad)", &mut env, &mut d);
+        assert!(result.is_err(), "macro expansion error should propagate");
+        assert!(
+            result.unwrap_err().contains("not yet implemented"),
+            "should contain the loop error"
+        );
+    }
+
+    #[test]
+    fn test_defmacro_display() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_program("(defmacro m [x] x)", &mut env, &mut d).unwrap();
+        assert_eq!(format!("{result}"), "#<macro [1]>");
+    }
+
+    #[test]
+    fn test_defmacro_wrong_arity() {
+        // Calling a macro with wrong number of args.
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_program("(defmacro m [x] x)", &mut env, &mut d).unwrap();
+        let result = eval_program("(m)", &mut env, &mut d);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("wrong number of args"));
+    }
+
+    #[test]
+    fn test_defmacro_variadic() {
+        // (defmacro m [x & rest] x) — ignores rest, returns first arg
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // The macro returns x (the first raw arg), which is then eval'd.
+        // (m (quote hello) a b c) => macro returns (quote hello) => eval => hello
+        let result = eval_program(
+            "(defmacro m [x & rest] x) (m (quote hello) a b c)",
+            &mut env,
+            &mut d,
+        );
+        assert_eq!(result, Ok(Val::Sym("hello".into())));
     }
 }
