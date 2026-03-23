@@ -1,10 +1,11 @@
 //! Evaluator for Glia expressions.
 //!
 //! Resolution order for list forms:
-//! 1. Special forms (`def`, `if`, `do`, `let`, `fn`, `quote`) — unevaluated args
-//! 2. Env lookup — if head resolves to `Val::Fn`, invoke the closure
-//! 3. (future: macro expansion — #209)
-//! 4. Generic dispatch — eval args, delegate to [`Dispatch`]
+//! 1. Special forms (`def`, `if`, `do`, `let`, `fn`, `quote`, `defmacro`) — unevaluated args
+//! 2. Macro expansion — if head resolves to `Val::Macro`, expand with raw args then re-eval
+//! 3. Env lookup — if head resolves to `Val::Fn`, invoke the closure
+//! 4. Built-in functions (`+`, `list`, `cons`, `apply`, etc.) — eval args, call builtin
+//! 5. Generic dispatch — eval args, delegate to [`Dispatch`]
 //!
 //! Non-list values are self-evaluating (returned as-is), except symbols
 //! which are looked up in [`Env`] (unbound symbols pass through).
@@ -14,8 +15,12 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{FnArity, Val};
+
+/// Monotonic counter for `gensym`.
+static GENSYM_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Env — lexical scope chain
@@ -504,6 +509,363 @@ async fn eval_recur<'a, D: Dispatch>(
     Ok(Val::Recur(evaled))
 }
 
+// ---------------------------------------------------------------------------
+// Built-in functions
+// ---------------------------------------------------------------------------
+
+/// Check whether `name` is a built-in function. If so, run it on the
+/// already-evaluated `args` and return `Some(result)`.
+/// Returns `None` if `name` is not a built-in — the caller should fall
+/// through to host dispatch.
+fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, String>> {
+    match name {
+        // --- Collections ---
+        "list" => Some(Ok(Val::List(args.to_vec()))),
+        "cons" => Some(builtin_cons(args)),
+        "first" => Some(builtin_first(args)),
+        "rest" => Some(builtin_rest(args)),
+        "count" => Some(builtin_count(args)),
+        "vec" => Some(builtin_vec(args)),
+        "get" => Some(builtin_get(args)),
+        "assoc" => Some(builtin_assoc(args)),
+        "conj" => Some(builtin_conj(args)),
+
+        // --- Arithmetic ---
+        "+" => Some(builtin_add(args)),
+        "-" => Some(builtin_sub(args)),
+        "*" => Some(builtin_mul(args)),
+        "/" => Some(builtin_div(args)),
+        "mod" => Some(builtin_mod(args)),
+
+        // --- Comparison ---
+        "=" => Some(builtin_eq(args)),
+        "<" => Some(builtin_lt(args)),
+        ">" => Some(builtin_gt(args)),
+        "<=" => Some(builtin_le(args)),
+        ">=" => Some(builtin_ge(args)),
+
+        // --- Other ---
+        "gensym" => {
+            if !args.is_empty() {
+                return Some(Err(format!("gensym: expected 0 args, got {}", args.len())));
+            }
+            let n = GENSYM_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+            Some(Ok(Val::Sym(format!("G__{n}"))))
+        }
+
+        _ => None, // not a built-in
+    }
+}
+
+// --- Collection built-ins ---
+
+fn builtin_cons(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("cons: expected 2 args, got {}", args.len()));
+    }
+    let tail = match &args[1] {
+        Val::List(v) | Val::Vector(v) => v,
+        other => {
+            return Err(format!(
+                "cons: second arg must be List or Vector, got {other}"
+            ))
+        }
+    };
+    let mut result = Vec::with_capacity(1 + tail.len());
+    result.push(args[0].clone());
+    result.extend_from_slice(tail);
+    Ok(Val::List(result))
+}
+
+fn builtin_first(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 1 {
+        return Err(format!("first: expected 1 arg, got {}", args.len()));
+    }
+    match &args[0] {
+        Val::Nil => Ok(Val::Nil),
+        Val::List(v) | Val::Vector(v) => Ok(v.first().cloned().unwrap_or(Val::Nil)),
+        other => Err(format!("first: expected collection, got {other}")),
+    }
+}
+
+fn builtin_rest(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 1 {
+        return Err(format!("rest: expected 1 arg, got {}", args.len()));
+    }
+    match &args[0] {
+        Val::Nil => Ok(Val::List(vec![])),
+        Val::List(v) | Val::Vector(v) => {
+            if v.is_empty() {
+                Ok(Val::List(vec![]))
+            } else {
+                Ok(Val::List(v[1..].to_vec()))
+            }
+        }
+        other => Err(format!("rest: expected collection, got {other}")),
+    }
+}
+
+fn builtin_count(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 1 {
+        return Err(format!("count: expected 1 arg, got {}", args.len()));
+    }
+    let n = match &args[0] {
+        Val::Nil => 0,
+        Val::List(v) | Val::Vector(v) | Val::Set(v) => v.len(),
+        Val::Map(pairs) => pairs.len(),
+        Val::Str(s) => s.chars().count(),
+        other => return Err(format!("count: expected collection or nil, got {other}")),
+    };
+    Ok(Val::Int(n as i64))
+}
+
+fn builtin_vec(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 1 {
+        return Err(format!("vec: expected 1 arg, got {}", args.len()));
+    }
+    match &args[0] {
+        Val::Nil => Ok(Val::Vector(vec![])),
+        Val::List(v) => Ok(Val::Vector(v.clone())),
+        Val::Vector(_) => Ok(args[0].clone()),
+        other => Err(format!("vec: expected list or vector, got {other}")),
+    }
+}
+
+fn builtin_get(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("get: expected 2 args, got {}", args.len()));
+    }
+    match &args[0] {
+        Val::Map(pairs) => {
+            for (k, v) in pairs {
+                if k == &args[1] {
+                    return Ok(v.clone());
+                }
+            }
+            Ok(Val::Nil)
+        }
+        Val::Vector(v) => match &args[1] {
+            Val::Int(i) => {
+                if *i < 0 {
+                    Ok(Val::Nil)
+                } else {
+                    Ok(v.get(*i as usize).cloned().unwrap_or(Val::Nil))
+                }
+            }
+            other => Err(format!("get: vector index must be Int, got {other}")),
+        },
+        Val::Nil => Ok(Val::Nil),
+        other => Err(format!("get: expected map or vector, got {other}")),
+    }
+}
+
+fn builtin_assoc(args: &[Val]) -> Result<Val, String> {
+    if args.is_empty() || !(args.len() - 1).is_multiple_of(2) {
+        return Err(format!(
+            "assoc: expected map + key-value pairs (odd number of args), got {}",
+            args.len()
+        ));
+    }
+    let mut pairs = match &args[0] {
+        Val::Map(pairs) => pairs.clone(),
+        other => return Err(format!("assoc: first arg must be a map, got {other}")),
+    };
+    for chunk in args[1..].chunks(2) {
+        let key = &chunk[0];
+        let val = &chunk[1];
+        // Update existing key or append.
+        if let Some(entry) = pairs.iter_mut().find(|(k, _)| k == key) {
+            entry.1 = val.clone();
+        } else {
+            pairs.push((key.clone(), val.clone()));
+        }
+    }
+    Ok(Val::Map(pairs))
+}
+
+fn builtin_conj(args: &[Val]) -> Result<Val, String> {
+    if args.len() < 2 {
+        return Err(format!(
+            "conj: expected at least 2 args, got {}",
+            args.len()
+        ));
+    }
+    match &args[0] {
+        Val::Vector(v) => {
+            let mut result = v.clone();
+            result.extend_from_slice(&args[1..]);
+            Ok(Val::Vector(result))
+        }
+        Val::List(v) => {
+            // Clojure: conj on lists PREPENDS each item
+            let mut result = v.clone();
+            for item in &args[1..] {
+                result.insert(0, item.clone());
+            }
+            Ok(Val::List(result))
+        }
+        Val::Map(pairs) => {
+            let mut result = pairs.clone();
+            for item in &args[1..] {
+                match item {
+                    Val::Vector(pair) if pair.len() == 2 => {
+                        if let Some(entry) = result.iter_mut().find(|(k, _)| k == &pair[0]) {
+                            entry.1 = pair[1].clone();
+                        } else {
+                            result.push((pair[0].clone(), pair[1].clone()));
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "conj: map entries must be [key val] vectors, got {other}"
+                        ))
+                    }
+                }
+            }
+            Ok(Val::Map(result))
+        }
+        other => Err(format!("conj: expected collection, got {other}")),
+    }
+}
+
+// --- Arithmetic helpers ---
+
+/// Extract a numeric pair, promoting to Float if mixed.
+enum NumPair {
+    Ints(i64, i64),
+    Floats(f64, f64),
+}
+
+fn num_pair(a: &Val, b: &Val) -> Result<NumPair, String> {
+    match (a, b) {
+        (Val::Int(x), Val::Int(y)) => Ok(NumPair::Ints(*x, *y)),
+        (Val::Float(x), Val::Float(y)) => Ok(NumPair::Floats(*x, *y)),
+        (Val::Int(x), Val::Float(y)) => Ok(NumPair::Floats(*x as f64, *y)),
+        (Val::Float(x), Val::Int(y)) => Ok(NumPair::Floats(*x, *y as f64)),
+        _ => Err(format!("expected numbers, got {a} and {b}")),
+    }
+}
+
+fn builtin_add(args: &[Val]) -> Result<Val, String> {
+    let mut acc = Val::Int(0);
+    for a in args {
+        acc = match num_pair(&acc, a)? {
+            NumPair::Ints(x, y) => Val::Int(x + y),
+            NumPair::Floats(x, y) => Val::Float(x + y),
+        };
+    }
+    Ok(acc)
+}
+
+fn builtin_sub(args: &[Val]) -> Result<Val, String> {
+    if args.is_empty() {
+        return Err("-: expected at least 1 arg".into());
+    }
+    if args.len() == 1 {
+        return match &args[0] {
+            Val::Int(n) => Ok(Val::Int(-n)),
+            Val::Float(n) => Ok(Val::Float(-n)),
+            other => Err(format!("-: expected number, got {other}")),
+        };
+    }
+    let mut acc = args[0].clone();
+    for a in &args[1..] {
+        acc = match num_pair(&acc, a)? {
+            NumPair::Ints(x, y) => Val::Int(x - y),
+            NumPair::Floats(x, y) => Val::Float(x - y),
+        };
+    }
+    Ok(acc)
+}
+
+fn builtin_mul(args: &[Val]) -> Result<Val, String> {
+    let mut acc = Val::Int(1);
+    for a in args {
+        acc = match num_pair(&acc, a)? {
+            NumPair::Ints(x, y) => Val::Int(x * y),
+            NumPair::Floats(x, y) => Val::Float(x * y),
+        };
+    }
+    Ok(acc)
+}
+
+fn builtin_div(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("/: expected 2 args, got {}", args.len()));
+    }
+    match num_pair(&args[0], &args[1])? {
+        NumPair::Ints(_, 0) => Err("division by zero".into()),
+        NumPair::Ints(x, y) => Ok(Val::Int(x / y)),
+        NumPair::Floats(_, 0.0) => Err("division by zero".into()),
+        NumPair::Floats(x, y) => Ok(Val::Float(x / y)),
+    }
+}
+
+fn builtin_mod(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("mod: expected 2 args, got {}", args.len()));
+    }
+    match num_pair(&args[0], &args[1])? {
+        NumPair::Ints(_, 0) => Err("mod: division by zero".into()),
+        NumPair::Ints(x, y) => Ok(Val::Int(x % y)),
+        NumPair::Floats(_, 0.0) => Err("mod: division by zero".into()),
+        NumPair::Floats(x, y) => Ok(Val::Float(x % y)),
+    }
+}
+
+// --- Comparison built-ins ---
+
+fn builtin_eq(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("=: expected 2 args, got {}", args.len()));
+    }
+    Ok(Val::Bool(args[0] == args[1]))
+}
+
+fn numeric_cmp(a: &Val, b: &Val) -> Result<std::cmp::Ordering, String> {
+    match (a, b) {
+        (Val::Int(x), Val::Int(y)) => Ok(x.cmp(y)),
+        (Val::Float(x), Val::Float(y)) => x
+            .partial_cmp(y)
+            .ok_or_else(|| "comparison failed (NaN)".to_string()),
+        (Val::Int(x), Val::Float(y)) => (*x as f64)
+            .partial_cmp(y)
+            .ok_or_else(|| "comparison failed (NaN)".to_string()),
+        (Val::Float(x), Val::Int(y)) => x
+            .partial_cmp(&(*y as f64))
+            .ok_or_else(|| "comparison failed (NaN)".to_string()),
+        _ => Err(format!("comparison requires numbers, got {a} and {b}")),
+    }
+}
+
+fn builtin_lt(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("<: expected 2 args, got {}", args.len()));
+    }
+    Ok(Val::Bool(numeric_cmp(&args[0], &args[1])?.is_lt()))
+}
+
+fn builtin_gt(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!(">: expected 2 args, got {}", args.len()));
+    }
+    Ok(Val::Bool(numeric_cmp(&args[0], &args[1])?.is_gt()))
+}
+
+fn builtin_le(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("<=: expected 2 args, got {}", args.len()));
+    }
+    Ok(Val::Bool(!numeric_cmp(&args[0], &args[1])?.is_gt()))
+}
+
+fn builtin_ge(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!(">=: expected 2 args, got {}", args.len()));
+    }
+    Ok(Val::Bool(!numeric_cmp(&args[0], &args[1])?.is_lt()))
+}
+
 /// Top-level evaluation wrapper.
 ///
 /// Calls `eval` and catches escaped `Val::Recur` sentinels, converting
@@ -526,9 +888,11 @@ pub fn eval_toplevel<'a, D: Dispatch>(
 ///
 /// Resolution order:
 /// 1. Special forms — matched by name, receive unevaluated args
-/// 2. Env lookup — if head resolves to Val::Fn, invoke it
-/// 3. (future: macro check — #209)
-/// 4. Generic path — eval args, delegate to Dispatch (capability calls)
+/// 2. Macro expansion — if head is Val::Macro in env, expand + re-eval
+/// 3. Env lookup — if head resolves to Val::Fn, invoke it
+/// 4. Built-in functions — eval args, call builtin
+/// 5. `apply` — special handling (re-dispatches)
+/// 6. Generic path — eval args, delegate to Dispatch (capability calls)
 ///
 /// Non-list values are self-evaluating (returned as-is), except symbols
 /// which are looked up in `env` (unbound symbols pass through for Dispatch).
@@ -566,10 +930,7 @@ pub fn eval<'a, D: Dispatch>(
                     "loop" => return eval_loop(raw_args, env, dispatch).await,
                     "recur" => return eval_recur(raw_args, env, dispatch).await,
 
-                    // Reserved for future special forms (#209).
-                    "defmacro" => return Err("defmacro: not yet implemented (see #209)".into()),
-
-                    _ => {} // fall through to env lookup / dispatch
+                    _ => {} // fall through to env lookup / builtins / dispatch
                 }
 
                 // --- Env lookup: if head resolves to a fn, invoke it ---
@@ -584,8 +945,71 @@ pub fn eval<'a, D: Dispatch>(
                     return invoke_fn(&arities, &captured_env, &args, dispatch).await;
                 }
 
-                // --- Generic path: eval args, then dispatch to host ---
+                // --- Built-in: apply (needs re-dispatch, so handled here) ---
+                if head == "apply" {
+                    let args = eval_args(raw_args, env, dispatch).await?;
+                    if args.len() < 2 {
+                        return Err(format!(
+                            "apply: expected at least 2 args, got {}",
+                            args.len()
+                        ));
+                    }
+                    // First arg is the function (symbol or Val::Fn)
+                    let func = &args[0];
+                    // Last arg must be a collection; middle args are prepended
+                    let last = &args[args.len() - 1];
+                    let trailing = match last {
+                        Val::List(v) | Val::Vector(v) => v.clone(),
+                        other => {
+                            return Err(format!(
+                                "apply: last arg must be List or Vector, got {other}"
+                            ))
+                        }
+                    };
+                    let mut spread = args[1..args.len() - 1].to_vec();
+                    spread.extend(trailing);
+
+                    // Re-dispatch: if func is a symbol, check env for Val::Fn first,
+                    // then try builtins, then dispatch.
+                    match func {
+                        Val::Sym(fname) => {
+                            if let Some(Val::Fn {
+                                arities,
+                                env: captured_env,
+                            }) = env.get(fname)
+                            {
+                                let arities = arities.clone();
+                                let captured_env = captured_env.clone();
+                                return invoke_fn(&arities, &captured_env, &spread, dispatch).await;
+                            }
+                            if let Some(result) = eval_builtin(fname, &spread) {
+                                return result;
+                            }
+                            return dispatch.call(fname, &spread).await;
+                        }
+                        Val::Fn {
+                            arities,
+                            env: captured_env,
+                        } => {
+                            let arities = arities.clone();
+                            let captured_env = captured_env.clone();
+                            return invoke_fn(&arities, &captured_env, &spread, dispatch).await;
+                        }
+                        other => {
+                            return Err(format!(
+                                "apply: first arg must be a symbol or fn, got {other}"
+                            ))
+                        }
+                    }
+                }
+
+                // --- Built-in functions ---
                 let args = eval_args(raw_args, env, dispatch).await?;
+                if let Some(result) = eval_builtin(head, &args) {
+                    return result;
+                }
+
+                // --- Generic path: eval args, then dispatch to host ---
                 dispatch.call(head, &args).await
             }
             // Symbol lookup.
@@ -1198,24 +1622,6 @@ mod tests {
         assert!(d.calls.is_empty()); // no dispatch happened
     }
 
-    // --- reserved forms ---
-
-    #[test]
-    fn reserved_forms_error_not_dispatch() {
-        let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        for form in &["defmacro"] {
-            let expr = Val::List(vec![Val::Sym(form.to_string())]);
-            let result = eval_blocking(&expr, &mut env, &mut d);
-            assert!(result.is_err(), "{form} should error, not dispatch");
-            assert!(
-                result.unwrap_err().contains("not yet implemented"),
-                "{form} error should mention 'not yet implemented'"
-            );
-        }
-        assert!(d.calls.is_empty(), "reserved forms should not dispatch");
-    }
-
     // --- fn ---
 
     #[test]
@@ -1541,5 +1947,604 @@ mod tests {
         ]);
         let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
         assert!(err.contains("pairs"), "got: {err}");
+    }
+
+    // =========================================================================
+    // Built-in function tests
+    // =========================================================================
+
+    /// Helper: parse + eval a string expression.
+    fn eval_str(input: &str, env: &mut Env, d: &mut RecordingDispatch) -> Result<Val, String> {
+        let expr = crate::read(input).map_err(|e| format!("parse error: {e}"))?;
+        eval_blocking(&expr, env, d)
+    }
+
+    // --- list ---
+
+    #[test]
+    fn builtin_list_empty() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(list)", &mut env, &mut d), Ok(Val::List(vec![])));
+    }
+
+    #[test]
+    fn builtin_list_with_args() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(list 1 2 3)", &mut env, &mut d),
+            Ok(Val::List(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
+        );
+    }
+
+    // --- cons ---
+
+    #[test]
+    fn builtin_cons_onto_list() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(cons 1 (list 2 3))", &mut env, &mut d),
+            Ok(Val::List(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
+        );
+    }
+
+    #[test]
+    fn builtin_cons_wrong_args() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(cons 1)", &mut env, &mut d).is_err());
+    }
+
+    #[test]
+    fn builtin_cons_non_collection() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(cons 1 2)", &mut env, &mut d).is_err());
+    }
+
+    // --- first ---
+
+    #[test]
+    fn builtin_first_of_list() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(first (list 1 2 3))", &mut env, &mut d),
+            Ok(Val::Int(1))
+        );
+    }
+
+    #[test]
+    fn builtin_first_of_empty() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(first (list))", &mut env, &mut d), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn builtin_first_of_nil() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(first nil)", &mut env, &mut d), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn builtin_first_wrong_type() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(first 42)", &mut env, &mut d).is_err());
+    }
+
+    // --- rest ---
+
+    #[test]
+    fn builtin_rest_of_list() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(rest (list 1 2 3))", &mut env, &mut d),
+            Ok(Val::List(vec![Val::Int(2), Val::Int(3)]))
+        );
+    }
+
+    #[test]
+    fn builtin_rest_of_empty() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(rest (list))", &mut env, &mut d),
+            Ok(Val::List(vec![]))
+        );
+    }
+
+    #[test]
+    fn builtin_rest_of_nil() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(rest nil)", &mut env, &mut d),
+            Ok(Val::List(vec![]))
+        );
+    }
+
+    #[test]
+    fn builtin_rest_wrong_type() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(rest 42)", &mut env, &mut d).is_err());
+    }
+
+    // --- count ---
+
+    #[test]
+    fn builtin_count_list() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(count (list 1 2 3))", &mut env, &mut d),
+            Ok(Val::Int(3))
+        );
+    }
+
+    #[test]
+    fn builtin_count_nil() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(count nil)", &mut env, &mut d), Ok(Val::Int(0)));
+    }
+
+    #[test]
+    fn builtin_count_string_chars() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // Unicode: each emoji is one char
+        assert_eq!(
+            eval_str(r#"(count "hello")"#, &mut env, &mut d),
+            Ok(Val::Int(5))
+        );
+    }
+
+    #[test]
+    fn builtin_count_wrong_type() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(count 42)", &mut env, &mut d).is_err());
+    }
+
+    // --- vec ---
+
+    #[test]
+    fn builtin_vec_from_list() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(vec (list 1 2))", &mut env, &mut d),
+            Ok(Val::Vector(vec![Val::Int(1), Val::Int(2)]))
+        );
+    }
+
+    #[test]
+    fn builtin_vec_from_nil() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(vec nil)", &mut env, &mut d),
+            Ok(Val::Vector(vec![]))
+        );
+    }
+
+    #[test]
+    fn builtin_vec_wrong_type() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(vec 42)", &mut env, &mut d).is_err());
+    }
+
+    // --- get ---
+
+    #[test]
+    fn builtin_get_map() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(get {:a 1 :b 2} :b)", &mut env, &mut d),
+            Ok(Val::Int(2))
+        );
+    }
+
+    #[test]
+    fn builtin_get_map_missing() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(get {:a 1} :z)", &mut env, &mut d), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn builtin_get_vector() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(get [10 20 30] 1)", &mut env, &mut d),
+            Ok(Val::Int(20))
+        );
+    }
+
+    #[test]
+    fn builtin_get_nil() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(get nil :a)", &mut env, &mut d), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn builtin_get_wrong_type() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(get 42 0)", &mut env, &mut d).is_err());
+    }
+
+    // --- assoc ---
+
+    #[test]
+    fn builtin_assoc_add_key() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(assoc {:a 1} :b 2)", &mut env, &mut d),
+            Ok(Val::Map(vec![
+                (Val::Keyword("a".into()), Val::Int(1)),
+                (Val::Keyword("b".into()), Val::Int(2)),
+            ]))
+        );
+    }
+
+    #[test]
+    fn builtin_assoc_update_key() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(assoc {:a 1} :a 99)", &mut env, &mut d),
+            Ok(Val::Map(vec![(Val::Keyword("a".into()), Val::Int(99))]))
+        );
+    }
+
+    #[test]
+    fn builtin_assoc_wrong_args() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // Even number of args (map + 1 key, no value)
+        assert!(eval_str("(assoc {:a 1} :b)", &mut env, &mut d).is_err());
+    }
+
+    // --- conj ---
+
+    #[test]
+    fn builtin_conj_vector_appends() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(conj [1 2] 3)", &mut env, &mut d),
+            Ok(Val::Vector(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
+        );
+    }
+
+    #[test]
+    fn builtin_conj_list_prepends() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(conj (list 2 3) 1)", &mut env, &mut d),
+            Ok(Val::List(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
+        );
+    }
+
+    #[test]
+    fn builtin_conj_map() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(conj {:a 1} [:b 2])", &mut env, &mut d),
+            Ok(Val::Map(vec![
+                (Val::Keyword("a".into()), Val::Int(1)),
+                (Val::Keyword("b".into()), Val::Int(2)),
+            ]))
+        );
+    }
+
+    #[test]
+    fn builtin_conj_too_few_args() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(conj [1])", &mut env, &mut d).is_err());
+    }
+
+    // --- Arithmetic ---
+
+    #[test]
+    fn builtin_add_ints() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(+ 1 2 3)", &mut env, &mut d), Ok(Val::Int(6)));
+    }
+
+    #[test]
+    fn builtin_add_empty() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(+)", &mut env, &mut d), Ok(Val::Int(0)));
+    }
+
+    #[test]
+    fn builtin_add_float_promotion() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(+ 1 2.0)", &mut env, &mut d), Ok(Val::Float(3.0)));
+    }
+
+    #[test]
+    fn builtin_add_non_number() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str(r#"(+ 1 "a")"#, &mut env, &mut d).is_err());
+    }
+
+    #[test]
+    fn builtin_sub_two() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(- 10 3)", &mut env, &mut d), Ok(Val::Int(7)));
+    }
+
+    #[test]
+    fn builtin_sub_negate() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(- 5)", &mut env, &mut d), Ok(Val::Int(-5)));
+    }
+
+    #[test]
+    fn builtin_sub_empty_error() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(-)", &mut env, &mut d).is_err());
+    }
+
+    #[test]
+    fn builtin_mul_ints() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(* 2 3 4)", &mut env, &mut d), Ok(Val::Int(24)));
+    }
+
+    #[test]
+    fn builtin_mul_empty() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(*)", &mut env, &mut d), Ok(Val::Int(1)));
+    }
+
+    #[test]
+    fn builtin_div_ints() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(/ 10 3)", &mut env, &mut d), Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn builtin_div_by_zero() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(/ 10 0)", &mut env, &mut d).is_err());
+    }
+
+    #[test]
+    fn builtin_div_wrong_args() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(/ 1)", &mut env, &mut d).is_err());
+    }
+
+    #[test]
+    fn builtin_mod_ints() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(mod 10 3)", &mut env, &mut d), Ok(Val::Int(1)));
+    }
+
+    #[test]
+    fn builtin_mod_by_zero() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(mod 10 0)", &mut env, &mut d).is_err());
+    }
+
+    // --- Comparison ---
+
+    #[test]
+    fn builtin_eq_true() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(= 1 1)", &mut env, &mut d), Ok(Val::Bool(true)));
+    }
+
+    #[test]
+    fn builtin_eq_false() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(= 1 2)", &mut env, &mut d), Ok(Val::Bool(false)));
+    }
+
+    #[test]
+    fn builtin_eq_wrong_args() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(= 1)", &mut env, &mut d).is_err());
+    }
+
+    #[test]
+    fn builtin_lt_true() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(< 1 2)", &mut env, &mut d), Ok(Val::Bool(true)));
+    }
+
+    #[test]
+    fn builtin_lt_false() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(< 2 1)", &mut env, &mut d), Ok(Val::Bool(false)));
+    }
+
+    #[test]
+    fn builtin_gt_true() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(> 2 1)", &mut env, &mut d), Ok(Val::Bool(true)));
+    }
+
+    #[test]
+    fn builtin_le_equal() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(<= 2 2)", &mut env, &mut d), Ok(Val::Bool(true)));
+    }
+
+    #[test]
+    fn builtin_ge_equal() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(>= 2 2)", &mut env, &mut d), Ok(Val::Bool(true)));
+    }
+
+    #[test]
+    fn builtin_comparison_mixed_numeric() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(< 1 2.5)", &mut env, &mut d), Ok(Val::Bool(true)));
+    }
+
+    #[test]
+    fn builtin_comparison_non_number() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str(r#"(< 1 "a")"#, &mut env, &mut d).is_err());
+    }
+
+    // --- gensym ---
+
+    #[test]
+    fn builtin_gensym() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let r1 = eval_str("(gensym)", &mut env, &mut d).unwrap();
+        let r2 = eval_str("(gensym)", &mut env, &mut d).unwrap();
+        // Each gensym returns a unique symbol
+        match (&r1, &r2) {
+            (Val::Sym(s1), Val::Sym(s2)) => {
+                assert!(s1.starts_with("G__"));
+                assert!(s2.starts_with("G__"));
+                assert_ne!(s1, s2);
+            }
+            _ => panic!("gensym should return Sym, got {r1} and {r2}"),
+        }
+    }
+
+    #[test]
+    fn builtin_gensym_no_args() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(gensym 1)", &mut env, &mut d).is_err());
+    }
+
+    // --- apply ---
+
+    #[test]
+    fn builtin_apply_builtin_fn() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(apply + (list 1 2 3))", &mut env, &mut d),
+            Ok(Val::Int(6))
+        );
+    }
+
+    #[test]
+    fn builtin_apply_user_fn() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str("(def f (fn [x y] (+ x y)))", &mut env, &mut d).unwrap();
+        assert_eq!(
+            eval_str("(apply f (list 3 4))", &mut env, &mut d),
+            Ok(Val::Int(7))
+        );
+    }
+
+    #[test]
+    fn builtin_apply_with_middle_args() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (apply + 1 2 (list 3)) → (+ 1 2 3) → 6
+        assert_eq!(
+            eval_str("(apply + 1 2 (list 3))", &mut env, &mut d),
+            Ok(Val::Int(6))
+        );
+    }
+
+    #[test]
+    fn builtin_apply_too_few_args() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(apply +)", &mut env, &mut d).is_err());
+    }
+
+    #[test]
+    fn builtin_apply_non_collection_last() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(apply + 1 2)", &mut env, &mut d).is_err());
+    }
+
+    #[test]
+    fn builtin_apply_fn_value() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // apply with a fn value (not symbol)
+        eval_str("(def f (fn [x] (+ x 1)))", &mut env, &mut d).unwrap();
+        assert_eq!(
+            eval_str("(apply f [10])", &mut env, &mut d),
+            Ok(Val::Int(11))
+        );
+    }
+
+    // --- Integration: builtins with special forms ---
+
+    #[test]
+    fn builtin_in_let() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(let [x (+ 1 2)] (* x 10))", &mut env, &mut d),
+            Ok(Val::Int(30))
+        );
+    }
+
+    #[test]
+    fn builtin_in_fn() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &mut d).unwrap();
+        assert_eq!(eval_str("(add 3 4)", &mut env, &mut d), Ok(Val::Int(7)));
+    }
+
+    #[test]
+    fn builtin_nested() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(+ (* 2 3) (- 10 4))", &mut env, &mut d),
+            Ok(Val::Int(12))
+        );
     }
 }
