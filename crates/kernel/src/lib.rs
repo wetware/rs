@@ -65,7 +65,7 @@ fn init_logging() {
 // Evaluator — dispatches (capability method args...) to RPC calls
 // ---------------------------------------------------------------------------
 
-struct ShellCtx {
+struct Session {
     host: system_capnp::host::Client,
     executor: system_capnp::executor::Client,
     ipfs: ipfs_capnp::client::Client,
@@ -102,7 +102,7 @@ fn resolve_ipfs_path(path: &str) -> String {
 /// Async handler: takes evaluated args and the shell context.
 type HandlerFn = for<'a> fn(
     &'a [Val],
-    &'a mut ShellCtx,
+    &'a mut Session,
 ) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>>;
 
 /// Build the dispatch table. Each capability and built-in is registered here.
@@ -127,7 +127,7 @@ fn build_dispatch() -> HashMap<&'static str, HandlerFn> {
     t
 }
 
-fn eval_cd(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
+fn eval_cd(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
     let path = match args.first() {
         Some(Val::Str(s)) => s.clone(),
         Some(Val::Sym(s)) => s.clone(),
@@ -145,7 +145,7 @@ fn eval_cd(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
 /// Bundles the capability context and dispatch table so the kernel can
 /// implement [`glia::eval::Dispatch`].
 struct KernelDispatch<'k> {
-    ctx: &'k mut ShellCtx,
+    ctx: &'k mut Session,
     table: &'k HashMap<&'static str, HandlerFn>,
 }
 
@@ -170,7 +170,7 @@ impl<'k> Dispatch for KernelDispatch<'k> {
 
 fn eval<'a>(
     expr: &'a Val,
-    ctx: &'a mut ShellCtx,
+    ctx: &'a mut Session,
     dispatch: &'a HashMap<&'static str, HandlerFn>,
 ) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
     Box::pin(async move {
@@ -183,7 +183,7 @@ fn eval<'a>(
     })
 }
 
-async fn eval_host(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
+async fn eval_host(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
     let method = match args.first() {
         Some(Val::Sym(s)) => s.as_str(),
         _ => return Err("(host <method> [args...])".into()),
@@ -300,7 +300,7 @@ async fn eval_host(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
     }
 }
 
-async fn eval_executor(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
+async fn eval_executor(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
     let method = match args.first() {
         Some(Val::Sym(s)) => s.as_str(),
         _ => return Err("(executor <method> [args...])".into()),
@@ -403,7 +403,7 @@ async fn eval_executor(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> 
     }
 }
 
-async fn eval_ipfs(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
+async fn eval_ipfs(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
     let method = match args.first() {
         Some(Val::Sym(s)) => s.as_str(),
         _ => return Err("(ipfs <method> [args...])".into()),
@@ -532,7 +532,7 @@ impl routing_capnp::provider_sink::Server for CollectorSink {
     }
 }
 
-async fn eval_routing(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
+async fn eval_routing(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
     let method = match args.first() {
         Some(Val::Sym(s)) => s.as_str(),
         _ => return Err("(routing <method> [args...])".into()),
@@ -627,7 +627,7 @@ async fn eval_routing(args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
     }
 }
 
-async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &mut ShellCtx) -> Result<Val, String> {
+async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &mut Session) -> Result<Val, String> {
     // Convert args to strings once — used for whichever candidate we find.
     let str_args: Vec<String> = args
         .iter()
@@ -766,7 +766,7 @@ fn parse_initd_script(name: &str, data: &[u8]) -> Option<Vec<Val>> {
 /// each file as a glia script. Returns true if any expression blocked
 /// (i.e. a foreground process ran to completion via `(executor run ...)`).
 async fn run_initd(
-    ctx: &mut ShellCtx,
+    ctx: &mut Session,
     dispatch: &HashMap<&'static str, HandlerFn>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let ww_root = std::env::var("WW_ROOT").unwrap_or_default();
@@ -886,7 +886,7 @@ fn write_prompt(stdout: &wasip2::io::streams::OutputStream, cwd: &str) {
 }
 
 async fn run_shell(
-    mut ctx: ShellCtx,
+    mut ctx: Session,
     dispatch: &HashMap<&'static str, HandlerFn>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stdin = get_stdin();
@@ -977,7 +977,7 @@ fn run_impl() {
         let graft_resp = membrane.graft_request().send().promise.await?;
         let results = graft_resp.get()?;
 
-        let mut ctx = ShellCtx {
+        let mut ctx = Session {
             host: results.get_host()?,
             executor: results.get_executor()?,
             ipfs: results.get_ipfs()?,
