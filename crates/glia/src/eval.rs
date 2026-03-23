@@ -403,7 +403,7 @@ fn builtin_get(args: &[Val]) -> Result<Val, String> {
 }
 
 fn builtin_assoc(args: &[Val]) -> Result<Val, String> {
-    if args.len() < 3 || (args.len() - 1) % 2 != 0 {
+    if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
         return Err("assoc: expected (assoc map key val ...)".into());
     }
     match &args[0] {
