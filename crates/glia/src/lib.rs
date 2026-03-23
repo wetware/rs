@@ -44,6 +44,9 @@ pub enum Val {
     /// Opaque binary data — a runtime value, not parseable from text.
     /// Produced by evaluating expressions like `(ipfs cat "...")`.
     Bytes(Vec<u8>),
+    /// Internal signal: carries rebinding values from `recur` back to `loop`.
+    /// Not user-visible — if it escapes to top-level eval, that's an error.
+    Recur(Vec<Val>),
 }
 
 impl PartialEq for Val {
@@ -61,6 +64,7 @@ impl PartialEq for Val {
             (Val::Map(a), Val::Map(b)) => a == b,
             (Val::Set(a), Val::Set(b)) => a == b,
             (Val::Bytes(a), Val::Bytes(b)) => a == b,
+            (Val::Recur(a), Val::Recur(b)) => a == b,
             _ => false,
         }
     }
@@ -97,6 +101,7 @@ impl core::fmt::Display for Val {
             }
             Val::Set(items) => fmt_seq(f, "#{", "}", items),
             Val::Bytes(b) => write!(f, "<{} bytes>", b.len()),
+            Val::Recur(_) => write!(f, "#<recur>"),
         }
     }
 }
