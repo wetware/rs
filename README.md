@@ -19,9 +19,8 @@ a capability to do.
 
 ```bash
 rustup target add wasm32-wasip2   # one-time setup
-cargo build                       # host binary
-ww build std/kernel               # kernel agent
-ww run std/kernel                 # drops into a Glia shell
+make                              # build host + kernel + shell
+cargo run -- run crates/kernel    # drops into a Glia shell
 ```
 
 ```clojure
@@ -45,7 +44,7 @@ ww run std/kernel                 # drops into a Glia shell
 `ww run` boots an agent:
 
 1. Starts a **libp2p swarm** on the configured port
-2. Loads `boot/main.wasm` from the merged [image](doc/images.md)
+2. Loads `bin/main.wasm` from the merged [image](doc/images.md)
 3. Spawns the agent with a **Membrane** — the capability hub that
    grants access to host, network, IPFS, and identity services via
    Cap'n Proto RPC
@@ -68,13 +67,10 @@ first-class values. The design blends three traditions:
 ## Building & testing
 
 ```bash
-cargo build                    # host binary
-ww build std/kernel            # kernel agent
-ww build std/shell             # shell agent
-
-cargo test --lib
-cargo test -p membrane
-cargo test -p atom --lib
+make                           # build everything (host + std + examples)
+make host                      # host binary only
+make kernel                    # kernel agent only
+cargo test                     # run tests
 ```
 
 Requires Rust with `wasm32-wasip2` target. Optional:

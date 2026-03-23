@@ -4,15 +4,14 @@ Each wetware image follows a minimal FHS convention:
 
 ```
 <image>/
-  boot/
+  bin/
     main.wasm          # agent entrypoint (required)
-  bin/                 # executables on the kernel's PATH
   svc/                 # nested service images (spawned by pid0)
   etc/                 # configuration (consumed by pid0)
     init.d/            # boot scripts evaluated by the kernel
 ```
 
-Only `boot/main.wasm` is required. Everything else is convention
+Only `bin/main.wasm` is required. Everything else is convention
 between the image author and the kernel (pid0).
 
 ## Mount sources
