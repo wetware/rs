@@ -1141,4 +1141,488 @@ mod tests {
             "unexpected extra entries in dispatch table"
         );
     }
+
+    // ===================================================================
+    // Integration tests — dispatch handlers against capnp-rpc stub servers
+    // ===================================================================
+
+    use capnp::capability::Promise;
+
+    // Fixed test data: a 38-byte multihash peer ID (identity hash of "test-peer").
+    // bs58 of these bytes is "12D3KooW..." in real life; here we use a short
+    // deterministic value so assertions are stable.
+    const STUB_PEER_ID: &[u8] = b"test-peer-id-multihash-bytes-1234";
+    // /ip4/127.0.0.1/tcp/4001 as multiaddr bytes
+    const STUB_MULTIADDR: &[u8] = &[0x04, 127, 0, 0, 1, 0x06, 0x0f, 0xa1];
+
+    // --- Stub Host: returns fixed peer ID, addrs, peers ---
+
+    struct TestHost;
+
+    #[allow(refining_impl_trait)]
+    impl system_capnp::host::Server for TestHost {
+        fn id(
+            self: capnp::capability::Rc<Self>,
+            _params: system_capnp::host::IdParams,
+            mut results: system_capnp::host::IdResults,
+        ) -> Promise<(), capnp::Error> {
+            results.get().set_peer_id(STUB_PEER_ID);
+            Promise::ok(())
+        }
+
+        fn addrs(
+            self: capnp::capability::Rc<Self>,
+            _params: system_capnp::host::AddrsParams,
+            mut results: system_capnp::host::AddrsResults,
+        ) -> Promise<(), capnp::Error> {
+            let mut list = results.get().init_addrs(1);
+            list.set(0, STUB_MULTIADDR);
+            Promise::ok(())
+        }
+
+        fn peers(
+            self: capnp::capability::Rc<Self>,
+            _params: system_capnp::host::PeersParams,
+            mut results: system_capnp::host::PeersResults,
+        ) -> Promise<(), capnp::Error> {
+            let mut list = results.get().init_peers(1);
+            {
+                let mut peer = list.reborrow().get(0);
+                peer.set_peer_id(STUB_PEER_ID);
+                let mut addrs = peer.init_addrs(1);
+                addrs.set(0, STUB_MULTIADDR);
+            }
+            Promise::ok(())
+        }
+
+        fn executor(
+            self: capnp::capability::Rc<Self>,
+            _params: system_capnp::host::ExecutorParams,
+            _results: system_capnp::host::ExecutorResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+
+        fn network(
+            self: capnp::capability::Rc<Self>,
+            _params: system_capnp::host::NetworkParams,
+            _results: system_capnp::host::NetworkResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+    }
+
+    // --- Stub Executor: echo returns input ---
+
+    struct TestExecutor;
+
+    #[allow(refining_impl_trait)]
+    impl system_capnp::executor::Server for TestExecutor {
+        fn echo(
+            self: capnp::capability::Rc<Self>,
+            params: system_capnp::executor::EchoParams,
+            mut results: system_capnp::executor::EchoResults,
+        ) -> Promise<(), capnp::Error> {
+            let msg = capnp_rpc::pry!(capnp_rpc::pry!(params.get()).get_message());
+            results.get().set_response(msg);
+            Promise::ok(())
+        }
+
+        fn run_bytes(
+            self: capnp::capability::Rc<Self>,
+            _params: system_capnp::executor::RunBytesParams,
+            _results: system_capnp::executor::RunBytesResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+    }
+
+    // --- Stub Routing: hash returns fixed CID, provide succeeds, findProviders streams 2 results ---
+
+    struct TestRouting;
+
+    #[allow(refining_impl_trait)]
+    impl routing_capnp::routing::Server for TestRouting {
+        fn hash(
+            self: capnp::capability::Rc<Self>,
+            _params: routing_capnp::routing::HashParams,
+            mut results: routing_capnp::routing::HashResults,
+        ) -> Promise<(), capnp::Error> {
+            results.get().set_key("QmTestCid123");
+            Promise::ok(())
+        }
+
+        fn provide(
+            self: capnp::capability::Rc<Self>,
+            _params: routing_capnp::routing::ProvideParams,
+            _results: routing_capnp::routing::ProvideResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::ok(())
+        }
+
+        fn find_providers(
+            self: capnp::capability::Rc<Self>,
+            params: routing_capnp::routing::FindProvidersParams,
+            _results: routing_capnp::routing::FindProvidersResults,
+        ) -> Promise<(), capnp::Error> {
+            let params = capnp_rpc::pry!(params.get());
+            let count = params.get_count();
+            let sink = capnp_rpc::pry!(params.get_sink());
+
+            // Stream `min(count, 2)` providers.
+            let n = std::cmp::min(count, 2) as usize;
+            Promise::from_future(async move {
+                for i in 0..n {
+                    let mut req = sink.provider_request();
+                    {
+                        let mut info = req.get().init_info();
+                        info.set_peer_id(format!("peer-{i}").as_bytes());
+                        let mut addrs = info.init_addrs(1);
+                        addrs.set(0, STUB_MULTIADDR);
+                    }
+                    req.send().await?;
+                }
+                let done_req = sink.done_request();
+                done_req.send().promise.await?;
+                Ok(())
+            })
+        }
+    }
+
+    // --- Stub IPFS + Identity (unimplemented — not under test) ---
+
+    struct TestIpfs;
+
+    #[allow(refining_impl_trait)]
+    impl ipfs_capnp::client::Server for TestIpfs {
+        fn unixfs(
+            self: capnp::capability::Rc<Self>,
+            _p: ipfs_capnp::client::UnixfsParams,
+            _r: ipfs_capnp::client::UnixfsResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+        fn block(
+            self: capnp::capability::Rc<Self>,
+            _p: ipfs_capnp::client::BlockParams,
+            _r: ipfs_capnp::client::BlockResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+        fn dag(
+            self: capnp::capability::Rc<Self>,
+            _p: ipfs_capnp::client::DagParams,
+            _r: ipfs_capnp::client::DagResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+        fn name(
+            self: capnp::capability::Rc<Self>,
+            _p: ipfs_capnp::client::NameParams,
+            _r: ipfs_capnp::client::NameResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+        fn key(
+            self: capnp::capability::Rc<Self>,
+            _p: ipfs_capnp::client::KeyParams,
+            _r: ipfs_capnp::client::KeyResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+        fn pin(
+            self: capnp::capability::Rc<Self>,
+            _p: ipfs_capnp::client::PinParams,
+            _r: ipfs_capnp::client::PinResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+        fn object(
+            self: capnp::capability::Rc<Self>,
+            _p: ipfs_capnp::client::ObjectParams,
+            _r: ipfs_capnp::client::ObjectResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+        fn swarm(
+            self: capnp::capability::Rc<Self>,
+            _p: ipfs_capnp::client::SwarmParams,
+            _r: ipfs_capnp::client::SwarmResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+        fn pub_sub(
+            self: capnp::capability::Rc<Self>,
+            _p: ipfs_capnp::client::PubSubParams,
+            _r: ipfs_capnp::client::PubSubResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+        fn routing(
+            self: capnp::capability::Rc<Self>,
+            _p: ipfs_capnp::client::RoutingParams,
+            _r: ipfs_capnp::client::RoutingResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+        fn resolve_path(
+            self: capnp::capability::Rc<Self>,
+            _p: ipfs_capnp::client::ResolvePathParams,
+            _r: ipfs_capnp::client::ResolvePathResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+        fn resolve_node(
+            self: capnp::capability::Rc<Self>,
+            _p: ipfs_capnp::client::ResolveNodeParams,
+            _r: ipfs_capnp::client::ResolveNodeResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+    }
+
+    struct TestIdentity;
+
+    #[allow(refining_impl_trait)]
+    impl stem_capnp::identity::Server for TestIdentity {
+        fn signer(
+            self: capnp::capability::Rc<Self>,
+            _p: stem_capnp::identity::SignerParams,
+            _r: stem_capnp::identity::SignerResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+    }
+
+    // --- Helper: construct a Session with test stubs ---
+
+    fn test_session() -> Session {
+        Session {
+            host: capnp_rpc::new_client(TestHost),
+            executor: capnp_rpc::new_client(TestExecutor),
+            ipfs: capnp_rpc::new_client(TestIpfs),
+            routing: capnp_rpc::new_client(TestRouting),
+            identity: capnp_rpc::new_client(TestIdentity),
+            cwd: "/".into(),
+        }
+    }
+
+    /// Run an async block on a single-threaded tokio + capnp-rpc LocalSet.
+    /// capnp-rpc clients are !Send, so we need LocalSet::run_until.
+    async fn run_local<F, T>(f: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        tokio::task::LocalSet::new().run_until(f).await
+    }
+
+    // --- host tests ---
+
+    #[tokio::test]
+    async fn test_host_id_returns_bs58() {
+        run_local(async {
+            let mut ctx = test_session();
+            let args = vec![Val::Sym("id".into())];
+            let result = eval_host(&args, &mut ctx).await.unwrap();
+            let expected = bs58::encode(STUB_PEER_ID).into_string();
+            assert_eq!(result, Val::Str(expected));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_host_addrs_returns_multiaddr_strings() {
+        run_local(async {
+            let mut ctx = test_session();
+            let args = vec![Val::Sym("addrs".into())];
+            let result = eval_host(&args, &mut ctx).await.unwrap();
+            match result {
+                Val::List(addrs) => {
+                    assert_eq!(addrs.len(), 1);
+                    // STUB_MULTIADDR = /ip4/127.0.0.1/tcp/4001
+                    assert_eq!(addrs[0], Val::Str("/ip4/127.0.0.1/tcp/4001".into()));
+                }
+                other => panic!("expected list, got {other:?}"),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_host_peers_returns_map_format() {
+        run_local(async {
+            let mut ctx = test_session();
+            let args = vec![Val::Sym("peers".into())];
+            let result = eval_host(&args, &mut ctx).await.unwrap();
+            match result {
+                Val::List(peers) => {
+                    assert_eq!(peers.len(), 1);
+                    match &peers[0] {
+                        Val::Map(entries) => {
+                            assert_eq!(entries.len(), 2);
+                            assert_eq!(entries[0].0, Val::Keyword("peer-id".into()));
+                            let expected_id = bs58::encode(STUB_PEER_ID).into_string();
+                            assert_eq!(entries[0].1, Val::Str(expected_id));
+                            assert_eq!(entries[1].0, Val::Keyword("addrs".into()));
+                        }
+                        other => panic!("expected map, got {other:?}"),
+                    }
+                }
+                other => panic!("expected list, got {other:?}"),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_host_unknown_method_returns_error() {
+        run_local(async {
+            let mut ctx = test_session();
+            let args = vec![Val::Sym("bogus".into())];
+            let err = eval_host(&args, &mut ctx).await.unwrap_err();
+            assert!(err.contains("unknown host method"), "got: {err}");
+        })
+        .await;
+    }
+
+    // --- executor tests ---
+
+    #[tokio::test]
+    async fn test_executor_echo() {
+        run_local(async {
+            let mut ctx = test_session();
+            let args = vec![Val::Sym("echo".into()), Val::Str("hello".into())];
+            let result = eval_executor(&args, &mut ctx).await.unwrap();
+            assert_eq!(result, Val::Str("hello".into()));
+        })
+        .await;
+    }
+
+    // --- routing tests ---
+
+    #[tokio::test]
+    async fn test_routing_provide_succeeds() {
+        run_local(async {
+            let mut ctx = test_session();
+            let args = vec![Val::Sym("provide".into()), Val::Str("oracle".into())];
+            let result = eval_routing(&args, &mut ctx).await.unwrap();
+            assert_eq!(result, Val::Nil);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_routing_provide_missing_name() {
+        run_local(async {
+            let mut ctx = test_session();
+            let args = vec![Val::Sym("provide".into())];
+            let err = eval_routing(&args, &mut ctx).await.unwrap_err();
+            assert!(err.contains("routing provide"), "got: {err}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_routing_find_default_count() {
+        run_local(async {
+            let mut ctx = test_session();
+            let args = vec![Val::Sym("find".into()), Val::Str("oracle".into())];
+            let result = eval_routing(&args, &mut ctx).await.unwrap();
+            match result {
+                Val::List(providers) => {
+                    // TestRouting streams min(count, 2) = min(20, 2) = 2 providers
+                    assert_eq!(providers.len(), 2);
+                    match &providers[0] {
+                        Val::Map(entries) => {
+                            assert_eq!(entries[0].0, Val::Keyword("peer-id".into()));
+                            assert_eq!(
+                                entries[0].1,
+                                Val::Str(bs58::encode(b"peer-0").into_string())
+                            );
+                        }
+                        other => panic!("expected map, got {other:?}"),
+                    }
+                }
+                other => panic!("expected list, got {other:?}"),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_routing_find_custom_count() {
+        run_local(async {
+            let mut ctx = test_session();
+            let args = vec![
+                Val::Sym("find".into()),
+                Val::Str("oracle".into()),
+                Val::Keyword("count".into()),
+                Val::Int(1),
+            ];
+            let result = eval_routing(&args, &mut ctx).await.unwrap();
+            match result {
+                Val::List(providers) => {
+                    // TestRouting streams min(1, 2) = 1 provider
+                    assert_eq!(providers.len(), 1);
+                }
+                other => panic!("expected list, got {other:?}"),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_routing_find_zero_count_means_no_limit() {
+        run_local(async {
+            let mut ctx = test_session();
+            let args = vec![
+                Val::Sym("find".into()),
+                Val::Str("oracle".into()),
+                Val::Keyword("count".into()),
+                Val::Int(0),
+            ];
+            let result = eval_routing(&args, &mut ctx).await.unwrap();
+            match result {
+                Val::List(providers) => {
+                    // count=0 → u32::MAX, TestRouting streams min(u32::MAX, 2) = 2
+                    assert_eq!(providers.len(), 2);
+                }
+                other => panic!("expected list, got {other:?}"),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_routing_find_missing_name() {
+        run_local(async {
+            let mut ctx = test_session();
+            let args = vec![Val::Sym("find".into())];
+            let err = eval_routing(&args, &mut ctx).await.unwrap_err();
+            assert!(err.contains("routing find"), "got: {err}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_routing_hash() {
+        run_local(async {
+            let mut ctx = test_session();
+            let args = vec![Val::Sym("hash".into()), Val::Str("test-data".into())];
+            let result = eval_routing(&args, &mut ctx).await.unwrap();
+            assert_eq!(result, Val::Str("QmTestCid123".into()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_routing_unknown_method_returns_error() {
+        run_local(async {
+            let mut ctx = test_session();
+            let args = vec![Val::Sym("bogus".into())];
+            let err = eval_routing(&args, &mut ctx).await.unwrap_err();
+            assert!(err.contains("unknown routing method"), "got: {err}");
+        })
+        .await;
+    }
 }

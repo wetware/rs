@@ -14,6 +14,9 @@ hex = "0.4"
 glia = { path = "../glia" }
 system = { path = "../../std/system" }
 
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+
 [lib]
 crate-type = ["cdylib"]
 
