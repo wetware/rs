@@ -95,10 +95,10 @@ impl futures::io::AsyncRead for StreamReader {
                 std::task::Poll::Ready(Ok(to_copy))
             }
             Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
-            Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("stream read error: {:?}", err),
-            ))),
+            Err(err) => std::task::Poll::Ready(Err(std::io::Error::other(format!(
+                "stream read error: {:?}",
+                err
+            )))),
         }
     }
 }
@@ -139,17 +139,17 @@ impl futures::io::AsyncWrite for StreamWriter {
                         std::task::Poll::Ready(Ok(to_write))
                     }
                     Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
-                    Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("stream write error: {:?}", err),
-                    ))),
+                    Err(err) => std::task::Poll::Ready(Err(std::io::Error::other(format!(
+                        "stream write error: {:?}",
+                        err
+                    )))),
                 }
             }
             Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(0)),
-            Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("stream write error: {:?}", err),
-            ))),
+            Err(err) => std::task::Poll::Ready(Err(std::io::Error::other(format!(
+                "stream write error: {:?}",
+                err
+            )))),
         }
     }
 
@@ -160,10 +160,10 @@ impl futures::io::AsyncWrite for StreamWriter {
         match self.stream.flush() {
             Ok(()) => std::task::Poll::Ready(Ok(())),
             Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(())),
-            Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("stream flush error: {:?}", err),
-            ))),
+            Err(err) => std::task::Poll::Ready(Err(std::io::Error::other(format!(
+                "stream flush error: {:?}",
+                err
+            )))),
         }
     }
 
@@ -174,10 +174,10 @@ impl futures::io::AsyncWrite for StreamWriter {
         match self.stream.flush() {
             Ok(()) => std::task::Poll::Ready(Ok(())),
             Err(WasiStreamError::Closed) => std::task::Poll::Ready(Ok(())),
-            Err(err) => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("stream close error: {:?}", err),
-            ))),
+            Err(err) => std::task::Poll::Ready(Err(std::io::Error::other(format!(
+                "stream close error: {:?}",
+                err
+            )))),
         }
     }
 }
@@ -313,11 +313,17 @@ pub struct RpcDriver {
     waker: Waker,
 }
 
-impl RpcDriver {
-    pub fn new() -> Self {
+impl Default for RpcDriver {
+    fn default() -> Self {
         Self {
             waker: noop_waker(),
         }
+    }
+}
+
+impl RpcDriver {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn drive_until<F>(
