@@ -244,15 +244,16 @@ async fn eval_loop<'a, D: Dispatch>(
     env.push_frame();
 
     let result = async {
-        // Evaluate initial binding values.
-        let mut vals: Vec<Val> = Vec::with_capacity(names.len());
+        // Evaluate initial binding values sequentially (each binding sees
+        // the previous ones, like `let`). This means `(loop [a 1 b a] b)`
+        // correctly evaluates to 1.
         for pair in bindings.chunks(2) {
+            let name = match &pair[0] {
+                Val::Sym(s) => s.clone(),
+                _ => unreachable!(), // already validated above
+            };
             let val = eval(&pair[1], env, dispatch).await?;
-            vals.push(val);
-        }
-        // Set initial bindings.
-        for (name, val) in names.iter().zip(vals.iter()) {
-            env.set(name.clone(), val.clone());
+            env.set(name, val);
         }
 
         loop {
