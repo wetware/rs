@@ -6,8 +6,7 @@
 //! - Membrane Signer for epoch-scoped session authentication
 //!
 //! Keys are stored as base58btc (Bitcoin alphabet, ~44 chars for 32 bytes)
-//! on the local filesystem. Hex-encoded keys are also accepted on load for
-//! backward compatibility.
+//! on the local filesystem, aligning with the libp2p ecosystem.
 #![cfg(not(target_arch = "wasm32"))]
 
 use anyhow::{bail, Context, Result};
@@ -56,18 +55,11 @@ pub fn ethereum_address(sk: &SigningKey) -> [u8; 20] {
     addr
 }
 
-/// Decode a base58btc or hex string into a 32-byte signing key.
+/// Decode a base58btc string into a 32-byte signing key.
 fn decode(s: &str) -> Result<SigningKey> {
-    let bytes = if let Ok(b) = s.from_base58() {
-        b
-    } else if let Ok(b) = hex::decode(s) {
-        b
-    } else {
-        bail!(
-            "key must be base58btc or hex-encoded (got {} chars)",
-            s.len()
-        );
-    };
+    let bytes = s
+        .from_base58()
+        .map_err(|_| anyhow::anyhow!("key must be base58btc-encoded (~44 chars)"))?;
 
     if bytes.len() != 32 {
         bail!("expected 32-byte key, got {} bytes", bytes.len());
@@ -76,9 +68,7 @@ fn decode(s: &str) -> Result<SigningKey> {
     SigningKey::from_bytes(bytes.as_slice().into()).context("invalid secp256k1 secret key bytes")
 }
 
-/// Load a secp256k1 private key from a local filesystem path.
-///
-/// Accepts base58btc or hex encoding (auto-detected).
+/// Load a secp256k1 private key from a local filesystem path (base58btc).
 pub fn load(path: &str) -> Result<SigningKey> {
     let contents =
         std::fs::read_to_string(path).with_context(|| format!("read key file: {path}"))?;
@@ -109,11 +99,11 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_hex_compat() {
+    fn hex_encoding_rejected() {
         let sk = generate().unwrap();
         let hex_str = hex::encode(sk.to_bytes());
-        let decoded = decode(&hex_str).unwrap();
-        assert_eq!(sk.to_bytes(), decoded.to_bytes());
+        // Hex is not accepted — base58btc only.
+        assert!(decode(&hex_str).is_err());
     }
 
     #[test]
