@@ -417,6 +417,111 @@ async fn invoke_fn<'a, D: Dispatch>(
     result
 }
 
+/// `(loop [bindings...] body...)` — tail-recursive iteration.
+///
+/// Bindings are sequential (like `let`).  Body forms are evaluated in
+/// an implicit `do`.  If the result is `Val::Recur`, the bindings are
+/// replaced and the body re-evaluated; otherwise the result is returned.
+async fn eval_loop<'a, D: Dispatch>(
+    args: &'a [Val],
+    env: &'a mut Env,
+    dispatch: &'a mut D,
+) -> Result<Val, String> {
+    let bindings = match args.first() {
+        Some(Val::Vector(v)) => v,
+        Some(other) => return Err(format!("loop: expected vector of bindings, got {other}")),
+        None => return Err("loop: expected (loop [bindings...] body...)".into()),
+    };
+    if bindings.len() % 2 != 0 {
+        return Err("loop: bindings must be pairs (even number of forms)".into());
+    }
+
+    let binding_names: Vec<String> = bindings
+        .chunks(2)
+        .map(|pair| match &pair[0] {
+            Val::Sym(s) => Ok(s.clone()),
+            other => Err(format!("loop: binding name must be a symbol, got {other}")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let num_bindings = binding_names.len();
+
+    env.push_frame();
+
+    let result = async {
+        // Evaluate initial bindings sequentially (each sees previous ones).
+        for pair in bindings.chunks(2) {
+            let name = match &pair[0] {
+                Val::Sym(s) => s.clone(),
+                _ => unreachable!(), // already validated above
+            };
+            let val = eval(&pair[1], env, dispatch).await?;
+            env.set(name, val);
+        }
+
+        let body = &args[1..];
+        loop {
+            // Evaluate body forms (implicit do).
+            let mut result = Val::Nil;
+            for form in body {
+                result = eval(form, env, dispatch).await?;
+            }
+
+            match result {
+                Val::Recur(new_vals) => {
+                    if new_vals.len() != num_bindings {
+                        return Err(format!(
+                            "recur: expected {} args, got {}",
+                            num_bindings,
+                            new_vals.len()
+                        ));
+                    }
+                    for (name, val) in binding_names.iter().zip(new_vals) {
+                        env.set(name.clone(), val);
+                    }
+                    // continue loop — re-evaluate body
+                }
+                other => return Ok(other),
+            }
+        }
+    }
+    .await;
+
+    env.pop_frame();
+    result
+}
+
+/// `(recur args...)` — evaluate args and return a `Recur` sentinel.
+///
+/// Only meaningful inside `loop` body (tail position).  If it escapes
+/// to the top level, `eval_toplevel` converts it to an error.
+async fn eval_recur<'a, D: Dispatch>(
+    args: &'a [Val],
+    env: &'a mut Env,
+    dispatch: &'a mut D,
+) -> Result<Val, String> {
+    let evaled = eval_args(args, env, dispatch).await?;
+    Ok(Val::Recur(evaled))
+}
+
+/// Top-level evaluation wrapper.
+///
+/// Calls `eval` and catches escaped `Val::Recur` sentinels, converting
+/// them to an error ("recur not in tail position").
+pub fn eval_toplevel<'a, D: Dispatch>(
+    expr: &'a Val,
+    env: &'a mut Env,
+    dispatch: &'a mut D,
+) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
+    Box::pin(async move {
+        let result = eval(expr, env, dispatch).await?;
+        match result {
+            Val::Recur(_) => Err("recur not in tail position".into()),
+            other => Ok(other),
+        }
+    })
+}
+
 /// Evaluate a Glia expression.
 ///
 /// Resolution order:
@@ -458,9 +563,10 @@ pub fn eval<'a, D: Dispatch>(
 
                     "fn" => return eval_fn(raw_args, env),
 
-                    // Reserved for future special forms (#208, #209).
-                    "loop" => return Err("loop: not yet implemented (see #208)".into()),
-                    "recur" => return Err("recur: not yet implemented (see #208)".into()),
+                    "loop" => return eval_loop(raw_args, env, dispatch).await,
+                    "recur" => return eval_recur(raw_args, env, dispatch).await,
+
+                    // Reserved for future special forms (#209).
                     "defmacro" => return Err("defmacro: not yet implemented (see #209)".into()),
 
                     _ => {} // fall through to env lookup / dispatch
@@ -530,7 +636,7 @@ mod tests {
         dispatch: &mut RecordingDispatch,
     ) -> Result<Val, String> {
         // We can use a trivial executor since our futures are purely synchronous.
-        pollster_eval(eval(expr, env, dispatch))
+        pollster_eval(eval_toplevel(expr, env, dispatch))
     }
 
     /// Minimal single-future poll-to-completion (no tokio needed).
@@ -1098,7 +1204,7 @@ mod tests {
     fn reserved_forms_error_not_dispatch() {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
-        for form in &["loop", "recur", "defmacro"] {
+        for form in &["defmacro"] {
             let expr = Val::List(vec![Val::Sym(form.to_string())]);
             let result = eval_blocking(&expr, &mut env, &mut d);
             assert!(result.is_err(), "{form} should error, not dispatch");
@@ -1297,5 +1403,143 @@ mod tests {
         // (fn) — no params at all
         let expr = Val::List(vec![Val::Sym("fn".into())]);
         assert!(eval_blocking(&expr, &mut env, &mut d).is_err());
+    }
+
+    // --- loop / recur ---
+
+    #[test]
+    fn loop_returns_non_recur() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (loop [x 42] x)
+        let expr = Val::List(vec![
+            Val::Sym("loop".into()),
+            Val::Vector(vec![Val::Sym("x".into()), Val::Int(42)]),
+            Val::Sym("x".into()),
+        ]);
+        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(Val::Int(42)));
+    }
+
+    #[test]
+    fn loop_recur_once() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (loop [x true] (if x (recur false) "done"))
+        let expr = Val::List(vec![
+            Val::Sym("loop".into()),
+            Val::Vector(vec![Val::Sym("x".into()), Val::Bool(true)]),
+            Val::List(vec![
+                Val::Sym("if".into()),
+                Val::Sym("x".into()),
+                Val::List(vec![Val::Sym("recur".into()), Val::Bool(false)]),
+                Val::Str("done".into()),
+            ]),
+        ]);
+        assert_eq!(
+            eval_blocking(&expr, &mut env, &mut d),
+            Ok(Val::Str("done".into()))
+        );
+    }
+
+    #[test]
+    fn loop_recur_multiple_bindings() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (loop [a 1 b 2] (if a (recur false 3) b))
+        let expr = Val::List(vec![
+            Val::Sym("loop".into()),
+            Val::Vector(vec![
+                Val::Sym("a".into()),
+                Val::Int(1),
+                Val::Sym("b".into()),
+                Val::Int(2),
+            ]),
+            Val::List(vec![
+                Val::Sym("if".into()),
+                Val::Sym("a".into()),
+                Val::List(vec![
+                    Val::Sym("recur".into()),
+                    Val::Bool(false),
+                    Val::Int(3),
+                ]),
+                Val::Sym("b".into()),
+            ]),
+        ]);
+        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn loop_sequential_bindings() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (loop [a 1 b a] b) — b sees a=1
+        let expr = Val::List(vec![
+            Val::Sym("loop".into()),
+            Val::Vector(vec![
+                Val::Sym("a".into()),
+                Val::Int(1),
+                Val::Sym("b".into()),
+                Val::Sym("a".into()),
+            ]),
+            Val::Sym("b".into()),
+        ]);
+        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(Val::Int(1)));
+    }
+
+    #[test]
+    fn recur_wrong_arity() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (loop [x 1 y 2] (recur 3))
+        let expr = Val::List(vec![
+            Val::Sym("loop".into()),
+            Val::Vector(vec![
+                Val::Sym("x".into()),
+                Val::Int(1),
+                Val::Sym("y".into()),
+                Val::Int(2),
+            ]),
+            Val::List(vec![Val::Sym("recur".into()), Val::Int(3)]),
+        ]);
+        let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
+        assert!(err.contains("expected 2 args"), "got: {err}");
+    }
+
+    #[test]
+    fn recur_outside_loop() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (recur 1) at top level
+        let expr = Val::List(vec![Val::Sym("recur".into()), Val::Int(1)]);
+        let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
+        assert!(err.contains("recur not in tail position"), "got: {err}");
+    }
+
+    #[test]
+    fn loop_non_vector_bindings() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (loop (x 1) x) — list instead of vector
+        let expr = Val::List(vec![
+            Val::Sym("loop".into()),
+            Val::List(vec![Val::Sym("x".into()), Val::Int(1)]),
+            Val::Sym("x".into()),
+        ]);
+        let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
+        assert!(err.contains("vector"), "got: {err}");
+    }
+
+    #[test]
+    fn loop_odd_bindings() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (loop [x] x) — odd number of binding forms
+        let expr = Val::List(vec![
+            Val::Sym("loop".into()),
+            Val::Vector(vec![Val::Sym("x".into())]),
+            Val::Sym("x".into()),
+        ]);
+        let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
+        assert!(err.contains("pairs"), "got: {err}");
     }
 }
