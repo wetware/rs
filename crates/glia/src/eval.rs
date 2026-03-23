@@ -675,6 +675,7 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, String>> {
         "get" => Some(builtin_get(args)),
         "assoc" => Some(builtin_assoc(args)),
         "conj" => Some(builtin_conj(args)),
+        "concat" => Some(builtin_concat(args)),
 
         // --- Arithmetic ---
         "+" => Some(builtin_add(args)),
@@ -872,6 +873,18 @@ fn builtin_conj(args: &[Val]) -> Result<Val, String> {
         }
         other => Err(format!("conj: expected collection, got {other}")),
     }
+}
+
+fn builtin_concat(args: &[Val]) -> Result<Val, String> {
+    let mut result = Vec::new();
+    for arg in args {
+        match arg {
+            Val::Nil => {}
+            Val::List(v) | Val::Vector(v) => result.extend(v.iter().cloned()),
+            other => return Err(format!("concat: expected sequence or nil, got {other}")),
+        }
+    }
+    Ok(Val::List(result))
 }
 
 // --- Arithmetic helpers ---
@@ -1077,6 +1090,14 @@ pub fn eval<'a, D: Dispatch>(
                     "recur" => return eval_recur(raw_args, env, dispatch).await,
 
                     "defmacro" => return eval_defmacro(raw_args, env).await,
+
+                    // Reader markers — error if they escape syntax-quote
+                    "unquote" => {
+                        return Err("unquote (~) not inside syntax-quote".into());
+                    }
+                    "splice-unquote" => {
+                        return Err("splice-unquote (~@) not inside syntax-quote".into());
+                    }
 
                     _ => {} // fall through to macro / fn / builtins / dispatch
                 }
@@ -2860,5 +2881,160 @@ mod tests {
             eval_str("(test-gensym)", &mut env, &mut d),
             Ok(Val::Int(42))
         );
+    }
+
+    // --- concat builtin tests ---
+
+    #[test]
+    fn builtin_concat_two_lists() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(concat (list 1 2) (list 3 4))", &mut env, &mut d),
+            Ok(Val::List(vec![
+                Val::Int(1),
+                Val::Int(2),
+                Val::Int(3),
+                Val::Int(4),
+            ]))
+        );
+    }
+
+    #[test]
+    fn builtin_concat_empty() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(concat)", &mut env, &mut d),
+            Ok(Val::List(vec![]))
+        );
+    }
+
+    #[test]
+    fn builtin_concat_with_nil() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(concat (list 1) nil (list 2))", &mut env, &mut d),
+            Ok(Val::List(vec![Val::Int(1), Val::Int(2)]))
+        );
+    }
+
+    #[test]
+    fn builtin_concat_with_vector() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(concat [1 2] (list 3))", &mut env, &mut d),
+            Ok(Val::List(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
+        );
+    }
+
+    #[test]
+    fn builtin_concat_non_seq_error() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(concat 42)", &mut env, &mut d).is_err());
+    }
+
+    // --- Syntax-quote integration tests ---
+
+    #[test]
+    fn syntax_quote_when_macro() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str(
+            "(defmacro when [test & body] `(if ~test (do ~@body) nil))",
+            &mut env,
+            &mut d,
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str("(when true 1 2 3)", &mut env, &mut d),
+            Ok(Val::Int(3))
+        );
+        assert_eq!(
+            eval_str("(when false 1 2 3)", &mut env, &mut d),
+            Ok(Val::Nil)
+        );
+    }
+
+    #[test]
+    fn syntax_quote_simple_expansion() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // Syntax-quote in a let produces a data structure
+        assert_eq!(
+            eval_str("(let [x 42] `(+ ~x 1))", &mut env, &mut d),
+            Ok(Val::List(vec![
+                Val::Sym("+".into()),
+                Val::Int(42),
+                Val::Int(1),
+            ]))
+        );
+    }
+
+    #[test]
+    fn syntax_quote_splice_expansion() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(let [xs (list 1 2 3)] `(+ ~@xs))", &mut env, &mut d,),
+            Ok(Val::List(vec![
+                Val::Sym("+".into()),
+                Val::Int(1),
+                Val::Int(2),
+                Val::Int(3),
+            ]))
+        );
+    }
+
+    #[test]
+    fn syntax_quote_unless_macro() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str(
+            "(defmacro unless [test & body] `(if ~test nil (do ~@body)))",
+            &mut env,
+            &mut d,
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str("(unless false 1 2 3)", &mut env, &mut d),
+            Ok(Val::Int(3))
+        );
+        assert_eq!(
+            eval_str("(unless true 1 2 3)", &mut env, &mut d),
+            Ok(Val::Nil)
+        );
+    }
+
+    #[test]
+    fn syntax_quote_preserves_keywords() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // Keywords are self-evaluating — should pass through syntax-quote
+        assert_eq!(
+            eval_str("`(:a ~(+ 1 2))", &mut env, &mut d),
+            Ok(Val::List(vec![Val::Keyword("a".into()), Val::Int(3)]))
+        );
+    }
+
+    #[test]
+    fn unquote_outside_syntax_quote_errors() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str("(unquote x)", &mut env, &mut d);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not inside syntax-quote"));
+    }
+
+    #[test]
+    fn splice_unquote_outside_syntax_quote_errors() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str("(splice-unquote x)", &mut env, &mut d);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not inside syntax-quote"));
     }
 }

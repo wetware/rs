@@ -210,14 +210,17 @@ pub fn read_many(input: &str) -> Result<Vec<Val>, String> {
 /// Token types produced by the tokenizer.
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
-    Open,     // (
-    Close,    // )
-    VecOpen,  // [
-    VecClose, // ]
-    MapOpen,  // {
-    MapClose, // }
-    SetOpen,  // #{
-    Quote,    // '
+    Open,          // (
+    Close,         // )
+    VecOpen,       // [
+    VecClose,      // ]
+    MapOpen,       // {
+    MapClose,      // }
+    SetOpen,       // #{
+    Quote,         // '
+    Backtick,      // `
+    Unquote,       // ~
+    SpliceUnquote, // ~@
     Atom(String),
 }
 
@@ -258,6 +261,19 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             '\'' => {
                 tokens.push(Token::Quote);
                 chars.next();
+            }
+            '`' => {
+                tokens.push(Token::Backtick);
+                chars.next();
+            }
+            '~' => {
+                chars.next();
+                if chars.peek() == Some(&'@') {
+                    chars.next();
+                    tokens.push(Token::SpliceUnquote);
+                } else {
+                    tokens.push(Token::Unquote);
+                }
             }
             '#' => {
                 chars.next();
@@ -316,6 +332,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                             | '\''
                             | '"'
                             | ';'
+                            | '`'
+                            | '~'
                     ) {
                         break;
                     }
@@ -344,6 +362,22 @@ fn parse_tokens(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
         Token::Quote => {
             let (inner, rest) = parse_tokens(&tokens[1..])?;
             Ok((Val::List(vec![Val::Sym("quote".into()), inner]), rest))
+        }
+        Token::Backtick => {
+            let (inner, rest) = parse_tokens(&tokens[1..])?;
+            let transformed = transform_syntax_quote(&inner)?;
+            Ok((transformed, rest))
+        }
+        Token::Unquote => {
+            let (inner, rest) = parse_tokens(&tokens[1..])?;
+            Ok((Val::List(vec![Val::Sym("unquote".into()), inner]), rest))
+        }
+        Token::SpliceUnquote => {
+            let (inner, rest) = parse_tokens(&tokens[1..])?;
+            Ok((
+                Val::List(vec![Val::Sym("splice-unquote".into()), inner]),
+                rest,
+            ))
         }
         Token::Close => Err("unexpected )".into()),
         Token::VecClose => Err("unexpected ]".into()),
@@ -417,6 +451,109 @@ fn close_name(token: &Token) -> &'static str {
         Token::VecClose => "vector",
         Token::MapClose => "map/set",
         _ => "collection",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Syntax-quote transformer
+// ---------------------------------------------------------------------------
+
+/// Check whether `val` is an `(unquote expr)` marker form.
+fn is_unquote(val: &Val) -> bool {
+    matches!(val, Val::List(items) if items.len() == 2 && matches!(&items[0], Val::Sym(s) if s == "unquote"))
+}
+
+/// Check whether `val` is a `(splice-unquote expr)` marker form.
+fn is_splice_unquote(val: &Val) -> bool {
+    matches!(val, Val::List(items) if items.len() == 2 && matches!(&items[0], Val::Sym(s) if s == "splice-unquote"))
+}
+
+/// Transform a syntax-quoted form into explicit `list`/`concat`/`quote` calls.
+///
+/// The reader converts `` `form `` by parsing `form` (which may contain
+/// `~expr` and `~@expr` marker sub-forms) and then calling this function
+/// to produce the expansion.
+fn transform_syntax_quote(val: &Val) -> Result<Val, String> {
+    match val {
+        // ~expr → pass through (will be evaluated at runtime)
+        _ if is_unquote(val) => {
+            if let Val::List(items) = val {
+                Ok(items[1].clone())
+            } else {
+                unreachable!()
+            }
+        }
+
+        // ~@expr at top level → error
+        _ if is_splice_unquote(val) => Err("splice-unquote (~@) not inside list".into()),
+
+        // (quote expr) inside syntax-quote → preserve as literal, don't recurse
+        Val::List(items)
+            if items.len() == 2 && matches!(&items[0], Val::Sym(s) if s == "quote") =>
+        {
+            // Return (list (quote quote) (list (quote expr)))
+            // which evaluates to the literal (quote expr)
+            Ok(Val::List(vec![
+                Val::Sym("concat".into()),
+                Val::List(vec![
+                    Val::Sym("list".into()),
+                    Val::List(vec![Val::Sym("quote".into()), Val::Sym("quote".into())]),
+                ]),
+                Val::List(vec![
+                    Val::Sym("list".into()),
+                    Val::List(vec![Val::Sym("quote".into()), items[1].clone()]),
+                ]),
+            ]))
+        }
+
+        // (a ~b ~@c d) → (concat (list (quote a)) (list b) c (list (quote d)))
+        Val::List(items) => {
+            if items.is_empty() {
+                return Ok(Val::List(vec![Val::Sym("list".into())]));
+            }
+            let mut segments = Vec::new();
+            for item in items {
+                if is_unquote(item) {
+                    // ~x → (list x)
+                    if let Val::List(inner) = item {
+                        segments.push(Val::List(vec![Val::Sym("list".into()), inner[1].clone()]));
+                    }
+                } else if is_splice_unquote(item) {
+                    // ~@x → x (concat will flatten)
+                    if let Val::List(inner) = item {
+                        segments.push(inner[1].clone());
+                    }
+                } else {
+                    // Recurse and wrap in (list ...)
+                    let quoted = transform_syntax_quote(item)?;
+                    segments.push(Val::List(vec![Val::Sym("list".into()), quoted]));
+                }
+            }
+            let mut result = vec![Val::Sym("concat".into())];
+            result.extend(segments);
+            Ok(Val::List(result))
+        }
+
+        // [a ~b] → (vec (concat ...))
+        Val::Vector(items) => {
+            let as_list = transform_syntax_quote(&Val::List(items.clone()))?;
+            Ok(Val::List(vec![Val::Sym("vec".into()), as_list]))
+        }
+
+        // Symbols → (quote sym)
+        Val::Sym(_) => Ok(Val::List(vec![Val::Sym("quote".into()), val.clone()])),
+
+        // Self-evaluating: nil, bool, int, float, str, keyword → as-is
+        Val::Nil | Val::Bool(_) | Val::Int(_) | Val::Float(_) | Val::Str(_) | Val::Keyword(_) => {
+            Ok(val.clone())
+        }
+
+        // Map/Set — defer to future phase
+        Val::Map(_) => Err("syntax-quote of maps not yet supported".into()),
+        Val::Set(_) => Err("syntax-quote of sets not yet supported".into()),
+
+        // Fn/Macro/Recur/Bytes — shouldn't appear in parsed forms
+        other => Err(format!("syntax-quote: unexpected value {other}")),
     }
 }
 
@@ -1343,5 +1480,261 @@ mod tests {
     #[test]
     fn quote_eof_error() {
         assert!(read("'").is_err());
+    }
+
+    // --- Syntax-quote tokenizer tests ---
+
+    #[test]
+    fn tokenize_backtick() {
+        let tokens = tokenize("`foo").unwrap();
+        assert_eq!(tokens, vec![Token::Backtick, Token::Atom("foo".into())]);
+    }
+
+    #[test]
+    fn tokenize_unquote() {
+        let tokens = tokenize("~foo").unwrap();
+        assert_eq!(tokens, vec![Token::Unquote, Token::Atom("foo".into())]);
+    }
+
+    #[test]
+    fn tokenize_splice_unquote() {
+        let tokens = tokenize("~@foo").unwrap();
+        assert_eq!(
+            tokens,
+            vec![Token::SpliceUnquote, Token::Atom("foo".into())]
+        );
+    }
+
+    #[test]
+    fn tokenize_tilde_in_list() {
+        let tokens = tokenize("(a ~b)").unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Open,
+                Token::Atom("a".into()),
+                Token::Unquote,
+                Token::Atom("b".into()),
+                Token::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_splice_in_list() {
+        let tokens = tokenize("(a ~@b)").unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Open,
+                Token::Atom("a".into()),
+                Token::SpliceUnquote,
+                Token::Atom("b".into()),
+                Token::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_at_in_symbol() {
+        // @ is NOT an atom boundary — @foo is a valid symbol
+        let tokens = tokenize("@foo").unwrap();
+        assert_eq!(tokens, vec![Token::Atom("@foo".into())]);
+    }
+
+    // --- Syntax-quote parser tests ---
+
+    #[test]
+    fn syntax_quote_symbol() {
+        // `x → (quote x)
+        let val = read("`x").unwrap();
+        assert_eq!(
+            val,
+            Val::List(vec![Val::Sym("quote".into()), Val::Sym("x".into())])
+        );
+    }
+
+    #[test]
+    fn syntax_quote_self_eval_int() {
+        // `42 → 42
+        let val = read("`42").unwrap();
+        assert_eq!(val, Val::Int(42));
+    }
+
+    #[test]
+    fn syntax_quote_self_eval_nil() {
+        // `nil → nil
+        let val = read("`nil").unwrap();
+        assert_eq!(val, Val::Nil);
+    }
+
+    #[test]
+    fn syntax_quote_self_eval_keyword() {
+        // `:foo → :foo
+        let val = read("`:foo").unwrap();
+        assert_eq!(val, Val::Keyword("foo".into()));
+    }
+
+    #[test]
+    fn syntax_quote_list() {
+        // `(a b) → (concat (list (quote a)) (list (quote b)))
+        let val = read("`(a b)").unwrap();
+        assert_eq!(
+            val,
+            Val::List(vec![
+                Val::Sym("concat".into()),
+                Val::List(vec![
+                    Val::Sym("list".into()),
+                    Val::List(vec![Val::Sym("quote".into()), Val::Sym("a".into())]),
+                ]),
+                Val::List(vec![
+                    Val::Sym("list".into()),
+                    Val::List(vec![Val::Sym("quote".into()), Val::Sym("b".into())]),
+                ]),
+            ])
+        );
+    }
+
+    #[test]
+    fn syntax_quote_unquote() {
+        // `(a ~b) → (concat (list (quote a)) (list b))
+        let val = read("`(a ~b)").unwrap();
+        assert_eq!(
+            val,
+            Val::List(vec![
+                Val::Sym("concat".into()),
+                Val::List(vec![
+                    Val::Sym("list".into()),
+                    Val::List(vec![Val::Sym("quote".into()), Val::Sym("a".into())]),
+                ]),
+                Val::List(vec![Val::Sym("list".into()), Val::Sym("b".into())]),
+            ])
+        );
+    }
+
+    #[test]
+    fn syntax_quote_splice() {
+        // `(a ~@b) → (concat (list (quote a)) b)
+        let val = read("`(a ~@b)").unwrap();
+        assert_eq!(
+            val,
+            Val::List(vec![
+                Val::Sym("concat".into()),
+                Val::List(vec![
+                    Val::Sym("list".into()),
+                    Val::List(vec![Val::Sym("quote".into()), Val::Sym("a".into())]),
+                ]),
+                Val::Sym("b".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn syntax_quote_vector() {
+        // `[a ~b] → (vec (concat (list (quote a)) (list b)))
+        let val = read("`[a ~b]").unwrap();
+        assert_eq!(
+            val,
+            Val::List(vec![
+                Val::Sym("vec".into()),
+                Val::List(vec![
+                    Val::Sym("concat".into()),
+                    Val::List(vec![
+                        Val::Sym("list".into()),
+                        Val::List(vec![Val::Sym("quote".into()), Val::Sym("a".into())]),
+                    ]),
+                    Val::List(vec![Val::Sym("list".into()), Val::Sym("b".into())]),
+                ]),
+            ])
+        );
+    }
+
+    #[test]
+    fn syntax_quote_nested_list() {
+        // `(a (b ~c)) → (concat (list (quote a)) (list (concat (list (quote b)) (list c))))
+        let val = read("`(a (b ~c))").unwrap();
+        assert_eq!(
+            val,
+            Val::List(vec![
+                Val::Sym("concat".into()),
+                Val::List(vec![
+                    Val::Sym("list".into()),
+                    Val::List(vec![Val::Sym("quote".into()), Val::Sym("a".into())]),
+                ]),
+                Val::List(vec![
+                    Val::Sym("list".into()),
+                    Val::List(vec![
+                        Val::Sym("concat".into()),
+                        Val::List(vec![
+                            Val::Sym("list".into()),
+                            Val::List(vec![Val::Sym("quote".into()), Val::Sym("b".into()),]),
+                        ]),
+                        Val::List(vec![Val::Sym("list".into()), Val::Sym("c".into())]),
+                    ]),
+                ]),
+            ])
+        );
+    }
+
+    #[test]
+    fn syntax_quote_only_unquote() {
+        // `~x → x (syntax-quoting an unquote is identity)
+        let val = read("`~x").unwrap();
+        assert_eq!(val, Val::Sym("x".into()));
+    }
+
+    #[test]
+    fn syntax_quote_empty_list() {
+        // `() → (list)
+        let val = read("`()").unwrap();
+        assert_eq!(val, Val::List(vec![Val::Sym("list".into())]));
+    }
+
+    #[test]
+    fn syntax_quote_eof_error() {
+        assert!(read("`").is_err());
+    }
+
+    #[test]
+    fn syntax_quote_splice_top_level_error() {
+        // `~@x at top level → error
+        assert!(read("`~@x").is_err());
+    }
+
+    #[test]
+    fn syntax_quote_preserves_inner_quote() {
+        // `'(unquote x) should produce (quote (unquote x)) as a literal,
+        // NOT treat the inner (unquote x) as a real unquote.
+        // The reader parses '(unquote x) as (quote (unquote x)).
+        // Inside syntax-quote, (quote ...) should be preserved as-is.
+        let val = read("`'(unquote x)").unwrap();
+        // Should produce: (concat (list (quote quote)) (list (quote (unquote x))))
+        assert_eq!(
+            val,
+            Val::List(vec![
+                Val::Sym("concat".into()),
+                Val::List(vec![
+                    Val::Sym("list".into()),
+                    Val::List(vec![Val::Sym("quote".into()), Val::Sym("quote".into()),]),
+                ]),
+                Val::List(vec![
+                    Val::Sym("list".into()),
+                    Val::List(vec![
+                        Val::Sym("quote".into()),
+                        Val::List(vec![Val::Sym("unquote".into()), Val::Sym("x".into()),]),
+                    ]),
+                ]),
+            ])
+        );
+    }
+
+    #[test]
+    fn unquote_eof_error() {
+        assert!(read("~").is_err());
+    }
+
+    #[test]
+    fn splice_unquote_eof_error() {
+        assert!(read("~@").is_err());
     }
 }
