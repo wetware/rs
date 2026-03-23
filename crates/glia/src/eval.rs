@@ -467,17 +467,15 @@ pub fn eval<'a, D: Dispatch>(
                 }
 
                 // --- Env lookup: if head resolves to a fn, invoke it ---
-                if let Some(val) = env.get(head) {
-                    if let Val::Fn {
-                        arities,
-                        env: captured_env,
-                    } = val
-                    {
-                        let arities = arities.clone();
-                        let captured_env = captured_env.clone();
-                        let args = eval_args(raw_args, env, dispatch).await?;
-                        return invoke_fn(&arities, &captured_env, &args, dispatch).await;
-                    }
+                if let Some(Val::Fn {
+                    arities,
+                    env: captured_env,
+                }) = env.get(head)
+                {
+                    let arities = arities.clone();
+                    let captured_env = captured_env.clone();
+                    let args = eval_args(raw_args, env, dispatch).await?;
+                    return invoke_fn(&arities, &captured_env, &args, dispatch).await;
                 }
 
                 // --- Generic path: eval args, then dispatch to host ---
