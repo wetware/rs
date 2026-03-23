@@ -60,6 +60,8 @@ pub enum Val {
         arities: Vec<FnArity>,
         env: eval::Env,
     },
+    /// Internal sentinel returned by `recur` — never escapes `loop`.
+    Recur(Vec<Val>),
 }
 
 impl PartialEq for Val {
@@ -79,6 +81,8 @@ impl PartialEq for Val {
             (Val::Bytes(a), Val::Bytes(b)) => a == b,
             // Closures are never equal (identity semantics, like Clojure).
             (Val::Fn { .. }, Val::Fn { .. }) => false,
+            // Recur is an internal sentinel — never equal.
+            (Val::Recur(_), _) | (_, Val::Recur(_)) => false,
             _ => false,
         }
     }
@@ -115,6 +119,7 @@ impl core::fmt::Display for Val {
             }
             Val::Set(items) => fmt_seq(f, "#{", "}", items),
             Val::Bytes(b) => write!(f, "<{} bytes>", b.len()),
+            Val::Recur(_) => write!(f, "#<recur>"),
             Val::Fn { arities, .. } => {
                 let arity_desc: Vec<String> = arities
                     .iter()
