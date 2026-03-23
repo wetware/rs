@@ -1,9 +1,10 @@
 //! Evaluator for Glia expressions.
 //!
 //! Resolution order for list forms:
-//! 1. Special forms (`def`, `if`, `do`, `let`, `quote`) — unevaluated args
-//! 2. (future: macro expansion, fn invocation — #207, #209)
-//! 3. Generic dispatch — eval args, delegate to [`Dispatch`]
+//! 1. Special forms (`def`, `if`, `do`, `let`, `fn`, `quote`) — unevaluated args
+//! 2. Env lookup — if head resolves to `Val::Fn`, invoke the closure
+//! 3. (future: macro expansion — #209)
+//! 4. Generic dispatch — eval args, delegate to [`Dispatch`]
 //!
 //! Non-list values are self-evaluating (returned as-is), except symbols
 //! which are looked up in [`Env`] (unbound symbols pass through).
@@ -14,7 +15,7 @@
 use core::future::Future;
 use core::pin::Pin;
 
-use crate::Val;
+use crate::{FnArity, Val};
 
 // ---------------------------------------------------------------------------
 // Env — lexical scope chain
@@ -256,12 +257,173 @@ async fn eval_let<'a, D: Dispatch>(
     result
 }
 
+/// Parse a parameter vector into an FnArity.
+/// Handles `[x y]` (fixed) and `[x & rest]` (variadic).
+fn parse_params(param_vec: &[Val], body: &[Val]) -> Result<FnArity, String> {
+    let mut params = Vec::new();
+    let mut variadic = None;
+    let mut i = 0;
+    while i < param_vec.len() {
+        match &param_vec[i] {
+            Val::Sym(s) if s == "&" => {
+                // Next symbol is the variadic rest param
+                i += 1;
+                match param_vec.get(i) {
+                    Some(Val::Sym(rest_name)) => {
+                        if variadic.is_some() {
+                            return Err("fn: only one & rest param allowed".into());
+                        }
+                        variadic = Some(rest_name.clone());
+                    }
+                    _ => return Err("fn: expected symbol after &".into()),
+                }
+                if i + 1 < param_vec.len() {
+                    return Err("fn: nothing allowed after & rest param".into());
+                }
+            }
+            Val::Sym(s) => params.push(s.clone()),
+            other => return Err(format!("fn: parameter must be a symbol, got {other}")),
+        }
+        i += 1;
+    }
+    Ok(FnArity {
+        params,
+        variadic,
+        body: body.to_vec(),
+    })
+}
+
+/// `(fn [params] body...)` or `(fn ([params] body...) ([params] body...))` — create a closure.
+fn eval_fn(args: &[Val], env: &Env) -> Result<Val, String> {
+    if args.is_empty() {
+        return Err("fn: expected (fn [params] body...) or (fn ([p] body) ...)".into());
+    }
+
+    let arities = match &args[0] {
+        // Single-arity: (fn [x y] body...)
+        Val::Vector(params) => {
+            let arity = parse_params(params, &args[1..])?;
+            vec![arity]
+        }
+        // Multi-arity: (fn ([x] body1) ([x y] body2) ...)
+        Val::List(_) => {
+            let mut result = Vec::new();
+            for arg in args {
+                match arg {
+                    Val::List(items) if !items.is_empty() => {
+                        let param_vec = match &items[0] {
+                            Val::Vector(v) => v,
+                            other => {
+                                return Err(format!(
+                                    "fn: multi-arity clause must start with [params], got {other}"
+                                ))
+                            }
+                        };
+                        result.push(parse_params(param_vec, &items[1..])?);
+                    }
+                    other => return Err(format!("fn: expected arity clause (list), got {other}")),
+                }
+            }
+            // Check for overlapping arities (same fixed param count, ignoring variadic)
+            let mut seen_counts = std::collections::HashSet::new();
+            let mut has_variadic = false;
+            for a in &result {
+                if a.variadic.is_some() {
+                    if has_variadic {
+                        return Err("fn: only one variadic arity allowed".into());
+                    }
+                    has_variadic = true;
+                } else if !seen_counts.insert(a.params.len()) {
+                    return Err(format!("fn: duplicate arity for {} args", a.params.len()));
+                }
+            }
+            result
+        }
+        other => {
+            return Err(format!(
+                "fn: expected [params] or arity clauses, got {other}"
+            ))
+        }
+    };
+
+    Ok(Val::Fn {
+        arities,
+        env: env.snapshot(),
+    })
+}
+
+/// Invoke a Val::Fn with evaluated arguments. Matches arity and evaluates body.
+async fn invoke_fn<'a, D: Dispatch>(
+    arities: &'a [FnArity],
+    captured_env: &'a Env,
+    args: &[Val],
+    dispatch: &'a mut D,
+) -> Result<Val, String> {
+    // Find matching arity: prefer exact fixed-arity match over variadic.
+    // This ensures (fn ([x y] ...) ([x & rest] ...)) called with 2 args
+    // picks the fixed 2-arity, not the variadic.
+    let arity = arities
+        .iter()
+        .find(|a| a.variadic.is_none() && args.len() == a.params.len())
+        .or_else(|| {
+            arities
+                .iter()
+                .find(|a| a.variadic.is_some() && args.len() >= a.params.len())
+        })
+        .ok_or_else(|| {
+            let expected: Vec<String> = arities
+                .iter()
+                .map(|a| {
+                    if a.variadic.is_some() {
+                        format!("{}+", a.params.len())
+                    } else {
+                        a.params.len().to_string()
+                    }
+                })
+                .collect();
+            format!(
+                "wrong number of args ({}) passed to fn, expected {}",
+                args.len(),
+                expected.join(" or ")
+            )
+        })?;
+
+    // Build fn environment: captured env + new frame with param bindings
+    let mut fn_env = captured_env.clone();
+    fn_env.push_frame();
+
+    // Bind positional params
+    for (name, val) in arity.params.iter().zip(args.iter()) {
+        fn_env.set(name.clone(), val.clone());
+    }
+
+    // Bind variadic rest param
+    if let Some(rest_name) = &arity.variadic {
+        let rest_args: Vec<Val> = args[arity.params.len()..].to_vec();
+        fn_env.set(rest_name.clone(), Val::List(rest_args));
+    }
+
+    // Evaluate body (implicit do)
+    let result = async {
+        let mut result = Val::Nil;
+        for form in &arity.body {
+            result = eval(form, &mut fn_env, dispatch).await?;
+        }
+        Ok(result)
+    }
+    .await;
+
+    fn_env.pop_frame();
+    result
+}
+
 /// Evaluate a Glia expression.
 ///
 /// Resolution order:
 /// 1. Special forms — matched by name, receive unevaluated args
-/// 2. (future: macro check, fn invocation — #207, #209)
-/// 3. Generic path — eval args, delegate to Dispatch (capability calls)
+/// 2. Env lookup — if head resolves to Val::Fn, invoke it
+/// 3. (future: macro check — #209)
+/// 4. Generic path — eval args, delegate to Dispatch (capability calls)
 ///
 /// Non-list values are self-evaluating (returned as-is), except symbols
 /// which are looked up in `env` (unbound symbols pass through for Dispatch).
@@ -294,14 +456,26 @@ pub fn eval<'a, D: Dispatch>(
                         };
                     }
 
-                    // Reserved for future special forms (#207, #208, #209).
-                    // Return clear errors so they don't fall through to Dispatch.
-                    "fn" => return Err("fn: not yet implemented (see #207)".into()),
+                    "fn" => return eval_fn(raw_args, env),
+
+                    // Reserved for future special forms (#208, #209).
                     "loop" => return Err("loop: not yet implemented (see #208)".into()),
                     "recur" => return Err("recur: not yet implemented (see #208)".into()),
                     "defmacro" => return Err("defmacro: not yet implemented (see #209)".into()),
 
-                    _ => {} // fall through to generic dispatch
+                    _ => {} // fall through to env lookup / dispatch
+                }
+
+                // --- Env lookup: if head resolves to a fn, invoke it ---
+                if let Some(Val::Fn {
+                    arities,
+                    env: captured_env,
+                }) = env.get(head)
+                {
+                    let arities = arities.clone();
+                    let captured_env = captured_env.clone();
+                    let args = eval_args(raw_args, env, dispatch).await?;
+                    return invoke_fn(&arities, &captured_env, &args, dispatch).await;
                 }
 
                 // --- Generic path: eval args, then dispatch to host ---
@@ -924,7 +1098,7 @@ mod tests {
     fn reserved_forms_error_not_dispatch() {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
-        for form in &["fn", "loop", "recur", "defmacro"] {
+        for form in &["loop", "recur", "defmacro"] {
             let expr = Val::List(vec![Val::Sym(form.to_string())]);
             let result = eval_blocking(&expr, &mut env, &mut d);
             assert!(result.is_err(), "{form} should error, not dispatch");
@@ -934,5 +1108,194 @@ mod tests {
             );
         }
         assert!(d.calls.is_empty(), "reserved forms should not dispatch");
+    }
+
+    // --- fn ---
+
+    #[test]
+    fn fn_single_arity_call() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (def f (fn [x] x))
+        let def_expr = Val::List(vec![
+            Val::Sym("def".into()),
+            Val::Sym("f".into()),
+            Val::List(vec![
+                Val::Sym("fn".into()),
+                Val::Vector(vec![Val::Sym("x".into())]),
+                Val::Sym("x".into()),
+            ]),
+        ]);
+        eval_blocking(&def_expr, &mut env, &mut d).unwrap();
+        // (f 42)
+        let call_expr = Val::List(vec![Val::Sym("f".into()), Val::Int(42)]);
+        let result = eval_blocking(&call_expr, &mut env, &mut d);
+        assert_eq!(result, Ok(Val::Int(42)));
+    }
+
+    #[test]
+    fn fn_multi_arity() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (def f (fn ([x] x) ([x y] y)))
+        let def_expr = Val::List(vec![
+            Val::Sym("def".into()),
+            Val::Sym("f".into()),
+            Val::List(vec![
+                Val::Sym("fn".into()),
+                Val::List(vec![
+                    Val::Vector(vec![Val::Sym("x".into())]),
+                    Val::Sym("x".into()),
+                ]),
+                Val::List(vec![
+                    Val::Vector(vec![Val::Sym("x".into()), Val::Sym("y".into())]),
+                    Val::Sym("y".into()),
+                ]),
+            ]),
+        ]);
+        eval_blocking(&def_expr, &mut env, &mut d).unwrap();
+        // (f 1) → 1
+        let call1 = Val::List(vec![Val::Sym("f".into()), Val::Int(1)]);
+        assert_eq!(eval_blocking(&call1, &mut env, &mut d), Ok(Val::Int(1)));
+        // (f 1 2) → 2
+        let call2 = Val::List(vec![Val::Sym("f".into()), Val::Int(1), Val::Int(2)]);
+        assert_eq!(eval_blocking(&call2, &mut env, &mut d), Ok(Val::Int(2)));
+    }
+
+    #[test]
+    fn fn_variadic() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (def f (fn [x & rest] rest))
+        let def_expr = Val::List(vec![
+            Val::Sym("def".into()),
+            Val::Sym("f".into()),
+            Val::List(vec![
+                Val::Sym("fn".into()),
+                Val::Vector(vec![
+                    Val::Sym("x".into()),
+                    Val::Sym("&".into()),
+                    Val::Sym("rest".into()),
+                ]),
+                Val::Sym("rest".into()),
+            ]),
+        ]);
+        eval_blocking(&def_expr, &mut env, &mut d).unwrap();
+        // (f 1 2 3) → (2 3)
+        let call = Val::List(vec![
+            Val::Sym("f".into()),
+            Val::Int(1),
+            Val::Int(2),
+            Val::Int(3),
+        ]);
+        assert_eq!(
+            eval_blocking(&call, &mut env, &mut d),
+            Ok(Val::List(vec![Val::Int(2), Val::Int(3)]))
+        );
+    }
+
+    #[test]
+    fn fn_closure_captures_env() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (def x 10)
+        let def_x = Val::List(vec![
+            Val::Sym("def".into()),
+            Val::Sym("x".into()),
+            Val::Int(10),
+        ]);
+        eval_blocking(&def_x, &mut env, &mut d).unwrap();
+        // (def f (fn [] x))
+        let def_f = Val::List(vec![
+            Val::Sym("def".into()),
+            Val::Sym("f".into()),
+            Val::List(vec![
+                Val::Sym("fn".into()),
+                Val::Vector(vec![]),
+                Val::Sym("x".into()),
+            ]),
+        ]);
+        eval_blocking(&def_f, &mut env, &mut d).unwrap();
+        // (def x 20) — rebind x
+        let def_x2 = Val::List(vec![
+            Val::Sym("def".into()),
+            Val::Sym("x".into()),
+            Val::Int(20),
+        ]);
+        eval_blocking(&def_x2, &mut env, &mut d).unwrap();
+        // (f) → 10, not 20 (captured at definition time)
+        let call = Val::List(vec![Val::Sym("f".into())]);
+        assert_eq!(eval_blocking(&call, &mut env, &mut d), Ok(Val::Int(10)));
+    }
+
+    #[test]
+    fn fn_arity_mismatch() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (def f (fn [x y] x))
+        let def_expr = Val::List(vec![
+            Val::Sym("def".into()),
+            Val::Sym("f".into()),
+            Val::List(vec![
+                Val::Sym("fn".into()),
+                Val::Vector(vec![Val::Sym("x".into()), Val::Sym("y".into())]),
+                Val::Sym("x".into()),
+            ]),
+        ]);
+        eval_blocking(&def_expr, &mut env, &mut d).unwrap();
+        // (f 1) — wrong arity
+        let call = Val::List(vec![Val::Sym("f".into()), Val::Int(1)]);
+        let err = eval_blocking(&call, &mut env, &mut d).unwrap_err();
+        assert!(err.contains("wrong number of args"), "got: {err}");
+    }
+
+    #[test]
+    fn fn_duplicate_arity_errors() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (fn ([x] x) ([y] y)) — two 1-arg arities
+        let expr = Val::List(vec![
+            Val::Sym("fn".into()),
+            Val::List(vec![
+                Val::Vector(vec![Val::Sym("x".into())]),
+                Val::Sym("x".into()),
+            ]),
+            Val::List(vec![
+                Val::Vector(vec![Val::Sym("y".into())]),
+                Val::Sym("y".into()),
+            ]),
+        ]);
+        let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
+        assert!(err.contains("duplicate arity"), "got: {err}");
+    }
+
+    #[test]
+    fn fn_implicit_do_body() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (def f (fn [x] 1 2 x)) — body has multiple forms, returns last
+        let def_expr = Val::List(vec![
+            Val::Sym("def".into()),
+            Val::Sym("f".into()),
+            Val::List(vec![
+                Val::Sym("fn".into()),
+                Val::Vector(vec![Val::Sym("x".into())]),
+                Val::Int(1),
+                Val::Int(2),
+                Val::Sym("x".into()),
+            ]),
+        ]);
+        eval_blocking(&def_expr, &mut env, &mut d).unwrap();
+        let call = Val::List(vec![Val::Sym("f".into()), Val::Int(99)]);
+        assert_eq!(eval_blocking(&call, &mut env, &mut d), Ok(Val::Int(99)));
+    }
+
+    #[test]
+    fn fn_no_params_errors() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // (fn) — no params at all
+        let expr = Val::List(vec![Val::Sym("fn".into())]);
+        assert!(eval_blocking(&expr, &mut env, &mut d).is_err());
     }
 }

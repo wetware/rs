@@ -27,6 +27,17 @@ pub mod eval;
 // Value type
 // ---------------------------------------------------------------------------
 
+/// One arity of a function: parameter names, optional variadic rest param, and body forms.
+#[derive(Debug, Clone)]
+pub struct FnArity {
+    /// Positional parameter names.
+    pub params: Vec<String>,
+    /// If present, the name after `&` that collects remaining args as a List.
+    pub variadic: Option<String>,
+    /// Body forms (implicit `do`).
+    pub body: Vec<Val>,
+}
+
 /// A Clojure-like value.
 #[derive(Debug, Clone)]
 pub enum Val {
@@ -44,6 +55,11 @@ pub enum Val {
     /// Opaque binary data — a runtime value, not parseable from text.
     /// Produced by evaluating expressions like `(ipfs cat "...")`.
     Bytes(Vec<u8>),
+    /// A closure: one or more arities + captured environment snapshot.
+    Fn {
+        arities: Vec<FnArity>,
+        env: eval::Env,
+    },
 }
 
 impl PartialEq for Val {
@@ -61,6 +77,8 @@ impl PartialEq for Val {
             (Val::Map(a), Val::Map(b)) => a == b,
             (Val::Set(a), Val::Set(b)) => a == b,
             (Val::Bytes(a), Val::Bytes(b)) => a == b,
+            // Closures are never equal (identity semantics, like Clojure).
+            (Val::Fn { .. }, Val::Fn { .. }) => false,
             _ => false,
         }
     }
@@ -97,6 +115,20 @@ impl core::fmt::Display for Val {
             }
             Val::Set(items) => fmt_seq(f, "#{", "}", items),
             Val::Bytes(b) => write!(f, "<{} bytes>", b.len()),
+            Val::Fn { arities, .. } => {
+                let arity_desc: Vec<String> = arities
+                    .iter()
+                    .map(|a| {
+                        let n = a.params.len();
+                        if a.variadic.is_some() {
+                            format!("{n}+")
+                        } else {
+                            n.to_string()
+                        }
+                    })
+                    .collect();
+                write!(f, "#<fn [{}]>", arity_desc.join("/"))
+            }
         }
     }
 }
