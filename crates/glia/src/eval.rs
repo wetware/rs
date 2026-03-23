@@ -3,8 +3,9 @@
 //! Resolution order for list forms:
 //! 1. Special forms (`def`, `if`, `do`, `let`, `fn`, `quote`) — unevaluated args
 //! 2. Env lookup — if head resolves to `Val::Fn`, invoke the closure
-//! 3. (future: macro expansion — #209)
-//! 4. Generic dispatch — eval args, delegate to [`Dispatch`]
+//! 3. Built-in functions (`+`, `list`, `cons`, `apply`, etc.)
+//! 4. (future: macro expansion — #209)
+//! 5. Generic dispatch — eval args, delegate to [`Dispatch`]
 //!
 //! Non-list values are self-evaluating (returned as-is), except symbols
 //! which are looked up in [`Env`] (unbound symbols pass through).
@@ -14,8 +15,12 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{FnArity, Val};
+
+/// Monotonic counter for `gensym`.
+static GENSYM_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Env — lexical scope chain
@@ -417,12 +422,373 @@ async fn invoke_fn<'a, D: Dispatch>(
     result
 }
 
+// ---------------------------------------------------------------------------
+// Built-in functions
+// ---------------------------------------------------------------------------
+
+/// Try to evaluate `name` as a built-in function with already-evaluated `args`.
+///
+/// Returns `None` when `name` is not a built-in (caller should fall through to
+/// Dispatch).  Returns `Some(Ok(val))` or `Some(Err(msg))` for built-ins.
+///
+/// NOTE: `apply` is handled separately in `eval()` because it needs to
+/// re-dispatch through the evaluator.
+fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, String>> {
+    match name {
+        // --- Collections ---
+        "list" => Some(Ok(Val::List(args.to_vec()))),
+
+        "cons" => Some(builtin_cons(args)),
+        "first" => Some(builtin_first(args)),
+        "rest" => Some(builtin_rest(args)),
+        "count" => Some(builtin_count(args)),
+        "vec" => Some(builtin_vec(args)),
+        "get" => Some(builtin_get(args)),
+        "assoc" => Some(builtin_assoc(args)),
+        "conj" => Some(builtin_conj(args)),
+
+        // --- Arithmetic ---
+        "+" => Some(builtin_add(args)),
+        "-" => Some(builtin_sub(args)),
+        "*" => Some(builtin_mul(args)),
+        "/" => Some(builtin_div(args)),
+        "mod" => Some(builtin_mod(args)),
+
+        // --- Comparison ---
+        "=" => Some(builtin_eq(args)),
+        "<" => Some(builtin_lt(args)),
+        ">" => Some(builtin_gt(args)),
+        "<=" => Some(builtin_le(args)),
+        ">=" => Some(builtin_ge(args)),
+
+        // --- Other ---
+        "gensym" => {
+            if !args.is_empty() {
+                return Some(Err(format!("gensym: expected 0 args, got {}", args.len())));
+            }
+            let n = GENSYM_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+            Some(Ok(Val::Sym(format!("G__{n}"))))
+        }
+
+        _ => None, // not a built-in
+    }
+}
+
+// --- Collection built-ins ---
+
+fn builtin_cons(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("cons: expected 2 args, got {}", args.len()));
+    }
+    let tail = match &args[1] {
+        Val::List(v) | Val::Vector(v) => v,
+        other => {
+            return Err(format!(
+                "cons: second arg must be List or Vector, got {other}"
+            ))
+        }
+    };
+    let mut result = Vec::with_capacity(1 + tail.len());
+    result.push(args[0].clone());
+    result.extend_from_slice(tail);
+    Ok(Val::List(result))
+}
+
+fn builtin_first(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 1 {
+        return Err(format!("first: expected 1 arg, got {}", args.len()));
+    }
+    match &args[0] {
+        Val::Nil => Ok(Val::Nil),
+        Val::List(v) | Val::Vector(v) => Ok(v.first().cloned().unwrap_or(Val::Nil)),
+        other => Err(format!("first: expected collection, got {other}")),
+    }
+}
+
+fn builtin_rest(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 1 {
+        return Err(format!("rest: expected 1 arg, got {}", args.len()));
+    }
+    match &args[0] {
+        Val::Nil => Ok(Val::List(vec![])),
+        Val::List(v) | Val::Vector(v) => {
+            if v.is_empty() {
+                Ok(Val::List(vec![]))
+            } else {
+                Ok(Val::List(v[1..].to_vec()))
+            }
+        }
+        other => Err(format!("rest: expected collection, got {other}")),
+    }
+}
+
+fn builtin_count(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 1 {
+        return Err(format!("count: expected 1 arg, got {}", args.len()));
+    }
+    let n = match &args[0] {
+        Val::Nil => 0,
+        Val::List(v) | Val::Vector(v) | Val::Set(v) => v.len(),
+        Val::Map(pairs) => pairs.len(),
+        Val::Str(s) => s.chars().count(),
+        other => return Err(format!("count: expected collection or nil, got {other}")),
+    };
+    Ok(Val::Int(n as i64))
+}
+
+fn builtin_vec(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 1 {
+        return Err(format!("vec: expected 1 arg, got {}", args.len()));
+    }
+    match &args[0] {
+        Val::Nil => Ok(Val::Vector(vec![])),
+        Val::List(v) => Ok(Val::Vector(v.clone())),
+        Val::Vector(_) => Ok(args[0].clone()),
+        other => Err(format!("vec: expected list or vector, got {other}")),
+    }
+}
+
+fn builtin_get(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("get: expected 2 args, got {}", args.len()));
+    }
+    match &args[0] {
+        Val::Map(pairs) => {
+            for (k, v) in pairs {
+                if k == &args[1] {
+                    return Ok(v.clone());
+                }
+            }
+            Ok(Val::Nil)
+        }
+        Val::Vector(v) => match &args[1] {
+            Val::Int(i) => {
+                if *i < 0 {
+                    Ok(Val::Nil)
+                } else {
+                    Ok(v.get(*i as usize).cloned().unwrap_or(Val::Nil))
+                }
+            }
+            other => Err(format!("get: vector index must be Int, got {other}")),
+        },
+        Val::Nil => Ok(Val::Nil),
+        other => Err(format!("get: expected map or vector, got {other}")),
+    }
+}
+
+fn builtin_assoc(args: &[Val]) -> Result<Val, String> {
+    if args.is_empty() || !(args.len() - 1).is_multiple_of(2) {
+        return Err(format!(
+            "assoc: expected map + key-value pairs (odd number of args), got {}",
+            args.len()
+        ));
+    }
+    let mut pairs = match &args[0] {
+        Val::Map(pairs) => pairs.clone(),
+        other => return Err(format!("assoc: first arg must be a map, got {other}")),
+    };
+    for chunk in args[1..].chunks(2) {
+        let key = &chunk[0];
+        let val = &chunk[1];
+        // Update existing key or append.
+        if let Some(entry) = pairs.iter_mut().find(|(k, _)| k == key) {
+            entry.1 = val.clone();
+        } else {
+            pairs.push((key.clone(), val.clone()));
+        }
+    }
+    Ok(Val::Map(pairs))
+}
+
+fn builtin_conj(args: &[Val]) -> Result<Val, String> {
+    if args.len() < 2 {
+        return Err(format!(
+            "conj: expected at least 2 args, got {}",
+            args.len()
+        ));
+    }
+    match &args[0] {
+        Val::Vector(v) => {
+            let mut result = v.clone();
+            result.extend_from_slice(&args[1..]);
+            Ok(Val::Vector(result))
+        }
+        Val::List(v) => {
+            // Clojure: conj on lists PREPENDS each item
+            let mut result = v.clone();
+            for item in &args[1..] {
+                result.insert(0, item.clone());
+            }
+            Ok(Val::List(result))
+        }
+        Val::Map(pairs) => {
+            let mut result = pairs.clone();
+            for item in &args[1..] {
+                match item {
+                    Val::Vector(pair) if pair.len() == 2 => {
+                        if let Some(entry) = result.iter_mut().find(|(k, _)| k == &pair[0]) {
+                            entry.1 = pair[1].clone();
+                        } else {
+                            result.push((pair[0].clone(), pair[1].clone()));
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "conj: map entries must be [key val] vectors, got {other}"
+                        ))
+                    }
+                }
+            }
+            Ok(Val::Map(result))
+        }
+        other => Err(format!("conj: expected collection, got {other}")),
+    }
+}
+
+// --- Arithmetic helpers ---
+
+/// Extract a numeric pair, promoting to Float if mixed.
+enum NumPair {
+    Ints(i64, i64),
+    Floats(f64, f64),
+}
+
+fn num_pair(a: &Val, b: &Val) -> Result<NumPair, String> {
+    match (a, b) {
+        (Val::Int(x), Val::Int(y)) => Ok(NumPair::Ints(*x, *y)),
+        (Val::Float(x), Val::Float(y)) => Ok(NumPair::Floats(*x, *y)),
+        (Val::Int(x), Val::Float(y)) => Ok(NumPair::Floats(*x as f64, *y)),
+        (Val::Float(x), Val::Int(y)) => Ok(NumPair::Floats(*x, *y as f64)),
+        _ => Err(format!("expected numbers, got {a} and {b}")),
+    }
+}
+
+fn builtin_add(args: &[Val]) -> Result<Val, String> {
+    let mut acc = Val::Int(0);
+    for a in args {
+        acc = match num_pair(&acc, a)? {
+            NumPair::Ints(x, y) => Val::Int(x + y),
+            NumPair::Floats(x, y) => Val::Float(x + y),
+        };
+    }
+    Ok(acc)
+}
+
+fn builtin_sub(args: &[Val]) -> Result<Val, String> {
+    if args.is_empty() {
+        return Err("-: expected at least 1 arg".into());
+    }
+    if args.len() == 1 {
+        return match &args[0] {
+            Val::Int(n) => Ok(Val::Int(-n)),
+            Val::Float(n) => Ok(Val::Float(-n)),
+            other => Err(format!("-: expected number, got {other}")),
+        };
+    }
+    let mut acc = args[0].clone();
+    for a in &args[1..] {
+        acc = match num_pair(&acc, a)? {
+            NumPair::Ints(x, y) => Val::Int(x - y),
+            NumPair::Floats(x, y) => Val::Float(x - y),
+        };
+    }
+    Ok(acc)
+}
+
+fn builtin_mul(args: &[Val]) -> Result<Val, String> {
+    let mut acc = Val::Int(1);
+    for a in args {
+        acc = match num_pair(&acc, a)? {
+            NumPair::Ints(x, y) => Val::Int(x * y),
+            NumPair::Floats(x, y) => Val::Float(x * y),
+        };
+    }
+    Ok(acc)
+}
+
+fn builtin_div(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("/: expected 2 args, got {}", args.len()));
+    }
+    match num_pair(&args[0], &args[1])? {
+        NumPair::Ints(_, 0) => Err("division by zero".into()),
+        NumPair::Ints(x, y) => Ok(Val::Int(x / y)),
+        NumPair::Floats(_, 0.0) => Err("division by zero".into()),
+        NumPair::Floats(x, y) => Ok(Val::Float(x / y)),
+    }
+}
+
+fn builtin_mod(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("mod: expected 2 args, got {}", args.len()));
+    }
+    match num_pair(&args[0], &args[1])? {
+        NumPair::Ints(_, 0) => Err("mod: division by zero".into()),
+        NumPair::Ints(x, y) => Ok(Val::Int(x % y)),
+        NumPair::Floats(_, 0.0) => Err("mod: division by zero".into()),
+        NumPair::Floats(x, y) => Ok(Val::Float(x % y)),
+    }
+}
+
+// --- Comparison built-ins ---
+
+fn builtin_eq(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("=: expected 2 args, got {}", args.len()));
+    }
+    Ok(Val::Bool(args[0] == args[1]))
+}
+
+fn numeric_cmp(a: &Val, b: &Val) -> Result<std::cmp::Ordering, String> {
+    match (a, b) {
+        (Val::Int(x), Val::Int(y)) => Ok(x.cmp(y)),
+        (Val::Float(x), Val::Float(y)) => x
+            .partial_cmp(y)
+            .ok_or_else(|| "comparison failed (NaN)".to_string()),
+        (Val::Int(x), Val::Float(y)) => (*x as f64)
+            .partial_cmp(y)
+            .ok_or_else(|| "comparison failed (NaN)".to_string()),
+        (Val::Float(x), Val::Int(y)) => x
+            .partial_cmp(&(*y as f64))
+            .ok_or_else(|| "comparison failed (NaN)".to_string()),
+        _ => Err(format!("comparison requires numbers, got {a} and {b}")),
+    }
+}
+
+fn builtin_lt(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("<: expected 2 args, got {}", args.len()));
+    }
+    Ok(Val::Bool(numeric_cmp(&args[0], &args[1])?.is_lt()))
+}
+
+fn builtin_gt(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!(">: expected 2 args, got {}", args.len()));
+    }
+    Ok(Val::Bool(numeric_cmp(&args[0], &args[1])?.is_gt()))
+}
+
+fn builtin_le(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("<=: expected 2 args, got {}", args.len()));
+    }
+    Ok(Val::Bool(!numeric_cmp(&args[0], &args[1])?.is_gt()))
+}
+
+fn builtin_ge(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!(">=: expected 2 args, got {}", args.len()));
+    }
+    Ok(Val::Bool(!numeric_cmp(&args[0], &args[1])?.is_lt()))
+}
+
 /// Evaluate a Glia expression.
 ///
 /// Resolution order:
 /// 1. Special forms — matched by name, receive unevaluated args
 /// 2. Env lookup — if head resolves to Val::Fn, invoke it
-/// 3. (future: macro check — #209)
+/// 3. Built-in functions — pure functions like +, list, cons, etc.
 /// 4. Generic path — eval args, delegate to Dispatch (capability calls)
 ///
 /// Non-list values are self-evaluating (returned as-is), except symbols
@@ -463,7 +829,7 @@ pub fn eval<'a, D: Dispatch>(
                     "recur" => return Err("recur: not yet implemented (see #208)".into()),
                     "defmacro" => return Err("defmacro: not yet implemented (see #209)".into()),
 
-                    _ => {} // fall through to env lookup / dispatch
+                    _ => {} // fall through to env lookup / builtins / dispatch
                 }
 
                 // --- Env lookup: if head resolves to a fn, invoke it ---
@@ -478,8 +844,71 @@ pub fn eval<'a, D: Dispatch>(
                     return invoke_fn(&arities, &captured_env, &args, dispatch).await;
                 }
 
-                // --- Generic path: eval args, then dispatch to host ---
+                // --- Built-in: apply (needs re-dispatch, so handled here) ---
+                if head == "apply" {
+                    let args = eval_args(raw_args, env, dispatch).await?;
+                    if args.len() < 2 {
+                        return Err(format!(
+                            "apply: expected at least 2 args, got {}",
+                            args.len()
+                        ));
+                    }
+                    // First arg is the function (symbol or Val::Fn)
+                    let func = &args[0];
+                    // Last arg must be a collection; middle args are prepended
+                    let last = &args[args.len() - 1];
+                    let trailing = match last {
+                        Val::List(v) | Val::Vector(v) => v.clone(),
+                        other => {
+                            return Err(format!(
+                                "apply: last arg must be List or Vector, got {other}"
+                            ))
+                        }
+                    };
+                    let mut spread = args[1..args.len() - 1].to_vec();
+                    spread.extend(trailing);
+
+                    // Re-dispatch: if func is a symbol, check env for Val::Fn first,
+                    // then try builtins, then dispatch.
+                    match func {
+                        Val::Sym(fname) => {
+                            if let Some(Val::Fn {
+                                arities,
+                                env: captured_env,
+                            }) = env.get(fname)
+                            {
+                                let arities = arities.clone();
+                                let captured_env = captured_env.clone();
+                                return invoke_fn(&arities, &captured_env, &spread, dispatch).await;
+                            }
+                            if let Some(result) = eval_builtin(fname, &spread) {
+                                return result;
+                            }
+                            return dispatch.call(fname, &spread).await;
+                        }
+                        Val::Fn {
+                            arities,
+                            env: captured_env,
+                        } => {
+                            let arities = arities.clone();
+                            let captured_env = captured_env.clone();
+                            return invoke_fn(&arities, &captured_env, &spread, dispatch).await;
+                        }
+                        other => {
+                            return Err(format!(
+                                "apply: first arg must be a symbol or fn, got {other}"
+                            ))
+                        }
+                    }
+                }
+
+                // --- Built-in functions ---
                 let args = eval_args(raw_args, env, dispatch).await?;
+                if let Some(result) = eval_builtin(head, &args) {
+                    return result;
+                }
+
+                // --- Generic path: eval args, then dispatch to host ---
                 dispatch.call(head, &args).await
             }
             // Symbol lookup.
@@ -1297,5 +1726,368 @@ mod tests {
         // (fn) — no params at all
         let expr = Val::List(vec![Val::Sym("fn".into())]);
         assert!(eval_blocking(&expr, &mut env, &mut d).is_err());
+    }
+
+    // =====================================================================
+    // Built-in function tests
+    // =====================================================================
+
+    /// Helper: parse + eval, return result.
+    fn eval_str(src: &str) -> Result<Val, String> {
+        let expr = crate::read(src)?;
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_blocking(&expr, &mut env, &mut d)
+    }
+
+    /// Helper: parse + eval with a shared env (for multi-step tests).
+    fn eval_str_env(src: &str, env: &mut Env, d: &mut RecordingDispatch) -> Result<Val, String> {
+        let expr = crate::read(src)?;
+        eval_blocking(&expr, env, d)
+    }
+
+    // --- list ---
+
+    #[test]
+    fn builtin_list_creates_list() {
+        assert_eq!(
+            eval_str("(list 1 2 3)"),
+            Ok(Val::List(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
+        );
+    }
+
+    #[test]
+    fn builtin_list_empty() {
+        assert_eq!(eval_str("(list)"), Ok(Val::List(vec![])));
+    }
+
+    // --- cons ---
+
+    #[test]
+    fn builtin_cons_prepends() {
+        assert_eq!(
+            eval_str("(cons 1 (list 2 3))"),
+            Ok(Val::List(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
+        );
+    }
+
+    #[test]
+    fn builtin_cons_non_collection_errors() {
+        assert!(eval_str("(cons 1 2)").is_err());
+    }
+
+    // --- first ---
+
+    #[test]
+    fn builtin_first_gets_head() {
+        assert_eq!(eval_str("(first (list 10 20 30))"), Ok(Val::Int(10)));
+    }
+
+    #[test]
+    fn builtin_first_empty_is_nil() {
+        assert_eq!(eval_str("(first (list))"), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn builtin_first_nil_is_nil() {
+        assert_eq!(eval_str("(first nil)"), Ok(Val::Nil));
+    }
+
+    // --- rest ---
+
+    #[test]
+    fn builtin_rest_returns_tail() {
+        assert_eq!(
+            eval_str("(rest (list 1 2 3))"),
+            Ok(Val::List(vec![Val::Int(2), Val::Int(3)]))
+        );
+    }
+
+    #[test]
+    fn builtin_rest_empty_is_empty() {
+        assert_eq!(eval_str("(rest (list))"), Ok(Val::List(vec![])));
+    }
+
+    // --- count ---
+
+    #[test]
+    fn builtin_count_list() {
+        assert_eq!(eval_str("(count (list 1 2 3))"), Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn builtin_count_string_chars() {
+        // Multi-byte chars: count should be char count, not byte length.
+        assert_eq!(eval_str(r#"(count "héllo")"#), Ok(Val::Int(5)));
+    }
+
+    #[test]
+    fn builtin_count_nil() {
+        assert_eq!(eval_str("(count nil)"), Ok(Val::Int(0)));
+    }
+
+    #[test]
+    fn builtin_count_wrong_type() {
+        assert!(eval_str("(count 42)").is_err());
+    }
+
+    // --- vec ---
+
+    #[test]
+    fn builtin_vec_converts_list() {
+        assert_eq!(
+            eval_str("(vec (list 1 2))"),
+            Ok(Val::Vector(vec![Val::Int(1), Val::Int(2)]))
+        );
+    }
+
+    #[test]
+    fn builtin_vec_nil_is_empty_vector() {
+        assert_eq!(eval_str("(vec nil)"), Ok(Val::Vector(vec![])));
+    }
+
+    // --- get ---
+
+    #[test]
+    fn builtin_get_map() {
+        assert_eq!(eval_str("(get {:a 1 :b 2} :b)"), Ok(Val::Int(2)));
+    }
+
+    #[test]
+    fn builtin_get_map_missing() {
+        assert_eq!(eval_str("(get {:a 1} :z)"), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn builtin_get_vector_index() {
+        assert_eq!(eval_str("(get [10 20 30] 1)"), Ok(Val::Int(20)));
+    }
+
+    #[test]
+    fn builtin_get_vector_out_of_bounds() {
+        assert_eq!(eval_str("(get [10 20] 5)"), Ok(Val::Nil));
+    }
+
+    // --- assoc ---
+
+    #[test]
+    fn builtin_assoc_adds_key() {
+        let result = eval_str("(assoc {:a 1} :b 2)").unwrap();
+        match result {
+            Val::Map(pairs) => {
+                assert_eq!(pairs.len(), 2);
+                assert!(pairs.contains(&(Val::Keyword("b".into()), Val::Int(2))));
+            }
+            other => panic!("expected map, got {other}"),
+        }
+    }
+
+    #[test]
+    fn builtin_assoc_bad_arity() {
+        assert!(eval_str("(assoc {:a 1} :b)").is_err());
+    }
+
+    // --- conj ---
+
+    #[test]
+    fn builtin_conj_vector_appends() {
+        assert_eq!(
+            eval_str("(conj [1 2] 3)"),
+            Ok(Val::Vector(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
+        );
+    }
+
+    #[test]
+    fn builtin_conj_list_prepends() {
+        // Clojure semantics: conj on list PREPENDS
+        assert_eq!(
+            eval_str("(conj (list 2 3) 1)"),
+            Ok(Val::List(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
+        );
+    }
+
+    #[test]
+    fn builtin_conj_map() {
+        let result = eval_str("(conj {:a 1} [:b 2])").unwrap();
+        match result {
+            Val::Map(pairs) => {
+                assert_eq!(pairs.len(), 2);
+                assert!(pairs.contains(&(Val::Keyword("b".into()), Val::Int(2))));
+            }
+            other => panic!("expected map, got {other}"),
+        }
+    }
+
+    #[test]
+    fn builtin_conj_too_few_args() {
+        assert!(eval_str("(conj [1])").is_err());
+    }
+
+    // --- Arithmetic ---
+
+    #[test]
+    fn builtin_add() {
+        assert_eq!(eval_str("(+ 1 2 3)"), Ok(Val::Int(6)));
+    }
+
+    #[test]
+    fn builtin_add_empty() {
+        assert_eq!(eval_str("(+)"), Ok(Val::Int(0)));
+    }
+
+    #[test]
+    fn builtin_add_mixed_promotes() {
+        assert_eq!(eval_str("(+ 1 2.0)"), Ok(Val::Float(3.0)));
+    }
+
+    #[test]
+    fn builtin_sub() {
+        assert_eq!(eval_str("(- 10 3)"), Ok(Val::Int(7)));
+    }
+
+    #[test]
+    fn builtin_sub_unary_negate() {
+        assert_eq!(eval_str("(- 5)"), Ok(Val::Int(-5)));
+    }
+
+    #[test]
+    fn builtin_sub_no_args() {
+        assert!(eval_str("(-)").is_err());
+    }
+
+    #[test]
+    fn builtin_mul() {
+        assert_eq!(eval_str("(* 2 3 4)"), Ok(Val::Int(24)));
+    }
+
+    #[test]
+    fn builtin_mul_empty() {
+        assert_eq!(eval_str("(*)"), Ok(Val::Int(1)));
+    }
+
+    #[test]
+    fn builtin_div_int() {
+        assert_eq!(eval_str("(/ 10 3)"), Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn builtin_div_float() {
+        assert_eq!(eval_str("(/ 10.0 4)"), Ok(Val::Float(2.5)));
+    }
+
+    #[test]
+    fn builtin_div_by_zero() {
+        assert!(eval_str("(/ 1 0)").is_err());
+    }
+
+    #[test]
+    fn builtin_mod_basic() {
+        assert_eq!(eval_str("(mod 10 3)"), Ok(Val::Int(1)));
+    }
+
+    #[test]
+    fn builtin_mod_by_zero() {
+        assert!(eval_str("(mod 10 0)").is_err());
+    }
+
+    // --- Comparison ---
+
+    #[test]
+    fn builtin_eq_true() {
+        assert_eq!(eval_str("(= 1 1)"), Ok(Val::Bool(true)));
+    }
+
+    #[test]
+    fn builtin_eq_false() {
+        assert_eq!(eval_str("(= 1 2)"), Ok(Val::Bool(false)));
+    }
+
+    #[test]
+    fn builtin_lt() {
+        assert_eq!(eval_str("(< 1 2)"), Ok(Val::Bool(true)));
+        assert_eq!(eval_str("(< 2 1)"), Ok(Val::Bool(false)));
+    }
+
+    #[test]
+    fn builtin_gt() {
+        assert_eq!(eval_str("(> 3 1)"), Ok(Val::Bool(true)));
+    }
+
+    #[test]
+    fn builtin_le() {
+        assert_eq!(eval_str("(<= 1 1)"), Ok(Val::Bool(true)));
+        assert_eq!(eval_str("(<= 1 2)"), Ok(Val::Bool(true)));
+        assert_eq!(eval_str("(<= 2 1)"), Ok(Val::Bool(false)));
+    }
+
+    #[test]
+    fn builtin_ge() {
+        assert_eq!(eval_str("(>= 2 2)"), Ok(Val::Bool(true)));
+        assert_eq!(eval_str("(>= 1 2)"), Ok(Val::Bool(false)));
+    }
+
+    #[test]
+    fn builtin_comparison_cross_type() {
+        assert_eq!(eval_str("(< 1 2.5)"), Ok(Val::Bool(true)));
+        assert_eq!(eval_str("(> 3.0 2)"), Ok(Val::Bool(true)));
+    }
+
+    #[test]
+    fn builtin_comparison_non_numeric_errors() {
+        assert!(eval_str(r#"(< "a" "b")"#).is_err());
+    }
+
+    // --- gensym ---
+
+    #[test]
+    fn builtin_gensym_increments() {
+        let a = eval_str("(gensym)").unwrap();
+        let b = eval_str("(gensym)").unwrap();
+        // Both should be symbols starting with G__
+        match (&a, &b) {
+            (Val::Sym(sa), Val::Sym(sb)) => {
+                assert!(sa.starts_with("G__"));
+                assert!(sb.starts_with("G__"));
+                assert_ne!(sa, sb);
+            }
+            _ => panic!("expected symbols"),
+        }
+    }
+
+    #[test]
+    fn builtin_gensym_no_args_only() {
+        assert!(eval_str("(gensym 1)").is_err());
+    }
+
+    // --- apply ---
+
+    #[test]
+    fn builtin_apply_builtin_fn() {
+        assert_eq!(eval_str("(apply + [1 2 3])"), Ok(Val::Int(6)));
+    }
+
+    #[test]
+    fn builtin_apply_with_middle_args() {
+        // (apply + 0 [1 2]) → (+ 0 1 2) → 3
+        assert_eq!(eval_str("(apply + 0 [1 2])"), Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn builtin_apply_user_fn() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str_env("(def add (fn [a b] (+ a b)))", &mut env, &mut d).unwrap();
+        let result = eval_str_env("(apply add [3 4])", &mut env, &mut d);
+        assert_eq!(result, Ok(Val::Int(7)));
+    }
+
+    #[test]
+    fn builtin_apply_last_not_collection() {
+        assert!(eval_str("(apply + 1 2)").is_err());
+    }
+
+    #[test]
+    fn builtin_apply_too_few_args() {
+        assert!(eval_str("(apply +)").is_err());
     }
 }
