@@ -44,6 +44,12 @@ pub enum Val {
     /// Opaque binary data — a runtime value, not parseable from text.
     /// Produced by evaluating expressions like `(ipfs cat "...")`.
     Bytes(Vec<u8>),
+    /// A macro: like a function, but receives unevaluated forms and returns
+    /// a new form to be evaluated in the caller's environment.
+    Macro {
+        arities: Vec<eval::FnArity>,
+        env: eval::Env,
+    },
 }
 
 impl PartialEq for Val {
@@ -61,6 +67,8 @@ impl PartialEq for Val {
             (Val::Map(a), Val::Map(b)) => a == b,
             (Val::Set(a), Val::Set(b)) => a == b,
             (Val::Bytes(a), Val::Bytes(b)) => a == b,
+            // Macros are never equal (like closures).
+            (Val::Macro { .. }, Val::Macro { .. }) => false,
             _ => false,
         }
     }
@@ -97,6 +105,20 @@ impl core::fmt::Display for Val {
             }
             Val::Set(items) => fmt_seq(f, "#{", "}", items),
             Val::Bytes(b) => write!(f, "<{} bytes>", b.len()),
+            Val::Macro { arities, .. } => {
+                let arity_strs: Vec<String> = arities
+                    .iter()
+                    .map(|a| {
+                        let n = a.params.len();
+                        if a.variadic.is_some() {
+                            format!("{n}+")
+                        } else {
+                            format!("{n}")
+                        }
+                    })
+                    .collect();
+                write!(f, "#<macro [{}]>", arity_strs.join(", "))
+            }
         }
     }
 }
