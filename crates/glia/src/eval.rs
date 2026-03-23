@@ -359,15 +359,16 @@ async fn invoke_fn<'a, D: Dispatch>(
     args: &[Val],
     dispatch: &'a mut D,
 ) -> Result<Val, String> {
-    // Find matching arity
+    // Find matching arity: prefer exact fixed-arity match over variadic.
+    // This ensures (fn ([x y] ...) ([x & rest] ...)) called with 2 args
+    // picks the fixed 2-arity, not the variadic.
     let arity = arities
         .iter()
-        .find(|a| {
-            if a.variadic.is_some() {
-                args.len() >= a.params.len()
-            } else {
-                args.len() == a.params.len()
-            }
+        .find(|a| a.variadic.is_none() && args.len() == a.params.len())
+        .or_else(|| {
+            arities
+                .iter()
+                .find(|a| a.variadic.is_some() && args.len() >= a.params.len())
         })
         .ok_or_else(|| {
             let expected: Vec<String> = arities
