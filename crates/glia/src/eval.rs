@@ -25,9 +25,16 @@ use crate::Val;
 /// Lookup walks from the innermost (last) frame outward.  `push_frame` /
 /// `pop_frame` create and destroy child scopes (used by future `let` / `fn`
 /// special forms).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Env {
     frames: Vec<Frame>,
+}
+
+impl Default for Env {
+    /// Default creates an Env with one root frame (same as `Env::new()`).
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 type Frame = std::collections::HashMap<String, Val>;
@@ -154,10 +161,15 @@ async fn eval_def<'a, D: Dispatch>(
     env: &'a mut Env,
     dispatch: &'a mut D,
 ) -> Result<Val, String> {
-    let name = match args.first() {
-        Some(Val::Sym(s)) => s.clone(),
-        Some(other) => return Err(format!("def: expected symbol, got {other}")),
-        None => return Err("def: expected (def name value)".into()),
+    if args.is_empty() || args.len() > 2 {
+        return Err(format!(
+            "def: expected (def name) or (def name value), got {} args",
+            args.len()
+        ));
+    }
+    let name = match &args[0] {
+        Val::Sym(s) => s.clone(),
+        other => return Err(format!("def: expected symbol, got {other}")),
     };
     let val = match args.get(1) {
         Some(expr) => eval(expr, env, dispatch).await?,
@@ -275,8 +287,8 @@ pub fn eval<'a, D: Dispatch>(
                     "do" => return eval_do(raw_args, env, dispatch).await,
                     "let" => return eval_let(raw_args, env, dispatch).await,
                     "quote" => {
-                        return if raw_args.is_empty() {
-                            Err("quote: expected 1 arg".into())
+                        return if raw_args.len() != 1 {
+                            Err(format!("quote: expected 1 arg, got {}", raw_args.len()))
                         } else {
                             Ok(raw_args[0].clone())
                         };
