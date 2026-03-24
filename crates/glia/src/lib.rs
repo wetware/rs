@@ -68,7 +68,35 @@ pub enum Val {
         arities: Vec<FnArity>,
         env: eval::Env,
     },
+    /// Internal sentinel returned by `perform` — caught by `with-handler`.
+    /// Propagates up the eval stack until a matching handler is found.
+    Effect {
+        effect_type: String,
+        data: Box<Val>,
+    },
 }
+
+/// Convert a string error into a structured error value.
+///
+/// Enables incremental migration from `Result<Val, String>` to `Result<Val, Val>`:
+/// existing `Err(format!(...))` sites auto-convert via the `?` operator.
+impl From<String> for Val {
+    fn from(s: String) -> Self {
+        Val::Map(vec![
+            (Val::Keyword("type".into()), Val::Keyword("internal".into())),
+            (Val::Keyword("message".into()), Val::Str(s)),
+        ])
+    }
+}
+
+impl From<&str> for Val {
+    fn from(s: &str) -> Self {
+        Val::from(s.to_string())
+    }
+}
+
+/// Val implements Error so it can be used with `?` in functions returning `Box<dyn Error>`.
+impl std::error::Error for Val {}
 
 impl PartialEq for Val {
     fn eq(&self, other: &Self) -> bool {
@@ -88,8 +116,9 @@ impl PartialEq for Val {
             // Closures and macros are never equal (identity semantics, like Clojure).
             (Val::Fn { .. }, Val::Fn { .. }) => false,
             (Val::Macro { .. }, Val::Macro { .. }) => false,
-            // Recur is an internal sentinel — never equal.
+            // Recur and Effect are internal sentinels — never equal.
             (Val::Recur(_), _) | (_, Val::Recur(_)) => false,
+            (Val::Effect { .. }, _) | (_, Val::Effect { .. }) => false,
             _ => false,
         }
     }
@@ -132,6 +161,9 @@ impl core::fmt::Display for Val {
             }
             Val::Macro { arities, .. } => {
                 write!(f, "#<macro [{}]>", fmt_arity_desc(arities))
+            }
+            Val::Effect { effect_type, data } => {
+                write!(f, "#<effect :{effect_type} {data}>")
             }
         }
     }
@@ -777,8 +809,18 @@ fn transform_syntax_quote(val: &Val, depth: usize) -> Result<Val, String> {
             Ok(val.clone())
         }
 
-        // Map/Set — defer to future phase
-        Val::Map(_) => Err("syntax-quote of maps not yet supported".into()),
+        // Map: recursively transform keys and values, reconstruct with assoc.
+        // `{:a 1 :b ~x}` becomes `(assoc {} :a 1 :b x)`
+        Val::Map(pairs) => {
+            let mut assoc_args = vec![Val::Sym("assoc".into()), Val::Map(vec![])];
+            for (k, v) in pairs {
+                let tk = transform_syntax_quote(k, depth)?;
+                let tv = transform_syntax_quote(v, depth)?;
+                assoc_args.push(tk);
+                assoc_args.push(tv);
+            }
+            Ok(Val::List(assoc_args))
+        }
         Val::Set(_) => Err("syntax-quote of sets not yet supported".into()),
 
         // Fn/Macro/Recur/Bytes — shouldn't appear in parsed forms
@@ -2071,6 +2113,44 @@ mod tests {
         assert!(
             display.contains("syntax-quote"),
             "inner backtick on symbol should be preserved, got: {display}"
+        );
+    }
+
+    // --- syntax-quote map tests ---
+
+    #[test]
+    fn syntax_quote_empty_map() {
+        let result = read("`{}");
+        assert!(
+            result.is_ok(),
+            "syntax-quote of empty map should parse without error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn syntax_quote_map_literal() {
+        // `{:a 1} should produce an assoc-based form
+        let val = read("`{:a 1}").unwrap();
+        let display = format!("{val}");
+        assert!(
+            display.contains("assoc"),
+            "syntax-quoted map should produce assoc form, got: {display}"
+        );
+    }
+
+    #[test]
+    fn syntax_quote_map_with_unquote() {
+        // `{:a ~x} should parse and produce an assoc form with unquote expansion
+        let val = read("`{:a ~x}").unwrap();
+        let display = format!("{val}");
+        assert!(
+            display.contains("assoc"),
+            "syntax-quoted map with unquote should produce assoc form, got: {display}"
+        );
+        // The unquoted symbol x should appear in the output (not wrapped in unquote)
+        assert!(
+            display.contains('x'),
+            "unquoted symbol should appear in expansion, got: {display}"
         );
     }
 }

@@ -100,10 +100,8 @@ fn resolve_ipfs_path(path: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Async handler: takes evaluated args and the shell context.
-type HandlerFn = for<'a> fn(
-    &'a [Val],
-    &'a mut Session,
-) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>>;
+type HandlerFn =
+    for<'a> fn(&'a [Val], &'a mut Session) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>>;
 
 /// Build the dispatch table. Each capability and built-in is registered here.
 /// Adding a new verb = one `table.insert(...)` call.
@@ -127,7 +125,7 @@ fn build_dispatch() -> HashMap<&'static str, HandlerFn> {
     t
 }
 
-fn eval_cd(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
+fn eval_cd(args: &[Val], ctx: &mut Session) -> Result<Val, Val> {
     let path = match args.first() {
         Some(Val::Str(s)) => s.clone(),
         Some(Val::Sym(s)) => s.clone(),
@@ -154,7 +152,7 @@ impl<'k> Dispatch for KernelDispatch<'k> {
         &'a mut self,
         name: &'a str,
         args: &'a [Val],
-    ) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
         Box::pin(async move {
             match self.table.get(name) {
                 Some(handler) => handler(args, self.ctx).await,
@@ -173,7 +171,7 @@ fn eval<'a>(
     env: &'a mut Env,
     ctx: &'a mut Session,
     dispatch: &'a HashMap<&'static str, HandlerFn>,
-) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
     Box::pin(async move {
         let mut kd = KernelDispatch {
             ctx,
@@ -183,10 +181,10 @@ fn eval<'a>(
     })
 }
 
-async fn eval_host(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
+async fn eval_host(args: &[Val], ctx: &mut Session) -> Result<Val, Val> {
     let method = match args.first() {
         Some(Val::Sym(s)) => s.as_str(),
-        _ => return Err("(host <method> [args...])".into()),
+        _ => return Err(Val::from("(host <method> [args...])")),
     };
     match method {
         "id" => {
@@ -196,12 +194,12 @@ async fn eval_host(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
                 .send()
                 .promise
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             let id = resp
                 .get()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Val::from(e.to_string()))?
                 .get_peer_id()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             Ok(Val::Str(bs58::encode(id).into_string()))
         }
         "addrs" => {
@@ -211,12 +209,12 @@ async fn eval_host(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
                 .send()
                 .promise
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             let addrs = resp
                 .get()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Val::from(e.to_string()))?
                 .get_addrs()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             let items: Vec<Val> = (0..addrs.len())
                 .filter_map(|i| {
                     addrs
@@ -235,12 +233,12 @@ async fn eval_host(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
                 .send()
                 .promise
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             let peers = resp
                 .get()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Val::from(e.to_string()))?
                 .get_peers()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             let items: Vec<Val> = (0..peers.len())
                 .filter_map(|i| {
                     let peer = peers.get(i);
@@ -283,27 +281,32 @@ async fn eval_host(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
                 .send()
                 .promise
                 .await
-                .map_err(|e| e.to_string())?;
-            let network = network_resp.get().map_err(|e| e.to_string())?;
-            let listener = network.get_listener().map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
+            let network = network_resp.get().map_err(|e| Val::from(e.to_string()))?;
+            let listener = network
+                .get_listener()
+                .map_err(|e| Val::from(e.to_string()))?;
 
             let mut req = listener.listen_request();
             req.get().set_executor(ctx.executor.clone());
             req.get().set_protocol(&protocol);
             req.get().set_handler(&wasm);
-            req.send().promise.await.map_err(|e| e.to_string())?;
+            req.send()
+                .promise
+                .await
+                .map_err(|e| Val::from(e.to_string()))?;
 
             log::info!("init.d: registered /ww/0.1.0/{protocol}");
             Ok(Val::Nil)
         }
-        _ => Err(format!("unknown host method: {method}")),
+        _ => Err(Val::from(format!("unknown host method: {method}"))),
     }
 }
 
-async fn eval_executor(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
+async fn eval_executor(args: &[Val], ctx: &mut Session) -> Result<Val, Val> {
     let method = match args.first() {
         Some(Val::Sym(s)) => s.as_str(),
-        _ => return Err("(executor <method> [args...])".into()),
+        _ => return Err(Val::from("(executor <method> [args...])")),
     };
     match method {
         "echo" => {
@@ -314,14 +317,18 @@ async fn eval_executor(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
             };
             let mut req = ctx.executor.echo_request();
             req.get().set_message(&msg);
-            let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+            let resp = req
+                .send()
+                .promise
+                .await
+                .map_err(|e| Val::from(e.to_string()))?;
             let text = resp
                 .get()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Val::from(e.to_string()))?
                 .get_response()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Val::from(e.to_string()))?
                 .to_str()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             Ok(Val::Str(text.to_string()))
         }
         "run" => {
@@ -380,12 +387,16 @@ async fn eval_executor(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
                     }
                 }
             }
-            let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+            let resp = req
+                .send()
+                .promise
+                .await
+                .map_err(|e| Val::from(e.to_string()))?;
             let process = resp
                 .get()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Val::from(e.to_string()))?
                 .get_process()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
 
             // Block until the process exits.
             log::info!("executor run: process spawned, waiting for exit");
@@ -394,19 +405,22 @@ async fn eval_executor(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
                 .send()
                 .promise
                 .await
-                .map_err(|e| e.to_string())?;
-            let exit_code = wait_resp.get().map_err(|e| e.to_string())?.get_exit_code();
+                .map_err(|e| Val::from(e.to_string()))?;
+            let exit_code = wait_resp
+                .get()
+                .map_err(|e| Val::from(e.to_string()))?
+                .get_exit_code();
             log::info!("executor run: process exited ({})", exit_code);
             Ok(Val::Int(exit_code as i64))
         }
-        _ => Err(format!("unknown executor method: {method}")),
+        _ => Err(Val::from(format!("unknown executor method: {method}"))),
     }
 }
 
-async fn eval_ipfs(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
+async fn eval_ipfs(args: &[Val], ctx: &mut Session) -> Result<Val, Val> {
     let method = match args.first() {
         Some(Val::Sym(s)) => s.as_str(),
-        _ => return Err("(ipfs <method> [args...])".into()),
+        _ => return Err(Val::from("(ipfs <method> [args...])")),
     };
     match method {
         "cat" => {
@@ -422,20 +436,24 @@ async fn eval_ipfs(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
                 .send()
                 .promise
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             let unixfs = unixfs_resp
                 .get()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Val::from(e.to_string()))?
                 .get_api()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             let mut req = unixfs.cat_request();
             req.get().set_path(&path);
-            let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+            let resp = req
+                .send()
+                .promise
+                .await
+                .map_err(|e| Val::from(e.to_string()))?;
             let data = resp
                 .get()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Val::from(e.to_string()))?
                 .get_data()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             Ok(Val::Bytes(data.to_vec()))
         }
         "ls" => {
@@ -451,20 +469,24 @@ async fn eval_ipfs(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
                 .send()
                 .promise
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             let unixfs = unixfs_resp
                 .get()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Val::from(e.to_string()))?
                 .get_api()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             let mut req = unixfs.ls_request();
             req.get().set_path(&path);
-            let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+            let resp = req
+                .send()
+                .promise
+                .await
+                .map_err(|e| Val::from(e.to_string()))?;
             let entries = resp
                 .get()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Val::from(e.to_string()))?
                 .get_entries()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             let items: Vec<Val> = (0..entries.len())
                 .filter_map(|i| {
                     let e = entries.get(i);
@@ -478,7 +500,7 @@ async fn eval_ipfs(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
                 .collect();
             Ok(Val::List(items))
         }
-        _ => Err(format!("unknown ipfs method: {method}")),
+        _ => Err(Val::from(format!("unknown ipfs method: {method}"))),
     }
 }
 
@@ -532,10 +554,10 @@ impl routing_capnp::provider_sink::Server for CollectorSink {
     }
 }
 
-async fn eval_routing(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
+async fn eval_routing(args: &[Val], ctx: &mut Session) -> Result<Val, Val> {
     let method = match args.first() {
         Some(Val::Sym(s)) => s.as_str(),
-        _ => return Err("(routing <method> [args...])".into()),
+        _ => return Err(Val::from("(routing <method> [args...])")),
     };
     match method {
         "provide" => {
@@ -547,7 +569,10 @@ async fn eval_routing(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
             let cid = routing_hash(&ctx.routing, &name).await?;
             let mut req = ctx.routing.provide_request();
             req.get().set_key(&cid);
-            req.send().promise.await.map_err(|e| e.to_string())?;
+            req.send()
+                .promise
+                .await
+                .map_err(|e| Val::from(e.to_string()))?;
             Ok(Val::Nil)
         }
         "find" => {
@@ -584,7 +609,10 @@ async fn eval_routing(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
             req.get().set_key(&cid);
             req.get().set_count(count);
             req.get().set_sink(sink);
-            req.send().promise.await.map_err(|e| e.to_string())?;
+            req.send()
+                .promise
+                .await
+                .map_err(|e| Val::from(e.to_string()))?;
 
             // Collect results from the channel. Single-threaded capnp-rpc
             // guarantees all provider() callbacks complete before findProviders
@@ -613,21 +641,25 @@ async fn eval_routing(args: &[Val], ctx: &mut Session) -> Result<Val, String> {
             };
             let mut req = ctx.routing.hash_request();
             req.get().set_data(&data);
-            let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+            let resp = req
+                .send()
+                .promise
+                .await
+                .map_err(|e| Val::from(e.to_string()))?;
             let key = resp
                 .get()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Val::from(e.to_string()))?
                 .get_key()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Val::from(e.to_string()))?
                 .to_str()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             Ok(Val::Str(key.to_string()))
         }
-        _ => Err(format!("unknown routing method: {method}")),
+        _ => Err(Val::from(format!("unknown routing method: {method}"))),
     }
 }
 
-async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &mut Session) -> Result<Val, String> {
+async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &mut Session) -> Result<Val, Val> {
     // Convert args to strings once — used for whichever candidate we find.
     let str_args: Vec<String> = args
         .iter()
@@ -656,12 +688,16 @@ async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &mut Session) -> Result<
                     arg_list.set(i as u32, a);
                 }
             }
-            let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+            let resp = req
+                .send()
+                .promise
+                .await
+                .map_err(|e| Val::from(e.to_string()))?;
             let process = resp
                 .get()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Val::from(e.to_string()))?
                 .get_process()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
 
             // Read stdout to completion.
             let stdout_resp = process
@@ -669,23 +705,27 @@ async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &mut Session) -> Result<
                 .send()
                 .promise
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
             let stdout_stream = stdout_resp
                 .get()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Val::from(e.to_string()))?
                 .get_stream()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Val::from(e.to_string()))?;
 
             let mut output = Vec::new();
             loop {
                 let mut req = stdout_stream.read_request();
                 req.get().set_max_bytes(65536);
-                let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+                let resp = req
+                    .send()
+                    .promise
+                    .await
+                    .map_err(|e| Val::from(e.to_string()))?;
                 let chunk = resp
                     .get()
-                    .map_err(|e| e.to_string())?
+                    .map_err(|e| Val::from(e.to_string()))?
                     .get_data()
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| Val::from(e.to_string()))?;
                 if chunk.is_empty() {
                     break;
                 }
@@ -698,17 +738,22 @@ async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &mut Session) -> Result<
                 .send()
                 .promise
                 .await
-                .map_err(|e| e.to_string())?;
-            let exit_code = wait_resp.get().map_err(|e| e.to_string())?.get_exit_code();
+                .map_err(|e| Val::from(e.to_string()))?;
+            let exit_code = wait_resp
+                .get()
+                .map_err(|e| Val::from(e.to_string()))?
+                .get_exit_code();
 
             let out_str = String::from_utf8_lossy(&output).trim_end().to_string();
             if exit_code != 0 {
-                return Err(format!("{cmd}: exit code {exit_code}\n{out_str}"));
+                return Err(Val::from(format!(
+                    "{cmd}: exit code {exit_code}\n{out_str}"
+                )));
             }
             return Ok(Val::Str(out_str));
         }
     }
-    Err(format!("{cmd}: command not found"))
+    Err(Val::from(format!("{cmd}: command not found")))
 }
 
 const HELP_TEXT: &str = "\
@@ -784,12 +829,12 @@ async fn run_initd(
         .send()
         .promise
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Val::from(e.to_string()))?;
     let unixfs = unixfs_resp
         .get()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| Val::from(e.to_string()))?
         .get_api()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Val::from(e.to_string()))?;
 
     // ls $WW_ROOT/etc/init.d — gracefully return empty on error
     // (no /etc or no /etc/init.d = nothing configured).
@@ -798,8 +843,8 @@ async fn run_initd(
     ls_req.get().set_path(&initd_path);
     let entries = match ls_req.send().promise.await {
         Ok(resp) => {
-            let reader = resp.get().map_err(|e| e.to_string())?;
-            let list = reader.get_entries().map_err(|e| e.to_string())?;
+            let reader = resp.get().map_err(|e| Val::from(e.to_string()))?;
+            let list = reader.get_entries().map_err(|e| Val::from(e.to_string()))?;
             let mut names = Vec::new();
             for i in 0..list.len() {
                 let entry = list.get(i);
