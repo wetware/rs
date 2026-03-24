@@ -685,4 +685,52 @@ mod tests {
             other => panic!("expected If, got {other:?}"),
         }
     }
+
+    // --- perform / with-handler analyzer tests ---
+
+    #[test]
+    fn analyze_perform_basic() {
+        match analyze_str("(perform :test 42)").unwrap() {
+            Expr::Perform { .. } => {}
+            other => panic!("expected Perform, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn analyze_perform_no_args() {
+        assert!(analyze_str("(perform)").is_err());
+    }
+
+    #[test]
+    fn analyze_perform_one_arg() {
+        assert!(analyze_str("(perform :test)").is_err());
+    }
+
+    #[test]
+    fn analyze_perform_three_args() {
+        assert!(analyze_str("(perform :a :b :c)").is_err());
+    }
+
+    #[test]
+    fn analyze_with_handler_basic() {
+        match analyze_str("(with-handler {} body)").unwrap() {
+            Expr::WithHandler { .. } => {}
+            other => panic!("expected WithHandler, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn analyze_with_handler_no_args() {
+        assert!(analyze_str("(with-handler)").is_err());
+    }
+
+    #[test]
+    fn analyze_with_handler_multi_body() {
+        match analyze_str("(with-handler {} a b c)").unwrap() {
+            Expr::WithHandler { body, .. } => {
+                assert_eq!(body.len(), 3);
+            }
+            other => panic!("expected WithHandler, got {other:?}"),
+        }
+    }
 }

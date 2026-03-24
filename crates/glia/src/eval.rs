@@ -4417,4 +4417,208 @@ mod tests {
         let err = eval_str("(/ 1 0)", &mut env, &mut d).unwrap_err();
         assert!(err_contains(&err, "division by zero"));
     }
+
+    // --- effect edge cases ---
+
+    #[test]
+    fn perform_non_keyword_type() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str(r#"(perform 42 "data")"#, &mut env, &mut d);
+        assert!(result.is_err());
+        assert!(err_contains(&result.unwrap_err(), "keyword"));
+    }
+
+    #[test]
+    fn perform_nil_data() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-handler {:test (fn [e] e)} (perform :test nil))",
+            &mut env,
+            &mut d,
+        );
+        assert_eq!(result, Ok(Val::Nil));
+    }
+
+    #[test]
+    fn perform_in_loop() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-handler {:done (fn [e] e)} (loop [i 0] (if (= i 3) (perform :done i) (recur (+ i 1)))))",
+            &mut env,
+            &mut d,
+        );
+        assert_eq!(result, Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn handler_empty_map() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str("(with-handler {} (perform :test 42))", &mut env, &mut d);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn handler_not_function() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str(
+            r#"(with-handler {:test 42} (perform :test "data"))"#,
+            &mut env,
+            &mut d,
+        );
+        assert!(result.is_err());
+        assert!(err_contains(&result.unwrap_err(), "function"));
+    }
+
+    #[test]
+    fn handler_multi_body() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-handler {:test (fn [e] e)} (def x 1) (perform :test (+ x 1)))",
+            &mut env,
+            &mut d,
+        );
+        assert_eq!(result, Ok(Val::Int(2)));
+    }
+
+    #[test]
+    fn handler_throws_effect() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-handler {:outer (fn [e] (+ e 100))} (with-handler {:fail (fn [e] (perform :outer e))} (perform :fail 5)))",
+            &mut env,
+            &mut d,
+        );
+        assert_eq!(result, Ok(Val::Int(105)));
+    }
+
+    #[test]
+    fn ex_info_non_string_msg() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str("(ex-info 42 {})", &mut env, &mut d);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ex_info_non_map_data() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str(r#"(ex-info "msg" [1 2])"#, &mut env, &mut d);
+        assert!(result.is_err());
+    }
+
+    // --- prelude macro edge cases ---
+
+    #[test]
+    fn try_multiple_body() {
+        let result = effects_eval("(try 1 2 3)").unwrap();
+        // Should be {:ok 3}
+        assert_eq!(
+            result,
+            Val::Map(vec![(Val::Keyword("ok".into()), Val::Int(3))])
+        );
+    }
+
+    #[test]
+    fn throw_nil() {
+        let result = effects_eval("(try (throw nil))").unwrap();
+        if let Val::Map(pairs) = &result {
+            let err_val = pairs
+                .iter()
+                .find(|(k, _)| k == &Val::Keyword("err".into()))
+                .map(|(_, v)| v);
+            assert_eq!(err_val, Some(&Val::Nil));
+        } else {
+            panic!("expected map, got {result:?}");
+        }
+    }
+
+    #[test]
+    fn throw_int() {
+        let result = effects_eval("(try (throw 42))").unwrap();
+        if let Val::Map(pairs) = &result {
+            let err_val = pairs
+                .iter()
+                .find(|(k, _)| k == &Val::Keyword("err".into()))
+                .map(|(_, v)| v);
+            assert_eq!(err_val, Some(&Val::Int(42)));
+        } else {
+            panic!("expected map, got {result:?}");
+        }
+    }
+
+    #[test]
+    fn throw_vector() {
+        let result = effects_eval("(try (throw [1 2 3]))").unwrap();
+        if let Val::Map(pairs) = &result {
+            let err_val = pairs
+                .iter()
+                .find(|(k, _)| k == &Val::Keyword("err".into()))
+                .map(|(_, v)| v);
+            assert_eq!(
+                err_val,
+                Some(&Val::Vector(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
+            );
+        } else {
+            panic!("expected map, got {result:?}");
+        }
+    }
+
+    #[test]
+    fn guard_truthy_int() {
+        assert_eq!(effects_eval("(guard 42 {:type :fail})"), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn guard_truthy_string() {
+        assert_eq!(effects_eval(r#"(guard "hi" {:type :fail})"#), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn or_else_nested() {
+        assert_eq!(
+            effects_eval("(or-else (or-else (throw 1) (throw 2)) 3)"),
+            Ok(Val::Int(3))
+        );
+    }
+
+    #[test]
+    fn try_deeply_nested() {
+        let result = effects_eval("(try (try (try (throw 1))))").unwrap();
+        // Outermost try succeeds: {:ok {:ok {:err 1}}}
+        if let Val::Map(pairs) = &result {
+            assert!(pairs.iter().any(|(k, _)| k == &Val::Keyword("ok".into())));
+        } else {
+            panic!("expected map, got {result:?}");
+        }
+    }
+
+    #[test]
+    fn guard_with_ex_info() {
+        let result = effects_eval(r#"(try (guard false (ex-info "nope" {:type :fail})))"#).unwrap();
+        if let Val::Map(pairs) = &result {
+            assert!(pairs.iter().any(|(k, _)| k == &Val::Keyword("err".into())));
+            // The error value should contain the message "nope"
+            if let Some((_, err_val)) = pairs.iter().find(|(k, _)| k == &Val::Keyword("err".into()))
+            {
+                if let Val::Map(err_pairs) = err_val {
+                    assert!(err_pairs
+                        .iter()
+                        .any(|(k, v)| k == &Val::Keyword("message".into())
+                            && v == &Val::Str("nope".into())));
+                } else {
+                    panic!("expected err to be a map, got {err_val:?}");
+                }
+            }
+        } else {
+            panic!("expected map, got {result:?}");
+        }
+    }
 }

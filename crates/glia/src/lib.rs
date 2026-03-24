@@ -2115,4 +2115,42 @@ mod tests {
             "inner backtick on symbol should be preserved, got: {display}"
         );
     }
+
+    // --- syntax-quote map tests ---
+
+    #[test]
+    fn syntax_quote_empty_map() {
+        let result = read("`{}");
+        assert!(
+            result.is_ok(),
+            "syntax-quote of empty map should parse without error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn syntax_quote_map_literal() {
+        // `{:a 1} should produce an assoc-based form
+        let val = read("`{:a 1}").unwrap();
+        let display = format!("{val}");
+        assert!(
+            display.contains("assoc"),
+            "syntax-quoted map should produce assoc form, got: {display}"
+        );
+    }
+
+    #[test]
+    fn syntax_quote_map_with_unquote() {
+        // `{:a ~x} should parse and produce an assoc form with unquote expansion
+        let val = read("`{:a ~x}").unwrap();
+        let display = format!("{val}");
+        assert!(
+            display.contains("assoc"),
+            "syntax-quoted map with unquote should produce assoc form, got: {display}"
+        );
+        // The unquoted symbol x should appear in the output (not wrapped in unquote)
+        assert!(
+            display.contains('x'),
+            "unquoted symbol should appear in expansion, got: {display}"
+        );
+    }
 }
