@@ -170,16 +170,16 @@ impl<'k> Dispatch for KernelDispatch<'k> {
 
 fn eval<'a>(
     expr: &'a Val,
+    env: &'a mut Env,
     ctx: &'a mut Session,
     dispatch: &'a HashMap<&'static str, HandlerFn>,
 ) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
     Box::pin(async move {
-        let mut env = Env::new();
         let mut kd = KernelDispatch {
             ctx,
             table: dispatch,
         };
-        eval::eval(expr, &mut env, &mut kd).await
+        eval::eval_toplevel(expr, env, &mut kd).await
     })
 }
 
@@ -766,6 +766,7 @@ fn parse_initd_script(name: &str, data: &[u8]) -> Option<Vec<Val>> {
 /// each file as a glia script. Returns true if any expression blocked
 /// (i.e. a foreground process ran to completion via `(executor run ...)`).
 async fn run_initd(
+    env: &mut Env,
     ctx: &mut Session,
     dispatch: &HashMap<&'static str, HandlerFn>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
@@ -855,7 +856,7 @@ async fn run_initd(
 
         for (i, form) in forms.iter().enumerate() {
             log::info!("init.d: {name}: evaluating form {}/{}", i + 1, forms.len());
-            match eval(form, ctx, dispatch).await {
+            match eval(form, env, ctx, dispatch).await {
                 Ok(Val::Nil) => {}
                 Ok(Val::Int(code)) => {
                     // An (executor run ...) that returned an exit code means
@@ -886,6 +887,7 @@ fn write_prompt(stdout: &wasip2::io::streams::OutputStream, cwd: &str) {
 }
 
 async fn run_shell(
+    env: &mut Env,
     mut ctx: Session,
     dispatch: &HashMap<&'static str, HandlerFn>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -919,7 +921,7 @@ async fn run_shell(
             }
 
             match read(line) {
-                Ok(expr) => match eval(&expr, &mut ctx, dispatch).await {
+                Ok(expr) => match eval(&expr, env, &mut ctx, dispatch).await {
                     Ok(Val::Nil) => {}
                     Ok(result) => {
                         let _ = stdout.blocking_write_and_flush(format!("{result}\n").as_bytes());
@@ -987,18 +989,30 @@ fn run_impl() {
         };
 
         let dispatch = build_dispatch();
+        let mut env = Env::new();
+
+        // Load the prelude (standard macros: when, and, or, defn, cond, not).
+        {
+            let mut kd = KernelDispatch {
+                ctx: &mut ctx,
+                table: &dispatch,
+            };
+            glia::load_prelude(&mut env, &mut kd).await;
+        }
 
         // Run init.d scripts first. If a foreground process blocked
         // (e.g. `(executor run ...)` in the script), we're done.
-        let blocked = run_initd(&mut ctx, &dispatch).await.unwrap_or_else(|e| {
-            log::error!("init.d: {e}");
-            false
-        });
+        let blocked = run_initd(&mut env, &mut ctx, &dispatch)
+            .await
+            .unwrap_or_else(|e| {
+                log::error!("init.d: {e}");
+                false
+            });
 
         if !blocked {
             let is_tty = std::env::var("WW_TTY").is_ok();
             let result = if is_tty {
-                run_shell(ctx, &dispatch).await
+                run_shell(&mut env, ctx, &dispatch).await
             } else {
                 run_daemon().await
             };
