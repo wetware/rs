@@ -687,6 +687,104 @@ async fn eval_recur<'a, D: Dispatch>(
 }
 
 // ---------------------------------------------------------------------------
+// Higher-order built-in functions (need async dispatch for fn invocation)
+// ---------------------------------------------------------------------------
+
+/// Dispatch `map`, `filter`, or `reduce` — these invoke user closures.
+async fn eval_hof<'a, D: Dispatch>(
+    name: &str,
+    args: &[Val],
+    _env: &'a mut Env,
+    dispatch: &'a mut D,
+) -> Result<Val, String> {
+    match name {
+        "map" => {
+            if args.len() != 2 {
+                return Err(format!("map: expected 2 args, got {}", args.len()));
+            }
+            let (arities, captured_env) = extract_fn("map", &args[0])?;
+            let items = extract_seq("map", &args[1])?;
+            let mut result = Vec::with_capacity(items.len());
+            for item in items {
+                let val = invoke_fn(
+                    &arities,
+                    &captured_env,
+                    std::slice::from_ref(item),
+                    dispatch,
+                )
+                .await?;
+                result.push(val);
+            }
+            Ok(Val::List(result))
+        }
+        "filter" => {
+            if args.len() != 2 {
+                return Err(format!("filter: expected 2 args, got {}", args.len()));
+            }
+            let (arities, captured_env) = extract_fn("filter", &args[0])?;
+            let items = extract_seq("filter", &args[1])?;
+            let mut result = Vec::new();
+            for item in items {
+                let val = invoke_fn(
+                    &arities,
+                    &captured_env,
+                    std::slice::from_ref(item),
+                    dispatch,
+                )
+                .await?;
+                let keep = !matches!(val, Val::Nil | Val::Bool(false));
+                if keep {
+                    result.push(item.clone());
+                }
+            }
+            Ok(Val::List(result))
+        }
+        "reduce" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(format!("reduce: expected 2-3 args, got {}", args.len()));
+            }
+            let (arities, captured_env) = extract_fn("reduce", &args[0])?;
+            let (mut acc, items) = if args.len() == 3 {
+                (args[1].clone(), extract_seq("reduce", &args[2])?)
+            } else {
+                let items = extract_seq("reduce", &args[1])?;
+                if items.is_empty() {
+                    return Err("reduce: empty collection with no init value".into());
+                }
+                (items[0].clone(), &items[1..])
+            };
+            for item in items {
+                acc = invoke_fn(&arities, &captured_env, &[acc, item.clone()], dispatch).await?;
+            }
+            Ok(acc)
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Extract a `Val::Fn` into its arities and captured env, or error.
+fn extract_fn(caller: &str, val: &Val) -> Result<(Vec<FnArity>, Env), String> {
+    match val {
+        Val::Fn {
+            arities,
+            env: captured_env,
+        } => Ok((arities.clone(), captured_env.clone())),
+        other => Err(format!(
+            "{caller}: first arg must be a function, got {other}"
+        )),
+    }
+}
+
+/// Extract a sequence (list/vector/nil) into a slice reference.
+fn extract_seq<'a>(caller: &str, val: &'a Val) -> Result<&'a [Val], String> {
+    match val {
+        Val::Nil => Ok(&[]),
+        Val::List(v) | Val::Vector(v) => Ok(v.as_slice()),
+        other => Err(format!("{caller}: expected collection, got {other}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Built-in functions
 // ---------------------------------------------------------------------------
 
@@ -722,6 +820,98 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, String>> {
         "<=" => Some(builtin_le(args)),
         ">=" => Some(builtin_ge(args)),
 
+        // --- Type ---
+        "type" => {
+            if args.len() != 1 {
+                return Some(Err(format!("type: expected 1 arg, got {}", args.len())));
+            }
+            let kw = match &args[0] {
+                Val::Nil => "nil",
+                Val::Bool(_) => "bool",
+                Val::Int(_) => "int",
+                Val::Float(_) => "float",
+                Val::Str(_) => "str",
+                Val::Sym(_) => "sym",
+                Val::Keyword(_) => "keyword",
+                Val::List(_) => "list",
+                Val::Vector(_) => "vector",
+                Val::Map(_) => "map",
+                Val::Set(_) => "set",
+                Val::Bytes(_) => "bytes",
+                Val::Fn { .. } => "fn",
+                Val::Recur(_) => "recur",
+                Val::Macro { .. } => "macro",
+            };
+            Some(Ok(Val::Keyword(kw.into())))
+        }
+        "nil?" => {
+            if args.len() != 1 {
+                return Some(Err(format!("nil?: expected 1 arg, got {}", args.len())));
+            }
+            Some(Ok(Val::Bool(matches!(args[0], Val::Nil))))
+        }
+        "some?" => {
+            if args.len() != 1 {
+                return Some(Err(format!("some?: expected 1 arg, got {}", args.len())));
+            }
+            Some(Ok(Val::Bool(!matches!(args[0], Val::Nil))))
+        }
+        "empty?" => {
+            if args.len() != 1 {
+                return Some(Err(format!("empty?: expected 1 arg, got {}", args.len())));
+            }
+            let empty = match &args[0] {
+                Val::Nil => true,
+                Val::List(v) | Val::Vector(v) | Val::Set(v) => v.is_empty(),
+                Val::Map(pairs) => pairs.is_empty(),
+                Val::Str(s) => s.is_empty(),
+                other => return Some(Err(format!("empty?: expected collection, got {other}"))),
+            };
+            Some(Ok(Val::Bool(empty)))
+        }
+        "contains?" => Some(builtin_contains(args)),
+
+        // --- Strings ---
+        "str" => {
+            let mut buf = String::new();
+            for arg in args {
+                use std::fmt::Write;
+                let _ = match arg {
+                    Val::Str(s) => write!(buf, "{s}"),
+                    Val::Nil => write!(buf, ""),
+                    other => write!(buf, "{other}"),
+                };
+            }
+            Some(Ok(Val::Str(buf)))
+        }
+        "name" => {
+            if args.len() != 1 {
+                return Some(Err(format!("name: expected 1 arg, got {}", args.len())));
+            }
+            match &args[0] {
+                Val::Keyword(k) => Some(Ok(Val::Str(k.clone()))),
+                Val::Sym(s) => Some(Ok(Val::Str(s.clone()))),
+                other => Some(Err(format!(
+                    "name: expected keyword or symbol, got {other}"
+                ))),
+            }
+        }
+        "println" => {
+            let mut buf = String::new();
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    buf.push(' ');
+                }
+                match arg {
+                    Val::Str(s) => buf.push_str(s),
+                    other => buf.push_str(&format!("{other}")),
+                };
+            }
+            #[cfg(not(test))]
+            std::println!("{buf}");
+            Some(Ok(Val::Nil))
+        }
+
         // --- Other ---
         "gensym" => {
             if !args.is_empty() {
@@ -733,6 +923,26 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, String>> {
 
         _ => None, // not a built-in
     }
+}
+
+fn builtin_contains(args: &[Val]) -> Result<Val, String> {
+    if args.len() != 2 {
+        return Err(format!("contains?: expected 2 args, got {}", args.len()));
+    }
+    let found = match &args[0] {
+        Val::Map(pairs) => pairs.iter().any(|(k, _)| k == &args[1]),
+        Val::Set(items) => items.iter().any(|v| v == &args[1]),
+        Val::Vector(v) => match &args[1] {
+            Val::Int(i) => *i >= 0 && (*i as usize) < v.len(),
+            other => return Err(format!("contains?: vector key must be Int, got {other}")),
+        },
+        other => {
+            return Err(format!(
+                "contains?: expected map, set, or vector, got {other}"
+            ))
+        }
+    };
+    Ok(Val::Bool(found))
 }
 
 // --- Collection built-ins ---
@@ -1216,6 +1426,12 @@ pub fn eval<'a, D: Dispatch>(
                             ))
                         }
                     }
+                }
+
+                // --- Higher-order builtins (need env + dispatch for fn invocation) ---
+                if head == "map" || head == "filter" || head == "reduce" {
+                    let args = eval_args(raw_args, env, dispatch).await?;
+                    return eval_hof(head, &args, env, dispatch).await;
                 }
 
                 // --- Built-in functions ---
@@ -3298,5 +3514,224 @@ mod tests {
         )
         .unwrap();
         assert_eq!(eval_str("(once true)", &mut env, &mut d), Ok(Val::Int(42)));
+    }
+
+    // =========================================================================
+    // Stdlib tests (#202)
+    // =========================================================================
+
+    #[test]
+    fn stdlib_type_int() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(type 42)", &mut env, &mut d),
+            Ok(Val::Keyword("int".into()))
+        );
+    }
+
+    #[test]
+    fn stdlib_type_nil() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(type nil)", &mut env, &mut d),
+            Ok(Val::Keyword("nil".into()))
+        );
+    }
+
+    #[test]
+    fn stdlib_type_fn() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(type (fn [x] x))", &mut env, &mut d),
+            Ok(Val::Keyword("fn".into()))
+        );
+    }
+
+    #[test]
+    fn stdlib_nil_pred() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(nil? nil)", &mut env, &mut d),
+            Ok(Val::Bool(true))
+        );
+        assert_eq!(eval_str("(nil? 0)", &mut env, &mut d), Ok(Val::Bool(false)));
+    }
+
+    #[test]
+    fn stdlib_some_pred() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(some? nil)", &mut env, &mut d),
+            Ok(Val::Bool(false))
+        );
+        assert_eq!(eval_str("(some? 0)", &mut env, &mut d), Ok(Val::Bool(true)));
+    }
+
+    #[test]
+    fn stdlib_empty_pred() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(empty? nil)", &mut env, &mut d),
+            Ok(Val::Bool(true))
+        );
+        assert_eq!(
+            eval_str("(empty? (list))", &mut env, &mut d),
+            Ok(Val::Bool(true))
+        );
+        assert_eq!(
+            eval_str("(empty? (list 1))", &mut env, &mut d),
+            Ok(Val::Bool(false))
+        );
+    }
+
+    #[test]
+    fn stdlib_contains_map() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(contains? {:a 1 :b 2} :a)", &mut env, &mut d),
+            Ok(Val::Bool(true))
+        );
+        assert_eq!(
+            eval_str("(contains? {:a 1} :z)", &mut env, &mut d),
+            Ok(Val::Bool(false))
+        );
+    }
+
+    #[test]
+    fn stdlib_str_empty() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(eval_str("(str)", &mut env, &mut d), Ok(Val::Str("".into())));
+    }
+
+    #[test]
+    fn stdlib_str_concat() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str(r#"(str "hello" " " "world")"#, &mut env, &mut d),
+            Ok(Val::Str("hello world".into()))
+        );
+    }
+
+    #[test]
+    fn stdlib_str_nil_empty() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str(r#"(str "a" nil "b")"#, &mut env, &mut d),
+            Ok(Val::Str("ab".into()))
+        );
+    }
+
+    #[test]
+    fn stdlib_name_keyword() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(name :foo)", &mut env, &mut d),
+            Ok(Val::Str("foo".into()))
+        );
+    }
+
+    #[test]
+    fn stdlib_name_symbol() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str("(name 'bar)", &mut env, &mut d),
+            Ok(Val::Str("bar".into()))
+        );
+    }
+
+    #[test]
+    fn stdlib_println_returns_nil() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str(r#"(println "test")"#, &mut env, &mut d),
+            Ok(Val::Nil)
+        );
+    }
+
+    #[test]
+    fn stdlib_map_basic() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str("(def inc (fn [x] (+ x 1)))", &mut env, &mut d).unwrap();
+        assert_eq!(
+            eval_str("(map inc (list 1 2 3))", &mut env, &mut d),
+            Ok(Val::List(vec![Val::Int(2), Val::Int(3), Val::Int(4)]))
+        );
+    }
+
+    #[test]
+    fn stdlib_map_empty() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str("(def f (fn [x] x))", &mut env, &mut d).unwrap();
+        assert_eq!(
+            eval_str("(map f (list))", &mut env, &mut d),
+            Ok(Val::List(vec![]))
+        );
+    }
+
+    #[test]
+    fn stdlib_filter_basic() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str("(def pos? (fn [x] (> x 0)))", &mut env, &mut d).unwrap();
+        assert_eq!(
+            eval_str("(filter pos? (list -1 0 1 2 -3))", &mut env, &mut d),
+            Ok(Val::List(vec![Val::Int(1), Val::Int(2)]))
+        );
+    }
+
+    #[test]
+    fn stdlib_reduce_with_init() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &mut d).unwrap();
+        assert_eq!(
+            eval_str("(reduce add 0 (list 1 2 3))", &mut env, &mut d),
+            Ok(Val::Int(6))
+        );
+    }
+
+    #[test]
+    fn stdlib_reduce_no_init() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &mut d).unwrap();
+        assert_eq!(
+            eval_str("(reduce add (list 1 2 3))", &mut env, &mut d),
+            Ok(Val::Int(6))
+        );
+    }
+
+    #[test]
+    fn stdlib_reduce_empty_no_init_errors() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str("(def f (fn [a b] a))", &mut env, &mut d).unwrap();
+        assert!(eval_str("(reduce f (list))", &mut env, &mut d).is_err());
+    }
+
+    #[test]
+    fn stdlib_reduce_empty_with_init() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &mut d).unwrap();
+        assert_eq!(
+            eval_str("(reduce add 100 (list))", &mut env, &mut d),
+            Ok(Val::Int(100))
+        );
     }
 }
