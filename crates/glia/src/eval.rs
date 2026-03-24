@@ -17,6 +17,7 @@ use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::expr::FnBody;
 use crate::{FnArity, Val};
 
 /// Monotonic counter for `gensym`.
@@ -132,6 +133,34 @@ pub trait Dispatch {
 /// including `0`, empty string, and empty collections.
 fn is_truthy(val: &Val) -> bool {
     !matches!(val, Val::Nil | Val::Bool(false))
+}
+
+/// Evaluate a function/macro body, dispatching on `FnBody` variant.
+///
+/// `Analyzed` bodies are evaluated via `eval_expr` (no re-analysis).
+/// `Raw` bodies are analyzed first, then evaluated (one-time cost for
+/// macro-produced closures).
+async fn eval_fn_body<'a, D: Dispatch>(
+    body: &'a FnBody,
+    env: &'a mut Env,
+    dispatch: &'a mut D,
+) -> Result<Val, String> {
+    match body {
+        FnBody::Raw(forms) => {
+            let mut result = Val::Nil;
+            for form in forms {
+                result = eval(form, env, dispatch).await?;
+            }
+            Ok(result)
+        }
+        FnBody::Analyzed(exprs) => {
+            let mut result = Val::Nil;
+            for expr in exprs {
+                result = eval_expr(expr, env, dispatch).await?;
+            }
+            Ok(result)
+        }
+    }
 }
 
 /// Evaluate arguments: recursively evaluate nested lists, look up symbols
@@ -294,7 +323,7 @@ fn parse_params(param_vec: &[Val], body: &[Val]) -> Result<FnArity, String> {
     Ok(FnArity {
         params,
         variadic,
-        body: body.to_vec(),
+        body: FnBody::Raw(body.to_vec()),
     })
 }
 
@@ -416,10 +445,7 @@ async fn invoke_fn<'a, D: Dispatch>(
     // semantics as loop/recur but targeting the enclosing fn.
     let result = async {
         loop {
-            let mut result = Val::Nil;
-            for form in &arity.body {
-                result = eval(form, &mut fn_env, dispatch).await?;
-            }
+            let result = eval_fn_body(&arity.body, &mut fn_env, dispatch).await?;
 
             match result {
                 Val::Recur(new_vals) => {
@@ -586,14 +612,7 @@ async fn invoke_macro<'a, D: Dispatch>(
     }
 
     // Evaluate body (implicit do) in the macro's captured env
-    let result = async {
-        let mut result = Val::Nil;
-        for form in &arity.body {
-            result = eval(form, &mut macro_env, dispatch).await?;
-        }
-        Ok(result)
-    }
-    .await;
+    let result = async { eval_fn_body(&arity.body, &mut macro_env, dispatch).await }.await;
 
     macro_env.pop_frame();
     result
@@ -1266,17 +1285,309 @@ fn builtin_ge(args: &[Val]) -> Result<Val, String> {
     Ok(Val::Bool(!numeric_cmp(&args[0], &args[1])?.is_lt()))
 }
 
-/// Top-level evaluation wrapper.
-///
-/// Calls `eval` and catches escaped `Val::Recur` sentinels, converting
-/// them to an error ("recur not in tail position").
-pub fn eval_toplevel<'a, D: Dispatch>(
-    expr: &'a Val,
+// ---------------------------------------------------------------------------
+// Expr-based evaluation (new pipeline)
+// ---------------------------------------------------------------------------
+
+use crate::expr::{self, Expr};
+
+/// Evaluate an analyzed Expr in the given environment.
+pub fn eval_expr<'a, D: Dispatch>(
+    expr: &'a Expr,
     env: &'a mut Env,
     dispatch: &'a mut D,
 ) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
     Box::pin(async move {
-        let result = eval(expr, env, dispatch).await?;
+        match expr {
+            Expr::Const(v) => Ok(v.clone()),
+
+            Expr::Sym(s) => match env.get(s) {
+                Some(v) => Ok(v.clone()),
+                None => Ok(Val::Sym(s.clone())),
+            },
+
+            Expr::Def { name, value } => {
+                let val = eval_expr(value, env, dispatch).await?;
+                env.set_root(name.clone(), val.clone());
+                Ok(val)
+            }
+
+            Expr::If { test, then, else_ } => {
+                let test_val = eval_expr(test, env, dispatch).await?;
+                if is_truthy(&test_val) {
+                    eval_expr(then, env, dispatch).await
+                } else {
+                    eval_expr(else_, env, dispatch).await
+                }
+            }
+
+            Expr::Do { body } => {
+                let mut result = Val::Nil;
+                for e in body {
+                    result = eval_expr(e, env, dispatch).await?;
+                }
+                Ok(result)
+            }
+
+            Expr::Let { bindings, body } => {
+                env.push_frame();
+                let result = async {
+                    for (name, val_expr) in bindings {
+                        let val = eval_expr(val_expr, env, dispatch).await?;
+                        env.set(name.clone(), val);
+                    }
+                    let mut result = Val::Nil;
+                    for e in body {
+                        result = eval_expr(e, env, dispatch).await?;
+                    }
+                    Ok(result)
+                }
+                .await;
+                env.pop_frame();
+                result
+            }
+
+            Expr::Quote(val) => Ok(val.clone()),
+
+            Expr::Fn { arities } => {
+                // Convert FnArityExpr → FnArity with FnBody::Analyzed
+                let fn_arities: Vec<FnArity> = arities
+                    .iter()
+                    .map(|a| FnArity {
+                        params: a.params.clone(),
+                        variadic: a.variadic.clone(),
+                        body: FnBody::Analyzed(a.body.clone()),
+                    })
+                    .collect();
+                Ok(Val::Fn {
+                    arities: fn_arities,
+                    env: env.snapshot(),
+                })
+            }
+
+            Expr::Loop { bindings, body } => {
+                env.push_frame();
+                // Evaluate initial bindings
+                let mut binding_names = Vec::with_capacity(bindings.len());
+                for (name, val_expr) in bindings {
+                    let val = eval_expr(val_expr, env, dispatch).await?;
+                    env.set(name.clone(), val);
+                    binding_names.push(name.clone());
+                }
+                let num_bindings = binding_names.len();
+
+                let result = async {
+                    loop {
+                        let mut result = Val::Nil;
+                        for e in body {
+                            result = eval_expr(e, env, dispatch).await?;
+                        }
+                        match result {
+                            Val::Recur(new_vals) => {
+                                if new_vals.len() != num_bindings {
+                                    return Err(format!(
+                                        "recur: expected {} args, got {}",
+                                        num_bindings,
+                                        new_vals.len()
+                                    ));
+                                }
+                                for (name, val) in binding_names.iter().zip(new_vals) {
+                                    env.set(name.clone(), val);
+                                }
+                            }
+                            other => return Ok(other),
+                        }
+                    }
+                }
+                .await;
+                env.pop_frame();
+                result
+            }
+
+            Expr::Recur { args } => {
+                let mut evaled = Vec::with_capacity(args.len());
+                for a in args {
+                    evaled.push(eval_expr(a, env, dispatch).await?);
+                }
+                Ok(Val::Recur(evaled))
+            }
+
+            Expr::DefMacro { name: _, raw_args } => {
+                // Delegate to existing defmacro logic which operates on raw Val
+                eval_defmacro(raw_args, env).await
+            }
+
+            Expr::Call {
+                head,
+                args,
+                raw_args,
+            } => {
+                // 1. Check for macro expansion
+                if let Some(Val::Macro {
+                    arities,
+                    env: captured_env,
+                }) = env.get(head)
+                {
+                    let arities = arities.clone();
+                    let captured_env = captured_env.clone();
+                    let expanded =
+                        invoke_macro(&arities, &captured_env, raw_args, dispatch).await?;
+                    // Re-analyze and eval the expanded form
+                    let analyzed = expr::analyze(&expanded)?;
+                    return eval_expr(&analyzed, env, dispatch).await;
+                }
+
+                // 2. Check env for fn
+                if let Some(Val::Fn {
+                    arities,
+                    env: captured_env,
+                }) = env.get(head)
+                {
+                    let arities = arities.clone();
+                    let captured_env = captured_env.clone();
+                    let evaled_args = eval_expr_args(args, env, dispatch).await?;
+                    return invoke_fn(&arities, &captured_env, &evaled_args, dispatch).await;
+                }
+
+                // 3. Evaluate args for remaining paths
+                let evaled_args = eval_expr_args(args, env, dispatch).await?;
+
+                // 4. HOF builtins
+                if head == "map" || head == "filter" || head == "reduce" {
+                    return eval_hof(head, &evaled_args, env, dispatch).await;
+                }
+
+                // 5. Sync builtins
+                if let Some(result) = eval_builtin(head, &evaled_args) {
+                    return result;
+                }
+
+                // 6. Generic dispatch
+                dispatch.call(head, &evaled_args).await
+            }
+
+            Expr::Apply { args, raw_args: _ } => {
+                let evaled = eval_expr_args(args, env, dispatch).await?;
+                if evaled.len() < 2 {
+                    return Err(format!(
+                        "apply: expected at least 2 args, got {}",
+                        evaled.len()
+                    ));
+                }
+                let func = &evaled[0];
+                let last = &evaled[evaled.len() - 1];
+                let trailing = match last {
+                    Val::List(v) | Val::Vector(v) => v.clone(),
+                    other => {
+                        return Err(format!(
+                            "apply: last arg must be List or Vector, got {other}"
+                        ))
+                    }
+                };
+                let mut spread = evaled[1..evaled.len() - 1].to_vec();
+                spread.extend(trailing);
+
+                match func {
+                    Val::Sym(fname) => {
+                        if let Some(Val::Fn {
+                            arities,
+                            env: captured_env,
+                        }) = env.get(fname)
+                        {
+                            let arities = arities.clone();
+                            let captured_env = captured_env.clone();
+                            return invoke_fn(&arities, &captured_env, &spread, dispatch).await;
+                        }
+                        if let Some(result) = eval_builtin(fname, &spread) {
+                            return result;
+                        }
+                        dispatch.call(fname, &spread).await
+                    }
+                    Val::Fn {
+                        arities,
+                        env: captured_env,
+                    } => {
+                        let arities = arities.clone();
+                        let captured_env = captured_env.clone();
+                        invoke_fn(&arities, &captured_env, &spread, dispatch).await
+                    }
+                    other => Err(format!(
+                        "apply: first arg must be a symbol or fn, got {other}"
+                    )),
+                }
+            }
+
+            Expr::Vector(exprs) => {
+                let mut items = Vec::with_capacity(exprs.len());
+                for e in exprs {
+                    items.push(eval_expr(e, env, dispatch).await?);
+                }
+                Ok(Val::Vector(items))
+            }
+
+            Expr::Map(pairs) => {
+                let mut items = Vec::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    items.push((
+                        eval_expr(k, env, dispatch).await?,
+                        eval_expr(v, env, dispatch).await?,
+                    ));
+                }
+                Ok(Val::Map(items))
+            }
+
+            Expr::Set(exprs) => {
+                let mut items = Vec::with_capacity(exprs.len());
+                for e in exprs {
+                    items.push(eval_expr(e, env, dispatch).await?);
+                }
+                Ok(Val::Set(items))
+            }
+        }
+    })
+}
+
+/// Evaluate a list of Expr args into Vec<Val>.
+async fn eval_expr_args<'a, D: Dispatch>(
+    args: &'a [Expr],
+    env: &'a mut Env,
+    dispatch: &'a mut D,
+) -> Result<Vec<Val>, String> {
+    let mut result = Vec::with_capacity(args.len());
+    for a in args {
+        result.push(eval_expr(a, env, dispatch).await?);
+    }
+    Ok(result)
+}
+
+/// Top-level Expr evaluation with Recur guard.
+pub fn eval_toplevel_expr<'a, D: Dispatch>(
+    expr: &'a Expr,
+    env: &'a mut Env,
+    dispatch: &'a mut D,
+) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
+    Box::pin(async move {
+        let result = eval_expr(expr, env, dispatch).await?;
+        match result {
+            Val::Recur(_) => Err("recur not in tail position".into()),
+            other => Ok(other),
+        }
+    })
+}
+
+/// Top-level evaluation wrapper.
+///
+/// Analyzes the Val into an Expr, then evaluates it.
+/// Catches escaped `Val::Recur` sentinels, converting
+/// them to an error ("recur not in tail position").
+pub fn eval_toplevel<'a, D: Dispatch>(
+    val: &'a Val,
+    env: &'a mut Env,
+    dispatch: &'a mut D,
+) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
+    Box::pin(async move {
+        let analyzed = expr::analyze(val)?;
+        let result = eval_expr(&analyzed, env, dispatch).await?;
         match result {
             Val::Recur(_) => Err("recur not in tail position".into()),
             other => Ok(other),
