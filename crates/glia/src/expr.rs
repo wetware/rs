@@ -402,7 +402,10 @@ fn analyze_recur(args: &[Val]) -> Result<Expr, String> {
     Ok(Expr::Recur { args: analyzed })
 }
 
-/// `(defmacro name [params] body...)` — store raw args for eval-time processing.
+/// `(defmacro name [params] body...)` — store raw fn-args for eval-time processing.
+///
+/// The name is extracted and stored separately.  `raw_args` contains only
+/// the params and body (`&args[1..]`), NOT the name — avoiding double-storage.
 fn analyze_defmacro(args: &[Val]) -> Result<Expr, String> {
     if args.is_empty() {
         return Err("defmacro: expected name".into());
@@ -411,9 +414,12 @@ fn analyze_defmacro(args: &[Val]) -> Result<Expr, String> {
         Val::Sym(s) => s.clone(),
         other => return Err(format!("defmacro: expected symbol for name, got {other}")),
     };
+    if args.len() < 2 {
+        return Err("defmacro: expected params after name".into());
+    }
     Ok(Expr::DefMacro {
         name,
-        raw_args: args.to_vec(),
+        raw_args: args[1..].to_vec(), // params + body only, no name
     })
 }
 
@@ -593,7 +599,7 @@ mod tests {
         match analyze_str("(defmacro m [x] x)").unwrap() {
             Expr::DefMacro { name, raw_args } => {
                 assert_eq!(name, "m");
-                assert_eq!(raw_args.len(), 3); // m, [x], and x
+                assert_eq!(raw_args.len(), 2); // [x] and x (name stored separately)
             }
             other => panic!("expected DefMacro, got {other:?}"),
         }

@@ -1412,9 +1412,66 @@ pub fn eval_expr<'a, D: Dispatch>(
                 Ok(Val::Recur(evaled))
             }
 
-            Expr::DefMacro { name: _, raw_args } => {
-                // Delegate to existing defmacro logic which operates on raw Val
-                eval_defmacro(raw_args, env).await
+            Expr::DefMacro { name, raw_args } => {
+                // raw_args contains [params, body...] — no name (already extracted).
+                // Build the macro directly: reuse parse_params + arity validation
+                // from eval_defmacro, but use the pre-extracted name.
+                let fn_args = raw_args.as_slice();
+                let arities = match &fn_args[0] {
+                    Val::Vector(params) => {
+                        vec![parse_params(params, &fn_args[1..])?]
+                    }
+                    Val::List(_) => {
+                        let mut result = Vec::new();
+                        for arg in fn_args {
+                            match arg {
+                                Val::List(items) if !items.is_empty() => {
+                                    let param_vec = match &items[0] {
+                                        Val::Vector(v) => v,
+                                        other => {
+                                            return Err(format!(
+                                                "defmacro: multi-arity clause must start with [params], got {other}"
+                                            ))
+                                        }
+                                    };
+                                    result.push(parse_params(param_vec, &items[1..])?);
+                                }
+                                other => {
+                                    return Err(format!(
+                                        "defmacro: expected arity clause (list), got {other}"
+                                    ))
+                                }
+                            }
+                        }
+                        let mut seen_counts = std::collections::HashSet::new();
+                        let mut has_variadic = false;
+                        for a in &result {
+                            if a.variadic.is_some() {
+                                if has_variadic {
+                                    return Err("defmacro: only one variadic arity allowed".into());
+                                }
+                                has_variadic = true;
+                            } else if !seen_counts.insert(a.params.len()) {
+                                return Err(format!(
+                                    "defmacro: duplicate arity for {} args",
+                                    a.params.len()
+                                ));
+                            }
+                        }
+                        result
+                    }
+                    other => {
+                        return Err(format!(
+                            "defmacro: expected [params] or arity clauses, got {other}"
+                        ))
+                    }
+                };
+                let val = Val::Macro {
+                    arities,
+                    env: env.snapshot(),
+                };
+                env.set_root(name.clone(), val.clone());
+                Ok(val)
             }
 
             Expr::Call {
