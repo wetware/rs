@@ -70,7 +70,7 @@ pub enum Expr {
     },
 
     /// `(apply fn args...)`
-    Apply { args: Vec<Expr>, raw_args: Vec<Val> },
+    Apply { args: Vec<Expr> },
 
     /// `[exprs...]` — vector literal with analyzed elements.
     Vector(Vec<Expr>),
@@ -182,10 +182,7 @@ fn analyze_list(items: &[Val]) -> Result<Expr, String> {
                 .iter()
                 .map(analyze)
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Expr::Apply {
-                args,
-                raw_args: raw_args.to_vec(),
-            })
+            Ok(Expr::Apply { args })
         }
         _ => {
             let args = raw_args
@@ -620,9 +617,8 @@ mod tests {
     #[test]
     fn analyze_apply() {
         match analyze_str("(apply + (list 1 2))").unwrap() {
-            Expr::Apply { args, raw_args } => {
+            Expr::Apply { args } => {
                 assert_eq!(args.len(), 2);
-                assert_eq!(raw_args.len(), 2);
             }
             other => panic!("expected Apply, got {other:?}"),
         }

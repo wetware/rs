@@ -479,32 +479,21 @@ async fn invoke_fn<'a, D: Dispatch>(
     result
 }
 
-/// `(defmacro name [params] body...)` — define a macro in the root frame.
+/// Parse macro/fn arity definitions from raw Val args.
 ///
-/// Like `fn` but the resulting `Val::Macro` receives unevaluated args;
-/// the body evaluates in the captured env and the result is re-evaluated
-/// in the caller's env.
-async fn eval_defmacro(args: &[Val], env: &mut Env) -> Result<Val, String> {
-    if args.is_empty() {
-        return Err("defmacro: expected (defmacro name [params] body...)".into());
-    }
-    let name = match &args[0] {
-        Val::Sym(s) => s.clone(),
-        other => return Err(format!("defmacro: expected symbol for name, got {other}")),
-    };
-    let fn_args = &args[1..];
+/// Shared by `eval_defmacro` (old path) and `eval_expr` DefMacro handler.
+/// `fn_args` is `[params, body...]` or `[(arity1) (arity2) ...]`.
+fn parse_macro_arities(fn_args: &[Val]) -> Result<Vec<FnArity>, String> {
     if fn_args.is_empty() {
-        return Err("defmacro: expected params after name".into());
+        return Err("defmacro: expected params".into());
     }
-
-    // Reuse the same parsing as eval_fn
-    let arities = match &fn_args[0] {
-        // Single-arity: (defmacro name [x y] body...)
+    match &fn_args[0] {
+        // Single-arity: [x y] body...
         Val::Vector(params) => {
             let arity = parse_params(params, &fn_args[1..])?;
-            vec![arity]
+            Ok(vec![arity])
         }
-        // Multi-arity: (defmacro name ([x] body1) ([x y] body2) ...)
+        // Multi-arity: ([x] body1) ([x y] body2) ...
         Val::List(_) => {
             let mut result = Vec::new();
             for arg in fn_args {
@@ -527,7 +516,6 @@ async fn eval_defmacro(args: &[Val], env: &mut Env) -> Result<Val, String> {
                     }
                 }
             }
-            // Check for overlapping arities
             let mut seen_counts = std::collections::HashSet::new();
             let mut has_variadic = false;
             for a in &result {
@@ -543,15 +531,32 @@ async fn eval_defmacro(args: &[Val], env: &mut Env) -> Result<Val, String> {
                     ));
                 }
             }
-            result
+            Ok(result)
         }
-        other => {
-            return Err(format!(
-                "defmacro: expected [params] or arity clauses, got {other}"
-            ))
-        }
-    };
+        other => Err(format!(
+            "defmacro: expected [params] or arity clauses, got {other}"
+        )),
+    }
+}
 
+/// `(defmacro name [params] body...)` — define a macro in the root frame.
+///
+/// Like `fn` but the resulting `Val::Macro` receives unevaluated args;
+/// the body evaluates in the captured env and the result is re-evaluated
+/// in the caller's env.
+async fn eval_defmacro(args: &[Val], env: &mut Env) -> Result<Val, String> {
+    if args.is_empty() {
+        return Err("defmacro: expected (defmacro name [params] body...)".into());
+    }
+    let name = match &args[0] {
+        Val::Sym(s) => s.clone(),
+        other => return Err(format!("defmacro: expected symbol for name, got {other}")),
+    };
+    let fn_args = &args[1..];
+    if fn_args.is_empty() {
+        return Err("defmacro: expected params after name".into());
+    }
+    let arities = parse_macro_arities(fn_args)?;
     let val = Val::Macro {
         arities,
         env: env.snapshot(),
@@ -1414,58 +1419,7 @@ pub fn eval_expr<'a, D: Dispatch>(
 
             Expr::DefMacro { name, raw_args } => {
                 // raw_args contains [params, body...] — no name (already extracted).
-                // Build the macro directly: reuse parse_params + arity validation
-                // from eval_defmacro, but use the pre-extracted name.
-                let fn_args = raw_args.as_slice();
-                let arities = match &fn_args[0] {
-                    Val::Vector(params) => {
-                        vec![parse_params(params, &fn_args[1..])?]
-                    }
-                    Val::List(_) => {
-                        let mut result = Vec::new();
-                        for arg in fn_args {
-                            match arg {
-                                Val::List(items) if !items.is_empty() => {
-                                    let param_vec = match &items[0] {
-                                        Val::Vector(v) => v,
-                                        other => {
-                                            return Err(format!(
-                                                "defmacro: multi-arity clause must start with [params], got {other}"
-                                            ))
-                                        }
-                                    };
-                                    result.push(parse_params(param_vec, &items[1..])?);
-                                }
-                                other => {
-                                    return Err(format!(
-                                        "defmacro: expected arity clause (list), got {other}"
-                                    ))
-                                }
-                            }
-                        }
-                        let mut seen_counts = std::collections::HashSet::new();
-                        let mut has_variadic = false;
-                        for a in &result {
-                            if a.variadic.is_some() {
-                                if has_variadic {
-                                    return Err("defmacro: only one variadic arity allowed".into());
-                                }
-                                has_variadic = true;
-                            } else if !seen_counts.insert(a.params.len()) {
-                                return Err(format!(
-                                    "defmacro: duplicate arity for {} args",
-                                    a.params.len()
-                                ));
-                            }
-                        }
-                        result
-                    }
-                    other => {
-                        return Err(format!(
-                            "defmacro: expected [params] or arity clauses, got {other}"
-                        ))
-                    }
-                };
+                let arities = parse_macro_arities(raw_args)?;
                 let val = Val::Macro {
                     arities,
                     env: env.snapshot(),
@@ -1523,7 +1477,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                 dispatch.call(head, &evaled_args).await
             }
 
-            Expr::Apply { args, raw_args: _ } => {
+            Expr::Apply { args } => {
                 let evaled = eval_expr_args(args, env, dispatch).await?;
                 if evaled.len() < 2 {
                     return Err(format!(
