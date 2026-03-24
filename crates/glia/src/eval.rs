@@ -408,13 +408,44 @@ async fn invoke_fn<'a, D: Dispatch>(
         fn_env.set(rest_name.clone(), Val::List(rest_args));
     }
 
-    // Evaluate body (implicit do)
+    // Number of expected recur args: fixed params + (1 if variadic)
+    let recur_arity = arity.params.len() + usize::from(arity.variadic.is_some());
+
+    // Evaluate body (implicit do) with recur support.
+    // If the body returns Val::Recur, re-bind params and loop — same
+    // semantics as loop/recur but targeting the enclosing fn.
     let result = async {
-        let mut result = Val::Nil;
-        for form in &arity.body {
-            result = eval(form, &mut fn_env, dispatch).await?;
+        loop {
+            let mut result = Val::Nil;
+            for form in &arity.body {
+                result = eval(form, &mut fn_env, dispatch).await?;
+            }
+
+            match result {
+                Val::Recur(new_vals) => {
+                    if new_vals.len() != recur_arity {
+                        return Err(format!(
+                            "recur: expected {} args, got {}",
+                            recur_arity,
+                            new_vals.len()
+                        ));
+                    }
+                    // Re-bind fixed params
+                    for (name, val) in arity.params.iter().zip(new_vals.iter()) {
+                        fn_env.set(name.clone(), val.clone());
+                    }
+                    // Re-bind variadic rest param.
+                    // Recur passes fixed_params + 1 args; the last arg IS the
+                    // new variadic collection (not individual elements to collect).
+                    if let Some(rest_name) = &arity.variadic {
+                        let rest_val = new_vals[arity.params.len()].clone();
+                        fn_env.set(rest_name.clone(), rest_val);
+                    }
+                    // continue — re-evaluate body with new bindings
+                }
+                other => return Ok(other),
+            }
         }
-        Ok(result)
     }
     .await;
 
@@ -3038,7 +3069,6 @@ mod tests {
         assert!(result.unwrap_err().contains("not inside syntax-quote"));
     }
 
-    // =========================================================================
     // Prelude tests
     // =========================================================================
 
@@ -3181,5 +3211,92 @@ mod tests {
             prelude_eval("(do (defn f [x] 1 2 (+ x 10)) (f 5))"),
             Ok(Val::Int(15))
         );
+    }
+
+    // =========================================================================
+    // fn recur tests (#225)
+    // =========================================================================
+
+    #[test]
+    fn fn_recur_factorial() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // Define factorial with recur
+        eval_str(
+            "(def factorial (fn [n acc] (if (= n 0) acc (recur (- n 1) (* acc n)))))",
+            &mut env,
+            &mut d,
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str("(factorial 5 1)", &mut env, &mut d),
+            Ok(Val::Int(120))
+        );
+    }
+
+    #[test]
+    fn fn_recur_countdown() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str(
+            r#"(def countdown (fn [n] (if (= n 0) "done" (recur (- n 1)))))"#,
+            &mut env,
+            &mut d,
+        )
+        .unwrap();
+        assert_eq!(
+            eval_str("(countdown 100)", &mut env, &mut d),
+            Ok(Val::Str("done".into()))
+        );
+    }
+
+    #[test]
+    fn fn_recur_no_recur_regression() {
+        // Normal fn without recur must still work
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &mut d).unwrap();
+        assert_eq!(eval_str("(add 3 4)", &mut env, &mut d), Ok(Val::Int(7)));
+    }
+
+    #[test]
+    fn fn_recur_wrong_arity() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str("(def f (fn [a b] (recur 1)))", &mut env, &mut d).unwrap();
+        let err = eval_str("(f 1 2)", &mut env, &mut d).unwrap_err();
+        assert!(err.contains("expected 2"), "got: {err}");
+    }
+
+    #[test]
+    fn fn_recur_variadic() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // Variadic fn that sums via recur: acc + first of rest, recur with rest
+        eval_str(
+            "(def sum-all (fn [acc & nums] (if (= (count nums) 0) acc (recur (+ acc (first nums)) (rest nums)))))",
+            &mut env,
+            &mut d,
+        )
+        .unwrap();
+        // sum-all 0 1 2 3 → 6
+        // Note: recur with variadic expects fixed_params + 1 args (the rest becomes a list)
+        assert_eq!(
+            eval_str("(sum-all 0 1 2 3)", &mut env, &mut d),
+            Ok(Val::Int(6))
+        );
+    }
+
+    #[test]
+    fn fn_recur_single_iteration() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        eval_str(
+            "(def once (fn [x] (if x (recur false) 42)))",
+            &mut env,
+            &mut d,
+        )
+        .unwrap();
+        assert_eq!(eval_str("(once true)", &mut env, &mut d), Ok(Val::Int(42)));
     }
 }
