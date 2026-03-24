@@ -370,13 +370,14 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 // Parser
 // ---------------------------------------------------------------------------
 
+/// Parse tokens in normal mode: backtick triggers syntax-quote transformation.
 fn parse_tokens(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
     if tokens.is_empty() {
         return Err("unexpected end of input".into());
     }
     match &tokens[0] {
-        Token::Open => parse_seq(&tokens[1..], Token::Close, Val::List),
-        Token::VecOpen => parse_seq(&tokens[1..], Token::VecClose, Val::Vector),
+        Token::Open => parse_seq(&tokens[1..], Token::Close, Val::List, false),
+        Token::VecOpen => parse_seq(&tokens[1..], Token::VecClose, Val::Vector, false),
         Token::MapOpen => parse_map(&tokens[1..]),
         Token::SetOpen => parse_set(&tokens[1..]),
         Token::Quote => {
@@ -384,8 +385,10 @@ fn parse_tokens(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
             Ok((Val::List(vec![Val::Sym("quote".into()), inner]), rest))
         }
         Token::Backtick => {
-            let (inner, rest) = parse_tokens(&tokens[1..])?;
-            let transformed = transform_syntax_quote(&inner)?;
+            // Parse the inner form in "raw" mode so nested backticks produce
+            // (syntax-quote ...) marker forms instead of being eagerly expanded.
+            let (inner, rest) = parse_tokens_raw(&tokens[1..])?;
+            let transformed = transform_syntax_quote(&inner, 0)?;
             Ok((transformed, rest))
         }
         Token::Unquote => {
@@ -406,7 +409,54 @@ fn parse_tokens(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
     }
 }
 
-fn parse_seq<F>(tokens: &[Token], close: Token, wrap: F) -> Result<(Val, &[Token]), String>
+/// Parse tokens in "raw" mode: backtick, unquote, and splice-unquote produce
+/// marker forms `(syntax-quote ...)`, `(unquote ...)`, `(splice-unquote ...)`
+/// without triggering syntax-quote transformation. This allows
+/// `transform_syntax_quote` to see the full nested structure and track depth.
+fn parse_tokens_raw(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
+    if tokens.is_empty() {
+        return Err("unexpected end of input".into());
+    }
+    match &tokens[0] {
+        Token::Open => parse_seq(&tokens[1..], Token::Close, Val::List, true),
+        Token::VecOpen => parse_seq(&tokens[1..], Token::VecClose, Val::Vector, true),
+        Token::MapOpen => parse_map_raw(&tokens[1..]),
+        Token::SetOpen => parse_set_raw(&tokens[1..]),
+        Token::Quote => {
+            let (inner, rest) = parse_tokens_raw(&tokens[1..])?;
+            Ok((Val::List(vec![Val::Sym("quote".into()), inner]), rest))
+        }
+        Token::Backtick => {
+            let (inner, rest) = parse_tokens_raw(&tokens[1..])?;
+            Ok((
+                Val::List(vec![Val::Sym("syntax-quote".into()), inner]),
+                rest,
+            ))
+        }
+        Token::Unquote => {
+            let (inner, rest) = parse_tokens_raw(&tokens[1..])?;
+            Ok((Val::List(vec![Val::Sym("unquote".into()), inner]), rest))
+        }
+        Token::SpliceUnquote => {
+            let (inner, rest) = parse_tokens_raw(&tokens[1..])?;
+            Ok((
+                Val::List(vec![Val::Sym("splice-unquote".into()), inner]),
+                rest,
+            ))
+        }
+        Token::Close => Err("unexpected )".into()),
+        Token::VecClose => Err("unexpected ]".into()),
+        Token::MapClose => Err("unexpected }".into()),
+        Token::Atom(a) => Ok((parse_atom(a), &tokens[1..])),
+    }
+}
+
+fn parse_seq<F>(
+    tokens: &[Token],
+    close: Token,
+    wrap: F,
+    raw: bool,
+) -> Result<(Val, &[Token]), String>
 where
     F: FnOnce(Vec<Val>) -> Val,
 {
@@ -419,13 +469,25 @@ where
         if rest[0] == close {
             return Ok((wrap(items), &rest[1..]));
         }
-        let (val, new_rest) = parse_tokens(rest)?;
+        let (val, new_rest) = if raw {
+            parse_tokens_raw(rest)?
+        } else {
+            parse_tokens(rest)?
+        };
         items.push(val);
         rest = new_rest;
     }
 }
 
 fn parse_map(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
+    parse_map_inner(tokens, false)
+}
+
+fn parse_map_raw(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
+    parse_map_inner(tokens, true)
+}
+
+fn parse_map_inner(tokens: &[Token], raw: bool) -> Result<(Val, &[Token]), String> {
     let mut pairs = Vec::new();
     let mut rest = tokens;
     loop {
@@ -435,17 +497,33 @@ fn parse_map(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
         if rest[0] == Token::MapClose {
             return Ok((Val::Map(pairs), &rest[1..]));
         }
-        let (key, after_key) = parse_tokens(rest)?;
+        let (key, after_key) = if raw {
+            parse_tokens_raw(rest)?
+        } else {
+            parse_tokens(rest)?
+        };
         if after_key.is_empty() || after_key[0] == Token::MapClose {
             return Err("map must have an even number of elements".into());
         }
-        let (val, after_val) = parse_tokens(after_key)?;
+        let (val, after_val) = if raw {
+            parse_tokens_raw(after_key)?
+        } else {
+            parse_tokens(after_key)?
+        };
         pairs.push((key, val));
         rest = after_val;
     }
 }
 
 fn parse_set(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
+    parse_set_inner(tokens, false)
+}
+
+fn parse_set_raw(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
+    parse_set_inner(tokens, true)
+}
+
+fn parse_set_inner(tokens: &[Token], raw: bool) -> Result<(Val, &[Token]), String> {
     let mut items: Vec<Val> = Vec::new();
     let mut rest = tokens;
     loop {
@@ -455,7 +533,11 @@ fn parse_set(tokens: &[Token]) -> Result<(Val, &[Token]), String> {
         if rest[0] == Token::MapClose {
             return Ok((Val::Set(items), &rest[1..]));
         }
-        let (val, new_rest) = parse_tokens(rest)?;
+        let (val, new_rest) = if raw {
+            parse_tokens_raw(rest)?
+        } else {
+            parse_tokens(rest)?
+        };
         // Check for duplicates (linear scan — fine for config-sized data)
         if items.iter().any(|existing| existing == &val) {
             return Err(format!("duplicate set element: {val}"));
@@ -488,30 +570,98 @@ fn is_splice_unquote(val: &Val) -> bool {
     matches!(val, Val::List(items) if items.len() == 2 && matches!(&items[0], Val::Sym(s) if s == "splice-unquote"))
 }
 
+/// Check whether `val` is a `(syntax-quote expr)` marker form.
+fn is_syntax_quote(val: &Val) -> bool {
+    matches!(val, Val::List(items) if items.len() == 2 && matches!(&items[0], Val::Sym(s) if s == "syntax-quote"))
+}
+
 /// Transform a syntax-quoted form into explicit `list`/`concat`/`quote` calls.
 ///
-/// The reader converts `` `form `` by parsing `form` (which may contain
-/// `~expr` and `~@expr` marker sub-forms) and then calling this function
-/// to produce the expansion.
-fn transform_syntax_quote(val: &Val) -> Result<Val, String> {
+/// The reader converts `` `form `` by parsing `form` in raw mode (which
+/// produces `(syntax-quote ...)`, `(unquote ...)`, and `(splice-unquote ...)`
+/// marker sub-forms) and then calling this function to produce the expansion.
+///
+/// `depth` tracks the nesting level of syntax-quotes:
+/// - Backtick (syntax-quote) increments depth
+/// - Tilde (unquote) and tilde-at (splice-unquote) decrement depth
+/// - Only at depth 0 do unquote/splice-unquote actually resolve
+/// - At deeper levels they are preserved as literal forms
+fn transform_syntax_quote(val: &Val, depth: usize) -> Result<Val, String> {
     match val {
-        // ~expr → pass through (will be evaluated at runtime)
+        // ~expr
         _ if is_unquote(val) => {
             if let Val::List(items) = val {
-                Ok(items[1].clone())
+                if depth == 0 {
+                    // depth 0 → resolve (pass through for runtime evaluation)
+                    Ok(items[1].clone())
+                } else {
+                    // depth > 0: preserve as literal (unquote <recurse at depth-1>)
+                    let inner_transformed = transform_syntax_quote(&items[1], depth - 1)?;
+                    Ok(Val::List(vec![
+                        Val::Sym("concat".into()),
+                        Val::List(vec![
+                            Val::Sym("list".into()),
+                            Val::List(vec![Val::Sym("quote".into()), Val::Sym("unquote".into())]),
+                        ]),
+                        Val::List(vec![Val::Sym("list".into()), inner_transformed]),
+                    ]))
+                }
             } else {
                 unreachable!()
             }
         }
 
-        // ~@expr at top level → error
-        _ if is_splice_unquote(val) => Err("splice-unquote (~@) not inside list".into()),
+        // ~@expr
+        _ if is_splice_unquote(val) => {
+            if depth == 0 {
+                Err("splice-unquote (~@) not inside list".into())
+            } else {
+                // depth > 0: preserve as literal (splice-unquote <recurse at depth-1>)
+                if let Val::List(items) = val {
+                    let inner_transformed = transform_syntax_quote(&items[1], depth - 1)?;
+                    Ok(Val::List(vec![
+                        Val::Sym("concat".into()),
+                        Val::List(vec![
+                            Val::Sym("list".into()),
+                            Val::List(vec![
+                                Val::Sym("quote".into()),
+                                Val::Sym("splice-unquote".into()),
+                            ]),
+                        ]),
+                        Val::List(vec![Val::Sym("list".into()), inner_transformed]),
+                    ]))
+                } else {
+                    unreachable!()
+                }
+            }
+        }
+
+        // Nested syntax-quote: `expr inside a syntax-quote → increment depth
+        _ if is_syntax_quote(val) => {
+            if let Val::List(items) = val {
+                let inner_transformed = transform_syntax_quote(&items[1], depth + 1)?;
+                // Preserve as (syntax-quote <recursed>)
+                Ok(Val::List(vec![
+                    Val::Sym("concat".into()),
+                    Val::List(vec![
+                        Val::Sym("list".into()),
+                        Val::List(vec![
+                            Val::Sym("quote".into()),
+                            Val::Sym("syntax-quote".into()),
+                        ]),
+                    ]),
+                    Val::List(vec![Val::Sym("list".into()), inner_transformed]),
+                ]))
+            } else {
+                unreachable!()
+            }
+        }
 
         // (quote expr) inside syntax-quote → preserve as literal, don't recurse
         Val::List(items)
             if items.len() == 2 && matches!(&items[0], Val::Sym(s) if s == "quote") =>
         {
-            // Return (list (quote quote) (list (quote expr)))
+            // Return (concat (list (quote quote)) (list (quote expr)))
             // which evaluates to the literal (quote expr)
             Ok(Val::List(vec![
                 Val::Sym("concat".into()),
@@ -534,18 +684,76 @@ fn transform_syntax_quote(val: &Val) -> Result<Val, String> {
             let mut segments = Vec::new();
             for item in items {
                 if is_unquote(item) {
-                    // ~x → (list x)
                     if let Val::List(inner) = item {
-                        segments.push(Val::List(vec![Val::Sym("list".into()), inner[1].clone()]));
+                        if depth == 0 {
+                            // ~x at depth 0 → (list x) — resolve
+                            segments
+                                .push(Val::List(vec![Val::Sym("list".into()), inner[1].clone()]));
+                        } else {
+                            // ~x at depth > 0 → preserve as literal
+                            let inner_transformed = transform_syntax_quote(&inner[1], depth - 1)?;
+                            segments.push(Val::List(vec![
+                                Val::Sym("list".into()),
+                                Val::List(vec![
+                                    Val::Sym("concat".into()),
+                                    Val::List(vec![
+                                        Val::Sym("list".into()),
+                                        Val::List(vec![
+                                            Val::Sym("quote".into()),
+                                            Val::Sym("unquote".into()),
+                                        ]),
+                                    ]),
+                                    Val::List(vec![Val::Sym("list".into()), inner_transformed]),
+                                ]),
+                            ]));
+                        }
                     }
                 } else if is_splice_unquote(item) {
-                    // ~@x → x (concat will flatten)
                     if let Val::List(inner) = item {
-                        segments.push(inner[1].clone());
+                        if depth == 0 {
+                            // ~@x at depth 0 → x (concat will flatten)
+                            segments.push(inner[1].clone());
+                        } else {
+                            // ~@x at depth > 0 → preserve as literal
+                            let inner_transformed = transform_syntax_quote(&inner[1], depth - 1)?;
+                            segments.push(Val::List(vec![
+                                Val::Sym("list".into()),
+                                Val::List(vec![
+                                    Val::Sym("concat".into()),
+                                    Val::List(vec![
+                                        Val::Sym("list".into()),
+                                        Val::List(vec![
+                                            Val::Sym("quote".into()),
+                                            Val::Sym("splice-unquote".into()),
+                                        ]),
+                                    ]),
+                                    Val::List(vec![Val::Sym("list".into()), inner_transformed]),
+                                ]),
+                            ]));
+                        }
+                    }
+                } else if is_syntax_quote(item) {
+                    if let Val::List(inner) = item {
+                        // Nested backtick in a list element → increment depth
+                        let inner_transformed = transform_syntax_quote(&inner[1], depth + 1)?;
+                        segments.push(Val::List(vec![
+                            Val::Sym("list".into()),
+                            Val::List(vec![
+                                Val::Sym("concat".into()),
+                                Val::List(vec![
+                                    Val::Sym("list".into()),
+                                    Val::List(vec![
+                                        Val::Sym("quote".into()),
+                                        Val::Sym("syntax-quote".into()),
+                                    ]),
+                                ]),
+                                Val::List(vec![Val::Sym("list".into()), inner_transformed]),
+                            ]),
+                        ]));
                     }
                 } else {
                     // Recurse and wrap in (list ...)
-                    let quoted = transform_syntax_quote(item)?;
+                    let quoted = transform_syntax_quote(item, depth)?;
                     segments.push(Val::List(vec![Val::Sym("list".into()), quoted]));
                 }
             }
@@ -556,7 +764,7 @@ fn transform_syntax_quote(val: &Val) -> Result<Val, String> {
 
         // [a ~b] → (vec (concat ...))
         Val::Vector(items) => {
-            let as_list = transform_syntax_quote(&Val::List(items.clone()))?;
+            let as_list = transform_syntax_quote(&Val::List(items.clone()), depth)?;
             Ok(Val::List(vec![Val::Sym("vec".into()), as_list]))
         }
 
@@ -1756,5 +1964,112 @@ mod tests {
     #[test]
     fn splice_unquote_eof_error() {
         assert!(read("~@").is_err());
+    }
+
+    // --- Nested syntax-quote depth tracking tests (#234) ---
+
+    #[test]
+    fn nested_syntax_quote_preserves_inner() {
+        // `(a `(b ~c)) — the inner ~c should NOT be resolved by the outer backtick.
+        // The inner backtick produces a (syntax-quote ...) marker form, which
+        // increments depth. The ~c inside it is at depth 1, so it's preserved.
+        let val = read("`(a `(b ~c))").unwrap();
+        let display = format!("{val}");
+        // The inner ~c must NOT be resolved — it should appear as (unquote c) in output
+        assert!(
+            display.contains("unquote"),
+            "inner ~c should be preserved as literal unquote, got: {display}"
+        );
+        assert!(
+            display.contains("syntax-quote"),
+            "inner backtick should be preserved as syntax-quote, got: {display}"
+        );
+    }
+
+    #[test]
+    fn nested_syntax_quote_outer_unquote() {
+        // `(a ~b `(c ~d)) — ~b resolves (outer, depth 0), ~d does not (inner, depth 1)
+        let val = read("`(a ~b `(c ~d))").unwrap();
+        let display = format!("{val}");
+        // The inner backtick should be preserved as syntax-quote
+        assert!(
+            display.contains("syntax-quote"),
+            "inner backtick should be preserved, got: {display}"
+        );
+    }
+
+    #[test]
+    fn double_unquote_no_panic() {
+        // `(a `(b ~~c)) — nested double unquote should not panic.
+        let result = read("`(a `(b ~~c))");
+        assert!(
+            result.is_ok(),
+            "double unquote should not panic: {result:?}"
+        );
+    }
+
+    #[test]
+    fn quote_inside_syntax_quote() {
+        // `(a '(unquote b)) — the quoted unquote should be preserved literally.
+        let val = read("`(a '(unquote b))").unwrap();
+        let display = format!("{val}");
+        assert!(
+            display.contains("quote"),
+            "quoted form should be preserved, got: {display}"
+        );
+    }
+
+    #[test]
+    fn syntax_quote_depth_overflow() {
+        // Very deeply nested backticks shouldn't panic (test with 3-4 levels)
+        let result = read("`(a `(b `(c ~d)))");
+        assert!(
+            result.is_ok(),
+            "3-level nested syntax-quote should not panic: {result:?}"
+        );
+
+        let result = read("`(a `(b `(c `(d ~e))))");
+        assert!(
+            result.is_ok(),
+            "4-level nested syntax-quote should not panic: {result:?}"
+        );
+    }
+
+    #[test]
+    fn nested_splice_unquote_preserved() {
+        // `(a `(b ~@c)) — ~@c at depth 1 should be preserved as literal splice-unquote
+        let val = read("`(a `(b ~@c))").unwrap();
+        let display = format!("{val}");
+        assert!(
+            display.contains("splice-unquote"),
+            "inner ~@c should be preserved as literal splice-unquote, got: {display}"
+        );
+    }
+
+    #[test]
+    fn nested_syntax_quote_common_macro_pattern() {
+        // `(let [x 1] `(+ ~x 2)) — common macro pattern, must work
+        let result = read("`(let [x 1] `(+ ~x 2))");
+        assert!(
+            result.is_ok(),
+            "common macro pattern should not panic: {result:?}"
+        );
+        let val = result.unwrap();
+        let display = format!("{val}");
+        assert!(
+            display.contains("syntax-quote"),
+            "inner backtick should be preserved, got: {display}"
+        );
+    }
+
+    #[test]
+    fn nested_syntax_quote_symbol_preserved() {
+        // `(a `b) — inner backtick on a symbol should preserve as syntax-quote form
+        let val = read("`(a `b)").unwrap();
+        let display = format!("{val}");
+        assert!(
+            display.contains("syntax-quote"),
+            "inner backtick on symbol should be preserved, got: {display}"
+        );
     }
 }
