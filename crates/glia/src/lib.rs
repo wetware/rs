@@ -22,6 +22,7 @@
 //! Commas are whitespace. Line comments start with `;`.
 
 pub mod eval;
+pub mod expr;
 
 // ---------------------------------------------------------------------------
 // Value type
@@ -34,8 +35,8 @@ pub struct FnArity {
     pub params: Vec<String>,
     /// If present, the name after `&` that collects remaining args as a List.
     pub variadic: Option<String>,
-    /// Body forms (implicit `do`).
-    pub body: Vec<Val>,
+    /// Body forms — either raw Val (macro-produced) or pre-analyzed Expr.
+    pub body: expr::FnBody,
 }
 
 /// A Clojure-like value.
