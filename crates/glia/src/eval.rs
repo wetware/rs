@@ -3069,6 +3069,150 @@ mod tests {
         assert!(result.unwrap_err().contains("not inside syntax-quote"));
     }
 
+    // Prelude tests
+    // =========================================================================
+
+    /// Helper: load the prelude then parse + eval a string expression.
+    fn prelude_eval(input: &str) -> Result<Val, String> {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // Load prelude forms into the environment
+        let prelude_forms =
+            crate::read_many(crate::PRELUDE).map_err(|e| format!("prelude parse: {e}"))?;
+        for form in &prelude_forms {
+            eval_blocking(form, &mut env, &mut d)?;
+        }
+        // Now eval the test expression
+        eval_str(input, &mut env, &mut d)
+    }
+
+    #[test]
+    fn prelude_not_true() {
+        assert_eq!(prelude_eval("(not true)"), Ok(Val::Bool(false)));
+    }
+
+    #[test]
+    fn prelude_not_false() {
+        assert_eq!(prelude_eval("(not false)"), Ok(Val::Bool(true)));
+    }
+
+    #[test]
+    fn prelude_not_nil() {
+        assert_eq!(prelude_eval("(not nil)"), Ok(Val::Bool(true)));
+    }
+
+    #[test]
+    fn prelude_not_truthy() {
+        // Non-nil, non-false values are truthy → not returns false
+        assert_eq!(prelude_eval("(not 42)"), Ok(Val::Bool(false)));
+    }
+
+    #[test]
+    fn prelude_when_true() {
+        assert_eq!(prelude_eval("(when true 1 2 3)"), Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn prelude_when_false() {
+        assert_eq!(prelude_eval("(when false 1 2 3)"), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn prelude_when_not_false() {
+        assert_eq!(prelude_eval("(when-not false 42)"), Ok(Val::Int(42)));
+    }
+
+    #[test]
+    fn prelude_when_not_true() {
+        assert_eq!(prelude_eval("(when-not true 42)"), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn prelude_and_empty() {
+        assert_eq!(prelude_eval("(and)"), Ok(Val::Bool(true)));
+    }
+
+    #[test]
+    fn prelude_and_single() {
+        assert_eq!(prelude_eval("(and 42)"), Ok(Val::Int(42)));
+    }
+
+    #[test]
+    fn prelude_and_two_truthy() {
+        assert_eq!(prelude_eval("(and 1 2)"), Ok(Val::Int(2)));
+    }
+
+    #[test]
+    fn prelude_and_short_circuit() {
+        assert_eq!(prelude_eval("(and false 2)"), Ok(Val::Bool(false)));
+    }
+
+    #[test]
+    fn prelude_and_nil_short_circuit() {
+        assert_eq!(prelude_eval("(and nil 2)"), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn prelude_or_empty() {
+        assert_eq!(prelude_eval("(or)"), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn prelude_or_single() {
+        assert_eq!(prelude_eval("(or 42)"), Ok(Val::Int(42)));
+    }
+
+    #[test]
+    fn prelude_or_first_truthy() {
+        assert_eq!(prelude_eval("(or 1 2)"), Ok(Val::Int(1)));
+    }
+
+    #[test]
+    fn prelude_or_skip_nil() {
+        assert_eq!(prelude_eval("(or nil 2)"), Ok(Val::Int(2)));
+    }
+
+    #[test]
+    fn prelude_or_skip_false_nil() {
+        assert_eq!(prelude_eval("(or false nil 3)"), Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn prelude_cond_basic() {
+        assert_eq!(prelude_eval("(cond false 1 true 2)"), Ok(Val::Int(2)));
+    }
+
+    #[test]
+    fn prelude_cond_default() {
+        assert_eq!(prelude_eval("(cond false 1 42)"), Ok(Val::Int(42)));
+    }
+
+    #[test]
+    fn prelude_cond_empty() {
+        assert_eq!(prelude_eval("(cond)"), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn prelude_cond_first_match() {
+        assert_eq!(prelude_eval("(cond true 1 true 2)"), Ok(Val::Int(1)));
+    }
+
+    #[test]
+    fn prelude_defn_basic() {
+        assert_eq!(
+            prelude_eval("(do (defn add [a b] (+ a b)) (add 1 2))"),
+            Ok(Val::Int(3))
+        );
+    }
+
+    #[test]
+    fn prelude_defn_multi_body() {
+        assert_eq!(
+            prelude_eval("(do (defn f [x] 1 2 (+ x 10)) (f 5))"),
+            Ok(Val::Int(15))
+        );
+    }
+
     // =========================================================================
     // fn recur tests (#225)
     // =========================================================================

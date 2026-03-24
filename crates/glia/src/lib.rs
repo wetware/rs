@@ -204,6 +204,26 @@ pub fn read_many(input: &str) -> Result<Vec<Val>, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Prelude
+// ---------------------------------------------------------------------------
+
+/// The Glia prelude: standard derived forms (when, and, or, defn, cond, not).
+const PRELUDE: &str = include_str!("prelude.glia");
+
+/// Load the prelude macros into the given environment.
+///
+/// Parses and evaluates each form in `prelude.glia`. This should be called
+/// once at boot before init.d or shell evaluation. Prelude errors are fatal.
+pub async fn load_prelude<D: eval::Dispatch>(env: &mut eval::Env, dispatch: &mut D) {
+    let forms = read_many(PRELUDE).expect("prelude: parse error");
+    for form in &forms {
+        eval::eval_toplevel(form, env, dispatch)
+            .await
+            .expect("prelude: eval error");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tokenizer
 // ---------------------------------------------------------------------------
 

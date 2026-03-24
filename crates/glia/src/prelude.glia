@@ -1,0 +1,50 @@
+;; Glia prelude — standard derived forms loaded at boot.
+;;
+;; These macros are defined in Glia itself, proving the macro system
+;; works end-to-end.  Loaded via include_str! before init.d/shell.
+
+;; not — logical negation
+(defmacro not [x]
+  `(if ~x false true))
+
+;; when — conditional with implicit do
+(defmacro when [test & body]
+  `(if ~test (do ~@body) nil))
+
+;; when-not — negated when
+(defmacro when-not [test & body]
+  `(if ~test nil (do ~@body)))
+
+;; and — short-circuit logical AND (uses gensym for hygiene)
+(defmacro and [& args]
+  (if (= (count args) 0)
+    true
+    (if (= (count args) 1)
+      (first args)
+      (let [g (gensym)]
+        `(let [~g ~(first args)]
+           (if ~g (and ~@(rest args)) ~g))))))
+
+;; or — short-circuit logical OR (uses gensym for hygiene)
+(defmacro or [& args]
+  (if (= (count args) 0)
+    nil
+    (if (= (count args) 1)
+      (first args)
+      (let [g (gensym)]
+        `(let [~g ~(first args)]
+           (if ~g ~g (or ~@(rest args))))))))
+
+;; cond — multi-branch conditional
+(defmacro cond [& clauses]
+  (if (= (count clauses) 0)
+    nil
+    (if (= (count clauses) 1)
+      (first clauses)
+      `(if ~(first clauses)
+           ~(first (rest clauses))
+           (cond ~@(rest (rest clauses)))))))
+
+;; defn — define a named function
+(defmacro defn [name params & body]
+  `(def ~name (fn ~params ~@body)))
