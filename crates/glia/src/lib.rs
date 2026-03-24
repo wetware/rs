@@ -70,6 +70,28 @@ pub enum Val {
     },
 }
 
+/// Convert a string error into a structured error value.
+///
+/// Enables incremental migration from `Result<Val, String>` to `Result<Val, Val>`:
+/// existing `Err(format!(...))` sites auto-convert via the `?` operator.
+impl From<String> for Val {
+    fn from(s: String) -> Self {
+        Val::Map(vec![
+            (Val::Keyword("type".into()), Val::Keyword("internal".into())),
+            (Val::Keyword("message".into()), Val::Str(s)),
+        ])
+    }
+}
+
+impl From<&str> for Val {
+    fn from(s: &str) -> Self {
+        Val::from(s.to_string())
+    }
+}
+
+/// Val implements Error so it can be used with `?` in functions returning `Box<dyn Error>`.
+impl std::error::Error for Val {}
+
 impl PartialEq for Val {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {

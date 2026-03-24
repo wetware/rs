@@ -121,12 +121,20 @@ pub trait Dispatch {
         &'a mut self,
         name: &'a str,
         args: &'a [Val],
-    ) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>>;
 }
 
 // ---------------------------------------------------------------------------
 // Evaluator
 // ---------------------------------------------------------------------------
+
+/// Convenience macro: creates an error `Val` from a format string.
+/// Equivalent to `Val::from(format!(...))` but shorter at callsites.
+macro_rules! eval_err {
+    ($($arg:tt)*) => {
+        Val::from(format!($($arg)*))
+    };
+}
 
 /// Returns true if `val` is logically truthy (Clojure model).
 /// Only `nil` and `false` are falsy — everything else is truthy,
@@ -144,7 +152,7 @@ async fn eval_fn_body<'a, D: Dispatch>(
     body: &'a FnBody,
     env: &'a mut Env,
     dispatch: &'a mut D,
-) -> Result<Val, String> {
+) -> Result<Val, Val> {
     match body {
         FnBody::Raw(forms) => {
             let mut result = Val::Nil;
@@ -171,7 +179,7 @@ async fn eval_args<'a, D: Dispatch>(
     raw_args: &'a [Val],
     env: &'a mut Env,
     dispatch: &'a mut D,
-) -> Result<Vec<Val>, String> {
+) -> Result<Vec<Val>, Val> {
     let mut args = Vec::with_capacity(raw_args.len());
     for a in raw_args {
         match a {
@@ -195,16 +203,16 @@ async fn eval_def<'a, D: Dispatch>(
     args: &'a [Val],
     env: &'a mut Env,
     dispatch: &'a mut D,
-) -> Result<Val, String> {
+) -> Result<Val, Val> {
     if args.is_empty() || args.len() > 2 {
-        return Err(format!(
+        return Err(eval_err!(
             "def: expected (def name) or (def name value), got {} args",
             args.len()
         ));
     }
     let name = match &args[0] {
         Val::Sym(s) => s.clone(),
-        other => return Err(format!("def: expected symbol, got {other}")),
+        other => return Err(eval_err!("def: expected symbol, got {other}")),
     };
     let val = match args.get(1) {
         Some(expr) => eval(expr, env, dispatch).await?,
@@ -219,9 +227,9 @@ async fn eval_if<'a, D: Dispatch>(
     args: &'a [Val],
     env: &'a mut Env,
     dispatch: &'a mut D,
-) -> Result<Val, String> {
+) -> Result<Val, Val> {
     if args.len() < 2 || args.len() > 3 {
-        return Err(format!("if: expected 2-3 args, got {}", args.len()));
+        return Err(eval_err!("if: expected 2-3 args, got {}", args.len()));
     }
     let test_val = eval(&args[0], env, dispatch).await?;
     if is_truthy(&test_val) {
@@ -238,7 +246,7 @@ async fn eval_do<'a, D: Dispatch>(
     args: &'a [Val],
     env: &'a mut Env,
     dispatch: &'a mut D,
-) -> Result<Val, String> {
+) -> Result<Val, Val> {
     let mut result = Val::Nil;
     for form in args {
         result = eval(form, env, dispatch).await?;
@@ -251,14 +259,16 @@ async fn eval_let<'a, D: Dispatch>(
     args: &'a [Val],
     env: &'a mut Env,
     dispatch: &'a mut D,
-) -> Result<Val, String> {
+) -> Result<Val, Val> {
     let bindings = match args.first() {
         Some(Val::Vector(v)) => v,
-        Some(other) => return Err(format!("let: expected vector of bindings, got {other}")),
-        None => return Err("let: expected (let [bindings...] body...)".into()),
+        Some(other) => return Err(eval_err!("let: expected vector of bindings, got {other}")),
+        None => return Err(eval_err!("let: expected (let [bindings...] body...)")),
     };
     if bindings.len() % 2 != 0 {
-        return Err("let: bindings must be pairs (even number of forms)".into());
+        return Err(eval_err!(
+            "let: bindings must be pairs (even number of forms)"
+        ));
     }
 
     env.push_frame();
@@ -270,7 +280,7 @@ async fn eval_let<'a, D: Dispatch>(
             let name = match &pair[0] {
                 Val::Sym(s) => s.clone(),
                 other => {
-                    return Err(format!("let: binding name must be a symbol, got {other}"));
+                    return Err(eval_err!("let: binding name must be a symbol, got {other}"));
                 }
             };
             let val = eval(&pair[1], env, dispatch).await?;
@@ -293,7 +303,7 @@ async fn eval_let<'a, D: Dispatch>(
 
 /// Parse a parameter vector into an FnArity.
 /// Handles `[x y]` (fixed) and `[x & rest]` (variadic).
-fn parse_params(param_vec: &[Val], body: &[Val]) -> Result<FnArity, String> {
+fn parse_params(param_vec: &[Val], body: &[Val]) -> Result<FnArity, Val> {
     let mut params = Vec::new();
     let mut variadic = None;
     let mut i = 0;
@@ -305,18 +315,18 @@ fn parse_params(param_vec: &[Val], body: &[Val]) -> Result<FnArity, String> {
                 match param_vec.get(i) {
                     Some(Val::Sym(rest_name)) => {
                         if variadic.is_some() {
-                            return Err("fn: only one & rest param allowed".into());
+                            return Err(eval_err!("fn: only one & rest param allowed"));
                         }
                         variadic = Some(rest_name.clone());
                     }
-                    _ => return Err("fn: expected symbol after &".into()),
+                    _ => return Err(eval_err!("fn: expected symbol after &")),
                 }
                 if i + 1 < param_vec.len() {
-                    return Err("fn: nothing allowed after & rest param".into());
+                    return Err(eval_err!("fn: nothing allowed after & rest param"));
                 }
             }
             Val::Sym(s) => params.push(s.clone()),
-            other => return Err(format!("fn: parameter must be a symbol, got {other}")),
+            other => return Err(eval_err!("fn: parameter must be a symbol, got {other}")),
         }
         i += 1;
     }
@@ -328,9 +338,11 @@ fn parse_params(param_vec: &[Val], body: &[Val]) -> Result<FnArity, String> {
 }
 
 /// `(fn [params] body...)` or `(fn ([params] body...) ([params] body...))` — create a closure.
-fn eval_fn(args: &[Val], env: &Env) -> Result<Val, String> {
+fn eval_fn(args: &[Val], env: &Env) -> Result<Val, Val> {
     if args.is_empty() {
-        return Err("fn: expected (fn [params] body...) or (fn ([p] body) ...)".into());
+        return Err(eval_err!(
+            "fn: expected (fn [params] body...) or (fn ([p] body) ...)"
+        ));
     }
 
     let arities = match &args[0] {
@@ -348,14 +360,16 @@ fn eval_fn(args: &[Val], env: &Env) -> Result<Val, String> {
                         let param_vec = match &items[0] {
                             Val::Vector(v) => v,
                             other => {
-                                return Err(format!(
+                                return Err(eval_err!(
                                     "fn: multi-arity clause must start with [params], got {other}"
                                 ))
                             }
                         };
                         result.push(parse_params(param_vec, &items[1..])?);
                     }
-                    other => return Err(format!("fn: expected arity clause (list), got {other}")),
+                    other => {
+                        return Err(eval_err!("fn: expected arity clause (list), got {other}"))
+                    }
                 }
             }
             // Check for overlapping arities (same fixed param count, ignoring variadic)
@@ -364,17 +378,17 @@ fn eval_fn(args: &[Val], env: &Env) -> Result<Val, String> {
             for a in &result {
                 if a.variadic.is_some() {
                     if has_variadic {
-                        return Err("fn: only one variadic arity allowed".into());
+                        return Err(eval_err!("fn: only one variadic arity allowed"));
                     }
                     has_variadic = true;
                 } else if !seen_counts.insert(a.params.len()) {
-                    return Err(format!("fn: duplicate arity for {} args", a.params.len()));
+                    return Err(eval_err!("fn: duplicate arity for {} args", a.params.len()));
                 }
             }
             result
         }
         other => {
-            return Err(format!(
+            return Err(eval_err!(
                 "fn: expected [params] or arity clauses, got {other}"
             ))
         }
@@ -392,7 +406,7 @@ async fn invoke_fn<'a, D: Dispatch>(
     captured_env: &'a Env,
     args: &[Val],
     dispatch: &'a mut D,
-) -> Result<Val, String> {
+) -> Result<Val, Val> {
     // Find matching arity: prefer exact fixed-arity match over variadic.
     // This ensures (fn ([x y] ...) ([x & rest] ...)) called with 2 args
     // picks the fixed 2-arity, not the variadic.
@@ -450,7 +464,7 @@ async fn invoke_fn<'a, D: Dispatch>(
             match result {
                 Val::Recur(new_vals) => {
                     if new_vals.len() != recur_arity {
-                        return Err(format!(
+                        return Err(eval_err!(
                             "recur: expected {} args, got {}",
                             recur_arity,
                             new_vals.len()
@@ -483,9 +497,9 @@ async fn invoke_fn<'a, D: Dispatch>(
 ///
 /// Shared by `eval_defmacro` (old path) and `eval_expr` DefMacro handler.
 /// `fn_args` is `[params, body...]` or `[(arity1) (arity2) ...]`.
-fn parse_macro_arities(fn_args: &[Val]) -> Result<Vec<FnArity>, String> {
+fn parse_macro_arities(fn_args: &[Val]) -> Result<Vec<FnArity>, Val> {
     if fn_args.is_empty() {
-        return Err("defmacro: expected params".into());
+        return Err(eval_err!("defmacro: expected params"));
     }
     match &fn_args[0] {
         // Single-arity: [x y] body...
@@ -502,7 +516,7 @@ fn parse_macro_arities(fn_args: &[Val]) -> Result<Vec<FnArity>, String> {
                         let param_vec = match &items[0] {
                             Val::Vector(v) => v,
                             other => {
-                                return Err(format!(
+                                return Err(eval_err!(
                                     "defmacro: multi-arity clause must start with [params], got {other}"
                                 ))
                             }
@@ -510,7 +524,7 @@ fn parse_macro_arities(fn_args: &[Val]) -> Result<Vec<FnArity>, String> {
                         result.push(parse_params(param_vec, &items[1..])?);
                     }
                     other => {
-                        return Err(format!(
+                        return Err(eval_err!(
                             "defmacro: expected arity clause (list), got {other}"
                         ))
                     }
@@ -521,11 +535,11 @@ fn parse_macro_arities(fn_args: &[Val]) -> Result<Vec<FnArity>, String> {
             for a in &result {
                 if a.variadic.is_some() {
                     if has_variadic {
-                        return Err("defmacro: only one variadic arity allowed".into());
+                        return Err(eval_err!("defmacro: only one variadic arity allowed"));
                     }
                     has_variadic = true;
                 } else if !seen_counts.insert(a.params.len()) {
-                    return Err(format!(
+                    return Err(eval_err!(
                         "defmacro: duplicate arity for {} args",
                         a.params.len()
                     ));
@@ -533,7 +547,7 @@ fn parse_macro_arities(fn_args: &[Val]) -> Result<Vec<FnArity>, String> {
             }
             Ok(result)
         }
-        other => Err(format!(
+        other => Err(eval_err!(
             "defmacro: expected [params] or arity clauses, got {other}"
         )),
     }
@@ -544,17 +558,19 @@ fn parse_macro_arities(fn_args: &[Val]) -> Result<Vec<FnArity>, String> {
 /// Like `fn` but the resulting `Val::Macro` receives unevaluated args;
 /// the body evaluates in the captured env and the result is re-evaluated
 /// in the caller's env.
-async fn eval_defmacro(args: &[Val], env: &mut Env) -> Result<Val, String> {
+async fn eval_defmacro(args: &[Val], env: &mut Env) -> Result<Val, Val> {
     if args.is_empty() {
-        return Err("defmacro: expected (defmacro name [params] body...)".into());
+        return Err(eval_err!(
+            "defmacro: expected (defmacro name [params] body...)"
+        ));
     }
     let name = match &args[0] {
         Val::Sym(s) => s.clone(),
-        other => return Err(format!("defmacro: expected symbol for name, got {other}")),
+        other => return Err(eval_err!("defmacro: expected symbol for name, got {other}")),
     };
     let fn_args = &args[1..];
     if fn_args.is_empty() {
-        return Err("defmacro: expected params after name".into());
+        return Err(eval_err!("defmacro: expected params after name"));
     }
     let arities = parse_macro_arities(fn_args)?;
     let val = Val::Macro {
@@ -573,7 +589,7 @@ async fn invoke_macro<'a, D: Dispatch>(
     captured_env: &'a Env,
     raw_args: &[Val],
     dispatch: &'a mut D,
-) -> Result<Val, String> {
+) -> Result<Val, Val> {
     // Find matching arity (same logic as invoke_fn)
     let arity = arities
         .iter()
@@ -632,21 +648,25 @@ async fn eval_loop<'a, D: Dispatch>(
     args: &'a [Val],
     env: &'a mut Env,
     dispatch: &'a mut D,
-) -> Result<Val, String> {
+) -> Result<Val, Val> {
     let bindings = match args.first() {
         Some(Val::Vector(v)) => v,
-        Some(other) => return Err(format!("loop: expected vector of bindings, got {other}")),
-        None => return Err("loop: expected (loop [bindings...] body...)".into()),
+        Some(other) => return Err(eval_err!("loop: expected vector of bindings, got {other}")),
+        None => return Err(eval_err!("loop: expected (loop [bindings...] body...)")),
     };
     if bindings.len() % 2 != 0 {
-        return Err("loop: bindings must be pairs (even number of forms)".into());
+        return Err(eval_err!(
+            "loop: bindings must be pairs (even number of forms)"
+        ));
     }
 
     let binding_names: Vec<String> = bindings
         .chunks(2)
         .map(|pair| match &pair[0] {
             Val::Sym(s) => Ok(s.clone()),
-            other => Err(format!("loop: binding name must be a symbol, got {other}")),
+            other => Err(eval_err!(
+                "loop: binding name must be a symbol, got {other}"
+            )),
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -676,7 +696,7 @@ async fn eval_loop<'a, D: Dispatch>(
             match result {
                 Val::Recur(new_vals) => {
                     if new_vals.len() != num_bindings {
-                        return Err(format!(
+                        return Err(eval_err!(
                             "recur: expected {} args, got {}",
                             num_bindings,
                             new_vals.len()
@@ -705,7 +725,7 @@ async fn eval_recur<'a, D: Dispatch>(
     args: &'a [Val],
     env: &'a mut Env,
     dispatch: &'a mut D,
-) -> Result<Val, String> {
+) -> Result<Val, Val> {
     let evaled = eval_args(args, env, dispatch).await?;
     Ok(Val::Recur(evaled))
 }
@@ -720,11 +740,11 @@ async fn eval_hof<'a, D: Dispatch>(
     args: &[Val],
     _env: &'a mut Env,
     dispatch: &'a mut D,
-) -> Result<Val, String> {
+) -> Result<Val, Val> {
     match name {
         "map" => {
             if args.len() != 2 {
-                return Err(format!("map: expected 2 args, got {}", args.len()));
+                return Err(eval_err!("map: expected 2 args, got {}", args.len()));
             }
             let (arities, captured_env) = extract_fn("map", &args[0])?;
             let items = extract_seq("map", &args[1])?;
@@ -743,7 +763,7 @@ async fn eval_hof<'a, D: Dispatch>(
         }
         "filter" => {
             if args.len() != 2 {
-                return Err(format!("filter: expected 2 args, got {}", args.len()));
+                return Err(eval_err!("filter: expected 2 args, got {}", args.len()));
             }
             let (arities, captured_env) = extract_fn("filter", &args[0])?;
             let items = extract_seq("filter", &args[1])?;
@@ -765,7 +785,7 @@ async fn eval_hof<'a, D: Dispatch>(
         }
         "reduce" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(format!("reduce: expected 2-3 args, got {}", args.len()));
+                return Err(eval_err!("reduce: expected 2-3 args, got {}", args.len()));
             }
             let (arities, captured_env) = extract_fn("reduce", &args[0])?;
             let (mut acc, items) = if args.len() == 3 {
@@ -773,7 +793,7 @@ async fn eval_hof<'a, D: Dispatch>(
             } else {
                 let items = extract_seq("reduce", &args[1])?;
                 if items.is_empty() {
-                    return Err("reduce: empty collection with no init value".into());
+                    return Err(eval_err!("reduce: empty collection with no init value"));
                 }
                 (items[0].clone(), &items[1..])
             };
@@ -787,24 +807,24 @@ async fn eval_hof<'a, D: Dispatch>(
 }
 
 /// Extract a `Val::Fn` into its arities and captured env, or error.
-fn extract_fn(caller: &str, val: &Val) -> Result<(Vec<FnArity>, Env), String> {
+fn extract_fn(caller: &str, val: &Val) -> Result<(Vec<FnArity>, Env), Val> {
     match val {
         Val::Fn {
             arities,
             env: captured_env,
         } => Ok((arities.clone(), captured_env.clone())),
-        other => Err(format!(
+        other => Err(eval_err!(
             "{caller}: first arg must be a function, got {other}"
         )),
     }
 }
 
 /// Extract a sequence (list/vector/nil) into a slice reference.
-fn extract_seq<'a>(caller: &str, val: &'a Val) -> Result<&'a [Val], String> {
+fn extract_seq<'a>(caller: &str, val: &'a Val) -> Result<&'a [Val], Val> {
     match val {
         Val::Nil => Ok(&[]),
         Val::List(v) | Val::Vector(v) => Ok(v.as_slice()),
-        other => Err(format!("{caller}: expected collection, got {other}")),
+        other => Err(eval_err!("{caller}: expected collection, got {other}")),
     }
 }
 
@@ -816,7 +836,7 @@ fn extract_seq<'a>(caller: &str, val: &'a Val) -> Result<&'a [Val], String> {
 /// already-evaluated `args` and return `Some(result)`.
 /// Returns `None` if `name` is not a built-in — the caller should fall
 /// through to host dispatch.
-fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, String>> {
+fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
     match name {
         // --- Collections ---
         "list" => Some(Ok(Val::List(args.to_vec()))),
@@ -847,7 +867,7 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, String>> {
         // --- Type ---
         "type" => {
             if args.len() != 1 {
-                return Some(Err(format!("type: expected 1 arg, got {}", args.len())));
+                return Some(Err(eval_err!("type: expected 1 arg, got {}", args.len())));
             }
             let kw = match &args[0] {
                 Val::Nil => "nil",
@@ -870,26 +890,26 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, String>> {
         }
         "nil?" => {
             if args.len() != 1 {
-                return Some(Err(format!("nil?: expected 1 arg, got {}", args.len())));
+                return Some(Err(eval_err!("nil?: expected 1 arg, got {}", args.len())));
             }
             Some(Ok(Val::Bool(matches!(args[0], Val::Nil))))
         }
         "some?" => {
             if args.len() != 1 {
-                return Some(Err(format!("some?: expected 1 arg, got {}", args.len())));
+                return Some(Err(eval_err!("some?: expected 1 arg, got {}", args.len())));
             }
             Some(Ok(Val::Bool(!matches!(args[0], Val::Nil))))
         }
         "empty?" => {
             if args.len() != 1 {
-                return Some(Err(format!("empty?: expected 1 arg, got {}", args.len())));
+                return Some(Err(eval_err!("empty?: expected 1 arg, got {}", args.len())));
             }
             let empty = match &args[0] {
                 Val::Nil => true,
                 Val::List(v) | Val::Vector(v) | Val::Set(v) => v.is_empty(),
                 Val::Map(pairs) => pairs.is_empty(),
                 Val::Str(s) => s.is_empty(),
-                other => return Some(Err(format!("empty?: expected collection, got {other}"))),
+                other => return Some(Err(eval_err!("empty?: expected collection, got {other}"))),
             };
             Some(Ok(Val::Bool(empty)))
         }
@@ -910,12 +930,12 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, String>> {
         }
         "name" => {
             if args.len() != 1 {
-                return Some(Err(format!("name: expected 1 arg, got {}", args.len())));
+                return Some(Err(eval_err!("name: expected 1 arg, got {}", args.len())));
             }
             match &args[0] {
                 Val::Keyword(k) => Some(Ok(Val::Str(k.clone()))),
                 Val::Sym(s) => Some(Ok(Val::Str(s.clone()))),
-                other => Some(Err(format!(
+                other => Some(Err(eval_err!(
                     "name: expected keyword or symbol, got {other}"
                 ))),
             }
@@ -939,7 +959,10 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, String>> {
         // --- Other ---
         "gensym" => {
             if !args.is_empty() {
-                return Some(Err(format!("gensym: expected 0 args, got {}", args.len())));
+                return Some(Err(eval_err!(
+                    "gensym: expected 0 args, got {}",
+                    args.len()
+                )));
             }
             let n = GENSYM_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
             Some(Ok(Val::Sym(format!("G__{n}"))))
@@ -949,19 +972,19 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, String>> {
     }
 }
 
-fn builtin_contains(args: &[Val]) -> Result<Val, String> {
+fn builtin_contains(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(format!("contains?: expected 2 args, got {}", args.len()));
+        return Err(eval_err!("contains?: expected 2 args, got {}", args.len()));
     }
     let found = match &args[0] {
         Val::Map(pairs) => pairs.iter().any(|(k, _)| k == &args[1]),
         Val::Set(items) => items.iter().any(|v| v == &args[1]),
         Val::Vector(v) => match &args[1] {
             Val::Int(i) => *i >= 0 && (*i as usize) < v.len(),
-            other => return Err(format!("contains?: vector key must be Int, got {other}")),
+            other => return Err(eval_err!("contains?: vector key must be Int, got {other}")),
         },
         other => {
-            return Err(format!(
+            return Err(eval_err!(
                 "contains?: expected map, set, or vector, got {other}"
             ))
         }
@@ -971,14 +994,14 @@ fn builtin_contains(args: &[Val]) -> Result<Val, String> {
 
 // --- Collection built-ins ---
 
-fn builtin_cons(args: &[Val]) -> Result<Val, String> {
+fn builtin_cons(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(format!("cons: expected 2 args, got {}", args.len()));
+        return Err(eval_err!("cons: expected 2 args, got {}", args.len()));
     }
     let tail = match &args[1] {
         Val::List(v) | Val::Vector(v) => v,
         other => {
-            return Err(format!(
+            return Err(eval_err!(
                 "cons: second arg must be List or Vector, got {other}"
             ))
         }
@@ -989,20 +1012,20 @@ fn builtin_cons(args: &[Val]) -> Result<Val, String> {
     Ok(Val::List(result))
 }
 
-fn builtin_first(args: &[Val]) -> Result<Val, String> {
+fn builtin_first(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 1 {
-        return Err(format!("first: expected 1 arg, got {}", args.len()));
+        return Err(eval_err!("first: expected 1 arg, got {}", args.len()));
     }
     match &args[0] {
         Val::Nil => Ok(Val::Nil),
         Val::List(v) | Val::Vector(v) => Ok(v.first().cloned().unwrap_or(Val::Nil)),
-        other => Err(format!("first: expected collection, got {other}")),
+        other => Err(eval_err!("first: expected collection, got {other}")),
     }
 }
 
-fn builtin_rest(args: &[Val]) -> Result<Val, String> {
+fn builtin_rest(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 1 {
-        return Err(format!("rest: expected 1 arg, got {}", args.len()));
+        return Err(eval_err!("rest: expected 1 arg, got {}", args.len()));
     }
     match &args[0] {
         Val::Nil => Ok(Val::List(vec![])),
@@ -1013,39 +1036,39 @@ fn builtin_rest(args: &[Val]) -> Result<Val, String> {
                 Ok(Val::List(v[1..].to_vec()))
             }
         }
-        other => Err(format!("rest: expected collection, got {other}")),
+        other => Err(eval_err!("rest: expected collection, got {other}")),
     }
 }
 
-fn builtin_count(args: &[Val]) -> Result<Val, String> {
+fn builtin_count(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 1 {
-        return Err(format!("count: expected 1 arg, got {}", args.len()));
+        return Err(eval_err!("count: expected 1 arg, got {}", args.len()));
     }
     let n = match &args[0] {
         Val::Nil => 0,
         Val::List(v) | Val::Vector(v) | Val::Set(v) => v.len(),
         Val::Map(pairs) => pairs.len(),
         Val::Str(s) => s.chars().count(),
-        other => return Err(format!("count: expected collection or nil, got {other}")),
+        other => return Err(eval_err!("count: expected collection or nil, got {other}")),
     };
     Ok(Val::Int(n as i64))
 }
 
-fn builtin_vec(args: &[Val]) -> Result<Val, String> {
+fn builtin_vec(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 1 {
-        return Err(format!("vec: expected 1 arg, got {}", args.len()));
+        return Err(eval_err!("vec: expected 1 arg, got {}", args.len()));
     }
     match &args[0] {
         Val::Nil => Ok(Val::Vector(vec![])),
         Val::List(v) => Ok(Val::Vector(v.clone())),
         Val::Vector(_) => Ok(args[0].clone()),
-        other => Err(format!("vec: expected list or vector, got {other}")),
+        other => Err(eval_err!("vec: expected list or vector, got {other}")),
     }
 }
 
-fn builtin_get(args: &[Val]) -> Result<Val, String> {
+fn builtin_get(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(format!("get: expected 2 args, got {}", args.len()));
+        return Err(eval_err!("get: expected 2 args, got {}", args.len()));
     }
     match &args[0] {
         Val::Map(pairs) => {
@@ -1064,23 +1087,23 @@ fn builtin_get(args: &[Val]) -> Result<Val, String> {
                     Ok(v.get(*i as usize).cloned().unwrap_or(Val::Nil))
                 }
             }
-            other => Err(format!("get: vector index must be Int, got {other}")),
+            other => Err(eval_err!("get: vector index must be Int, got {other}")),
         },
         Val::Nil => Ok(Val::Nil),
-        other => Err(format!("get: expected map or vector, got {other}")),
+        other => Err(eval_err!("get: expected map or vector, got {other}")),
     }
 }
 
-fn builtin_assoc(args: &[Val]) -> Result<Val, String> {
+fn builtin_assoc(args: &[Val]) -> Result<Val, Val> {
     if args.is_empty() || !(args.len() - 1).is_multiple_of(2) {
-        return Err(format!(
+        return Err(eval_err!(
             "assoc: expected map + key-value pairs (odd number of args), got {}",
             args.len()
         ));
     }
     let mut pairs = match &args[0] {
         Val::Map(pairs) => pairs.clone(),
-        other => return Err(format!("assoc: first arg must be a map, got {other}")),
+        other => return Err(eval_err!("assoc: first arg must be a map, got {other}")),
     };
     for chunk in args[1..].chunks(2) {
         let key = &chunk[0];
@@ -1095,9 +1118,9 @@ fn builtin_assoc(args: &[Val]) -> Result<Val, String> {
     Ok(Val::Map(pairs))
 }
 
-fn builtin_conj(args: &[Val]) -> Result<Val, String> {
+fn builtin_conj(args: &[Val]) -> Result<Val, Val> {
     if args.len() < 2 {
-        return Err(format!(
+        return Err(eval_err!(
             "conj: expected at least 2 args, got {}",
             args.len()
         ));
@@ -1128,7 +1151,7 @@ fn builtin_conj(args: &[Val]) -> Result<Val, String> {
                         }
                     }
                     other => {
-                        return Err(format!(
+                        return Err(eval_err!(
                             "conj: map entries must be [key val] vectors, got {other}"
                         ))
                     }
@@ -1136,17 +1159,17 @@ fn builtin_conj(args: &[Val]) -> Result<Val, String> {
             }
             Ok(Val::Map(result))
         }
-        other => Err(format!("conj: expected collection, got {other}")),
+        other => Err(eval_err!("conj: expected collection, got {other}")),
     }
 }
 
-fn builtin_concat(args: &[Val]) -> Result<Val, String> {
+fn builtin_concat(args: &[Val]) -> Result<Val, Val> {
     let mut result = Vec::new();
     for arg in args {
         match arg {
             Val::Nil => {}
             Val::List(v) | Val::Vector(v) => result.extend(v.iter().cloned()),
-            other => return Err(format!("concat: expected sequence or nil, got {other}")),
+            other => return Err(eval_err!("concat: expected sequence or nil, got {other}")),
         }
     }
     Ok(Val::List(result))
@@ -1160,17 +1183,17 @@ enum NumPair {
     Floats(f64, f64),
 }
 
-fn num_pair(a: &Val, b: &Val) -> Result<NumPair, String> {
+fn num_pair(a: &Val, b: &Val) -> Result<NumPair, Val> {
     match (a, b) {
         (Val::Int(x), Val::Int(y)) => Ok(NumPair::Ints(*x, *y)),
         (Val::Float(x), Val::Float(y)) => Ok(NumPair::Floats(*x, *y)),
         (Val::Int(x), Val::Float(y)) => Ok(NumPair::Floats(*x as f64, *y)),
         (Val::Float(x), Val::Int(y)) => Ok(NumPair::Floats(*x, *y as f64)),
-        _ => Err(format!("expected numbers, got {a} and {b}")),
+        _ => Err(eval_err!("expected numbers, got {a} and {b}")),
     }
 }
 
-fn builtin_add(args: &[Val]) -> Result<Val, String> {
+fn builtin_add(args: &[Val]) -> Result<Val, Val> {
     let mut acc = Val::Int(0);
     for a in args {
         acc = match num_pair(&acc, a)? {
@@ -1181,15 +1204,15 @@ fn builtin_add(args: &[Val]) -> Result<Val, String> {
     Ok(acc)
 }
 
-fn builtin_sub(args: &[Val]) -> Result<Val, String> {
+fn builtin_sub(args: &[Val]) -> Result<Val, Val> {
     if args.is_empty() {
-        return Err("-: expected at least 1 arg".into());
+        return Err(eval_err!("-: expected at least 1 arg"));
     }
     if args.len() == 1 {
         return match &args[0] {
             Val::Int(n) => Ok(Val::Int(-n)),
             Val::Float(n) => Ok(Val::Float(-n)),
-            other => Err(format!("-: expected number, got {other}")),
+            other => Err(eval_err!("-: expected number, got {other}")),
         };
     }
     let mut acc = args[0].clone();
@@ -1202,7 +1225,7 @@ fn builtin_sub(args: &[Val]) -> Result<Val, String> {
     Ok(acc)
 }
 
-fn builtin_mul(args: &[Val]) -> Result<Val, String> {
+fn builtin_mul(args: &[Val]) -> Result<Val, Val> {
     let mut acc = Val::Int(1);
     for a in args {
         acc = match num_pair(&acc, a)? {
@@ -1213,79 +1236,79 @@ fn builtin_mul(args: &[Val]) -> Result<Val, String> {
     Ok(acc)
 }
 
-fn builtin_div(args: &[Val]) -> Result<Val, String> {
+fn builtin_div(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(format!("/: expected 2 args, got {}", args.len()));
+        return Err(eval_err!("/: expected 2 args, got {}", args.len()));
     }
     match num_pair(&args[0], &args[1])? {
-        NumPair::Ints(_, 0) => Err("division by zero".into()),
+        NumPair::Ints(_, 0) => Err(eval_err!("division by zero")),
         NumPair::Ints(x, y) => Ok(Val::Int(x / y)),
-        NumPair::Floats(_, 0.0) => Err("division by zero".into()),
+        NumPair::Floats(_, 0.0) => Err(eval_err!("division by zero")),
         NumPair::Floats(x, y) => Ok(Val::Float(x / y)),
     }
 }
 
-fn builtin_mod(args: &[Val]) -> Result<Val, String> {
+fn builtin_mod(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(format!("mod: expected 2 args, got {}", args.len()));
+        return Err(eval_err!("mod: expected 2 args, got {}", args.len()));
     }
     match num_pair(&args[0], &args[1])? {
-        NumPair::Ints(_, 0) => Err("mod: division by zero".into()),
+        NumPair::Ints(_, 0) => Err(eval_err!("mod: division by zero")),
         NumPair::Ints(x, y) => Ok(Val::Int(x % y)),
-        NumPair::Floats(_, 0.0) => Err("mod: division by zero".into()),
+        NumPair::Floats(_, 0.0) => Err(eval_err!("mod: division by zero")),
         NumPair::Floats(x, y) => Ok(Val::Float(x % y)),
     }
 }
 
 // --- Comparison built-ins ---
 
-fn builtin_eq(args: &[Val]) -> Result<Val, String> {
+fn builtin_eq(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(format!("=: expected 2 args, got {}", args.len()));
+        return Err(eval_err!("=: expected 2 args, got {}", args.len()));
     }
     Ok(Val::Bool(args[0] == args[1]))
 }
 
-fn numeric_cmp(a: &Val, b: &Val) -> Result<std::cmp::Ordering, String> {
+fn numeric_cmp(a: &Val, b: &Val) -> Result<std::cmp::Ordering, Val> {
     match (a, b) {
         (Val::Int(x), Val::Int(y)) => Ok(x.cmp(y)),
         (Val::Float(x), Val::Float(y)) => x
             .partial_cmp(y)
-            .ok_or_else(|| "comparison failed (NaN)".to_string()),
+            .ok_or_else(|| eval_err!("comparison failed (NaN)")),
         (Val::Int(x), Val::Float(y)) => (*x as f64)
             .partial_cmp(y)
-            .ok_or_else(|| "comparison failed (NaN)".to_string()),
+            .ok_or_else(|| eval_err!("comparison failed (NaN)")),
         (Val::Float(x), Val::Int(y)) => x
             .partial_cmp(&(*y as f64))
-            .ok_or_else(|| "comparison failed (NaN)".to_string()),
-        _ => Err(format!("comparison requires numbers, got {a} and {b}")),
+            .ok_or_else(|| eval_err!("comparison failed (NaN)")),
+        _ => Err(eval_err!("comparison requires numbers, got {a} and {b}")),
     }
 }
 
-fn builtin_lt(args: &[Val]) -> Result<Val, String> {
+fn builtin_lt(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(format!("<: expected 2 args, got {}", args.len()));
+        return Err(eval_err!("<: expected 2 args, got {}", args.len()));
     }
     Ok(Val::Bool(numeric_cmp(&args[0], &args[1])?.is_lt()))
 }
 
-fn builtin_gt(args: &[Val]) -> Result<Val, String> {
+fn builtin_gt(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(format!(">: expected 2 args, got {}", args.len()));
+        return Err(eval_err!(">: expected 2 args, got {}", args.len()));
     }
     Ok(Val::Bool(numeric_cmp(&args[0], &args[1])?.is_gt()))
 }
 
-fn builtin_le(args: &[Val]) -> Result<Val, String> {
+fn builtin_le(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(format!("<=: expected 2 args, got {}", args.len()));
+        return Err(eval_err!("<=: expected 2 args, got {}", args.len()));
     }
     Ok(Val::Bool(!numeric_cmp(&args[0], &args[1])?.is_gt()))
 }
 
-fn builtin_ge(args: &[Val]) -> Result<Val, String> {
+fn builtin_ge(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(format!(">=: expected 2 args, got {}", args.len()));
+        return Err(eval_err!(">=: expected 2 args, got {}", args.len()));
     }
     Ok(Val::Bool(!numeric_cmp(&args[0], &args[1])?.is_lt()))
 }
@@ -1301,7 +1324,7 @@ pub fn eval_expr<'a, D: Dispatch>(
     expr: &'a Expr,
     env: &'a mut Env,
     dispatch: &'a mut D,
-) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
     Box::pin(async move {
         match expr {
             Expr::Const(v) => Ok(v.clone()),
@@ -1390,7 +1413,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                         match result {
                             Val::Recur(new_vals) => {
                                 if new_vals.len() != num_bindings {
-                                    return Err(format!(
+                                    return Err(eval_err!(
                                         "recur: expected {} args, got {}",
                                         num_bindings,
                                         new_vals.len()
@@ -1480,7 +1503,7 @@ pub fn eval_expr<'a, D: Dispatch>(
             Expr::Apply { args } => {
                 let evaled = eval_expr_args(args, env, dispatch).await?;
                 if evaled.len() < 2 {
-                    return Err(format!(
+                    return Err(eval_err!(
                         "apply: expected at least 2 args, got {}",
                         evaled.len()
                     ));
@@ -1490,7 +1513,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                 let trailing = match last {
                     Val::List(v) | Val::Vector(v) => v.clone(),
                     other => {
-                        return Err(format!(
+                        return Err(eval_err!(
                             "apply: last arg must be List or Vector, got {other}"
                         ))
                     }
@@ -1522,7 +1545,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                         let captured_env = captured_env.clone();
                         invoke_fn(&arities, &captured_env, &spread, dispatch).await
                     }
-                    other => Err(format!(
+                    other => Err(eval_err!(
                         "apply: first arg must be a symbol or fn, got {other}"
                     )),
                 }
@@ -1563,7 +1586,7 @@ async fn eval_expr_args<'a, D: Dispatch>(
     args: &'a [Expr],
     env: &'a mut Env,
     dispatch: &'a mut D,
-) -> Result<Vec<Val>, String> {
+) -> Result<Vec<Val>, Val> {
     let mut result = Vec::with_capacity(args.len());
     for a in args {
         result.push(eval_expr(a, env, dispatch).await?);
@@ -1576,11 +1599,11 @@ pub fn eval_toplevel_expr<'a, D: Dispatch>(
     expr: &'a Expr,
     env: &'a mut Env,
     dispatch: &'a mut D,
-) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
     Box::pin(async move {
         let result = eval_expr(expr, env, dispatch).await?;
         match result {
-            Val::Recur(_) => Err("recur not in tail position".into()),
+            Val::Recur(_) => Err(eval_err!("recur not in tail position")),
             other => Ok(other),
         }
     })
@@ -1595,12 +1618,12 @@ pub fn eval_toplevel<'a, D: Dispatch>(
     val: &'a Val,
     env: &'a mut Env,
     dispatch: &'a mut D,
-) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
     Box::pin(async move {
         let analyzed = expr::analyze(val)?;
         let result = eval_expr(&analyzed, env, dispatch).await?;
         match result {
-            Val::Recur(_) => Err("recur not in tail position".into()),
+            Val::Recur(_) => Err(eval_err!("recur not in tail position")),
             other => Ok(other),
         }
     })
@@ -1622,14 +1645,14 @@ pub fn eval<'a, D: Dispatch>(
     expr: &'a Val,
     env: &'a mut Env,
     dispatch: &'a mut D,
-) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
     Box::pin(async move {
         match expr {
             Val::List(items) if items.is_empty() => Ok(Val::Nil),
             Val::List(items) => {
                 let head = match &items[0] {
                     Val::Sym(s) => s.as_str(),
-                    _ => return Err(format!("expected symbol, got {}", items[0])),
+                    _ => return Err(eval_err!("expected symbol, got {}", items[0])),
                 };
                 let raw_args = &items[1..];
 
@@ -1641,7 +1664,7 @@ pub fn eval<'a, D: Dispatch>(
                     "let" => return eval_let(raw_args, env, dispatch).await,
                     "quote" => {
                         return if raw_args.len() != 1 {
-                            Err(format!("quote: expected 1 arg, got {}", raw_args.len()))
+                            Err(eval_err!("quote: expected 1 arg, got {}", raw_args.len()))
                         } else {
                             Ok(raw_args[0].clone())
                         };
@@ -1656,10 +1679,10 @@ pub fn eval<'a, D: Dispatch>(
 
                     // Reader markers — error if they escape syntax-quote
                     "unquote" => {
-                        return Err("unquote (~) not inside syntax-quote".into());
+                        return Err(eval_err!("unquote (~) not inside syntax-quote"));
                     }
                     "splice-unquote" => {
-                        return Err("splice-unquote (~@) not inside syntax-quote".into());
+                        return Err(eval_err!("splice-unquote (~@) not inside syntax-quote"));
                     }
 
                     _ => {} // fall through to macro / fn / builtins / dispatch
@@ -1696,7 +1719,7 @@ pub fn eval<'a, D: Dispatch>(
                 if head == "apply" {
                     let args = eval_args(raw_args, env, dispatch).await?;
                     if args.len() < 2 {
-                        return Err(format!(
+                        return Err(eval_err!(
                             "apply: expected at least 2 args, got {}",
                             args.len()
                         ));
@@ -1708,7 +1731,7 @@ pub fn eval<'a, D: Dispatch>(
                     let trailing = match last {
                         Val::List(v) | Val::Vector(v) => v.clone(),
                         other => {
-                            return Err(format!(
+                            return Err(eval_err!(
                                 "apply: last arg must be List or Vector, got {other}"
                             ))
                         }
@@ -1743,7 +1766,7 @@ pub fn eval<'a, D: Dispatch>(
                             return invoke_fn(&arities, &captured_env, &spread, dispatch).await;
                         }
                         other => {
-                            return Err(format!(
+                            return Err(eval_err!(
                                 "apply: first arg must be a symbol or fn, got {other}"
                             ))
                         }
@@ -1800,7 +1823,7 @@ mod tests {
             &'a mut self,
             name: &'a str,
             args: &'a [Val],
-        ) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
             self.calls.push((name.to_string(), args.to_vec()));
             Box::pin(core::future::ready(Ok(Val::Nil)))
         }
@@ -1811,7 +1834,7 @@ mod tests {
         expr: &Val,
         env: &mut Env,
         dispatch: &mut RecordingDispatch,
-    ) -> Result<Val, String> {
+    ) -> Result<Val, Val> {
         // We can use a trivial executor since our futures are purely synchronous.
         pollster_eval(eval_toplevel(expr, env, dispatch))
     }
@@ -1953,11 +1976,11 @@ mod tests {
                 &'a mut self,
                 name: &'a str,
                 _args: &'a [Val],
-            ) -> Pin<Box<dyn Future<Output = Result<Val, String>> + 'a>> {
+            ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
                 let result = match name {
                     "ipfs" => Ok(Val::Bytes(vec![1, 2, 3])),
                     "host" => Ok(Val::Nil),
-                    _ => Err(format!("unknown: {name}")),
+                    _ => Err(eval_err!("unknown: {name}")),
                 };
                 Box::pin(core::future::ready(result))
             }
@@ -2064,7 +2087,7 @@ mod tests {
         ]);
         let result = eval_blocking(&expr, &mut env, &mut d);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("def"));
+        assert!(err_contains(&result.unwrap_err(), "def"));
     }
 
     #[test]
@@ -2331,7 +2354,7 @@ mod tests {
         ]);
         let result = eval_blocking(&expr, &mut env, &mut d);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("pairs"));
+        assert!(err_contains(&result.unwrap_err(), "pairs"));
     }
 
     #[test]
@@ -2346,7 +2369,7 @@ mod tests {
         ]);
         let result = eval_blocking(&expr, &mut env, &mut d);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("vector"));
+        assert!(err_contains(&result.unwrap_err(), "vector"));
     }
 
     // --- quote ---
@@ -2511,7 +2534,7 @@ mod tests {
         // (f 1) — wrong arity
         let call = Val::List(vec![Val::Sym("f".into()), Val::Int(1)]);
         let err = eval_blocking(&call, &mut env, &mut d).unwrap_err();
-        assert!(err.contains("wrong number of args"), "got: {err}");
+        assert!(err_contains(&err, "wrong number of args"), "got: {err}");
     }
 
     #[test]
@@ -2531,7 +2554,7 @@ mod tests {
             ]),
         ]);
         let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
-        assert!(err.contains("duplicate arity"), "got: {err}");
+        assert!(err_contains(&err, "duplicate arity"), "got: {err}");
     }
 
     #[test]
@@ -2661,7 +2684,7 @@ mod tests {
             Val::List(vec![Val::Sym("recur".into()), Val::Int(3)]),
         ]);
         let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
-        assert!(err.contains("expected 2 args"), "got: {err}");
+        assert!(err_contains(&err, "expected 2 args"), "got: {err}");
     }
 
     #[test]
@@ -2671,7 +2694,10 @@ mod tests {
         // (recur 1) at top level
         let expr = Val::List(vec![Val::Sym("recur".into()), Val::Int(1)]);
         let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
-        assert!(err.contains("recur not in tail position"), "got: {err}");
+        assert!(
+            err_contains(&err, "recur not in tail position"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -2685,7 +2711,7 @@ mod tests {
             Val::Sym("x".into()),
         ]);
         let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
-        assert!(err.contains("vector"), "got: {err}");
+        assert!(err_contains(&err, "vector"), "got: {err}");
     }
 
     #[test]
@@ -2699,7 +2725,7 @@ mod tests {
             Val::Sym("x".into()),
         ]);
         let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
-        assert!(err.contains("pairs"), "got: {err}");
+        assert!(err_contains(&err, "pairs"), "got: {err}");
     }
 
     // =========================================================================
@@ -2707,9 +2733,25 @@ mod tests {
     // =========================================================================
 
     /// Helper: parse + eval a string expression.
-    fn eval_str(input: &str, env: &mut Env, d: &mut RecordingDispatch) -> Result<Val, String> {
-        let expr = crate::read(input).map_err(|e| format!("parse error: {e}"))?;
+    fn eval_str(input: &str, env: &mut Env, d: &mut RecordingDispatch) -> Result<Val, Val> {
+        let expr = crate::read(input).map_err(|e| eval_err!("parse error: {e}"))?;
         eval_blocking(&expr, env, d)
+    }
+
+    /// Check if an error Val contains a substring in its :message field or Display output.
+    fn err_contains(err: &Val, needle: &str) -> bool {
+        // Check :message field in map
+        if let Val::Map(pairs) = err {
+            for (k, v) in pairs {
+                if let (Val::Keyword(key), Val::Str(msg)) = (k, v) {
+                    if key == "message" && msg.contains(needle) {
+                        return true;
+                    }
+                }
+            }
+        }
+        // Fallback: check Display output
+        format!("{err}").contains(needle)
     }
 
     // --- list ---
@@ -3595,7 +3637,10 @@ mod tests {
         let mut d = RecordingDispatch::new();
         let result = eval_str("(unquote x)", &mut env, &mut d);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not inside syntax-quote"));
+        assert!(err_contains(
+            &result.unwrap_err(),
+            "not inside syntax-quote"
+        ));
     }
 
     #[test]
@@ -3604,14 +3649,17 @@ mod tests {
         let mut d = RecordingDispatch::new();
         let result = eval_str("(splice-unquote x)", &mut env, &mut d);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not inside syntax-quote"));
+        assert!(err_contains(
+            &result.unwrap_err(),
+            "not inside syntax-quote"
+        ));
     }
 
     // Prelude tests
     // =========================================================================
 
     /// Helper: load the prelude then parse + eval a string expression.
-    fn prelude_eval(input: &str) -> Result<Val, String> {
+    fn prelude_eval(input: &str) -> Result<Val, Val> {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         // Load prelude forms into the environment
@@ -3803,7 +3851,7 @@ mod tests {
         let mut d = RecordingDispatch::new();
         eval_str("(def f (fn [a b] (recur 1)))", &mut env, &mut d).unwrap();
         let err = eval_str("(f 1 2)", &mut env, &mut d).unwrap_err();
-        assert!(err.contains("expected 2"), "got: {err}");
+        assert!(err_contains(&err, "expected 2"), "got: {err}");
     }
 
     #[test]
