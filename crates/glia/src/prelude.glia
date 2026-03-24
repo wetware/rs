@@ -48,3 +48,29 @@
 ;; defn — define a named function
 (defmacro defn [name params & body]
   `(def ~name (fn ~params ~@body)))
+
+;; ---------------------------------------------------------------------------
+;; Error handling — sugar over perform/with-handler
+;; ---------------------------------------------------------------------------
+
+;; throw — signal a :fail effect (error)
+(defmacro throw [data]
+  `(perform :fail ~data))
+
+;; try — attempt expr, return {:ok val} or {:err data}
+(defmacro try [& body]
+  (let [e (gensym)]
+    `(with-handler {:fail (fn [~e] {:err ~e})}
+       {:ok (do ~@body)})))
+
+;; or-else — default on failure
+(defmacro or-else [expr default]
+  (let [r (gensym)]
+    `(let [~r (try ~expr)]
+       (if (nil? (get ~r :err))
+         (get ~r :ok)
+         ~default))))
+
+;; guard — assert or throw
+(defmacro guard [test error-data]
+  `(when-not ~test (throw ~error-data)))

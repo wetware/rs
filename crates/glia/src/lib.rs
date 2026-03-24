@@ -68,6 +68,12 @@ pub enum Val {
         arities: Vec<FnArity>,
         env: eval::Env,
     },
+    /// Internal sentinel returned by `perform` — caught by `with-handler`.
+    /// Propagates up the eval stack until a matching handler is found.
+    Effect {
+        effect_type: String,
+        data: Box<Val>,
+    },
 }
 
 /// Convert a string error into a structured error value.
@@ -110,8 +116,9 @@ impl PartialEq for Val {
             // Closures and macros are never equal (identity semantics, like Clojure).
             (Val::Fn { .. }, Val::Fn { .. }) => false,
             (Val::Macro { .. }, Val::Macro { .. }) => false,
-            // Recur is an internal sentinel — never equal.
+            // Recur and Effect are internal sentinels — never equal.
             (Val::Recur(_), _) | (_, Val::Recur(_)) => false,
+            (Val::Effect { .. }, _) | (_, Val::Effect { .. }) => false,
             _ => false,
         }
     }
@@ -154,6 +161,9 @@ impl core::fmt::Display for Val {
             }
             Val::Macro { arities, .. } => {
                 write!(f, "#<macro [{}]>", fmt_arity_desc(arities))
+            }
+            Val::Effect { effect_type, data } => {
+                write!(f, "#<effect :{effect_type} {data}>")
             }
         }
     }
@@ -799,8 +809,18 @@ fn transform_syntax_quote(val: &Val, depth: usize) -> Result<Val, String> {
             Ok(val.clone())
         }
 
-        // Map/Set — defer to future phase
-        Val::Map(_) => Err("syntax-quote of maps not yet supported".into()),
+        // Map: recursively transform keys and values, reconstruct with assoc.
+        // `{:a 1 :b ~x}` becomes `(assoc {} :a 1 :b x)`
+        Val::Map(pairs) => {
+            let mut assoc_args = vec![Val::Sym("assoc".into()), Val::Map(vec![])];
+            for (k, v) in pairs {
+                let tk = transform_syntax_quote(k, depth)?;
+                let tv = transform_syntax_quote(v, depth)?;
+                assoc_args.push(tk);
+                assoc_args.push(tv);
+            }
+            Ok(Val::List(assoc_args))
+        }
         Val::Set(_) => Err("syntax-quote of sets not yet supported".into()),
 
         // Fn/Macro/Recur/Bytes — shouldn't appear in parsed forms

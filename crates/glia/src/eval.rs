@@ -885,6 +885,7 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
                 Val::Fn { .. } => "fn",
                 Val::Recur(_) => "recur",
                 Val::Macro { .. } => "macro",
+                Val::Effect { .. } => "effect",
             };
             Some(Ok(Val::Keyword(kw.into())))
         }
@@ -966,6 +967,33 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
             }
             let n = GENSYM_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
             Some(Ok(Val::Sym(format!("G__{n}"))))
+        }
+
+        "ex-info" => {
+            if args.len() != 2 {
+                return Some(Err(eval_err!(
+                    "ex-info: expected 2 args (message, data-map), got {}",
+                    args.len()
+                )));
+            }
+            let msg = match &args[0] {
+                Val::Str(s) => s.clone(),
+                other => {
+                    return Some(Err(eval_err!(
+                        "ex-info: message must be a string, got {other}"
+                    )))
+                }
+            };
+            let mut pairs = match &args[1] {
+                Val::Map(pairs) => pairs.clone(),
+                other => {
+                    return Some(Err(eval_err!(
+                        "ex-info: second arg must be a map, got {other}"
+                    )))
+                }
+            };
+            pairs.push((Val::Keyword("message".into()), Val::Str(msg)));
+            Some(Ok(Val::Map(pairs)))
         }
 
         _ => None, // not a built-in
@@ -1438,6 +1466,85 @@ pub fn eval_expr<'a, D: Dispatch>(
                     evaled.push(eval_expr(a, env, dispatch).await?);
                 }
                 Ok(Val::Recur(evaled))
+            }
+
+            Expr::Perform { effect_type, data } => {
+                let etype = eval_expr(effect_type, env, dispatch).await?;
+                let etype_str = match &etype {
+                    Val::Keyword(s) => s.clone(),
+                    other => {
+                        return Err(eval_err!(
+                            "perform: effect type must be a keyword, got {other}"
+                        ))
+                    }
+                };
+                let data_val = eval_expr(data, env, dispatch).await?;
+                // Return the Effect sentinel — propagates up until caught by with-handler
+                Err(Val::Effect {
+                    effect_type: etype_str,
+                    data: Box::new(data_val),
+                })
+            }
+
+            Expr::WithHandler { handlers, body } => {
+                // Evaluate the handler map
+                let handler_map = eval_expr(handlers, env, dispatch).await?;
+                let handler_pairs = match &handler_map {
+                    Val::Map(pairs) => pairs.clone(),
+                    other => {
+                        return Err(eval_err!(
+                            "with-handler: expected map of handlers, got {other}"
+                        ))
+                    }
+                };
+
+                // Evaluate body (implicit do)
+                let body_result = async {
+                    let mut result = Val::Nil;
+                    for e in body {
+                        result = eval_expr(e, env, dispatch).await?;
+                    }
+                    Ok(result)
+                }
+                .await;
+
+                match body_result {
+                    Ok(val) => Ok(val),
+                    Err(Val::Effect { effect_type, data }) => {
+                        // Find a matching handler
+                        let handler_fn = handler_pairs.iter().find_map(|(k, v)| {
+                            if let Val::Keyword(kw) = k {
+                                if kw == &effect_type {
+                                    return Some(v.clone());
+                                }
+                            }
+                            None
+                        });
+
+                        match handler_fn {
+                            Some(Val::Fn {
+                                arities,
+                                env: captured_env,
+                            }) => {
+                                // Abort-only: call handler with (data).
+                                // No resume argument in Phase 1.
+                                invoke_fn(&arities, &captured_env, &[*data], dispatch).await
+                            }
+                            Some(other) => Err(eval_err!(
+                                "with-handler: handler for :{effect_type} must be a function, got {other}"
+                            )),
+                            None => {
+                                // No matching handler — re-propagate the effect
+                                Err(Val::Effect {
+                                    effect_type,
+                                    data,
+                                })
+                            }
+                        }
+                    }
+                    // Non-effect errors propagate unchanged
+                    Err(other) => Err(other),
+                }
             }
 
             Expr::DefMacro { name, raw_args } => {
@@ -4103,5 +4210,211 @@ mod tests {
             eval_str("(reduce add 100 (list))", &mut env, &mut d),
             Ok(Val::Int(100))
         );
+    }
+
+    // =========================================================================
+    // Effect system tests (#205)
+    // =========================================================================
+
+    /// Helper: load prelude then eval — needed for try/throw macros
+    fn effects_eval(input: &str) -> Result<Val, Val> {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let prelude_forms =
+            crate::read_many(crate::PRELUDE).map_err(|e| eval_err!("prelude parse: {e}"))?;
+        for form in &prelude_forms {
+            eval_blocking(form, &mut env, &mut d)?;
+        }
+        eval_str(input, &mut env, &mut d)
+    }
+
+    // --- perform / with-handler primitives ---
+
+    #[test]
+    fn perform_without_handler_propagates() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str("(perform :fail 42)", &mut env, &mut d);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn with_handler_catches_effect() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-handler {:fail (fn [e] (+ e 1))} (perform :fail 42))",
+            &mut env,
+            &mut d,
+        );
+        assert_eq!(result, Ok(Val::Int(43)));
+    }
+
+    #[test]
+    fn with_handler_passes_through_on_no_effect() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert_eq!(
+            eval_str(
+                "(with-handler {:fail (fn [e] 0)} (+ 1 2))",
+                &mut env,
+                &mut d
+            ),
+            Ok(Val::Int(3))
+        );
+    }
+
+    #[test]
+    fn with_handler_unmatched_effect_propagates() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-handler {:other (fn [e] 0)} (perform :fail 42))",
+            &mut env,
+            &mut d,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn nested_handlers() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // Inner handler catches :fail, outer catches :other
+        assert_eq!(
+            eval_str(
+                "(with-handler {:other (fn [e] 99)} (with-handler {:fail (fn [e] (+ e 10))} (perform :fail 5)))",
+                &mut env,
+                &mut d
+            ),
+            Ok(Val::Int(15))
+        );
+    }
+
+    // --- try / throw macros (prelude) ---
+
+    #[test]
+    fn throw_basic() {
+        let result = effects_eval("(throw 42)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn try_ok() {
+        let result = effects_eval("(try (+ 1 2))").unwrap();
+        // Should be {:ok 3}
+        assert_eq!(
+            result,
+            Val::Map(vec![(Val::Keyword("ok".into()), Val::Int(3))])
+        );
+    }
+
+    #[test]
+    fn try_err() {
+        let result = effects_eval("(try (throw {:type :test}))").unwrap();
+        // Should be {:err {:type :test}}
+        if let Val::Map(pairs) = &result {
+            assert!(pairs.iter().any(|(k, _)| k == &Val::Keyword("err".into())));
+        } else {
+            panic!("expected map, got {result:?}");
+        }
+    }
+
+    #[test]
+    fn try_catch_string() {
+        let result = effects_eval(r#"(try (throw "just a string"))"#).unwrap();
+        if let Val::Map(pairs) = &result {
+            let err_val = pairs
+                .iter()
+                .find(|(k, _)| k == &Val::Keyword("err".into()))
+                .map(|(_, v)| v);
+            assert_eq!(err_val, Some(&Val::Str("just a string".into())));
+        } else {
+            panic!("expected map, got {result:?}");
+        }
+    }
+
+    #[test]
+    fn nested_try() {
+        let result = effects_eval("(try (try (throw 1)))").unwrap();
+        // Outer try succeeds with {:ok {:err 1}}
+        if let Val::Map(pairs) = &result {
+            assert!(pairs.iter().any(|(k, _)| k == &Val::Keyword("ok".into())));
+        } else {
+            panic!("expected map, got {result:?}");
+        }
+    }
+
+    // --- ex-info ---
+
+    #[test]
+    fn ex_info_basic() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        let result = eval_str(
+            r#"(ex-info "bad input" {:type :invalid})"#,
+            &mut env,
+            &mut d,
+        )
+        .unwrap();
+        if let Val::Map(pairs) = &result {
+            assert!(pairs
+                .iter()
+                .any(|(k, v)| k == &Val::Keyword("message".into())
+                    && v == &Val::Str("bad input".into())));
+            assert!(pairs
+                .iter()
+                .any(|(k, v)| k == &Val::Keyword("type".into())
+                    && v == &Val::Keyword("invalid".into())));
+        } else {
+            panic!("expected map, got {result:?}");
+        }
+    }
+
+    #[test]
+    fn ex_info_wrong_args() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        assert!(eval_str("(ex-info)", &mut env, &mut d).is_err());
+    }
+
+    // --- or-else ---
+
+    #[test]
+    fn or_else_ok() {
+        assert_eq!(effects_eval("(or-else (+ 1 2) 0)"), Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn or_else_err() {
+        assert_eq!(effects_eval("(or-else (throw 42) 0)"), Ok(Val::Int(0)));
+    }
+
+    // --- guard ---
+
+    #[test]
+    fn guard_pass() {
+        assert_eq!(effects_eval("(guard true {:type :fail})"), Ok(Val::Nil));
+    }
+
+    #[test]
+    fn guard_fail() {
+        let result = effects_eval(r#"(try (guard false (ex-info "nope" {:type :fail})))"#).unwrap();
+        if let Val::Map(pairs) = &result {
+            assert!(pairs.iter().any(|(k, _)| k == &Val::Keyword("err".into())));
+        } else {
+            panic!("expected map, got {result:?}");
+        }
+    }
+
+    // --- existing error format ---
+
+    #[test]
+    fn internal_error_is_structured() {
+        let mut env = Env::new();
+        let mut d = RecordingDispatch::new();
+        // Division by zero should produce a structured error
+        let err = eval_str("(/ 1 0)", &mut env, &mut d).unwrap_err();
+        assert!(err_contains(&err, "division by zero"));
     }
 }

@@ -61,6 +61,18 @@ pub enum Expr {
     /// `(defmacro name [params] body...)` — macro bodies stay as raw Val.
     DefMacro { name: String, raw_args: Vec<Val> },
 
+    /// `(perform :effect-type data)` — signal an effect.
+    Perform {
+        effect_type: Box<Expr>,
+        data: Box<Expr>,
+    },
+
+    /// `(with-handler {handlers} body...)` — install effect handlers.
+    WithHandler {
+        handlers: Box<Expr>,
+        body: Vec<Expr>,
+    },
+
     /// A function/builtin/dispatch call — unified.
     /// `raw_args` preserved for potential macro expansion (macros need unevaluated Val args).
     Call {
@@ -149,7 +161,9 @@ pub fn analyze(val: &Val) -> Result<Expr, String> {
         }
 
         // Runtime-only values (shouldn't appear in source but handle gracefully)
-        Val::Fn { .. } | Val::Macro { .. } | Val::Recur(_) => Ok(Expr::Const(val.clone())),
+        Val::Fn { .. } | Val::Macro { .. } | Val::Recur(_) | Val::Effect { .. } => {
+            Ok(Expr::Const(val.clone()))
+        }
     }
 }
 
@@ -175,6 +189,8 @@ fn analyze_list(items: &[Val]) -> Result<Expr, String> {
         "loop" => analyze_loop(raw_args),
         "recur" => analyze_recur(raw_args),
         "defmacro" => analyze_defmacro(raw_args),
+        "perform" => analyze_perform(raw_args),
+        "with-handler" => analyze_with_handler(raw_args),
         "unquote" => Err("unquote (~) not inside syntax-quote".into()),
         "splice-unquote" => Err("splice-unquote (~@) not inside syntax-quote".into()),
         "apply" => {
@@ -418,6 +434,33 @@ fn analyze_defmacro(args: &[Val]) -> Result<Expr, String> {
         name,
         raw_args: args[1..].to_vec(), // params + body only, no name
     })
+}
+
+/// `(perform :effect-type data)`
+fn analyze_perform(args: &[Val]) -> Result<Expr, String> {
+    if args.len() != 2 {
+        return Err(format!(
+            "perform: expected 2 args (effect-type data), got {}",
+            args.len()
+        ));
+    }
+    Ok(Expr::Perform {
+        effect_type: Box::new(analyze(&args[0])?),
+        data: Box::new(analyze(&args[1])?),
+    })
+}
+
+/// `(with-handler {handlers-map} body...)`
+fn analyze_with_handler(args: &[Val]) -> Result<Expr, String> {
+    if args.is_empty() {
+        return Err("with-handler: expected (with-handler {handlers} body...)".into());
+    }
+    let handlers = Box::new(analyze(&args[0])?);
+    let body = args[1..]
+        .iter()
+        .map(analyze)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Expr::WithHandler { handlers, body })
 }
 
 // ---------------------------------------------------------------------------
