@@ -36,9 +36,9 @@ pub enum Expr {
     /// `(do exprs...)`
     Do { body: Vec<Expr> },
 
-    /// `(let [bindings...] body...)`
+    /// `(let [bindings...] body...)` — supports destructuring patterns.
     Let {
-        bindings: Vec<(String, Expr)>,
+        bindings: Vec<(crate::pattern::LetBinding, Expr)>,
         body: Vec<Expr>,
     },
 
@@ -49,9 +49,9 @@ pub enum Expr {
     /// Bodies are pre-analyzed.  Captures env at eval time.
     Fn { arities: Vec<FnArityExpr> },
 
-    /// `(loop [bindings...] body...)`
+    /// `(loop [bindings...] body...)` — supports destructuring patterns.
     Loop {
-        bindings: Vec<(String, Expr)>,
+        bindings: Vec<(crate::pattern::LetBinding, Expr)>,
         body: Vec<Expr>,
     },
 
@@ -67,10 +67,19 @@ pub enum Expr {
         data: Box<Expr>,
     },
 
-    /// `(with-handler {handlers} body...)` — install effect handlers.
-    WithHandler {
+    /// `(with-effect-handler {handlers} body...)` — install effect handlers.
+    /// Internal form — users write `match` with `(effect ...)` clauses instead.
+    WithEffectHandler {
         handlers: Box<Expr>,
         body: Vec<Expr>,
+    },
+
+    /// `(match expr pattern1 body1 pattern2 body2 ...)` — pattern matching.
+    /// Value clauses only — effect clauses are compiled away by the analyzer
+    /// into a wrapping `WithEffectHandler`.
+    Match {
+        expr: Box<Expr>,
+        clauses: Vec<(crate::pattern::Pattern, Expr)>,
     },
 
     /// A function/builtin/dispatch call — unified.
@@ -161,9 +170,12 @@ pub fn analyze(val: &Val) -> Result<Expr, String> {
         }
 
         // Runtime-only values (shouldn't appear in source but handle gracefully)
-        Val::Fn { .. } | Val::Macro { .. } | Val::Recur(_) | Val::Effect { .. } => {
-            Ok(Expr::Const(val.clone()))
-        }
+        Val::Fn { .. }
+        | Val::Macro { .. }
+        | Val::Recur(_)
+        | Val::Effect { .. }
+        | Val::NativeFn { .. }
+        | Val::Resume(_) => Ok(Expr::Const(val.clone())),
     }
 }
 
@@ -190,7 +202,8 @@ fn analyze_list(items: &[Val]) -> Result<Expr, String> {
         "recur" => analyze_recur(raw_args),
         "defmacro" => analyze_defmacro(raw_args),
         "perform" => analyze_perform(raw_args),
-        "with-handler" => analyze_with_handler(raw_args),
+        "with-effect-handler" => analyze_with_effect_handler(raw_args),
+        "match" => analyze_match(raw_args),
         "unquote" => Err("unquote (~) not inside syntax-quote".into()),
         "splice-unquote" => Err("splice-unquote (~@) not inside syntax-quote".into()),
         "apply" => {
@@ -270,12 +283,9 @@ fn analyze_let(args: &[Val]) -> Result<Expr, String> {
     }
     let mut bindings = Vec::new();
     for pair in binding_vec.chunks(2) {
-        let name = match &pair[0] {
-            Val::Sym(s) => s.clone(),
-            other => return Err(format!("let: binding name must be a symbol, got {other}")),
-        };
+        let binding = crate::pattern::analyze_binding(&pair[0]).map_err(|e| format!("let: {e}"))?;
         let expr = analyze(&pair[1])?;
-        bindings.push((name, expr));
+        bindings.push((binding, expr));
     }
     let body = args[1..]
         .iter()
@@ -395,12 +405,10 @@ fn analyze_loop(args: &[Val]) -> Result<Expr, String> {
     }
     let mut bindings = Vec::new();
     for pair in binding_vec.chunks(2) {
-        let name = match &pair[0] {
-            Val::Sym(s) => s.clone(),
-            other => return Err(format!("loop: binding name must be a symbol, got {other}")),
-        };
+        let binding =
+            crate::pattern::analyze_binding(&pair[0]).map_err(|e| format!("loop: {e}"))?;
         let expr = analyze(&pair[1])?;
-        bindings.push((name, expr));
+        bindings.push((binding, expr));
     }
     let body = args[1..]
         .iter()
@@ -451,16 +459,126 @@ fn analyze_perform(args: &[Val]) -> Result<Expr, String> {
 }
 
 /// `(with-handler {handlers-map} body...)`
-fn analyze_with_handler(args: &[Val]) -> Result<Expr, String> {
+fn analyze_with_effect_handler(args: &[Val]) -> Result<Expr, String> {
     if args.is_empty() {
-        return Err("with-handler: expected (with-handler {handlers} body...)".into());
+        return Err(
+            "with-effect-handler: expected (with-effect-handler {handlers} body...)".into(),
+        );
     }
     let handlers = Box::new(analyze(&args[0])?);
     let body = args[1..]
         .iter()
         .map(analyze)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Expr::WithHandler { handlers, body })
+    Ok(Expr::WithEffectHandler { handlers, body })
+}
+
+/// Analyze a `(match expr clause1 clause2 ...)` form.
+///
+/// Separates value clauses from effect clauses at analysis time.
+/// Effect clauses (starting with `(effect ...)`) are compiled into a
+/// wrapping `Expr::WithEffectHandler`. The resulting `Expr::Match`
+/// contains only value clauses.
+fn analyze_match(args: &[Val]) -> Result<Expr, String> {
+    if args.is_empty() {
+        return Err("match: expected (match expr clauses...)".into());
+    }
+
+    let scrutinee = analyze(&args[0])?;
+    let clause_args = &args[1..];
+
+    if clause_args.len() % 2 != 0 {
+        return Err("match: clauses must be pattern/body pairs (odd number of forms)".into());
+    }
+    if clause_args.is_empty() {
+        return Err("match: at least one clause required".into());
+    }
+
+    let mut value_clauses = Vec::new();
+    // (effect_type, binding_names, raw_body_val)
+    let mut effect_clauses: Vec<(String, Vec<String>, Val)> = Vec::new();
+
+    for chunk in clause_args.chunks(2) {
+        let pattern_val = &chunk[0];
+        let body_val = &chunk[1];
+
+        // Check if this is an effect clause: (effect :type binding...)
+        if let Val::List(items) = pattern_val {
+            if let Some(Val::Sym(s)) = items.first() {
+                if s == "effect" {
+                    if items.len() < 3 {
+                        return Err(
+                            "match: effect clause needs at least (effect :type data)".into()
+                        );
+                    }
+                    let effect_type = match &items[1] {
+                        Val::Keyword(k) => k.clone(),
+                        other => {
+                            return Err(format!(
+                                "match: effect type must be a keyword, got {other}"
+                            ))
+                        }
+                    };
+                    let mut bindings = Vec::new();
+                    for item in &items[2..] {
+                        match item {
+                            Val::Sym(name) => bindings.push(name.clone()),
+                            other => {
+                                return Err(format!(
+                                    "match: effect clause binding must be a symbol, got {other}"
+                                ))
+                            }
+                        }
+                    }
+                    if bindings.is_empty() || bindings.len() > 2 {
+                        return Err(
+                            "match: effect clause expects 1-2 bindings (data [resume])".into()
+                        );
+                    }
+                    effect_clauses.push((effect_type, bindings, body_val.clone()));
+                    continue;
+                }
+            }
+        }
+
+        // Value clause — analyze pattern and body
+        let pattern = crate::pattern::analyze_pattern(pattern_val)?;
+        let body = analyze(body_val)?;
+        value_clauses.push((pattern, body));
+    }
+
+    let match_expr = Expr::Match {
+        expr: Box::new(scrutinee),
+        clauses: value_clauses,
+    };
+
+    if effect_clauses.is_empty() {
+        // Pure match — no handler installation
+        Ok(match_expr)
+    } else {
+        // Compile effect clauses into WithEffectHandler wrapper.
+        // Handler fn arity is determined here at analysis time (not guessed at runtime).
+        // Build: (with-effect-handler {:etype (fn [bindings...] body) ...} (match ...))
+        let mut handler_map_vals = Vec::new();
+        for (effect_type, bindings, body_val) in effect_clauses {
+            let params: Vec<Val> = bindings.iter().map(|b| Val::Sym(b.clone())).collect();
+            // Build (fn [params] body) as raw Val — will be analyzed by the fn analyzer
+            let handler_fn_val =
+                Val::List(vec![Val::Sym("fn".into()), Val::Vector(params), body_val]);
+            handler_map_vals.push((Val::Keyword(effect_type), handler_fn_val));
+        }
+
+        // Analyze the handler map
+        let handler_map_exprs: Vec<(Expr, Expr)> = handler_map_vals
+            .into_iter()
+            .map(|(k, v)| -> Result<(Expr, Expr), String> { Ok((analyze(&k)?, analyze(&v)?)) })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Expr::WithEffectHandler {
+            handlers: Box::new(Expr::Map(handler_map_exprs)),
+            body: vec![match_expr],
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -558,8 +676,12 @@ mod tests {
         match analyze_str("(let [x 1 y 2] (+ x y))").unwrap() {
             Expr::Let { bindings, body } => {
                 assert_eq!(bindings.len(), 2);
-                assert_eq!(bindings[0].0, "x");
-                assert_eq!(bindings[1].0, "y");
+                assert!(
+                    matches!(&bindings[0].0, crate::pattern::LetBinding::Simple(s) if s == "x")
+                );
+                assert!(
+                    matches!(&bindings[1].0, crate::pattern::LetBinding::Simple(s) if s == "y")
+                );
                 assert_eq!(body.len(), 1);
             }
             other => panic!("expected Let, got {other:?}"),
@@ -603,7 +725,9 @@ mod tests {
         match analyze_str("(loop [i 0] (recur (+ i 1)))").unwrap() {
             Expr::Loop { bindings, body } => {
                 assert_eq!(bindings.len(), 1);
-                assert_eq!(bindings[0].0, "i");
+                assert!(
+                    matches!(&bindings[0].0, crate::pattern::LetBinding::Simple(s) if s == "i")
+                );
                 assert_eq!(body.len(), 1);
             }
             other => panic!("expected Loop, got {other:?}"),
@@ -712,25 +836,25 @@ mod tests {
     }
 
     #[test]
-    fn analyze_with_handler_basic() {
-        match analyze_str("(with-handler {} body)").unwrap() {
-            Expr::WithHandler { .. } => {}
-            other => panic!("expected WithHandler, got {other:?}"),
+    fn analyze_with_effect_handler_basic() {
+        match analyze_str("(with-effect-handler {} body)").unwrap() {
+            Expr::WithEffectHandler { .. } => {}
+            other => panic!("expected WithEffectHandler, got {other:?}"),
         }
     }
 
     #[test]
-    fn analyze_with_handler_no_args() {
-        assert!(analyze_str("(with-handler)").is_err());
+    fn analyze_with_effect_handler_no_args() {
+        assert!(analyze_str("(with-effect-handler)").is_err());
     }
 
     #[test]
-    fn analyze_with_handler_multi_body() {
-        match analyze_str("(with-handler {} a b c)").unwrap() {
-            Expr::WithHandler { body, .. } => {
+    fn analyze_with_effect_handler_multi_body() {
+        match analyze_str("(with-effect-handler {} a b c)").unwrap() {
+            Expr::WithEffectHandler { body, .. } => {
                 assert_eq!(body.len(), 3);
             }
-            other => panic!("expected WithHandler, got {other:?}"),
+            other => panic!("expected WithEffectHandler, got {other:?}"),
         }
     }
 }

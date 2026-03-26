@@ -6,7 +6,7 @@ members = [
     "crates/membrane",
     "crates/guest/auth",
     "std/system",
-    "crates/kernel",
+    # "crates/kernel",  # TODO: re-enable when kernel crate is created
     "std/shell",
     "examples/chess",
 ]

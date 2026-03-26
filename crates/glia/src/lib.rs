@@ -21,8 +21,11 @@
 //!
 //! Commas are whitespace. Line comments start with `;`.
 
+pub mod effect;
 pub mod eval;
 pub mod expr;
+pub mod oneshot;
+pub mod pattern;
 
 // ---------------------------------------------------------------------------
 // Value type
@@ -40,7 +43,7 @@ pub struct FnArity {
 }
 
 /// A Clojure-like value.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Val {
     Nil,
     Bool(bool),
@@ -70,10 +73,50 @@ pub enum Val {
     },
     /// Internal sentinel returned by `perform` — caught by `with-handler`.
     /// Propagates up the eval stack until a matching handler is found.
+    /// Used as fallback when no handler context exists (unhandled effect).
     Effect {
         effect_type: String,
         data: Box<Val>,
     },
+    /// A Rust-side function callable from Glia. Used for `resume` and future
+    /// stdlib builtins. The closure is behind Rc for Clone support.
+    NativeFn {
+        name: String,
+        func: std::rc::Rc<dyn Fn(&[Val]) -> Result<Val, Val>>,
+    },
+    /// Internal sentinel returned by `resume` — short-circuits the handler's
+    /// eval chain. Propagates via Err like Effect and Recur. Must NOT be caught
+    /// by nested `with-handler` — always re-propagated.
+    Resume(Box<Val>),
+}
+
+impl core::fmt::Debug for Val {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Val::Nil => write!(f, "Nil"),
+            Val::Bool(b) => f.debug_tuple("Bool").field(b).finish(),
+            Val::Int(n) => f.debug_tuple("Int").field(n).finish(),
+            Val::Float(n) => f.debug_tuple("Float").field(n).finish(),
+            Val::Str(s) => f.debug_tuple("Str").field(s).finish(),
+            Val::Sym(s) => f.debug_tuple("Sym").field(s).finish(),
+            Val::Keyword(s) => f.debug_tuple("Keyword").field(s).finish(),
+            Val::List(v) => f.debug_tuple("List").field(v).finish(),
+            Val::Vector(v) => f.debug_tuple("Vector").field(v).finish(),
+            Val::Map(v) => f.debug_tuple("Map").field(v).finish(),
+            Val::Set(v) => f.debug_tuple("Set").field(v).finish(),
+            Val::Bytes(b) => write!(f, "Bytes({} bytes)", b.len()),
+            Val::Fn { arities, .. } => write!(f, "Fn({} arities)", arities.len()),
+            Val::Recur(v) => f.debug_tuple("Recur").field(v).finish(),
+            Val::Macro { arities, .. } => write!(f, "Macro({} arities)", arities.len()),
+            Val::Effect { effect_type, data } => f
+                .debug_struct("Effect")
+                .field("effect_type", effect_type)
+                .field("data", data)
+                .finish(),
+            Val::NativeFn { name, .. } => write!(f, "NativeFn({name})"),
+            Val::Resume(v) => f.debug_tuple("Resume").field(v).finish(),
+        }
+    }
 }
 
 /// Convert a string error into a structured error value.
@@ -116,9 +159,14 @@ impl PartialEq for Val {
             // Closures and macros are never equal (identity semantics, like Clojure).
             (Val::Fn { .. }, Val::Fn { .. }) => false,
             (Val::Macro { .. }, Val::Macro { .. }) => false,
-            // Recur and Effect are internal sentinels — never equal.
+            // Closures, native fns, and macros are never equal (identity semantics).
+            (Val::NativeFn { func: a, .. }, Val::NativeFn { func: b, .. }) => {
+                std::rc::Rc::ptr_eq(a, b)
+            }
+            // Recur, Effect, and Resume are internal sentinels — never equal.
             (Val::Recur(_), _) | (_, Val::Recur(_)) => false,
             (Val::Effect { .. }, _) | (_, Val::Effect { .. }) => false,
+            (Val::Resume(_), _) | (_, Val::Resume(_)) => false,
             _ => false,
         }
     }
@@ -165,6 +213,8 @@ impl core::fmt::Display for Val {
             Val::Effect { effect_type, data } => {
                 write!(f, "#<effect :{effect_type} {data}>")
             }
+            Val::NativeFn { name, .. } => write!(f, "#<native-fn {name}>"),
+            Val::Resume(val) => write!(f, "#<resume {val}>"),
         }
     }
 }
