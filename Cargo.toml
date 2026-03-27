@@ -3,6 +3,7 @@ members = [
     ".",
     "crates/atom",
     "crates/glia",
+    "crates/cache",
     "crates/membrane",
     "crates/guest/auth",
     "std/system",
