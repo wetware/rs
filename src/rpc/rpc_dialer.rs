@@ -15,7 +15,7 @@ use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
 use futures::io::AsyncReadExt;
-use libp2p::{PeerId, StreamProtocol};
+use libp2p::PeerId;
 use membrane::EpochGuard;
 
 use crate::system_capnp;
@@ -48,28 +48,17 @@ impl system_capnp::rpc_dialer::Server for RpcDialerImpl {
 
         let params = pry!(params.get());
         let peer_bytes = pry!(params.get_peer()).to_vec();
-        let protocol_str = pry!(pry!(params.get_protocol())
-            .to_str()
-            .map_err(|e| capnp::Error::failed(e.to_string())));
+        let schema_bytes = pry!(params.get_schema()).to_vec();
 
-        if protocol_str.is_empty() {
-            return Promise::err(capnp::Error::failed(
-                "protocol name must not be empty".into(),
-            ));
-        }
-        if protocol_str.contains('/') {
-            return Promise::err(capnp::Error::failed(
-                "protocol name must not contain '/'".into(),
-            ));
+        if schema_bytes.is_empty() {
+            return Promise::err(capnp::Error::failed("schema must not be empty".into()));
         }
 
         let peer_id = pry!(PeerId::from_bytes(&peer_bytes)
             .map_err(|e| capnp::Error::failed(format!("invalid peer ID: {e}"))));
 
-        let stream_protocol = pry!(StreamProtocol::try_from_owned(format!(
-            "/ww/0.1.0/{protocol_str}"
-        ))
-        .map_err(|e| capnp::Error::failed(format!("invalid protocol: {e}"))));
+        let protocol_cid = super::schema_cid(&schema_bytes);
+        let stream_protocol = pry!(super::schema_protocol(&protocol_cid));
 
         let mut control = self.stream_control.clone();
 

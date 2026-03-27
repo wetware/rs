@@ -25,9 +25,31 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use ::membrane::EpochGuard;
 
+use libp2p::StreamProtocol;
+
 use crate::cell::proc::Builder as ProcBuilder;
 use crate::host::SwarmCommand;
 use crate::system_capnp;
+
+/// Derive a content-addressed protocol ID from canonical schema bytes.
+///
+/// The input is the canonical Cap'n Proto encoding of a `schema.Node`, which
+/// includes the 64-bit unique type ID. Two interfaces with identical structure
+/// but different type IDs produce different CIDs.
+///
+/// Returns the CID as a string: `CIDv1(raw, BLAKE3(schema_bytes))`.
+pub(crate) fn schema_cid(schema_bytes: &[u8]) -> String {
+    let digest = blake3::hash(schema_bytes);
+    let mh = cid::multihash::Multihash::<64>::wrap(0x1e, digest.as_bytes())
+        .expect("blake3 digest always fits in 64-byte multihash");
+    cid::Cid::new_v1(0x55, mh).to_string()
+}
+
+/// Build a `StreamProtocol` from a schema CID string.
+pub(crate) fn schema_protocol(cid: &str) -> Result<StreamProtocol, capnp::Error> {
+    StreamProtocol::try_from_owned(format!("/ww/0.1.0/{cid}"))
+        .map_err(|e| capnp::Error::failed(format!("invalid protocol from schema CID: {e}")))
+}
 
 /// Maximum bytes a single ByteStream read may allocate.
 ///
@@ -1160,6 +1182,53 @@ mod tests {
 
         let snap = state2.snapshot().await;
         assert_eq!(snap.listen_addrs.len(), 1);
+    }
+
+    // =========================================================================
+    // schema_cid / schema_protocol tests
+    // =========================================================================
+
+    #[test]
+    fn test_schema_cid_deterministic() {
+        let schema = b"some canonical schema bytes with id 0xdeadbeef";
+        let cid1 = super::schema_cid(schema);
+        let cid2 = super::schema_cid(schema);
+        assert_eq!(cid1, cid2, "same schema bytes must produce same CID");
+    }
+
+    #[test]
+    fn test_schema_cid_different_for_different_schemas() {
+        let schema_a = b"\x00\x00\x00\x00\x00\x00\x00\x01interface A";
+        let schema_b = b"\x00\x00\x00\x00\x00\x00\x00\x02interface A";
+        let cid_a = super::schema_cid(schema_a);
+        let cid_b = super::schema_cid(schema_b);
+        assert_ne!(
+            cid_a, cid_b,
+            "different type IDs must produce different CIDs"
+        );
+    }
+
+    #[test]
+    fn test_schema_cid_is_valid_cid() {
+        let schema = b"test schema node bytes";
+        let cid_str = super::schema_cid(schema);
+        // Must parse back as a valid CID.
+        let parsed = cid_str.parse::<cid::Cid>();
+        assert!(parsed.is_ok(), "schema_cid must produce a valid CID string");
+        let cid = parsed.unwrap();
+        assert_eq!(cid.version(), cid::Version::V1);
+        assert_eq!(cid.codec(), 0x55); // raw codec
+    }
+
+    #[test]
+    fn test_schema_protocol_builds_valid_protocol() {
+        let schema = b"test schema";
+        let cid_str = super::schema_cid(schema);
+        let protocol = super::schema_protocol(&cid_str);
+        assert!(protocol.is_ok());
+        let proto = protocol.unwrap();
+        assert!(proto.as_ref().starts_with("/ww/0.1.0/"));
+        assert!(proto.as_ref().contains(&cid_str));
     }
 
     // =========================================================================

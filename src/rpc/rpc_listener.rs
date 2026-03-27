@@ -17,7 +17,6 @@ use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
 use futures::io::AsyncReadExt;
 use futures::StreamExt;
-use libp2p::StreamProtocol;
 use membrane::EpochGuard;
 
 use crate::system_capnp;
@@ -47,27 +46,15 @@ impl system_capnp::rpc_listener::Server for RpcListenerImpl {
 
         let params = pry!(params.get());
         let executor: system_capnp::executor::Client = pry!(params.get_executor());
-        let protocol_str = pry!(pry!(params.get_protocol())
-            .to_str()
-            .map_err(|e| capnp::Error::failed(e.to_string())));
+        let schema_bytes = pry!(params.get_schema());
         let handler: Arc<[u8]> = pry!(params.get_handler()).into();
 
-        if protocol_str.is_empty() {
-            return Promise::err(capnp::Error::failed(
-                "protocol name must not be empty".into(),
-            ));
-        }
-        if protocol_str.contains('/') {
-            return Promise::err(capnp::Error::failed(
-                "protocol name must not contain '/'".into(),
-            ));
+        if schema_bytes.is_empty() {
+            return Promise::err(capnp::Error::failed("schema must not be empty".into()));
         }
 
-        let protocol_suffix = protocol_str.to_string();
-        let stream_protocol = pry!(StreamProtocol::try_from_owned(format!(
-            "/ww/0.1.0/{protocol_suffix}"
-        ))
-        .map_err(|e| capnp::Error::failed(format!("invalid protocol: {e}"))));
+        let protocol_cid = super::schema_cid(schema_bytes);
+        let stream_protocol = pry!(super::schema_protocol(&protocol_cid));
 
         let mut control = self.stream_control.clone();
         let mut incoming =
@@ -89,12 +76,15 @@ impl system_capnp::rpc_listener::Server for RpcListenerImpl {
                 );
                 let executor = executor.clone();
                 let handler = Arc::clone(&handler);
-                let protocol = protocol_suffix.clone();
+                let protocol_cid = protocol_cid.clone();
                 tokio::task::spawn_local(async move {
                     if let Err(e) =
-                        handle_rpc_connection(executor, &handler, stream, &protocol).await
+                        handle_rpc_connection(executor, &handler, stream, &protocol_cid).await
                     {
-                        tracing::error!(protocol, "RPC handler connection error: {e}");
+                        tracing::error!(
+                            protocol = protocol_cid,
+                            "RPC handler connection error: {e}"
+                        );
                     }
                 });
             }
@@ -121,7 +111,7 @@ async fn handle_rpc_connection(
     executor: system_capnp::executor::Client,
     handler_wasm: &[u8],
     stream: libp2p::Stream,
-    protocol: &str,
+    protocol_cid: &str,
 ) -> Result<(), capnp::Error> {
     // 1. Spawn handler process via executor.runBytes.
     let mut req = executor.run_bytes_request();
@@ -130,7 +120,7 @@ async fn handle_rpc_connection(
     {
         let mut env = req.get().init_env(3);
         env.set(0, "WW_HANDLER=1");
-        env.set(1, format!("WW_PROTOCOL={protocol}"));
+        env.set(1, format!("WW_PROTOCOL={protocol_cid}"));
         env.set(2, "PATH=/bin");
     }
     let response = req.send().promise.await?;
@@ -160,12 +150,12 @@ async fn handle_rpc_connection(
 
     tokio::select! {
         _ = peer_rpc => {
-            tracing::debug!(protocol, "Peer disconnected, cleaning up handler");
+            tracing::debug!(protocol = protocol_cid, "Peer disconnected, cleaning up handler");
             // Peer disconnected. Drop process capability to trigger cleanup.
             // The handler will see its host RPC connection close.
         }
         exit_code = wait_fut => {
-            tracing::debug!(exit_code, protocol, "RPC handler process exited");
+            tracing::debug!(exit_code, protocol = protocol_cid, "RPC handler process exited");
             // Handler exited. The peer RPC will get disconnected errors
             // on subsequent calls since the bootstrap cap is dead.
         }
