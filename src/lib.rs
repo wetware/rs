@@ -9,6 +9,8 @@ pub mod cell;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod daemon_config;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod dispatcher;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod epoch;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod host;

@@ -9,6 +9,7 @@ use async_trait::async_trait;
 pub mod executor;
 pub mod proc;
 pub mod streams;
+pub mod swappable;
 
 #[cfg(test)]
 mod streams_test;
