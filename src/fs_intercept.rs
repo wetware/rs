@@ -6,7 +6,6 @@
 
 use crate::cell::proc::ComponentRunStates;
 use anyhow::Result;
-use std::sync::Arc;
 use tempfile::TempDir;
 use wasmtime::component::{HasData, Linker, Resource};
 use wasmtime_wasi::filesystem::{WasiFilesystemCtx, WasiFilesystemCtxView};
@@ -113,8 +112,8 @@ impl IpfsFilesystemView<'_> {
             .as_ref()
             .ok_or_else(|| -> FsError { types::ErrorCode::NoEntry.into() })?;
 
-        // Ensure CID is pinned + potentially cached in memory
-        let data = match cache {
+        // Ensure CID is pinned in IPFS
+        match cache {
             cache::CacheMode::Shared(pinset) => pinset.ensure(&ipfs_path.cid).await,
             cache::CacheMode::Isolated(isolated) => isolated.ensure(&ipfs_path.cid).await,
         }
@@ -123,35 +122,32 @@ impl IpfsFilesystemView<'_> {
             FsError::from(types::ErrorCode::Io)
         })?;
 
-        // Materialize to staging directory
+        // Materialize to staging directory (local filesystem is our cache)
         let staging_path = self.staging.path().join(ipfs_path.cid.to_string());
-        let bytes = match data {
-            Some(bytes) => bytes,
-            None => {
-                // Large object: not held in memory, fetch from IPFS to disk.
-                let fetched = match cache {
-                    cache::CacheMode::Shared(pinset) => pinset.fetch(&ipfs_path.cid).await,
-                    cache::CacheMode::Isolated(isolated) => isolated.fetch(&ipfs_path.cid).await,
-                }
-                .map_err(|e| {
-                    tracing::warn!(cid = %ipfs_path.cid, err = %e, "IPFS fetch for large object failed");
-                    FsError::from(types::ErrorCode::Io)
-                })?;
-                Arc::from(fetched.into_boxed_slice())
-            }
-        };
-
         let file_path = if ipfs_path.subpath.is_empty() {
             staging_path.clone()
         } else {
             staging_path.join(&ipfs_path.subpath)
         };
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent)
+
+        // Skip fetch if already staged (disk cache hit)
+        if !file_path.exists() {
+            let bytes = match cache {
+                cache::CacheMode::Shared(pinset) => pinset.fetch(&ipfs_path.cid).await,
+                cache::CacheMode::Isolated(isolated) => isolated.fetch(&ipfs_path.cid).await,
+            }
+            .map_err(|e| {
+                tracing::warn!(cid = %ipfs_path.cid, err = %e, "IPFS fetch failed");
+                FsError::from(types::ErrorCode::Io)
+            })?;
+
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
+            }
+            std::fs::write(&file_path, &bytes)
                 .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
         }
-        std::fs::write(&file_path, &*bytes)
-            .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
 
         let target_path = if ipfs_path.subpath.is_empty() {
             staging_path
@@ -628,7 +624,7 @@ mod tests {
         let content = b"hello ipfs world";
         let (cid, pinner) = test_cid_and_pinner(content);
 
-        let isolated = cache::IsolatedPinset::new(pinner, 1024 * 1024);
+        let isolated = cache::IsolatedPinset::new(pinner);
         let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
 
         let ipfs_path = IpfsCidPath {
@@ -662,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn test_open_ipfs_write_rejected() {
         let (cid, pinner) = test_cid_and_pinner(b"data");
-        let isolated = cache::IsolatedPinset::new(pinner, 1024 * 1024);
+        let isolated = cache::IsolatedPinset::new(pinner);
         let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
 
         let ipfs_path = IpfsCidPath {
@@ -710,7 +706,7 @@ mod tests {
         let pinner = Arc::new(MockPinner {
             data: HashMap::new(),
         });
-        let isolated = cache::IsolatedPinset::new(pinner, 1024 * 1024);
+        let isolated = cache::IsolatedPinset::new(pinner);
         let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
 
         let cid: cid::Cid = "QmYwAPJzv5CZsnN625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
@@ -737,11 +733,7 @@ mod tests {
         let content = b"shared cache content";
         let (cid, pinner) = test_cid_and_pinner(content);
 
-        let pinset = Arc::new(cache::PinsetCache::new(
-            pinner,
-            10 * 1024 * 1024,
-            1024 * 1024,
-        ));
+        let pinset = Arc::new(cache::PinsetCache::new(pinner, 10 * 1024 * 1024));
         let mut harness = TestHarness::new(Some(cache::CacheMode::Shared(pinset)));
 
         let ipfs_path = IpfsCidPath {
@@ -769,7 +761,7 @@ mod tests {
         let content = b"nested file content";
         let (cid, pinner) = test_cid_and_pinner(content);
 
-        let isolated = cache::IsolatedPinset::new(pinner, 1024 * 1024);
+        let isolated = cache::IsolatedPinset::new(pinner);
         let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
 
         let ipfs_path = IpfsCidPath {
@@ -799,14 +791,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_open_ipfs_large_object_fetched_to_disk() {
-        let content = b"large object content fetched on demand";
+    async fn test_open_ipfs_skips_fetch_on_staging_hit() {
+        let content = b"cached on disk";
         let (cid, pinner) = test_cid_and_pinner(content);
 
-        // Set inline_threshold to 0 so ALL objects are "large" (data=None from ensure)
-        let isolated = cache::IsolatedPinset::new(pinner, 0);
+        let isolated = cache::IsolatedPinset::new(pinner);
         let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
 
+        // First open: fetches and stages
+        let ipfs_path = IpfsCidPath {
+            cid,
+            subpath: String::new(),
+        };
+        harness
+            .view()
+            .open_ipfs(
+                ipfs_path,
+                types::OpenFlags::empty(),
+                types::DescriptorFlags::READ,
+            )
+            .await
+            .expect("first open should succeed");
+
+        // Second open: should hit staging (file already exists)
         let ipfs_path = IpfsCidPath {
             cid,
             subpath: String::new(),
@@ -819,19 +826,8 @@ mod tests {
                 types::DescriptorFlags::READ,
             )
             .await
-            .expect("open_ipfs for large object should succeed via fetch");
+            .expect("second open should hit staging cache");
 
         assert!(harness.resource_table.get(&fd).is_ok());
-
-        let staging_file = harness.staging.path().join(cid.to_string());
-        assert!(
-            staging_file.exists(),
-            "large object should be fetched to staging"
-        );
-        assert_eq!(
-            std::fs::read(&staging_file).unwrap(),
-            content,
-            "fetched content should match"
-        );
     }
 }
