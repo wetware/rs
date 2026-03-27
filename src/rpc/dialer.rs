@@ -4,10 +4,17 @@
 //! on a named subprotocol. The host opens the stream and returns a bidirectional
 //! `ByteStream` capability — the guest reads/writes whatever wire protocol it
 //! wants directly.
+//!
+//! `dialRpc` opens the bare `/ww/0.1.0` protocol, bootstraps Cap'n Proto RPC,
+//! and returns the remote peer's Terminal capability for authentication.
 
 use capnp::capability::Promise;
 use capnp_rpc::pry;
+use capnp_rpc::rpc_twoparty_capnp::Side;
+use capnp_rpc::twoparty::VatNetwork;
+use capnp_rpc::RpcSystem;
 use futures::io::AsyncReadExt;
+use futures::FutureExt;
 use libp2p::{PeerId, StreamProtocol};
 use membrane::EpochGuard;
 use tokio::io;
@@ -15,7 +22,7 @@ use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 
 use crate::system_capnp;
 
-use super::{ByteStreamImpl, StreamMode};
+use super::{ByteStreamImpl, StreamMode, CAPNP_PROTOCOL};
 
 pub struct DialerImpl {
     stream_control: libp2p_stream::Control,
@@ -113,6 +120,51 @@ impl system_capnp::dialer::Server for DialerImpl {
                 capnp_rpc::new_client(ByteStreamImpl::new(guest_side, StreamMode::Bidirectional));
             results.get().set_stream(stream_cap);
 
+            Ok(())
+        })
+    }
+
+    fn dial_rpc(
+        self: capnp::capability::Rc<Self>,
+        params: system_capnp::dialer::DialRpcParams,
+        mut results: system_capnp::dialer::DialRpcResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.guard.check());
+
+        let peer_bytes = pry!(pry!(params.get()).get_peer()).to_vec();
+        let peer_id = pry!(PeerId::from_bytes(&peer_bytes)
+            .map_err(|e| capnp::Error::failed(format!("invalid peer ID: {e}"))));
+
+        let mut control = self.stream_control.clone();
+
+        Promise::from_future(async move {
+            tracing::debug!(peer = %peer_id, "dialRpc: opening Cap'n Proto stream");
+
+            let stream = control
+                .open_stream(peer_id, CAPNP_PROTOCOL)
+                .await
+                .map_err(|e| {
+                    capnp::Error::failed(format!(
+                        "dialRpc: failed to open stream to {peer_id}: {e}"
+                    ))
+                })?;
+
+            // Bootstrap Cap'n Proto RPC as client over the libp2p stream.
+            // The remote side serves Terminal(Membrane) as its bootstrap capability.
+            let (reader, writer) = Box::pin(stream).split();
+            let network = VatNetwork::new(reader, writer, Side::Client, Default::default());
+            let mut rpc_system =
+                RpcSystem::new(Box::new(network), None::<capnp::capability::Client>);
+            let terminal: membrane::stem_capnp::terminal::Client<
+                membrane::stem_capnp::membrane::Owned,
+            > = rpc_system.bootstrap(Side::Server);
+
+            // Drive the RPC system in the background.
+            tokio::task::spawn_local(rpc_system.map(|_| ()));
+
+            results.get().set_terminal(terminal);
+
+            tracing::debug!(peer = %peer_id, "dialRpc: Terminal capability obtained");
             Ok(())
         })
     }

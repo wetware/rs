@@ -23,9 +23,17 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use ::membrane::EpochGuard;
 
+use libp2p::StreamProtocol;
+
 use crate::cell::proc::Builder as ProcBuilder;
 use crate::host::SwarmCommand;
 use crate::system_capnp;
+
+/// The base Cap'n Proto RPC protocol served by every node.
+///
+/// Terminal(Membrane) is bootstrapped over streams opened on this protocol.
+/// Subprotocols (e.g. `/ww/0.1.0/chess`) are separate and carry raw bytes.
+pub const CAPNP_PROTOCOL: StreamProtocol = StreamProtocol::new("/ww/0.1.0");
 
 /// Maximum bytes a single ByteStream read may allocate.
 ///
@@ -643,6 +651,112 @@ impl system_capnp::executor::Server for ExecutorImpl {
             let process_client: system_capnp::process::Client =
                 capnp_rpc::new_client(ProcessImpl::new(stdin, stdout, stderr, exit_rx));
             results.get().set_process(process_client);
+
+            Ok(())
+        })
+    }
+
+    fn run_cap(
+        self: capnp::capability::Rc<Self>,
+        params: system_capnp::executor::RunCapParams,
+        mut results: system_capnp::executor::RunCapResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
+        let params = pry!(params.get());
+        let args = read_text_list_result(params.get_args());
+        let env = read_text_list_result(params.get_env());
+        let wasm = read_data_result(params.get_wasm());
+        let wasm_debug = self.wasm_debug;
+        let network_state = self.network_state.clone();
+        let swarm_cmd_tx = self.swarm_cmd_tx.clone();
+        let epoch_rx = self.epoch_rx.clone();
+        let content_store = self.content_store.clone();
+        let signing_key = self.signing_key.clone();
+        let stream_control = self.stream_control.clone();
+        Promise::from_future(async move {
+            if wasm.len() > MAX_WASM_BYTES {
+                return Err(capnp::Error::failed(format!(
+                    "WASM binary too large ({} bytes, max {})",
+                    wasm.len(),
+                    MAX_WASM_BYTES,
+                )));
+            }
+
+            let (epoch_rx, content_store, stream_control) =
+                match (epoch_rx, content_store, stream_control) {
+                    (Some(erx), Some(cs), Some(sc)) => (erx, cs, sc),
+                    _ => {
+                        return Err(capnp::Error::failed(
+                            "runCap requires full membrane context".into(),
+                        ))
+                    }
+                };
+
+            tracing::debug!("run_cap: starting capability-exporting process");
+
+            // Provide dummy stdin/stdout (the guest communicates via capability RPC,
+            // not stdio) and a real stderr for log draining.
+            let (host_stderr, guest_stderr) = io::duplex(64 * 1024);
+            let (_host_stdin, guest_stdin) = io::duplex(64 * 1024);
+            let (_host_stdout, guest_stdout) = io::duplex(64 * 1024);
+            let (builder, mut handles) = ProcBuilder::new()
+                .with_env(env)
+                .with_args(args)
+                .with_wasm_debug(wasm_debug)
+                .with_bytecode(wasm)
+                .with_stdio(guest_stdin, guest_stdout, guest_stderr)
+                .with_data_streams();
+
+            let proc = builder
+                .build()
+                .await
+                .map_err(|err| capnp::Error::failed(err.to_string()))?;
+
+            let (reader, writer) = handles
+                .take_host_split()
+                .ok_or_else(|| capnp::Error::failed("host stream missing".into()))?;
+
+            // Bootstrap membrane RPC and capture the guest's exported capability.
+            let (rpc_system, guest_cap) = membrane::build_membrane_rpc(
+                reader,
+                writer,
+                network_state,
+                swarm_cmd_tx,
+                wasm_debug,
+                epoch_rx,
+                content_store,
+                signing_key,
+                stream_control,
+            );
+
+            // Drive RPC, stderr drain, and process in the background.
+            tokio::task::spawn_local(async move {
+                let local = tokio::task::LocalSet::new();
+                local.spawn_local(rpc_system.map(|_| ()));
+
+                local.spawn_local(async move {
+                    use tokio::io::AsyncBufReadExt;
+                    let reader = tokio::io::BufReader::new(host_stderr);
+                    let mut lines = reader.lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        tracing::info!("{}", line);
+                    }
+                });
+
+                local
+                    .run_until(async move {
+                        match proc.run().await {
+                            Ok(()) => tracing::info!("run_cap: guest process exited cleanly"),
+                            Err(e) => tracing::error!("run_cap: guest process failed: {e}"),
+                        }
+                    })
+                    .await;
+            });
+
+            tracing::info!("run_cap: guest process started, returning bootstrap capability");
+
+            // Return the guest's bootstrap capability as AnyPointer.
+            results.get().init_cap().set_as_capability(guest_cap.client.hook);
 
             Ok(())
         })

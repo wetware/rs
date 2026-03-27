@@ -7,6 +7,8 @@
 
 @0xbf5147b78c0e6a2f;
 
+using Stem = import "stem.capnp";
+
 struct PeerInfo {
   peerId @0 :Data;       # libp2p peer ID, serialized.
   addrs @1 :List(Data);  # Multiaddrs for this peer, each serialized.
@@ -44,6 +46,11 @@ interface Dialer {
   # Open a stream to peer on /ww/0.1.0/{protocol}.
   # Returns a bidirectional ByteStream: read() pulls from the remote,
   # write() pushes to the remote, close() shuts down both directions.
+
+  dialRpc @1 (peer :Data) -> (terminal :Stem.Terminal(Stem.Membrane));
+  # Open /ww/0.1.0 stream to peer, bootstrap Cap'n Proto RPC, and return
+  # the peer's Terminal capability for authentication.  After login, the
+  # caller receives a Membrane and can graft remote capabilities.
 }
 
 interface Executor {
@@ -53,6 +60,13 @@ interface Executor {
 
   echo @1 (message :Text) -> (response :Text);
   # Diagnostic echo — returns the message unmodified.
+
+  runCap @2 (wasm :Data, args :List(Text), env :List(Text)) -> (cap :AnyPointer);
+  # Like runBytes, but the spawned process exports a bootstrap capability
+  # via system::serve().  Returns that capability as AnyPointer — the caller
+  # casts it to the expected interface (e.g. ChessEngine).
+  # Process lifecycle is tied to the capability: dropping it closes the
+  # RPC connection and terminates the guest.
 }
 
 interface Process {

@@ -4,7 +4,6 @@ use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
 use futures::FutureExt;
 use k256::ecdsa::SigningKey;
-use libp2p::StreamProtocol;
 use membrane::Epoch;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -17,9 +16,7 @@ use tracing::info;
 use crate::cell::{proc::DataStreamHandles, Loader, ProcBuilder};
 use crate::host::SwarmCommand;
 use crate::rpc::membrane::GuestMembrane;
-use crate::rpc::NetworkState;
-
-const CAPNP_PROTOCOL: StreamProtocol = StreamProtocol::new("/ww/0.1.0");
+use crate::rpc::{NetworkState, CAPNP_PROTOCOL};
 
 /// Builder for constructing a [`Cell`].
 ///
