@@ -66,13 +66,20 @@ pub(crate) struct IpfsCidPath {
 }
 
 /// Parse a relative path like `ipfs/QmHash/sub/file` into CID + subpath.
-/// Returns None if the path doesn't start with `ipfs/`.
+/// Returns None if the path doesn't start with `ipfs/` or contains path
+/// traversal components (`..`).
 pub(crate) fn parse_ipfs_path(path: &str) -> Option<IpfsCidPath> {
     let rest = path.strip_prefix("ipfs/")?;
     let (cid_str, subpath) = match rest.find('/') {
         Some(idx) => (&rest[..idx], &rest[idx + 1..]),
         None => (rest, ""),
     };
+
+    // Reject path traversal: any ".." component could escape the staging directory.
+    if subpath.split('/').any(|seg| seg == "..") {
+        return None;
+    }
+
     let cid = cid_str.parse::<cid::Cid>().ok()?;
     Some(IpfsCidPath {
         cid,
@@ -523,6 +530,20 @@ mod tests {
     #[test]
     fn test_parse_ipfs_path_invalid_cid() {
         assert!(parse_ipfs_path("ipfs/not-a-valid-cid/file").is_none());
+    }
+
+    #[test]
+    fn test_parse_ipfs_path_rejects_traversal() {
+        let cid_str = "QmYwAPJzv5CZsnN625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
+        // Direct traversal
+        assert!(parse_ipfs_path(&format!("ipfs/{cid_str}/../../etc/passwd")).is_none());
+        // Mid-path traversal
+        assert!(parse_ipfs_path(&format!("ipfs/{cid_str}/sub/../../../etc")).is_none());
+        // Single dotdot
+        assert!(parse_ipfs_path(&format!("ipfs/{cid_str}/..")).is_none());
+        // Valid subpaths still work
+        assert!(parse_ipfs_path(&format!("ipfs/{cid_str}/sub/file.txt")).is_some());
+        assert!(parse_ipfs_path(&format!("ipfs/{cid_str}/file..name")).is_some());
     }
 
     // ── Mock pinner for integration tests ──────────────────────────
