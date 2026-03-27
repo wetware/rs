@@ -283,6 +283,82 @@ mod tests {
         *v as usize
     }
 
+    /// Verify all ARC structural invariants. Call after every operation
+    /// in stress tests to catch corruption early.
+    fn assert_invariants(cache: &ArcInner<u64>, weighter: fn(&Cid, &u64) -> usize) {
+        // 1. weight == actual sum of T1 + T2 weights
+        let actual_weight: usize = cache
+            .t1
+            .iter()
+            .chain(cache.t2.iter())
+            .map(|(k, v)| weighter(k, v))
+            .sum();
+        assert_eq!(
+            cache.weight, actual_weight,
+            "weight field ({}) != actual T1+T2 weight ({})",
+            cache.weight, actual_weight
+        );
+
+        // 2. t1_weight == actual sum of T1 weights
+        let actual_t1_weight: usize = cache.t1.iter().map(|(k, v)| weighter(k, v)).sum();
+        assert_eq!(
+            cache.t1_weight, actual_t1_weight,
+            "t1_weight field ({}) != actual T1 weight ({})",
+            cache.t1_weight, actual_t1_weight
+        );
+
+        // 3. weight <= budget
+        assert!(
+            cache.weight <= cache.budget,
+            "weight ({}) exceeds budget ({})",
+            cache.weight,
+            cache.budget
+        );
+
+        // 4. 0 <= p <= budget
+        assert!(
+            cache.p <= cache.budget,
+            "p ({}) exceeds budget ({})",
+            cache.p,
+            cache.budget
+        );
+
+        // 5. Disjointness: no key in more than one list
+        for k in cache.t1.keys() {
+            assert!(!cache.t2.contains_key(k), "key in both T1 and T2");
+            assert!(!cache.b1.contains_key(k), "key in both T1 and B1");
+            assert!(!cache.b2.contains_key(k), "key in both T1 and B2");
+        }
+        for k in cache.t2.keys() {
+            assert!(!cache.b1.contains_key(k), "key in both T2 and B1");
+            assert!(!cache.b2.contains_key(k), "key in both T2 and B2");
+        }
+        for k in cache.b1.keys() {
+            assert!(!cache.b2.contains_key(k), "key in both B1 and B2");
+        }
+
+        // 6. Ghost list caps
+        let p_frac = if cache.budget > 0 {
+            cache.p * cache.ghost_capacity / cache.budget
+        } else {
+            0
+        };
+        let b1_cap = cache.ghost_capacity.saturating_sub(p_frac).max(1);
+        let b2_cap = p_frac.max(1);
+        assert!(
+            cache.b1.len() <= b1_cap,
+            "B1 len ({}) exceeds cap ({})",
+            cache.b1.len(),
+            b1_cap
+        );
+        assert!(
+            cache.b2.len() <= b2_cap,
+            "B2 len ({}) exceeds cap ({})",
+            cache.b2.len(),
+            b2_cap
+        );
+    }
+
     // 1. test_insert_to_t1 — new entry lands in T1
     #[test]
     fn test_insert_to_t1() {
@@ -586,5 +662,150 @@ mod tests {
             "total ghosts should be bounded by ghost_capacity, got {}",
             total_ghosts
         );
+    }
+
+    // --- Invariant stress tests ---
+
+    // 17. Sequential insert churn — invariants hold after every put
+    #[test]
+    fn test_invariants_sequential_churn() {
+        let mut cache = ArcInner::new(10, 16, unit_weighter);
+
+        for i in 0..=255u8 {
+            cache.put(test_cid(i), i as u64);
+            assert_invariants(&cache, unit_weighter);
+        }
+    }
+
+    // 18. Mixed get/put — invariants hold through promotion + eviction
+    #[test]
+    fn test_invariants_mixed_get_put() {
+        let mut cache = ArcInner::new(5, 8, unit_weighter);
+
+        for round in 0..3u8 {
+            // Insert a batch
+            for i in 0..10u8 {
+                let id = round * 50 + i;
+                cache.put(test_cid(id), id as u64);
+                assert_invariants(&cache, unit_weighter);
+            }
+
+            // Read some back (promotes T1→T2)
+            for i in 0..5u8 {
+                let id = round * 50 + i;
+                cache.get(&test_cid(id));
+                assert_invariants(&cache, unit_weighter);
+            }
+
+            // Insert more (triggers ghost hits if keys cycle)
+            for i in 0..10u8 {
+                let id = round * 50 + i;
+                cache.put(test_cid(id), id as u64);
+                assert_invariants(&cache, unit_weighter);
+            }
+        }
+    }
+
+    // 19. Weighted entries — invariants hold with variable-weight entries
+    #[test]
+    fn test_invariants_weighted_churn() {
+        let mut cache = ArcInner::new(20, 16, value_weighter);
+
+        // Insert entries with weights 1..=5, cycling
+        for i in 0..100u8 {
+            let weight = (i % 5) as u64 + 1;
+            cache.put(test_cid(i), weight);
+            assert_invariants(&cache, value_weighter);
+        }
+    }
+
+    // 20. Ghost hit cycles — B1/B2 hits adapt p, invariants hold
+    #[test]
+    fn test_invariants_ghost_hit_cycles() {
+        let mut cache = ArcInner::new(3, 8, unit_weighter);
+
+        // Phase 1: fill and evict to create ghost entries
+        for i in 0..10u8 {
+            cache.put(test_cid(i), i as u64);
+            assert_invariants(&cache, unit_weighter);
+        }
+
+        // Phase 2: re-insert evicted keys to trigger ghost hits
+        for i in 0..10u8 {
+            cache.put(test_cid(i), i as u64);
+            assert_invariants(&cache, unit_weighter);
+        }
+
+        // Phase 3: promote some, then cycle again
+        for i in 0..5u8 {
+            cache.get(&test_cid(i));
+            assert_invariants(&cache, unit_weighter);
+        }
+        for i in 0..10u8 {
+            cache.put(test_cid(i), i as u64);
+            assert_invariants(&cache, unit_weighter);
+        }
+    }
+
+    // 21. Oversize entries interleaved — budget never violated
+    #[test]
+    fn test_invariants_oversize_interleaved() {
+        let mut cache = ArcInner::new(10, 8, value_weighter);
+
+        for i in 0..50u8 {
+            // Alternate between normal (weight 2) and oversize (weight 20)
+            let weight = if i % 7 == 0 { 20 } else { 2 };
+            cache.put(test_cid(i), weight);
+            assert_invariants(&cache, value_weighter);
+        }
+    }
+
+    // 22. Rapid p swings — force alternating B1/B2 hits
+    #[test]
+    fn test_invariants_rapid_p_swings() {
+        let mut cache = ArcInner::new(4, 8, unit_weighter);
+
+        // Build up ghost lists on both sides by alternating access patterns.
+        // Even keys: insert, evict, re-insert (B1 hits → p up)
+        // Odd keys: insert, promote to T2, evict, re-insert (B2 hits → p down)
+        for round in 0..5u8 {
+            let base = round * 20;
+
+            // Insert even keys (will land in T1, evict to B1)
+            for i in (0..8).step_by(2) {
+                cache.put(test_cid(base + i), (base + i) as u64);
+                assert_invariants(&cache, unit_weighter);
+            }
+
+            // Insert odd keys with promotion (will evict to B2)
+            for i in (1..8).step_by(2) {
+                cache.put(test_cid(base + i), (base + i) as u64);
+                cache.get(&test_cid(base + i)); // promote to T2
+                assert_invariants(&cache, unit_weighter);
+            }
+
+            // Re-insert earlier keys to trigger ghost hits
+            for i in 0..8u8 {
+                let prev_base = if round > 0 { (round - 1) * 20 } else { 0 };
+                cache.put(test_cid(prev_base + i), (prev_base + i) as u64);
+                assert_invariants(&cache, unit_weighter);
+            }
+        }
+    }
+
+    // 23. Tight ghost capacity — ghost_capacity = 2, minimal room
+    #[test]
+    fn test_invariants_tight_ghost_capacity() {
+        let mut cache = ArcInner::new(3, 2, unit_weighter);
+
+        for i in 0..100u8 {
+            cache.put(test_cid(i), i as u64);
+            assert_invariants(&cache, unit_weighter);
+
+            if i % 3 == 0 {
+                cache.get(&test_cid(i));
+                assert_invariants(&cache, unit_weighter);
+            }
+        }
     }
 }
