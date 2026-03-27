@@ -89,6 +89,17 @@ The image ships kernel and shell WASM blobs, so `podman run wetware:latest`
 works out of the box. Pass additional layers as arguments to stack on top of
 the default kernel.
 
+## Interactive tour
+
+```
+I just cloned github.com/wetware/ww.  Read doc/ai-tour.md and give me a guided tour.
+```
+
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code) ·
+[Cursor](https://cursor.com) ·
+[Windsurf](https://windsurf.com) ·
+[doc/ai-tour.md](doc/ai-tour.md)
+
 ## Learn more
 
 - [Architecture](doc/architecture.md) — design principles and capability flow
