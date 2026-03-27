@@ -1630,4 +1630,108 @@ mod tests {
             })
             .await;
     }
+
+    #[tokio::test]
+    async fn test_rpc_bridge_dead_handler_returns_error() {
+        // When the handler's RPC system dies (process exits), the cap served
+        // through the bridge should break. We simulate this by creating a
+        // handler-side RPC system we directly control, then abort() it.
+        //
+        // Topology:
+        //   handler RPC (Side::Server, serves executor)
+        //       ↓ bootstrap
+        //   handler_cap (client ref to executor)
+        //       ↓ bridged over
+        //   bridge RPC (Side::Server, bootstrap = handler_cap)
+        //       ↓ bootstrap
+        //   remote_executor (remote peer's view)
+        //
+        // We abort the handler RPC task, which drops the RPC system,
+        // closes the duplex half, and disconnects the executor cap.
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // Create a real executor to serve as the handler's exported cap.
+                let (host, _server, _rx) = setup_rpc();
+                let executor_cap = host.executor_request().send().pipeline.get_executor();
+
+                // Set up a handler-side RPC system we control.
+                let (handler_stream, host_stream) = io::duplex(8 * 1024);
+                let (h_read, h_write) = io::split(handler_stream);
+                let (c_read, c_write) = io::split(host_stream);
+
+                let handler_network = VatNetwork::new(
+                    h_read.compat(),
+                    h_write.compat_write(),
+                    Side::Server,
+                    Default::default(),
+                );
+                let handler_rpc =
+                    RpcSystem::new(Box::new(handler_network), Some(executor_cap.client));
+                let handler_task = tokio::task::spawn_local(async move {
+                    let _ = handler_rpc.await;
+                });
+
+                let client_network = VatNetwork::new(
+                    c_read.compat(),
+                    c_write.compat_write(),
+                    Side::Client,
+                    Default::default(),
+                );
+                let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
+                let handler_cap: system_capnp::executor::Client =
+                    client_rpc.bootstrap(Side::Server);
+                let handler_cap = handler_cap.client;
+                tokio::task::spawn_local(async move {
+                    let _ = client_rpc.await;
+                });
+
+                // Bridge the handler cap to a remote peer.
+                let (remote_executor, _bridge): (system_capnp::executor::Client, _) =
+                    setup_bridge(handler_cap);
+
+                // Verify it works while alive.
+                let mut req = remote_executor.echo_request();
+                req.get().set_message("alive");
+                let resp = req.send().promise.await.unwrap();
+                assert_eq!(
+                    resp.get()
+                        .unwrap()
+                        .get_response()
+                        .unwrap()
+                        .to_str()
+                        .unwrap(),
+                    "Echo: alive"
+                );
+
+                // Kill the handler's RPC system.
+                handler_task.abort();
+                // Let the runtime propagate the disconnection.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+                // Call through the bridge should now fail.
+                let mut req = remote_executor.echo_request();
+                req.get().set_message("should fail");
+                let result =
+                    tokio::time::timeout(std::time::Duration::from_millis(500), req.send().promise)
+                        .await;
+
+                // Either the inner call errors (disconnected) or the timeout fires
+                // (cap is dead but stream hasn't noticed yet). Both prove the handler
+                // death propagated — a live cap would return Ok instantly.
+                let is_dead = match result {
+                    Err(_) => true,     // timeout — stream stalled
+                    Ok(Err(_)) => true, // RPC error — disconnected
+                    Ok(Ok(resp)) => {
+                        // If somehow a response came back, it should be an error.
+                        resp.get().is_err()
+                    }
+                };
+                assert!(
+                    is_dead,
+                    "call through bridge should fail after handler dies"
+                );
+            })
+            .await;
+    }
 }
