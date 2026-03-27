@@ -44,7 +44,7 @@ blake3 = "1.8.3"
 libp2p = { version = "0.55.0", features = ["tokio", "tcp", "noise", "yamux", "macros", "identify", "rsa", "request-response", "secp256k1", "kad"] }
 libp2p-core = "0.43"
 ipfs-api-backend-hyper = "0.6.0"
-reqwest = { version = "0.12.24", features = ["json", "stream", "multipart"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
 tar = "0.4"
 clap = { version = "4.5.51", features = ["derive", "env"] }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
@@ -72,8 +72,12 @@ path = "src/cli/main.rs"
 [build-dependencies]
 capnpc = "0.23.3"
 
-# Optimise WASM guests for size (previously in per-crate Cargo.toml)
+# Optimise WASM guests for size; host binary overridden below.
 [profile.release]
 opt-level = "z"
 lto = true
 strip = true
+
+# Host binary: optimize for speed (wasmtime JIT benefits from opt-level 2).
+[profile.release.package.ww]
+opt-level = 2
