@@ -6,6 +6,7 @@
 
 use crate::cell::proc::ComponentRunStates;
 use anyhow::Result;
+use std::sync::Arc;
 use tempfile::TempDir;
 use wasmtime::component::{HasData, Linker, Resource};
 use wasmtime_wasi::filesystem::{WasiFilesystemCtx, WasiFilesystemCtxView};
@@ -124,24 +125,33 @@ impl IpfsFilesystemView<'_> {
 
         // Materialize to staging directory
         let staging_path = self.staging.path().join(ipfs_path.cid.to_string());
-        if let Some(bytes) = data {
-            // Small object: write bytes to staging
-            let file_path = if ipfs_path.subpath.is_empty() {
-                staging_path.clone()
-            } else {
-                staging_path.join(&ipfs_path.subpath)
-            };
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
+        let bytes = match data {
+            Some(bytes) => bytes,
+            None => {
+                // Large object: not held in memory, fetch from IPFS to disk.
+                let fetched = match cache {
+                    cache::CacheMode::Shared(pinset) => pinset.fetch(&ipfs_path.cid).await,
+                    cache::CacheMode::Isolated(isolated) => isolated.fetch(&ipfs_path.cid).await,
+                }
+                .map_err(|e| {
+                    tracing::warn!(cid = %ipfs_path.cid, err = %e, "IPFS fetch for large object failed");
+                    FsError::from(types::ErrorCode::Io)
+                })?;
+                Arc::from(fetched.into_boxed_slice())
             }
-            std::fs::write(&file_path, &*bytes)
+        };
+
+        let file_path = if ipfs_path.subpath.is_empty() {
+            staging_path.clone()
+        } else {
+            staging_path.join(&ipfs_path.subpath)
+        };
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent)
                 .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
         }
-        // For large objects (data=None), content is pinned in IPFS but not
-        // in-memory. We'd need to fetch to disk. For v1, return NoEntry
-        // if the staging file doesn't exist yet.
-        // TODO: fetch large objects to staging via pinner.fetch()
+        std::fs::write(&file_path, &*bytes)
+            .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
 
         let target_path = if ipfs_path.subpath.is_empty() {
             staging_path
@@ -786,5 +796,42 @@ mod tests {
             .join("sub/dir/file.txt");
         assert!(nested_file.exists(), "nested staging file should exist");
         assert_eq!(std::fs::read(&nested_file).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn test_open_ipfs_large_object_fetched_to_disk() {
+        let content = b"large object content fetched on demand";
+        let (cid, pinner) = test_cid_and_pinner(content);
+
+        // Set inline_threshold to 0 so ALL objects are "large" (data=None from ensure)
+        let isolated = cache::IsolatedPinset::new(pinner, 0);
+        let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
+
+        let ipfs_path = IpfsCidPath {
+            cid,
+            subpath: String::new(),
+        };
+        let fd = harness
+            .view()
+            .open_ipfs(
+                ipfs_path,
+                types::OpenFlags::empty(),
+                types::DescriptorFlags::READ,
+            )
+            .await
+            .expect("open_ipfs for large object should succeed via fetch");
+
+        assert!(harness.resource_table.get(&fd).is_ok());
+
+        let staging_file = harness.staging.path().join(cid.to_string());
+        assert!(
+            staging_file.exists(),
+            "large object should be fetched to staging"
+        );
+        assert_eq!(
+            std::fs::read(&staging_file).unwrap(),
+            content,
+            "fetched content should match"
+        );
     }
 }

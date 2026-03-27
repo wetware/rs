@@ -148,6 +148,15 @@ impl PinsetCache {
         Ok(PinEntry { data, size })
     }
 
+    /// Fetch raw bytes for a CID from the backing store.
+    ///
+    /// Use this when `ensure()` returns `None` (large object, not held in memory)
+    /// but you still need the bytes on disk. The CID should already be pinned
+    /// via a prior `ensure()` call.
+    pub async fn fetch(&self, cid: &Cid) -> Result<Vec<u8>> {
+        self.pinner.fetch(cid).await.context("failed to fetch CID")
+    }
+
     /// Spawn background tasks to unpin evicted entries with retry.
     fn spawn_unpins(&self, evicted: Vec<(Cid, PinEntry)>) {
         for (cid, _entry) in evicted {
@@ -249,6 +258,13 @@ impl IsolatedPinset {
         pins.insert(*cid, data.clone());
 
         Ok(data)
+    }
+
+    /// Fetch raw bytes for a CID from the backing store.
+    ///
+    /// Same as `PinsetCache::fetch` — for large objects not held in memory.
+    pub async fn fetch(&self, cid: &Cid) -> Result<Vec<u8>> {
+        self.pinner.fetch(cid).await.context("failed to fetch CID")
     }
 }
 
