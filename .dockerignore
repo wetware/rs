@@ -1,38 +1,29 @@
-# Rust build artifacts
+# Build artifacts
 target/
-**/*.rs.bk
-Cargo.lock
 
-# Git
+# Git (commit hash passed via --build-arg GIT_COMMIT)
 .git/
-.gitignore
 
-# IDE
+# CI/CD
+.github/
+
+# Not needed in container
+contracts/
+doc/
+
+# Documentation
+*.md
+
+# IDE / OS
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# OS
 .DS_Store
-Thumbs.db
 
-# Documentation
-README.md
-docs/
-
-# CI/CD
-.github/
-.gitlab-ci.yml
-
-# Docker
-Dockerfile*
-.dockerignore
-
-# Logs
-*.log
+# Claude Code
+.claude/
 
 # Environment files
 .env
-.env.local
-.env.*.local
+.env.*
