@@ -25,9 +25,10 @@ interface Host {
   executor @3 () -> (executor :Executor);
   # Obtain an Executor scoped to the same epoch as this Host.
 
-  network @4 () -> (listener :Listener, dialer :Dialer);
-  # Obtain Listener (accept incoming subprotocol streams) and
-  # Dialer (open outgoing subprotocol streams) capabilities.
+  network @4 () -> (listener :Listener, dialer :Dialer,
+                    rpcListener :RpcListener, rpcDialer :RpcDialer);
+  # Obtain Listener/Dialer (byte-stream mode) and
+  # RpcListener/RpcDialer (capability mode) for subprotocol I/O.
 }
 
 interface Listener {
@@ -80,6 +81,37 @@ interface Process {
 
   wait @3 () -> (exitCode :Int32);
   # Block until the process exits and return its exit code.
+
+  bootstrap @4 () -> (cap :AnyPointer);
+  # Return the capability exported by the guest via system::serve().
+  # The cap is type-erased — cast to the expected interface on the guest side.
+  # Errors if the guest didn't export a capability.
+}
+
+interface RpcListener {
+  listen @0 (executor :Executor, schema :Data, handler :Data) -> ();
+  # Accept incoming streams on /ww/0.1.0/{cid} where cid = CIDv1(raw, BLAKE3(schema)).
+  # The schema is the canonical Cap'n Proto encoding of a schema.Node — its id field
+  # (the 64-bit unique type ID) is part of the hash input, so identical structures
+  # with different IDs produce different protocol addresses.
+  #
+  # For each stream, spawn a handler process via executor.runBytes(handler).
+  # The handler calls system::serve() to export a bootstrap capability, which
+  # flows back to the connecting peer via Cap'n Proto RPC bootstrapping.
+  #
+  # The handler's Membrane is never exposed to the remote peer.
+  # OCAP: caller delegates spawn authority via executor.
+}
+
+interface RpcDialer {
+  dial @0 (peer :Data, schema :Data) -> (cap :AnyPointer);
+  # Open a stream to peer on /ww/0.1.0/{cid} where cid = CIDv1(raw, BLAKE3(schema)).
+  # The schema is the canonical Cap'n Proto encoding of a schema.Node.
+  # Bootstraps Cap'n Proto RPC over the stream and returns the remote handler's
+  # bootstrap capability.
+  #
+  # The returned cap is type-erased (AnyPointer) — cast it to the expected
+  # interface type on the guest side.
 }
 
 interface ByteStream {
