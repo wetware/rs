@@ -47,6 +47,8 @@ pub struct ComponentRunStates {
     pub data_stream: Option<tokio::io::DuplexStream>,
     /// Cache mode for this process. `None` means no cache (default).
     /// `Shared` shares a global pinset cache; `Isolated` gets a private one.
+    /// The staging directory for IPFS content is owned by the cache mode itself:
+    /// host-wide shared dir for `Shared`, per-process dir for `Isolated`.
     pub cache_mode: Option<cache::CacheMode>,
 }
 
@@ -327,6 +329,11 @@ impl Proc {
         };
         let mut linker = Linker::new(&engine);
         add_to_linker_async(&mut linker)?;
+
+        // Override filesystem bindings with IPFS interceptor when cache is active
+        if cache_mode.is_some() {
+            crate::fs_intercept::override_filesystem_linker(&mut linker)?;
+        }
 
         // Add loader host function if loader is provided
         if loader.is_some() {

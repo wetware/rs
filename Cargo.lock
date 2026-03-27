@@ -1206,6 +1206,7 @@ dependencies = [
  "async-trait",
  "cid",
  "linked-hash-map",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -7693,6 +7694,7 @@ dependencies = [
  "blake3",
  "bytes",
  "cache",
+ "cap-std",
  "capnp",
  "capnp-rpc",
  "capnpc",
