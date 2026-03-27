@@ -2,7 +2,7 @@
 
 Audit a Wetware application for capability hygiene, security, and
 correctness.  The user may point you at their own code or at an
-example in this repo.
+example in this repo (try `examples/chess/`).
 
 ## What to check
 
@@ -16,7 +16,7 @@ For each agent, answer:
   routing, restricted executor)?
 
 Read `doc/capabilities.md` for the capability model.  Read
-`doc/architecture.md` (§ "The Membrane pattern") for how
+`doc/architecture.md`, section "The Membrane pattern" for how
 attenuation works.
 
 ### 2. Trust boundaries
@@ -32,7 +32,7 @@ attenuation works.
 - Does the FHS structure follow conventions?  Read `doc/images.md`.
 - Are layers composed correctly?  Later layers should override,
   not duplicate.
-- Is `boot/main.wasm` present in the union?
+- Is `bin/main.wasm` present in the union?
 
 ### 4. Protocol correctness
 
@@ -55,3 +55,5 @@ Present findings as:
    (critical / warning / suggestion) and a concrete fix
 3. **Capability map** — table showing each agent's current
    capabilities vs. recommended minimum
+
+When done, offer to return to the main menu from PROMPT.md.

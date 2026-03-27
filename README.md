@@ -98,7 +98,7 @@ Read PROMPT.md and give me a guided tour of Wetware.
 Or without cloning:
 
 ```
-Read https://github.com/wetware/ww/blob/master/PROMPT.md and give me a guided tour of Wetware.
+Read https://raw.githubusercontent.com/wetware/ww/master/PROMPT.md and give me a guided tour of Wetware.
 ```
 
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) ·

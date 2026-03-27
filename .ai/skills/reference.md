@@ -20,3 +20,6 @@ with a sub-menu and let them choose:
 
 When walking through a `.capnp` file, explain each interface and
 method in plain language, then show the schema definition.
+
+When the user finishes exploring a subsystem, re-present this
+sub-menu or offer to return to the main menu from PROMPT.md.

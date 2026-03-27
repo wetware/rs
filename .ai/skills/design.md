@@ -23,14 +23,14 @@ Summarize your understanding back to the user before proceeding.
 
 Based on discovery, design the system with the user.  Cover:
 
-- **Image layout**: which layers, what goes in `boot/`, `bin/`,
-  `svc/`, `etc/`.  Read `doc/images.md` for conventions.
+- **Image layout**: which layers, what goes in `bin/`, `svc/`,
+  `etc/`.  Read `doc/images.md` for conventions.
 - **Capability map**: which capabilities each agent needs.  Draw
   from the capability table in `doc/capabilities.md`.  Identify
   what should be attenuated.
 - **Membrane design**: what pid0 exports to the network, what
-  children receive.  Read `doc/architecture.md`
-  (§ "The Membrane pattern").
+  children receive.  Read `doc/architecture.md`, section
+  "The Membrane pattern".
 - **Protocol design**: if agents communicate, what stream protocols
   do they use?  Read the chess example's listener/dialer pattern
   in `examples/chess/`.
@@ -53,3 +53,6 @@ Produce a design document the user (or another AI) can execute from:
 
 Do not write code in this skill.  The output is a design, not an
 implementation.
+
+When done, offer to return to the main menu from PROMPT.md, or
+suggest running the **review** skill on the design.

@@ -5,13 +5,13 @@ behind it.  Read and reference these files:
 
 | Topic | Key files |
 |-------|-----------|
-| Ambient authority vs capabilities | `doc/architecture.md` (§ "No ambient authority") |
-| The three layers (host → kernel → children) | `doc/architecture.md` (§ "Layers") |
-| The Membrane pattern | `doc/architecture.md` (§ "The Membrane pattern") |
+| Ambient authority vs capabilities | `doc/architecture.md`, section "No ambient authority" |
+| The three layers (host, kernel, children) | `doc/architecture.md`, section "Layers" |
+| The Membrane pattern | `doc/architecture.md`, section "The Membrane pattern" |
 | Capability lifecycle and epoch scoping | `doc/capabilities.md` |
 | Image layers and FHS convention | `doc/images.md` |
-| Network architecture | `doc/architecture.md` (§ "Network architecture") |
-| On-chain coordination | `doc/architecture.md` (§ "Epoch lifecycle") |
+| Network architecture | `doc/architecture.md`, section "Network architecture" |
+| On-chain coordination | `doc/architecture.md`, section "Epoch lifecycle" |
 
 ## Suggested order
 
@@ -29,4 +29,5 @@ behind it.  Read and reference these files:
 5. Cover **epochs**: on-chain coordination, capability revocation,
    re-grafting.
 
-After each topic, ask if the user wants to go deeper or move on.
+After each topic, ask if the user wants to go deeper, move to
+another topic, or return to the main menu from PROMPT.md.

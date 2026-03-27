@@ -15,15 +15,18 @@ Either way works — adapt your file access accordingly:
 
 - **Local clone**: read files directly (e.g. `.ai/skills/concepts.md`,
   `doc/architecture.md`).
-- **GitHub URL**: if the user gave you a URL like
-  `https://github.com/wetware/ww/blob/<branch>/PROMPT.md`, fetch
-  other files from the same repo and branch.  Use raw URLs:
-  `https://raw.githubusercontent.com/wetware/ww/<branch>/<path>`
+- **GitHub URL**: fetch other files from the same repo using raw URLs:
+  `https://raw.githubusercontent.com/wetware/ww/master/<path>`
 
 All file paths in this document and in skill files are relative to
-the repository root.
+the repository root.  If fetching a file fails, use the embedded
+context at the bottom of this document instead.
 
 ## How to behave
+
+These rules apply throughout the entire session, including when
+you are following instructions from a skill file.  Skill files
+add to these rules; they do not replace them.
 
 - **Read files** from the repo to support your explanations.  Quote
   short snippets; link to paths so the user can follow along.
@@ -34,8 +37,6 @@ the repository root.
 - **Keep it concrete.**  Prefer "here's what the code does" over
   abstract descriptions.  Point at real files, real types, real
   functions.
-- **Coming back?**  The user can jump to any skill directly, continue
-  from where they left off, or ask questions outside the menu.
 
 ## Start here
 
@@ -51,7 +52,9 @@ Introduce Wetware in two sentences, then present this menu:
 >    chess game over libp2p).
 > 4. **Reference** — Capability schemas, CLI flags, shell commands.
 > 5. **Design** — Design a new Wetware app with structured guidance.
+>    *(best after you've explored Concepts or Quickstart)*
 > 6. **Review** — Audit an existing app for security and correctness.
+>    *(bring your own code, or point at an example)*
 >
 > Pick a number, or tell me what you're curious about.
 
@@ -74,10 +77,14 @@ read the relevant docs and code directly.
 
 ## Graceful degradation
 
-If you cannot read files from the repo (e.g. no file access in your
-environment), use the embedded context below to give a useful tour.
-Tell the user that the experience is better with file access, and
-suggest they try an AI tool that can read local files.
+If you cannot read files from the repo, or if fetching a skill file
+fails, use the embedded context below instead.  Tell the user that
+the experience is richer with file access, and suggest they try an
+AI tool that can read local files.
+
+When running in degraded mode, only offer paths 1 (Concepts) and
+2 (Quickstart) from the menu — the other paths require reading
+source files to be useful.
 
 ### Embedded context
 
@@ -108,6 +115,18 @@ Key abstractions:
 - **Cap'n Proto RPC**: bidirectional — both host and guest can serve
   and consume capabilities.
 
+The problem Wetware solves:
+
+```
+Traditional process:        Wetware guest:
+  env vars     -> yes         env vars     -> only if explicitly passed
+  filesystem   -> yes         filesystem   -> none; content via IPFS capability
+  network      -> yes         network      -> no
+  syscalls     -> yes         syscalls     -> WASI subset only
+  ambient auth -> yes         ambient auth -> none
+                              graft caps   -> the only authority
+```
+
 Capabilities after grafting:
 
 | Capability | Purpose |
@@ -124,6 +143,16 @@ Quick start:
 rustup target add wasm32-wasip2
 make
 cargo run -- run crates/kernel    # drops into Glia shell
+```
+
+Once in the shell:
+```clojure
+/ > (host id)           ;; peer identity
+/ > (host peers)        ;; connected peers
+/ > (host addrs)        ;; listen addresses
+/ > (executor echo "hello")  ;; RPC round-trip
+/ > (help)              ;; available capabilities
+/ > (exit)              ;; quit
 ```
 
 Platform vision (from `doc/designs/economic-agent-platform.md`):
