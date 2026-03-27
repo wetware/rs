@@ -48,6 +48,9 @@ pub struct ComponentRunStates {
     /// Cache mode for this process. `None` means no cache (default).
     /// `Shared` shares a global pinset cache; `Isolated` gets a private one.
     pub cache_mode: Option<cache::CacheMode>,
+    /// Staging directory for lazily-materialized IPFS content.
+    /// Created when cache_mode is set; IPFS files are written here on demand.
+    pub ipfs_staging: Option<tempfile::TempDir>,
 }
 
 // Required for WASI IO to work.
@@ -328,6 +331,11 @@ impl Proc {
         let mut linker = Linker::new(&engine);
         add_to_linker_async(&mut linker)?;
 
+        // Override filesystem bindings with IPFS interceptor when cache is active
+        if cache_mode.is_some() {
+            crate::fs_intercept::override_filesystem_linker(&mut linker)?;
+        }
+
         // Add loader host function if loader is provided
         if loader.is_some() {
             add_loader_to_linker(&mut linker)?;
@@ -363,12 +371,20 @@ impl Proc {
             None
         };
 
+        // Create staging directory for IPFS content when cache is active
+        let ipfs_staging = if cache_mode.is_some() {
+            Some(tempfile::TempDir::new().context("failed to create IPFS staging directory")?)
+        } else {
+            None
+        };
+
         let state = ComponentRunStates {
             wasi_ctx: wasi,
             resource_table: ResourceTable::new(),
             loader,
             data_stream,
             cache_mode,
+            ipfs_staging,
         };
 
         let mut store = Store::new(&engine, state);

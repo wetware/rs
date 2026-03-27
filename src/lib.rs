@@ -13,6 +13,8 @@ pub mod dispatcher;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod epoch;
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod fs_intercept;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod host;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod image;
