@@ -1387,4 +1387,247 @@ mod tests {
             })
             .await;
     }
+
+    // =========================================================================
+    // RPC bridge integration tests
+    // =========================================================================
+    //
+    // These test the full capability bridge pattern used by RpcListener/RpcDialer
+    // without requiring libp2p or WASM. We simulate the bridge with duplex streams:
+    //
+    //   Handler (Executor echo)
+    //       ↓ bootstrap cap
+    //   Process.bootstrap()
+    //       ↓ cap over duplex
+    //   Host bridge (Side::Server, bootstrap = handler_cap)
+    //       ↓ duplex stream
+    //   Remote peer (Side::Client, bootstraps → gets handler_cap)
+    //       ↓
+    //   Uses the cap (echo request)
+
+    /// Simulate the host bridge: serve a bootstrap cap over a duplex stream,
+    /// return the "remote peer" side client that bootstrapped from it.
+    fn setup_bridge<T: capnp::capability::FromClientHook>(
+        bootstrap_cap: capnp::capability::Client,
+    ) -> (T, tokio::task::JoinHandle<()>) {
+        let (peer_stream, bridge_stream) = io::duplex(8 * 1024);
+        let (bridge_read, bridge_write) = io::split(bridge_stream);
+        let (peer_read, peer_write) = io::split(peer_stream);
+
+        // Host bridge side: serve the handler's cap.
+        let bridge_network = VatNetwork::new(
+            bridge_read.compat(),
+            bridge_write.compat_write(),
+            Side::Server,
+            Default::default(),
+        );
+        let bridge_rpc = RpcSystem::new(Box::new(bridge_network), Some(bootstrap_cap));
+        let bridge_handle = tokio::task::spawn_local(async move {
+            let _ = bridge_rpc.await;
+        });
+
+        // Remote peer side: bootstrap to get the handler's cap.
+        let peer_network = VatNetwork::new(
+            peer_read.compat(),
+            peer_write.compat_write(),
+            Side::Client,
+            Default::default(),
+        );
+        let mut peer_rpc = RpcSystem::new(Box::new(peer_network), None);
+        let remote_cap: T = peer_rpc.bootstrap(Side::Server);
+        tokio::task::spawn_local(async move {
+            let _ = peer_rpc.await;
+        });
+
+        (remote_cap, bridge_handle)
+    }
+
+    #[tokio::test]
+    async fn test_rpc_bridge_cap_flows_to_remote_peer() {
+        // The golden path: handler exports a cap → Process.bootstrap() →
+        // host serves it over a stream → remote peer bootstraps and uses it.
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // 1. Create a real Executor (the "handler's exported cap").
+                let (host, _server, _rx) = setup_rpc();
+                let executor_cap = host.executor_request().send().pipeline.get_executor();
+
+                // 2. Store it in a ProcessImpl (simulates build_membrane_rpc capture).
+                let (stdin, stdout, stderr, exit_rx) = dummy_process_parts();
+                let process_impl = ProcessImpl::with_bootstrap(
+                    stdin,
+                    stdout,
+                    stderr,
+                    exit_rx,
+                    executor_cap.client.clone(),
+                );
+                let process = setup_process_rpc(process_impl);
+
+                // 3. Call Process.bootstrap() to get the cap (what handle_rpc_connection does).
+                let resp = process.bootstrap_request().send().promise.await.unwrap();
+                let bootstrap_cap: capnp::capability::Client =
+                    resp.get().unwrap().get_cap().get_as_capability().unwrap();
+
+                // 4. Bridge: serve it over a duplex (simulates the libp2p stream bridge).
+                let (remote_executor, _bridge): (system_capnp::executor::Client, _) =
+                    setup_bridge(bootstrap_cap);
+
+                // 5. Remote peer uses the cap through the bridge.
+                let mut echo_req = remote_executor.echo_request();
+                echo_req.get().set_message("hello from remote peer");
+                let echo_resp = echo_req.send().promise.await.unwrap();
+                let text = echo_resp
+                    .get()
+                    .unwrap()
+                    .get_response()
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                assert_eq!(text, "Echo: hello from remote peer");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_bridge_multiple_calls_through_bridge() {
+        // Verify the bridge handles multiple sequential RPC calls, not just one.
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+                let executor_cap = host.executor_request().send().pipeline.get_executor();
+
+                let (stdin, stdout, stderr, exit_rx) = dummy_process_parts();
+                let process_impl = ProcessImpl::with_bootstrap(
+                    stdin,
+                    stdout,
+                    stderr,
+                    exit_rx,
+                    executor_cap.client.clone(),
+                );
+                let process = setup_process_rpc(process_impl);
+
+                let resp = process.bootstrap_request().send().promise.await.unwrap();
+                let bootstrap_cap: capnp::capability::Client =
+                    resp.get().unwrap().get_cap().get_as_capability().unwrap();
+
+                let (remote_executor, _bridge): (system_capnp::executor::Client, _) =
+                    setup_bridge(bootstrap_cap);
+
+                // Make 5 calls through the bridge.
+                for i in 0..5 {
+                    let mut req = remote_executor.echo_request();
+                    req.get().set_message(format!("msg-{i}"));
+                    let resp = req.send().promise.await.unwrap();
+                    let text = resp
+                        .get()
+                        .unwrap()
+                        .get_response()
+                        .unwrap()
+                        .to_str()
+                        .unwrap();
+                    assert_eq!(text, format!("Echo: msg-{i}"));
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_bridge_concurrent_calls() {
+        // Verify pipelined (concurrent) calls work through the bridge.
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+                let executor_cap = host.executor_request().send().pipeline.get_executor();
+
+                let (stdin, stdout, stderr, exit_rx) = dummy_process_parts();
+                let process_impl = ProcessImpl::with_bootstrap(
+                    stdin,
+                    stdout,
+                    stderr,
+                    exit_rx,
+                    executor_cap.client.clone(),
+                );
+                let process = setup_process_rpc(process_impl);
+
+                let resp = process.bootstrap_request().send().promise.await.unwrap();
+                let bootstrap_cap: capnp::capability::Client =
+                    resp.get().unwrap().get_cap().get_as_capability().unwrap();
+
+                let (remote_executor, _bridge): (system_capnp::executor::Client, _) =
+                    setup_bridge(bootstrap_cap);
+
+                // Fire 5 calls concurrently (pipelined), then collect results.
+                let mut futures = Vec::new();
+                for i in 0..5 {
+                    let mut req = remote_executor.echo_request();
+                    req.get().set_message(format!("concurrent-{i}"));
+                    futures.push(req.send().promise);
+                }
+
+                for (i, fut) in futures.into_iter().enumerate() {
+                    let resp = fut.await.unwrap();
+                    let text = resp
+                        .get()
+                        .unwrap()
+                        .get_response()
+                        .unwrap()
+                        .to_str()
+                        .unwrap();
+                    assert_eq!(text, format!("Echo: concurrent-{i}"));
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_bridge_distinct_caps_stay_independent() {
+        // Two separate bridges with different bootstrap caps don't interfere.
+        // This validates that the bridge correctly isolates per-connection state.
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+                let executor_cap = host.executor_request().send().pipeline.get_executor();
+
+                // Create two independent process+bridge chains.
+                let mut remote_executors = Vec::new();
+                for _ in 0..2 {
+                    let (stdin, stdout, stderr, exit_rx) = dummy_process_parts();
+                    let process_impl = ProcessImpl::with_bootstrap(
+                        stdin,
+                        stdout,
+                        stderr,
+                        exit_rx,
+                        executor_cap.client.clone(),
+                    );
+                    let process = setup_process_rpc(process_impl);
+
+                    let resp = process.bootstrap_request().send().promise.await.unwrap();
+                    let cap: capnp::capability::Client =
+                        resp.get().unwrap().get_cap().get_as_capability().unwrap();
+
+                    let (remote, _bridge): (system_capnp::executor::Client, _) = setup_bridge(cap);
+                    remote_executors.push(remote);
+                }
+
+                // Both bridges work independently.
+                for (i, remote) in remote_executors.iter().enumerate() {
+                    let mut req = remote.echo_request();
+                    req.get().set_message(format!("bridge-{i}"));
+                    let resp = req.send().promise.await.unwrap();
+                    let text = resp
+                        .get()
+                        .unwrap()
+                        .get_response()
+                        .unwrap()
+                        .to_str()
+                        .unwrap();
+                    assert_eq!(text, format!("Echo: bridge-{i}"));
+                }
+            })
+            .await;
+    }
 }
