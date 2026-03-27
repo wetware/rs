@@ -258,18 +258,19 @@ impl IsolatedPinset {
         self.staging.path()
     }
 
-    /// Ensure a CID is pinned. Same interface as `PinsetCache::ensure`.
+    /// Ensure a CID is pinned. Idempotent within this pinset.
+    ///
+    /// Each IsolatedPinset pins independently in IPFS, giving cross-process
+    /// refcounting: the IPFS node keeps content as long as any process holds
+    /// a pin. Lock is held across the async pin to prevent double-pinning
+    /// within a single process (contention is low for per-proc pinsets).
     pub async fn ensure(&self, cid: &Cid) -> Result<()> {
-        {
-            let pins = self.pins.lock().await;
-            if pins.contains_key(cid) {
-                return Ok(());
-            }
+        let mut pins = self.pins.lock().await;
+        if pins.contains_key(cid) {
+            return Ok(());
         }
 
         self.pinner.pin(cid).await.context("failed to pin CID")?;
-
-        let mut pins = self.pins.lock().await;
         pins.insert(*cid, ());
 
         Ok(())
