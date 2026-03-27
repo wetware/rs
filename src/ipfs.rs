@@ -135,6 +135,35 @@ pub struct UnixFSRef<'a> {
 }
 
 impl UnixFSRef<'_> {
+    /// Get file content from an IPFS path (borrowing version of `UnixFS::get`).
+    pub async fn get_bytes(&self, cid: &cid::Cid) -> Result<Vec<u8>> {
+        let path = format!("/ipfs/{cid}");
+        let url = format!("{}/api/v0/cat?arg={}", self.client.base_url, path);
+        let response = self
+            .client
+            .http_client
+            .post(&url)
+            .send()
+            .await
+            .with_context(|| {
+                format!("Failed to connect to IPFS node at {}", self.client.base_url)
+            })?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to retrieve file from IPFS: {} (cid: {})",
+                response.status(),
+                cid
+            ));
+        }
+
+        response
+            .bytes()
+            .await
+            .with_context(|| format!("Failed to read IPFS content for {cid}"))
+            .map(|b| b.to_vec())
+    }
+
     /// Fetch an IPFS directory and extract it to a local path.
     ///
     /// Uses kubo's `/api/v0/get?arg=<path>&archive=true` which returns
@@ -507,6 +536,28 @@ impl HttpClient {
             .and_then(|h| h.as_str())
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow::anyhow!("ipfs add: missing Hash in response"))
+    }
+}
+
+// ── Pinner impl for cache crate ────────────────────────────────────
+
+#[async_trait]
+impl cache::Pinner for HttpClient {
+    async fn pin(&self, cid: &cid::Cid) -> Result<()> {
+        self.pin_add(&cid.to_string()).await
+    }
+
+    async fn unpin(&self, cid: &cid::Cid) -> Result<()> {
+        self.pin_rm(&cid.to_string()).await
+    }
+
+    async fn fetch(&self, cid: &cid::Cid) -> Result<Vec<u8>> {
+        self.unixfs_ref().get_bytes(cid).await
+    }
+
+    async fn size(&self, cid: &cid::Cid) -> Result<u64> {
+        let entries = self.ls(&format!("/ipfs/{cid}")).await?;
+        Ok(entries.iter().map(|e| e.size).sum())
     }
 }
 
