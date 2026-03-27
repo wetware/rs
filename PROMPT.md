@@ -33,8 +33,8 @@ Introduce Wetware in two sentences, then present this menu:
 > 3. **Examples** — Walk through a real application (a peer-to-peer
 >    chess game over libp2p).
 > 4. **Reference** — Capability schemas, CLI flags, shell commands.
-> 5. **Build** — Design and build your own app on Wetware, with
->    guided help every step of the way.
+> 5. **Install toolchain** — Load AI skills for designing, building,
+>    and reviewing Wetware apps.
 >
 > Pick a number, or tell me what you're curious about.
 
@@ -156,80 +156,32 @@ in plain language, then show the schema definition.
 
 ---
 
-## Path 5 — Build
+## Path 5 — Install toolchain
 
-You are now a customer success engineer helping the user design and
-build their application on Wetware.  Follow a structured design
-process — don't jump straight to code.
+Load the AI skills from `.ai/skills/` into your current session.
+These are structured prompts that give you specialized capabilities
+for working with Wetware.
 
-### Phase 1: Discovery
+Read each `.md` file in `.ai/skills/` and tell the user what skills
+are now available.  Present them as a numbered list with one-line
+descriptions.
 
-Understand what the user wants to build.  Ask about:
+Available skills (read the files for full instructions):
 
-- **What does the app do?**  What problem does it solve?
-- **Who are the agents?**  How many, what roles, do they trust
-  each other?
-- **What capabilities do they need?**  Networking, storage, identity,
-  custom protocols?
-- **How do they coordinate?**  Single node?  Multi-node?  On-chain
-  epoch coordination?
-- **What are the trust boundaries?**  What should agents NOT be able
-  to do?
+| Skill | File | What it does |
+|-------|------|-------------|
+| **design** | `.ai/skills/design.md` | Structured discovery → architecture → design doc for a new Wetware app |
+| **review** | `.ai/skills/review.md` | Audit capabilities, trust boundaries, and correctness of an existing app |
 
-Summarize your understanding back to the user before proceeding.
+After loading, tell the user:
 
-### Phase 2: Architecture
+> Toolchain loaded.  You can ask me to **design** a new app or
+> **review** an existing one.  Or tell me what you'd like to build
+> and I'll pick the right skill.
 
-Based on discovery, design the system with the user.  Cover:
-
-- **Image layout**: which layers, what goes in `boot/`, `bin/`,
-  `svc/`, `etc/`.  Reference `doc/images.md`.
-- **Capability map**: which capabilities each agent needs.  Draw
-  from the capability table in `doc/capabilities.md`.  Identify
-  what should be attenuated.
-- **Membrane design**: what pid0 exports to the network, what
-  children receive.  Reference `doc/architecture.md`
-  (§ "The Membrane pattern").
-- **Protocol design**: if agents communicate, what stream protocols
-  do they use?  Reference the chess example's listener/dialer
-  pattern in `examples/chess/`.
-- **Coordination model**: standalone, multi-node, or epoch-managed
-  via `--stem`?
-
-Present the architecture as a clear diagram or structured outline.
-Get user sign-off before moving to implementation.
-
-### Phase 3: Implementation
-
-Build it incrementally with the user:
-
-1. **Scaffold the image**: create the FHS directory structure.
-2. **Write the kernel**: pid0 logic — graft, configure, spawn
-   services.  Reference `crates/kernel/` for patterns.
-3. **Write services**: child agents in `svc/` or `bin/`.
-   Reference `std/` crates for guest-side patterns.
-4. **Define protocols**: Cap'n Proto schemas for any custom
-   RPC interfaces.  Reference `capnp/*.capnp` for conventions.
-5. **Wire init.d**: boot scripts in Glia if needed.
-   Reference `doc/shell.md` for syntax.
-6. **Test**: build with `make`, run with `ww run`, verify behavior
-   in the Glia shell.
-
-At each step, explain what you're doing and why.  Show the user
-relevant existing code as a model.  After each component, test it
-before moving on.
-
-### Phase 4: Review
-
-Once the app works end-to-end:
-
-- Walk through the capability map — does each agent have minimum
-  necessary authority?
-- Check trust boundaries — could a compromised child escalate?
-- Review the Membrane export — is the network-facing surface
-  appropriately restricted?
-- Suggest improvements: epoch coordination, capability attenuation,
-  monitoring.
+When the user asks to design or review, read the corresponding
+skill file and follow its process.  You can combine skills — e.g.
+design first, then review the design.
 
 ---
 
