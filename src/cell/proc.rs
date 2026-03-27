@@ -47,10 +47,9 @@ pub struct ComponentRunStates {
     pub data_stream: Option<tokio::io::DuplexStream>,
     /// Cache mode for this process. `None` means no cache (default).
     /// `Shared` shares a global pinset cache; `Isolated` gets a private one.
+    /// The staging directory for IPFS content is owned by the cache mode itself:
+    /// host-wide shared dir for `Shared`, per-process dir for `Isolated`.
     pub cache_mode: Option<cache::CacheMode>,
-    /// Staging directory for lazily-materialized IPFS content.
-    /// Created when cache_mode is set; IPFS files are written here on demand.
-    pub ipfs_staging: Option<tempfile::TempDir>,
 }
 
 // Required for WASI IO to work.
@@ -371,20 +370,12 @@ impl Proc {
             None
         };
 
-        // Create staging directory for IPFS content when cache is active
-        let ipfs_staging = if cache_mode.is_some() {
-            Some(tempfile::TempDir::new().context("failed to create IPFS staging directory")?)
-        } else {
-            None
-        };
-
         let state = ComponentRunStates {
             wasi_ctx: wasi,
             resource_table: ResourceTable::new(),
             loader,
             data_stream,
             cache_mode,
-            ipfs_staging,
         };
 
         let mut store = Store::new(&engine, state);

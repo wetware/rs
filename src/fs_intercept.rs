@@ -6,7 +6,6 @@
 
 use crate::cell::proc::ComponentRunStates;
 use anyhow::Result;
-use tempfile::TempDir;
 use wasmtime::component::{HasData, Linker, Resource};
 use wasmtime_wasi::filesystem::{WasiFilesystemCtx, WasiFilesystemCtxView};
 use wasmtime_wasi::p2::bindings::filesystem::{preopens, types};
@@ -27,7 +26,6 @@ pub(crate) struct IpfsFilesystemView<'a> {
     pub ctx: &'a mut WasiFilesystemCtx,
     pub table: &'a mut wasmtime::component::ResourceTable,
     pub cache_mode: &'a Option<cache::CacheMode>,
-    pub staging: &'a TempDir,
 }
 
 impl IpfsFilesystemView<'_> {
@@ -44,16 +42,12 @@ impl IpfsFilesystemView<'_> {
 
 fn ipfs_filesystem(state: &mut ComponentRunStates) -> IpfsFilesystemView<'_> {
     // Split borrow across distinct fields of ComponentRunStates.
-    // wasi_ctx.filesystem() borrows wasi_ctx; resource_table, cache_mode,
-    // and ipfs_staging are separate fields.
+    // wasi_ctx.filesystem() borrows wasi_ctx; resource_table and cache_mode
+    // are separate fields.
     IpfsFilesystemView {
         ctx: state.wasi_ctx.filesystem(),
         table: &mut state.resource_table,
         cache_mode: &state.cache_mode,
-        staging: state
-            .ipfs_staging
-            .as_ref()
-            .expect("ipfs_staging must be set when IPFS intercept is active"),
     }
 }
 
@@ -113,17 +107,14 @@ impl IpfsFilesystemView<'_> {
             .ok_or_else(|| -> FsError { types::ErrorCode::NoEntry.into() })?;
 
         // Ensure CID is pinned in IPFS
-        match cache {
-            cache::CacheMode::Shared(pinset) => pinset.ensure(&ipfs_path.cid).await,
-            cache::CacheMode::Isolated(isolated) => isolated.ensure(&ipfs_path.cid).await,
-        }
-        .map_err(|e| {
+        cache.ensure(&ipfs_path.cid).await.map_err(|e| {
             tracing::warn!(cid = %ipfs_path.cid, err = %e, "IPFS cache ensure failed");
             FsError::from(types::ErrorCode::Io)
         })?;
 
-        // Materialize to staging directory (local filesystem is our cache)
-        let staging_path = self.staging.path().join(ipfs_path.cid.to_string());
+        // Materialize to staging directory (local filesystem is our cache).
+        // Staging dir is owned by the CacheMode: shared for Shared, per-proc for Isolated.
+        let staging_path = cache.staging_dir().join(ipfs_path.cid.to_string());
         let file_path = if ipfs_path.subpath.is_empty() {
             staging_path.clone()
         } else {
@@ -132,11 +123,7 @@ impl IpfsFilesystemView<'_> {
 
         // Skip fetch if already staged (disk cache hit)
         if !file_path.exists() {
-            let bytes = match cache {
-                cache::CacheMode::Shared(pinset) => pinset.fetch(&ipfs_path.cid).await,
-                cache::CacheMode::Isolated(isolated) => isolated.fetch(&ipfs_path.cid).await,
-            }
-            .map_err(|e| {
+            let bytes = cache.fetch(&ipfs_path.cid).await.map_err(|e| {
                 tracing::warn!(cid = %ipfs_path.cid, err = %e, "IPFS fetch failed");
                 FsError::from(types::ErrorCode::Io)
             })?;
@@ -594,7 +581,6 @@ mod tests {
         wasi_ctx: wasmtime_wasi::WasiCtx,
         resource_table: wasmtime::component::ResourceTable,
         cache_mode: Option<cache::CacheMode>,
-        staging: TempDir,
     }
 
     impl TestHarness {
@@ -603,7 +589,6 @@ mod tests {
                 wasi_ctx: wasmtime_wasi::WasiCtxBuilder::new().build(),
                 resource_table: wasmtime::component::ResourceTable::new(),
                 cache_mode,
-                staging: TempDir::new().unwrap(),
             }
         }
 
@@ -612,7 +597,6 @@ mod tests {
                 ctx: self.wasi_ctx.filesystem(),
                 table: &mut self.resource_table,
                 cache_mode: &self.cache_mode,
-                staging: &self.staging,
             }
         }
     }
@@ -624,7 +608,7 @@ mod tests {
         let content = b"hello ipfs world";
         let (cid, pinner) = test_cid_and_pinner(content);
 
-        let isolated = cache::IsolatedPinset::new(pinner);
+        let isolated = cache::IsolatedPinset::new(pinner).unwrap();
         let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
 
         let ipfs_path = IpfsCidPath {
@@ -646,7 +630,12 @@ mod tests {
         assert!(desc.is_ok(), "descriptor should be in resource table");
 
         // Content was materialized to staging
-        let staging_file = harness.staging.path().join(cid.to_string());
+        let staging_file = harness
+            .cache_mode
+            .as_ref()
+            .unwrap()
+            .staging_dir()
+            .join(cid.to_string());
         assert!(staging_file.exists(), "staging file should exist");
         assert_eq!(
             std::fs::read(&staging_file).unwrap(),
@@ -658,7 +647,7 @@ mod tests {
     #[tokio::test]
     async fn test_open_ipfs_write_rejected() {
         let (cid, pinner) = test_cid_and_pinner(b"data");
-        let isolated = cache::IsolatedPinset::new(pinner);
+        let isolated = cache::IsolatedPinset::new(pinner).unwrap();
         let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
 
         let ipfs_path = IpfsCidPath {
@@ -706,7 +695,7 @@ mod tests {
         let pinner = Arc::new(MockPinner {
             data: HashMap::new(),
         });
-        let isolated = cache::IsolatedPinset::new(pinner);
+        let isolated = cache::IsolatedPinset::new(pinner).unwrap();
         let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
 
         let cid: cid::Cid = "QmYwAPJzv5CZsnN625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
@@ -733,7 +722,7 @@ mod tests {
         let content = b"shared cache content";
         let (cid, pinner) = test_cid_and_pinner(content);
 
-        let pinset = Arc::new(cache::PinsetCache::new(pinner, 10 * 1024 * 1024));
+        let pinset = Arc::new(cache::PinsetCache::new(pinner, 10 * 1024 * 1024).unwrap());
         let mut harness = TestHarness::new(Some(cache::CacheMode::Shared(pinset)));
 
         let ipfs_path = IpfsCidPath {
@@ -752,7 +741,12 @@ mod tests {
 
         assert!(harness.resource_table.get(&fd).is_ok());
 
-        let staging_file = harness.staging.path().join(cid.to_string());
+        let staging_file = harness
+            .cache_mode
+            .as_ref()
+            .unwrap()
+            .staging_dir()
+            .join(cid.to_string());
         assert_eq!(std::fs::read(&staging_file).unwrap(), content);
     }
 
@@ -761,7 +755,7 @@ mod tests {
         let content = b"nested file content";
         let (cid, pinner) = test_cid_and_pinner(content);
 
-        let isolated = cache::IsolatedPinset::new(pinner);
+        let isolated = cache::IsolatedPinset::new(pinner).unwrap();
         let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
 
         let ipfs_path = IpfsCidPath {
@@ -782,8 +776,10 @@ mod tests {
 
         // Verify nested path was created in staging
         let nested_file = harness
-            .staging
-            .path()
+            .cache_mode
+            .as_ref()
+            .unwrap()
+            .staging_dir()
             .join(cid.to_string())
             .join("sub/dir/file.txt");
         assert!(nested_file.exists(), "nested staging file should exist");
@@ -795,7 +791,7 @@ mod tests {
         let content = b"cached on disk";
         let (cid, pinner) = test_cid_and_pinner(content);
 
-        let isolated = cache::IsolatedPinset::new(pinner);
+        let isolated = cache::IsolatedPinset::new(pinner).unwrap();
         let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
 
         // First open: fetches and stages

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,6 +7,7 @@ use crate::arc::ArcInner;
 use crate::pinner::Pinner;
 use anyhow::{Context, Result};
 use cid::Cid;
+use tempfile::TempDir;
 use tokio::sync::{Mutex, Notify};
 
 /// A cached pin entry. Tracks that a CID is pinned in the IPFS node
@@ -32,6 +34,9 @@ struct CacheState {
 pub struct PinsetCache {
     state: Mutex<CacheState>,
     pinner: Arc<dyn Pinner>,
+    /// Host-wide staging directory for materialized IPFS content.
+    /// Shared across all processes using `CacheMode::Shared`.
+    staging: TempDir,
 }
 
 /// Maximum retry attempts for failed unpins.
@@ -50,14 +55,23 @@ impl PinsetCache {
     ///
     /// - `pinner`: the IPFS pin backend
     /// - `budget`: maximum total weight (bytes) of pinned entries managed by the ARC
-    pub fn new(pinner: Arc<dyn Pinner>, budget: usize) -> Self {
-        Self {
+    ///
+    /// Creates a host-wide staging directory in `/tmp` for materialized IPFS content.
+    pub fn new(pinner: Arc<dyn Pinner>, budget: usize) -> Result<Self> {
+        let staging = TempDir::new().context("failed to create shared IPFS staging directory")?;
+        Ok(Self {
             state: Mutex::new(CacheState {
                 arc: ArcInner::new(budget, Self::DEFAULT_GHOST_CAPACITY, pin_entry_weighter),
                 inflight: HashMap::new(),
             }),
             pinner,
-        }
+            staging,
+        })
+    }
+
+    /// Path to the shared staging directory.
+    pub fn staging_dir(&self) -> &Path {
+        self.staging.path()
     }
 
     /// Ensure a CID is pinned in the IPFS node and tracked by the ARC.
@@ -190,20 +204,58 @@ pub enum CacheMode {
     Isolated(IsolatedPinset),
 }
 
+impl CacheMode {
+    /// Path to the staging directory for materialized IPFS content.
+    ///
+    /// - `Shared`: host-wide directory shared across all processes
+    /// - `Isolated`: per-process directory, cleaned up on drop
+    pub fn staging_dir(&self) -> &Path {
+        match self {
+            CacheMode::Shared(cache) => cache.staging_dir(),
+            CacheMode::Isolated(pinset) => pinset.staging_dir(),
+        }
+    }
+
+    /// Ensure a CID is pinned.
+    pub async fn ensure(&self, cid: &Cid) -> Result<()> {
+        match self {
+            CacheMode::Shared(cache) => cache.ensure(cid).await,
+            CacheMode::Isolated(pinset) => pinset.ensure(cid).await,
+        }
+    }
+
+    /// Fetch raw bytes for a CID.
+    pub async fn fetch(&self, cid: &Cid) -> Result<Vec<u8>> {
+        match self {
+            CacheMode::Shared(cache) => cache.fetch(cid).await,
+            CacheMode::Isolated(pinset) => pinset.fetch(cid).await,
+        }
+    }
+}
+
 /// A per-process isolated pinset. Does not use ARC; simply tracks
 /// what this process has pinned and unpins everything on drop.
 pub struct IsolatedPinset {
     pinner: Arc<dyn Pinner>,
     pins: Mutex<HashMap<Cid, ()>>,
+    /// Per-process staging directory. Cleaned up on drop.
+    staging: TempDir,
 }
 
 impl IsolatedPinset {
-    /// Create a new isolated pinset.
-    pub fn new(pinner: Arc<dyn Pinner>) -> Self {
-        Self {
+    /// Create a new isolated pinset with its own staging directory.
+    pub fn new(pinner: Arc<dyn Pinner>) -> Result<Self> {
+        let staging = TempDir::new().context("failed to create isolated IPFS staging directory")?;
+        Ok(Self {
             pinner,
             pins: Mutex::new(HashMap::new()),
-        }
+            staging,
+        })
+    }
+
+    /// Path to the per-process staging directory.
+    pub fn staging_dir(&self) -> &Path {
+        self.staging.path()
     }
 
     /// Ensure a CID is pinned. Same interface as `PinsetCache::ensure`.
@@ -341,7 +393,7 @@ mod tests {
     #[tokio::test]
     async fn test_ensure_pins_on_miss() {
         let pinner = mock_with_entries(&[(1, b"hello")]);
-        let cache = PinsetCache::new(pinner.clone(), 1024);
+        let cache = PinsetCache::new(pinner.clone(), 1024).unwrap();
 
         cache.ensure(&test_cid(1)).await.unwrap();
         assert_eq!(pinner.pin_count.load(Ordering::Relaxed), 1);
@@ -350,7 +402,7 @@ mod tests {
     #[tokio::test]
     async fn test_ensure_is_idempotent() {
         let pinner = mock_with_entries(&[(1, b"data")]);
-        let cache = PinsetCache::new(pinner.clone(), 1024);
+        let cache = PinsetCache::new(pinner.clone(), 1024).unwrap();
 
         cache.ensure(&test_cid(1)).await.unwrap();
         cache.ensure(&test_cid(1)).await.unwrap();
@@ -361,7 +413,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_returns_bytes() {
         let pinner = mock_with_entries(&[(1, b"hello")]);
-        let cache = PinsetCache::new(pinner, 1024);
+        let cache = PinsetCache::new(pinner, 1024).unwrap();
 
         cache.ensure(&test_cid(1)).await.unwrap();
         let bytes = cache.fetch(&test_cid(1)).await.unwrap();
@@ -371,7 +423,7 @@ mod tests {
     #[tokio::test]
     async fn test_eviction_unpins() {
         let pinner = mock_with_entries(&[(1, &[0u8; 60]), (2, &[0u8; 60])]);
-        let cache = PinsetCache::new(pinner.clone(), 80); // budget=80
+        let cache = PinsetCache::new(pinner.clone(), 80).unwrap(); // budget=80
 
         cache.ensure(&test_cid(1)).await.unwrap(); // weight 60
         cache.ensure(&test_cid(2)).await.unwrap(); // weight 60, total 120 > 80
@@ -387,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_dedup() {
         let pinner = mock_with_entries(&[(1, b"data")]);
-        let cache = Arc::new(PinsetCache::new(pinner.clone(), 1024));
+        let cache = Arc::new(PinsetCache::new(pinner.clone(), 1024).unwrap());
 
         let mut handles = Vec::new();
         for _ in 0..10 {
@@ -407,7 +459,7 @@ mod tests {
     #[tokio::test]
     async fn test_isolated_cleanup() {
         let pinner = mock_with_entries(&[(1, b"a"), (2, b"b")]);
-        let iso = IsolatedPinset::new(pinner.clone());
+        let iso = IsolatedPinset::new(pinner.clone()).unwrap();
 
         iso.ensure(&test_cid(1)).await.unwrap();
         iso.ensure(&test_cid(2)).await.unwrap();
@@ -424,7 +476,7 @@ mod tests {
     async fn test_pin_failure_no_cache() {
         let pinner = mock_with_entries(&[(1, b"data")]);
         pinner.fail_pin.store(true, Ordering::Relaxed);
-        let cache = PinsetCache::new(pinner, 1024);
+        let cache = PinsetCache::new(pinner, 1024).unwrap();
 
         let result = cache.ensure(&test_cid(1)).await;
         assert!(result.is_err(), "pin failure should propagate");
@@ -438,7 +490,7 @@ mod tests {
     async fn test_size_failure_before_pin() {
         let pinner = mock_with_entries(&[(1, b"data")]);
         pinner.fail_size.store(true, Ordering::Relaxed);
-        let cache = PinsetCache::new(pinner.clone(), 1024);
+        let cache = PinsetCache::new(pinner.clone(), 1024).unwrap();
 
         let result = cache.ensure(&test_cid(1)).await;
         assert!(result.is_err());
@@ -451,7 +503,7 @@ mod tests {
         let pinner = mock_with_entries(&[(1, &[0u8; 60]), (2, &[0u8; 60])]);
         // Fail unpins initially.
         pinner.fail_unpin.store(true, Ordering::Relaxed);
-        let cache = PinsetCache::new(pinner.clone(), 80);
+        let cache = PinsetCache::new(pinner.clone(), 80).unwrap();
 
         cache.ensure(&test_cid(1)).await.unwrap();
 
@@ -476,7 +528,7 @@ mod tests {
     async fn test_unpin_retry_exhausted() {
         let pinner = mock_with_entries(&[(1, &[0u8; 60]), (2, &[0u8; 60])]);
         pinner.fail_unpin.store(true, Ordering::Relaxed);
-        let cache = PinsetCache::new(pinner.clone(), 80);
+        let cache = PinsetCache::new(pinner.clone(), 80).unwrap();
 
         cache.ensure(&test_cid(1)).await.unwrap();
         cache.ensure(&test_cid(2)).await.unwrap(); // triggers eviction + unpin
