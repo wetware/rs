@@ -5,6 +5,7 @@ members = [
     "crates/glia",
     "crates/cache",
     "crates/membrane",
+    "crates/schema-id",
     "crates/guest/auth",
     "std/system",
     # "crates/kernel",  # TODO: re-enable when kernel crate is created
