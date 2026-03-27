@@ -12,8 +12,9 @@ use std::rc::Rc;
 // Types
 // =========================================================================
 
-/// Shared state between `perform` and `with-handler`'s poll loop.
-/// `perform` writes here; `with-handler` reads and dispatches.
+/// Shared state between `perform` and `with-effect-handler`'s poll loop.
+/// `perform` writes here; `with-effect-handler` reads and dispatches.
+#[derive(Default)]
 pub struct EffectSlot {
     pub pending: Option<(String, Val, oneshot::Sender)>,
 }
@@ -29,12 +30,6 @@ impl core::fmt::Debug for EffectSlot {
 impl core::fmt::Debug for HandlerContext {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("HandlerContext").finish()
-    }
-}
-
-impl Default for EffectSlot {
-    fn default() -> Self {
-        Self { pending: None }
     }
 }
 
