@@ -92,13 +92,13 @@ the default kernel.
 ## Interactive tour
 
 ```
-I just cloned github.com/wetware/ww.  Read doc/ai-tour.md and give me a guided tour.
+I just cloned github.com/wetware/ww.  Read PROMPT.md and give me a guided tour.
 ```
 
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) ·
 [Cursor](https://cursor.com) ·
 [Windsurf](https://windsurf.com) ·
-[doc/ai-tour.md](doc/ai-tour.md)
+[PROMPT.md](PROMPT.md)
 
 ## Learn more
 
