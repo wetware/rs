@@ -491,6 +491,10 @@ pub(crate) fn override_filesystem_linker(linker: &mut Linker<ComponentRunStates>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    // ── CID path parsing tests ─────────────────────────────────────
 
     #[test]
     fn test_parse_ipfs_path_with_subpath() {
@@ -519,5 +523,247 @@ mod tests {
     #[test]
     fn test_parse_ipfs_path_invalid_cid() {
         assert!(parse_ipfs_path("ipfs/not-a-valid-cid/file").is_none());
+    }
+
+    // ── Mock pinner for integration tests ──────────────────────────
+
+    struct MockPinner {
+        data: HashMap<cid::Cid, Vec<u8>>,
+    }
+
+    #[async_trait::async_trait]
+    impl cache::Pinner for MockPinner {
+        async fn pin(&self, _cid: &cid::Cid) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn unpin(&self, _cid: &cid::Cid) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn fetch(&self, cid: &cid::Cid) -> anyhow::Result<Vec<u8>> {
+            self.data
+                .get(cid)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("CID not found in mock"))
+        }
+        async fn size(&self, cid: &cid::Cid) -> anyhow::Result<u64> {
+            self.data
+                .get(cid)
+                .map(|d| d.len() as u64)
+                .ok_or_else(|| anyhow::anyhow!("CID not found in mock"))
+        }
+    }
+
+    /// Helper: construct a test CID + mock pinner with known content.
+    fn test_cid_and_pinner(content: &[u8]) -> (cid::Cid, Arc<MockPinner>) {
+        let cid_str = "QmYwAPJzv5CZsnN625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
+        let cid: cid::Cid = cid_str.parse().unwrap();
+        let mut data = HashMap::new();
+        data.insert(cid, content.to_vec());
+        (cid, Arc::new(MockPinner { data }))
+    }
+
+    /// Helper: build the view for testing open_ipfs.
+    struct TestHarness {
+        wasi_ctx: wasmtime_wasi::WasiCtx,
+        resource_table: wasmtime::component::ResourceTable,
+        cache_mode: Option<cache::CacheMode>,
+        staging: TempDir,
+    }
+
+    impl TestHarness {
+        fn new(cache_mode: Option<cache::CacheMode>) -> Self {
+            Self {
+                wasi_ctx: wasmtime_wasi::WasiCtxBuilder::new().build(),
+                resource_table: wasmtime::component::ResourceTable::new(),
+                cache_mode,
+                staging: TempDir::new().unwrap(),
+            }
+        }
+
+        fn view(&mut self) -> IpfsFilesystemView<'_> {
+            IpfsFilesystemView {
+                ctx: self.wasi_ctx.filesystem(),
+                table: &mut self.resource_table,
+                cache_mode: &self.cache_mode,
+                staging: &self.staging,
+            }
+        }
+    }
+
+    // ── Integration tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_open_ipfs_file_materializes_and_returns_descriptor() {
+        let content = b"hello ipfs world";
+        let (cid, pinner) = test_cid_and_pinner(content);
+
+        let isolated = cache::IsolatedPinset::new(pinner, 1024 * 1024);
+        let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
+
+        let ipfs_path = IpfsCidPath {
+            cid,
+            subpath: String::new(),
+        };
+        let fd = harness
+            .view()
+            .open_ipfs(
+                ipfs_path,
+                types::OpenFlags::empty(),
+                types::DescriptorFlags::READ,
+            )
+            .await
+            .expect("open_ipfs should succeed");
+
+        // Descriptor was pushed to the resource table
+        let desc = harness.resource_table.get(&fd);
+        assert!(desc.is_ok(), "descriptor should be in resource table");
+
+        // Content was materialized to staging
+        let staging_file = harness.staging.path().join(cid.to_string());
+        assert!(staging_file.exists(), "staging file should exist");
+        assert_eq!(
+            std::fs::read(&staging_file).unwrap(),
+            content,
+            "staging file should contain the IPFS content"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_open_ipfs_write_rejected() {
+        let (cid, pinner) = test_cid_and_pinner(b"data");
+        let isolated = cache::IsolatedPinset::new(pinner, 1024 * 1024);
+        let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
+
+        let ipfs_path = IpfsCidPath {
+            cid,
+            subpath: String::new(),
+        };
+        let result = harness
+            .view()
+            .open_ipfs(
+                ipfs_path,
+                types::OpenFlags::empty(),
+                types::DescriptorFlags::READ | types::DescriptorFlags::WRITE,
+            )
+            .await;
+
+        assert!(result.is_err(), "write to /ipfs/ should be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_open_ipfs_no_cache_returns_error() {
+        let cid: cid::Cid = "QmYwAPJzv5CZsnN625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
+            .parse()
+            .unwrap();
+        let mut harness = TestHarness::new(None); // no cache
+
+        let ipfs_path = IpfsCidPath {
+            cid,
+            subpath: String::new(),
+        };
+        let result = harness
+            .view()
+            .open_ipfs(
+                ipfs_path,
+                types::OpenFlags::empty(),
+                types::DescriptorFlags::READ,
+            )
+            .await;
+
+        assert!(result.is_err(), "open without cache should fail");
+    }
+
+    #[tokio::test]
+    async fn test_open_ipfs_unknown_cid_returns_error() {
+        // Pinner has no data for the CID we'll request
+        let pinner = Arc::new(MockPinner {
+            data: HashMap::new(),
+        });
+        let isolated = cache::IsolatedPinset::new(pinner, 1024 * 1024);
+        let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
+
+        let cid: cid::Cid = "QmYwAPJzv5CZsnN625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
+            .parse()
+            .unwrap();
+        let ipfs_path = IpfsCidPath {
+            cid,
+            subpath: String::new(),
+        };
+        let result = harness
+            .view()
+            .open_ipfs(
+                ipfs_path,
+                types::OpenFlags::empty(),
+                types::DescriptorFlags::READ,
+            )
+            .await;
+
+        assert!(result.is_err(), "unknown CID should fail");
+    }
+
+    #[tokio::test]
+    async fn test_open_ipfs_with_shared_cache() {
+        let content = b"shared cache content";
+        let (cid, pinner) = test_cid_and_pinner(content);
+
+        let pinset = Arc::new(cache::PinsetCache::new(
+            pinner,
+            10 * 1024 * 1024,
+            1024 * 1024,
+        ));
+        let mut harness = TestHarness::new(Some(cache::CacheMode::Shared(pinset)));
+
+        let ipfs_path = IpfsCidPath {
+            cid,
+            subpath: String::new(),
+        };
+        let fd = harness
+            .view()
+            .open_ipfs(
+                ipfs_path,
+                types::OpenFlags::empty(),
+                types::DescriptorFlags::READ,
+            )
+            .await
+            .expect("open_ipfs with shared cache should succeed");
+
+        assert!(harness.resource_table.get(&fd).is_ok());
+
+        let staging_file = harness.staging.path().join(cid.to_string());
+        assert_eq!(std::fs::read(&staging_file).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn test_open_ipfs_with_subpath() {
+        let content = b"nested file content";
+        let (cid, pinner) = test_cid_and_pinner(content);
+
+        let isolated = cache::IsolatedPinset::new(pinner, 1024 * 1024);
+        let mut harness = TestHarness::new(Some(cache::CacheMode::Isolated(isolated)));
+
+        let ipfs_path = IpfsCidPath {
+            cid,
+            subpath: "sub/dir/file.txt".to_string(),
+        };
+        let fd = harness
+            .view()
+            .open_ipfs(
+                ipfs_path,
+                types::OpenFlags::empty(),
+                types::DescriptorFlags::READ,
+            )
+            .await
+            .expect("open_ipfs with subpath should succeed");
+
+        assert!(harness.resource_table.get(&fd).is_ok());
+
+        // Verify nested path was created in staging
+        let nested_file = harness
+            .staging
+            .path()
+            .join(cid.to_string())
+            .join("sub/dir/file.txt");
+        assert!(nested_file.exists(), "nested staging file should exist");
+        assert_eq!(std::fs::read(&nested_file).unwrap(), content);
     }
 }
