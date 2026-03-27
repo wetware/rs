@@ -23,3 +23,21 @@
 **Why:** Completes the pattern matching story. Clojure's core.match and Erlang both have guards.
 **Context:** Guards evaluate in the scope of the pattern's bindings. If guard is falsy, fall through to next clause. The pattern module's `match_pattern` is currently pure (no eval dependency); guards would require threading the evaluator through pattern matching. Design doc has full syntax spec in Deferred Work section.
 **Depends on:** match + pattern matching
+
+## Cache: bloom filter for mutex contention reduction
+**What:** Add a lock-free bloom filter in front of `Mutex<ArcInner>` in `PinsetCache`. Definite-miss CIDs skip the mutex entirely.
+**Why:** Under adversarial guest load, many concurrent `ensure()` calls for uncached CIDs contend on the mutex. Bloom absorbs misses without touching the lock.
+**Context:** Size generously (100K entries at 0.001% FPR = ~244KB, ~20 hash functions, ~40ns per check). Never rebuild — stale bits just mean spurious lock acquisitions, not correctness issues. Study `quick_cache` source for concurrent bloom patterns.
+**Depends on:** `crates/cache` (weighted ARC)
+
+## Cache: metrics and observability
+**What:** Hit rate, eviction count, weight utilization, inflight count. Expose via `tracing` spans or a `CacheStats` struct.
+**Why:** Can't tune `budget` or `inline_threshold` without visibility into cache behavior.
+**Context:** Pure additive — no runtime impact on existing code paths. Add counters to `ensure()` hot path.
+**Depends on:** `crates/cache` (weighted ARC)
+
+## Cache: mutable path caching (`/ipns/`, `/p2p/`)
+**What:** Support caching mutable paths with TTL-based invalidation.
+**Why:** v1 only caches content-addressed paths (`/ipfs/`). Mutable paths need TTL and re-resolution.
+**Context:** IPNS records have a TTL field. `/p2p/` paths resolve via DHT with its own caching semantics. Needs design work around invalidation strategy.
+**Depends on:** `crates/cache` (weighted ARC)
