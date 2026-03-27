@@ -92,7 +92,13 @@ the default kernel.
 ## Interactive tour
 
 ```
-I just cloned github.com/wetware/ww.  Read PROMPT.md and give me a guided tour.
+Read PROMPT.md and give me a guided tour of Wetware.
+```
+
+Or without cloning:
+
+```
+Read https://github.com/wetware/ww/blob/master/PROMPT.md and give me a guided tour of Wetware.
 ```
 
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) ·
