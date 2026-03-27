@@ -32,9 +32,15 @@ impl core::fmt::Debug for HandlerContext {
     }
 }
 
+impl Default for EffectSlot {
+    fn default() -> Self {
+        Self { pending: None }
+    }
+}
+
 impl EffectSlot {
     pub fn new() -> Self {
-        Self { pending: None }
+        Self::default()
     }
 }
 

@@ -89,6 +89,9 @@ pub struct FnArity {
     pub body: expr::FnBody,
 }
 
+/// Shared pointer to a native (Rust-side) function callable from Glia.
+pub type NativeFnImpl = std::rc::Rc<dyn Fn(&[Val]) -> Result<Val, Val>>;
+
 /// A Clojure-like value.
 #[derive(Clone)]
 pub enum Val {
@@ -129,7 +132,7 @@ pub enum Val {
     /// stdlib builtins. The closure is behind Rc for Clone support.
     NativeFn {
         name: String,
-        func: std::rc::Rc<dyn Fn(&[Val]) -> Result<Val, Val>>,
+        func: NativeFnImpl,
     },
     /// Internal sentinel returned by `resume` — short-circuits the handler's
     /// eval chain. Propagates via Err like Effect and Recur. Must NOT be caught

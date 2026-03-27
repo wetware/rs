@@ -487,7 +487,7 @@ fn analyze_match(args: &[Val]) -> Result<Expr, String> {
     let scrutinee = analyze(&args[0])?;
     let clause_args = &args[1..];
 
-    if clause_args.len() % 2 != 0 {
+    if !clause_args.len().is_multiple_of(2) {
         return Err("match: clauses must be pattern/body pairs (odd number of forms)".into());
     }
     if clause_args.is_empty() {
