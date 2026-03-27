@@ -27,6 +27,53 @@ pub mod expr;
 pub mod oneshot;
 pub mod pattern;
 
+/// Crate version from Cargo.toml (compile-time).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Git short hash at build time, with `+dirty` suffix if worktree was dirty.
+/// Falls back to `"unknown"` when built outside a git repo.
+pub const GIT_COMMIT: &str = env!("GIT_COMMIT");
+
+/// Shell banner line: `glia v0.1.0 (48c5498)`.
+/// Call this at REPL startup for debuggability.
+pub fn banner() -> String {
+    format!("glia v{VERSION} ({GIT_COMMIT})")
+}
+
+#[cfg(test)]
+mod banner_tests {
+    use super::*;
+
+    #[test]
+    fn banner_format() {
+        let b = banner();
+        assert!(
+            b.starts_with("glia v"),
+            "banner should start with 'glia v', got: {b}"
+        );
+        assert!(
+            b.contains('('),
+            "banner should contain commit hash in parens, got: {b}"
+        );
+        assert!(
+            b.contains(')'),
+            "banner should contain closing paren, got: {b}"
+        );
+    }
+
+    #[test]
+    fn version_is_semver() {
+        assert!(
+            VERSION.split('.').count() >= 2,
+            "VERSION should be semver, got: {VERSION}"
+        );
+    }
+
+    #[test]
+    fn git_commit_not_empty() {
+        assert!(!GIT_COMMIT.is_empty(), "GIT_COMMIT should not be empty");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Value type
 // ---------------------------------------------------------------------------
