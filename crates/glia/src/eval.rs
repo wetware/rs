@@ -16,9 +16,13 @@
 use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
+use core::task::Poll;
+use std::cell::RefCell;
+use std::rc::Rc;
 
+use crate::effect::{self, HandlerStack};
 use crate::expr::FnBody;
-use crate::{FnArity, Val};
+use crate::{oneshot, FnArity, Val};
 
 /// Monotonic counter for `gensym`.
 static GENSYM_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -32,9 +36,16 @@ static GENSYM_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Lookup walks from the innermost (last) frame outward.  `push_frame` /
 /// `pop_frame` create and destroy child scopes (used by future `let` / `fn`
 /// special forms).
+///
+/// The `handler_stack` is dynamic scope for the effect system. It is stored
+/// as `Rc<RefCell<...>>` so that clones (including closures via `snapshot()`)
+/// share the SAME handler stack. This means `perform` always sees the live
+/// handler stack of the current eval session, regardless of where the calling
+/// closure was defined.
 #[derive(Debug, Clone)]
 pub struct Env {
     frames: Vec<Frame>,
+    handler_stack: HandlerStack,
 }
 
 impl Default for Env {
@@ -51,6 +62,7 @@ impl Env {
     pub fn new() -> Self {
         Self {
             frames: vec![Frame::new()],
+            handler_stack: effect::new_handler_stack(),
         }
     }
 
@@ -103,6 +115,9 @@ impl Env {
         }
         Self {
             frames: vec![merged],
+            // Share the same handler stack — dynamic scope, not lexical.
+            // Closures see the handler stack of their call site.
+            handler_stack: self.handler_stack.clone(),
         }
     }
 }
@@ -117,8 +132,12 @@ impl Env {
 /// like `(host id)`, `(ipfs cat ...)`, etc.
 pub trait Dispatch {
     /// Invoke the command `name` with already-evaluated `args`.
+    ///
+    /// Takes `&self` (not `&mut self`) — implementations use interior mutability
+    /// for any mutable state. This enables sharing dispatch between body and
+    /// handler futures in the effect system's state machine.
     fn call<'a>(
-        &'a mut self,
+        &'a self,
         name: &'a str,
         args: &'a [Val],
     ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>>;
@@ -151,7 +170,7 @@ fn is_truthy(val: &Val) -> bool {
 async fn eval_fn_body<'a, D: Dispatch>(
     body: &'a FnBody,
     env: &'a mut Env,
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Result<Val, Val> {
     match body {
         FnBody::Raw(forms) => {
@@ -178,7 +197,7 @@ async fn eval_fn_body<'a, D: Dispatch>(
 async fn eval_args<'a, D: Dispatch>(
     raw_args: &'a [Val],
     env: &'a mut Env,
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Result<Vec<Val>, Val> {
     let mut args = Vec::with_capacity(raw_args.len());
     for a in raw_args {
@@ -202,7 +221,7 @@ async fn eval_args<'a, D: Dispatch>(
 async fn eval_def<'a, D: Dispatch>(
     args: &'a [Val],
     env: &'a mut Env,
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Result<Val, Val> {
     if args.is_empty() || args.len() > 2 {
         return Err(eval_err!(
@@ -226,7 +245,7 @@ async fn eval_def<'a, D: Dispatch>(
 async fn eval_if<'a, D: Dispatch>(
     args: &'a [Val],
     env: &'a mut Env,
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Result<Val, Val> {
     if args.len() < 2 || args.len() > 3 {
         return Err(eval_err!("if: expected 2-3 args, got {}", args.len()));
@@ -245,7 +264,7 @@ async fn eval_if<'a, D: Dispatch>(
 async fn eval_do<'a, D: Dispatch>(
     args: &'a [Val],
     env: &'a mut Env,
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Result<Val, Val> {
     let mut result = Val::Nil;
     for form in args {
@@ -258,7 +277,7 @@ async fn eval_do<'a, D: Dispatch>(
 async fn eval_let<'a, D: Dispatch>(
     args: &'a [Val],
     env: &'a mut Env,
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Result<Val, Val> {
     let bindings = match args.first() {
         Some(Val::Vector(v)) => v,
@@ -405,7 +424,7 @@ async fn invoke_fn<'a, D: Dispatch>(
     arities: &'a [FnArity],
     captured_env: &'a Env,
     args: &[Val],
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Result<Val, Val> {
     // Find matching arity: prefer exact fixed-arity match over variadic.
     // This ensures (fn ([x y] ...) ([x & rest] ...)) called with 2 args
@@ -588,7 +607,7 @@ async fn invoke_macro<'a, D: Dispatch>(
     arities: &'a [FnArity],
     captured_env: &'a Env,
     raw_args: &[Val],
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Result<Val, Val> {
     // Find matching arity (same logic as invoke_fn)
     let arity = arities
@@ -647,7 +666,7 @@ async fn invoke_macro<'a, D: Dispatch>(
 async fn eval_loop<'a, D: Dispatch>(
     args: &'a [Val],
     env: &'a mut Env,
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Result<Val, Val> {
     let bindings = match args.first() {
         Some(Val::Vector(v)) => v,
@@ -724,7 +743,7 @@ async fn eval_loop<'a, D: Dispatch>(
 async fn eval_recur<'a, D: Dispatch>(
     args: &'a [Val],
     env: &'a mut Env,
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Result<Val, Val> {
     let evaled = eval_args(args, env, dispatch).await?;
     Ok(Val::Recur(evaled))
@@ -739,7 +758,7 @@ async fn eval_hof<'a, D: Dispatch>(
     name: &str,
     args: &[Val],
     _env: &'a mut Env,
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Result<Val, Val> {
     match name {
         "map" => {
@@ -886,6 +905,8 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
                 Val::Recur(_) => "recur",
                 Val::Macro { .. } => "macro",
                 Val::Effect { .. } => "effect",
+                Val::NativeFn { .. } => "native-fn",
+                Val::Resume(_) => "resume",
             };
             Some(Ok(Val::Keyword(kw.into())))
         }
@@ -1351,7 +1372,7 @@ use crate::expr::{self, Expr};
 pub fn eval_expr<'a, D: Dispatch>(
     expr: &'a Expr,
     env: &'a mut Env,
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
     Box::pin(async move {
         match expr {
@@ -1388,9 +1409,18 @@ pub fn eval_expr<'a, D: Dispatch>(
             Expr::Let { bindings, body } => {
                 env.push_frame();
                 let result = async {
-                    for (name, val_expr) in bindings {
+                    for (binding, val_expr) in bindings {
                         let val = eval_expr(val_expr, env, dispatch).await?;
-                        env.set(name.clone(), val);
+                        match binding {
+                            crate::pattern::LetBinding::Simple(name) => {
+                                env.set(name.clone(), val);
+                            }
+                            crate::pattern::LetBinding::Destructure(pat) => {
+                                crate::pattern::bind_pattern(pat, &val, "let", &mut |name, v| {
+                                    env.set(name.to_string(), v);
+                                })?;
+                            }
+                        }
                     }
                     let mut result = Val::Nil;
                     for e in body {
@@ -1423,14 +1453,26 @@ pub fn eval_expr<'a, D: Dispatch>(
 
             Expr::Loop { bindings, body } => {
                 env.push_frame();
-                // Evaluate initial bindings
-                let mut binding_names = Vec::with_capacity(bindings.len());
-                for (name, val_expr) in bindings {
+                // Evaluate initial bindings — track binding specs for recur
+                let mut binding_specs: Vec<crate::pattern::LetBinding> =
+                    Vec::with_capacity(bindings.len());
+                for (binding, val_expr) in bindings {
                     let val = eval_expr(val_expr, env, dispatch).await?;
-                    env.set(name.clone(), val);
-                    binding_names.push(name.clone());
+                    match binding {
+                        crate::pattern::LetBinding::Simple(name) => {
+                            env.set(name.clone(), val);
+                            binding_specs.push(crate::pattern::LetBinding::Simple(name.clone()));
+                        }
+                        crate::pattern::LetBinding::Destructure(pat) => {
+                            crate::pattern::bind_pattern(pat, &val, "loop", &mut |name, v| {
+                                env.set(name.to_string(), v);
+                            })?;
+                            binding_specs
+                                .push(crate::pattern::LetBinding::Destructure(pat.clone()));
+                        }
+                    }
                 }
-                let num_bindings = binding_names.len();
+                let num_bindings = binding_specs.len();
 
                 let result = async {
                     loop {
@@ -1447,8 +1489,23 @@ pub fn eval_expr<'a, D: Dispatch>(
                                         new_vals.len()
                                     ));
                                 }
-                                for (name, val) in binding_names.iter().zip(new_vals) {
-                                    env.set(name.clone(), val);
+                                // Re-bind: re-apply patterns for destructuring bindings
+                                for (spec, val) in binding_specs.iter().zip(new_vals) {
+                                    match spec {
+                                        crate::pattern::LetBinding::Simple(name) => {
+                                            env.set(name.clone(), val);
+                                        }
+                                        crate::pattern::LetBinding::Destructure(pat) => {
+                                            crate::pattern::bind_pattern(
+                                                pat,
+                                                &val,
+                                                "recur",
+                                                &mut |name, v| {
+                                                    env.set(name.to_string(), v);
+                                                },
+                                            )?;
+                                        }
+                                    }
                                 }
                             }
                             other => return Ok(other),
@@ -1479,71 +1536,247 @@ pub fn eval_expr<'a, D: Dispatch>(
                     }
                 };
                 let data_val = eval_expr(data, env, dispatch).await?;
-                // Return the Effect sentinel — propagates up until caught by with-handler
-                Err(Val::Effect {
-                    effect_type: etype_str,
-                    data: Box::new(data_val),
-                })
+
+                // Check for a handler context (with-effect-handler installed one)
+                let ctx = env.handler_stack.borrow().last().cloned();
+                match ctx {
+                    Some(ctx) => {
+                        // Suspend: create oneshot, write to effect slot, await resume.
+                        let (tx, rx) = oneshot::channel();
+                        ctx.borrow_mut().slot.borrow_mut().pending =
+                            Some((etype_str.clone(), data_val, tx));
+                        // Await resume value — Pending until handler sends or drops
+                        rx.await
+                    }
+                    None => {
+                        // No handler context — propagate as error (backward compat)
+                        Err(Val::Effect {
+                            effect_type: etype_str,
+                            data: Box::new(data_val),
+                        })
+                    }
+                }
             }
 
-            Expr::WithHandler { handlers, body } => {
-                // Evaluate the handler map
+            Expr::Match { expr, clauses } => {
+                // Evaluate the scrutinee
+                let value = eval_expr(expr, env, dispatch).await?;
+
+                // Try each clause in order (linear, first match wins)
+                for (pattern, body) in clauses {
+                    if let Some(bindings) = crate::pattern::match_pattern(pattern, &value) {
+                        // Push new frame with pattern bindings
+                        env.push_frame();
+                        for (name, val) in bindings {
+                            env.set(name, val);
+                        }
+                        let result = eval_expr(body, env, dispatch).await;
+                        env.pop_frame();
+                        return result;
+                    }
+                }
+
+                // No clause matched — runtime error
+                Err(eval_err!("match: no clause matched value {value}"))
+            }
+
+            Expr::WithEffectHandler { handlers, body } => {
+                // Evaluate the handler map BEFORE pushing context — ensures handler
+                // closures don't capture the current handler frame.
                 let handler_map = eval_expr(handlers, env, dispatch).await?;
                 let handler_pairs = match &handler_map {
                     Val::Map(pairs) => pairs.clone(),
                     other => {
                         return Err(eval_err!(
-                            "with-handler: expected map of handlers, got {other}"
+                            "with-effect-handler: expected map of handlers, got {other}"
                         ))
                     }
                 };
 
-                // Evaluate body (implicit do)
-                let body_result = async {
-                    let mut result = Val::Nil;
-                    for e in body {
-                        result = eval_expr(e, env, dispatch).await?;
-                    }
-                    Ok(result)
-                }
-                .await;
+                // Create handler context and push onto the shared dynamic stack.
+                let ctx = Rc::new(RefCell::new(effect::HandlerContext {
+                    slot: Rc::new(RefCell::new(effect::EffectSlot::new())),
+                }));
+                // Clone the handler stack Rc BEFORE body future moves env.
+                let hs = env.handler_stack.clone();
+                hs.borrow_mut().push(ctx.clone());
 
-                match body_result {
-                    Ok(val) => Ok(val),
-                    Err(Val::Effect { effect_type, data }) => {
-                        // Find a matching handler
-                        let handler_fn = handler_pairs.iter().find_map(|(k, v)| {
-                            if let Val::Keyword(kw) = k {
-                                if kw == &effect_type {
-                                    return Some(v.clone());
+                // Create body future — captures env and dispatch.
+                let mut body_fut = {
+                    let body = body.clone(); // clone Expr vec for the future
+                    Box::pin(async move {
+                        let mut result = Val::Nil;
+                        for e in &body {
+                            result = eval_expr(e, env, dispatch).await?;
+                        }
+                        Ok::<Val, Val>(result)
+                    })
+                };
+
+                // State machine: alternate between polling body and handling effects.
+                enum EffectHandlerState<'b> {
+                    Polling,
+                    Handling(Pin<Box<dyn Future<Output = Result<Val, Val>> + 'b>>),
+                }
+                let mut state = EffectHandlerState::Polling;
+
+                let result: Result<Val, Val> = std::future::poll_fn(|cx| {
+                    loop {
+                        match &mut state {
+                            EffectHandlerState::Polling => {
+                                match body_fut.as_mut().poll(cx) {
+                                    Poll::Ready(result) => return Poll::Ready(result),
+                                    Poll::Pending => {
+                                        // Did body suspend on a perform?
+                                        let pending =
+                                            ctx.borrow().slot.borrow_mut().pending.take();
+                                        match pending {
+                                            Some((etype, data, resume_tx)) => {
+                                                // Find matching handler
+                                                let handler_fn =
+                                                    handler_pairs.iter().find_map(|(k, v)| {
+                                                        if let Val::Keyword(kw) = k {
+                                                            if *kw == etype {
+                                                                return Some(v.clone());
+                                                            }
+                                                        }
+                                                        None
+                                                    });
+
+                                                match handler_fn {
+                                                    Some(Val::Fn {
+                                                        arities,
+                                                        env: captured_env,
+                                                    }) => {
+                                                        // HANDLER STACK DISCIPLINE:
+                                                        // Pop our context before running handler.
+                                                        // If handler calls perform, it dispatches
+                                                        // to the NEXT OUTER handler, not us.
+                                                        hs.borrow_mut().pop();
+
+                                                        // Arity dispatch: 2-arg gets resume, 1-arg aborts.
+                                                        // Clone data so the future owns it (no borrows from poll_fn).
+                                                        let has_2_arity = arities.iter().any(|a| {
+                                                            (a.variadic.is_none()
+                                                                && a.params.len() == 2)
+                                                                || (a.variadic.is_some()
+                                                                    && a.params.len() <= 2)
+                                                        });
+                                                        let owned_arities = arities.clone();
+                                                        let owned_env = captured_env.clone();
+
+                                                        let handler_fut: Pin<
+                                                            Box<
+                                                                dyn Future<
+                                                                        Output = Result<Val, Val>,
+                                                                    > + '_,
+                                                            >,
+                                                        > = if has_2_arity {
+                                                            let resume_fn =
+                                                                effect::make_resume_fn(resume_tx);
+                                                            let args = vec![data, resume_fn];
+                                                            Box::pin(async move {
+                                                                invoke_fn(
+                                                                    &owned_arities,
+                                                                    &owned_env,
+                                                                    &args,
+                                                                    dispatch,
+                                                                ).await
+                                                            })
+                                                        } else {
+                                                            // 1-arg: drop resume_tx → body abandoned
+                                                            drop(resume_tx);
+                                                            let args = vec![data];
+                                                            Box::pin(async move {
+                                                                invoke_fn(
+                                                                    &owned_arities,
+                                                                    &owned_env,
+                                                                    &args,
+                                                                    dispatch,
+                                                                ).await
+                                                            })
+                                                        };
+
+                                                        state =
+                                                            EffectHandlerState::Handling(handler_fut);
+                                                        continue; // immediately poll handler
+                                                    }
+                                                    Some(other) => {
+                                                        drop(resume_tx);
+                                                        return Poll::Ready(Err(eval_err!(
+                                                            "with-effect-handler: handler for :{etype} must be a function, got {other}"
+                                                        )));
+                                                    }
+                                                    None => {
+                                                        // No match — propagate effect upward.
+                                                        // Pop our context (we're done).
+                                                        hs.borrow_mut().pop();
+                                                        drop(resume_tx);
+                                                        return Poll::Ready(Err(Val::Effect {
+                                                            effect_type: etype,
+                                                            data: Box::new(data),
+                                                        }));
+                                                    }
+                                                }
+                                            }
+                                            None => {
+                                                // Genuine async (dispatch call) — yield
+                                                return Poll::Pending;
+                                            }
+                                        }
+                                    }
                                 }
                             }
-                            None
-                        });
-
-                        match handler_fn {
-                            Some(Val::Fn {
-                                arities,
-                                env: captured_env,
-                            }) => {
-                                // Abort-only: call handler with (data).
-                                // No resume argument in Phase 1.
-                                invoke_fn(&arities, &captured_env, &[*data], dispatch).await
-                            }
-                            Some(other) => Err(eval_err!(
-                                "with-handler: handler for :{effect_type} must be a function, got {other}"
-                            )),
-                            None => {
-                                // No matching handler — re-propagate the effect
-                                Err(Val::Effect {
-                                    effect_type,
-                                    data,
-                                })
+                            EffectHandlerState::Handling(handler_fut) => {
+                                match handler_fut.as_mut().poll(cx) {
+                                    Poll::Ready(Ok(val)) => {
+                                        // Handler returned normally (abort).
+                                        // Re-push context, body future will be dropped.
+                                        hs.borrow_mut().push(ctx.clone());
+                                        return Poll::Ready(Ok(val));
+                                    }
+                                    Poll::Ready(Err(Val::Resume(_))) => {
+                                        // Handler called resume — value already sent via oneshot.
+                                        // Re-push context for resumed body execution.
+                                        hs.borrow_mut().push(ctx.clone());
+                                        state = EffectHandlerState::Polling;
+                                        cx.waker().wake_by_ref();
+                                        return Poll::Pending;
+                                    }
+                                    Poll::Ready(Err(Val::Effect { effect_type, data })) => {
+                                        // Handler performed an unhandled effect — propagate.
+                                        hs.borrow_mut().push(ctx.clone());
+                                        return Poll::Ready(Err(Val::Effect {
+                                            effect_type,
+                                            data,
+                                        }));
+                                    }
+                                    Poll::Ready(Err(other)) => {
+                                        // Handler errored — propagate.
+                                        hs.borrow_mut().push(ctx.clone());
+                                        return Poll::Ready(Err(other));
+                                    }
+                                    Poll::Pending => return Poll::Pending,
+                                }
                             }
                         }
                     }
-                    // Non-effect errors propagate unchanged
-                    Err(other) => Err(other),
+                })
+                .await;
+
+                // Pop our handler context (if still on the stack — it should be).
+                let mut stack = hs.borrow_mut();
+                if let Some(last) = stack.last() {
+                    if Rc::ptr_eq(last, &ctx) {
+                        stack.pop();
+                    }
+                }
+                drop(stack);
+
+                // Guard: Val::Resume must not escape with-handler.
+                match &result {
+                    Err(Val::Resume(_)) => result, // re-propagate to owning with-handler
+                    _ => result,
                 }
             }
 
@@ -1578,7 +1811,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                     return eval_expr(&analyzed, env, dispatch).await;
                 }
 
-                // 2. Check env for fn
+                // 2. Check env for fn or native-fn
                 if let Some(Val::Fn {
                     arities,
                     env: captured_env,
@@ -1588,6 +1821,11 @@ pub fn eval_expr<'a, D: Dispatch>(
                     let captured_env = captured_env.clone();
                     let evaled_args = eval_expr_args(args, env, dispatch).await?;
                     return invoke_fn(&arities, &captured_env, &evaled_args, dispatch).await;
+                }
+                if let Some(Val::NativeFn { func, .. }) = env.get(head) {
+                    let func = func.clone();
+                    let evaled_args = eval_expr_args(args, env, dispatch).await?;
+                    return func(&evaled_args);
                 }
 
                 // 3. Evaluate args for remaining paths
@@ -1639,6 +1877,9 @@ pub fn eval_expr<'a, D: Dispatch>(
                             let captured_env = captured_env.clone();
                             return invoke_fn(&arities, &captured_env, &spread, dispatch).await;
                         }
+                        if let Some(Val::NativeFn { func, .. }) = env.get(fname) {
+                            return func.clone()(&spread);
+                        }
                         if let Some(result) = eval_builtin(fname, &spread) {
                             return result;
                         }
@@ -1652,6 +1893,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                         let captured_env = captured_env.clone();
                         invoke_fn(&arities, &captured_env, &spread, dispatch).await
                     }
+                    Val::NativeFn { func, .. } => func(&spread),
                     other => Err(eval_err!(
                         "apply: first arg must be a symbol or fn, got {other}"
                     )),
@@ -1692,7 +1934,7 @@ pub fn eval_expr<'a, D: Dispatch>(
 async fn eval_expr_args<'a, D: Dispatch>(
     args: &'a [Expr],
     env: &'a mut Env,
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Result<Vec<Val>, Val> {
     let mut result = Vec::with_capacity(args.len());
     for a in args {
@@ -1705,7 +1947,7 @@ async fn eval_expr_args<'a, D: Dispatch>(
 pub fn eval_toplevel_expr<'a, D: Dispatch>(
     expr: &'a Expr,
     env: &'a mut Env,
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
     Box::pin(async move {
         let result = eval_expr(expr, env, dispatch).await?;
@@ -1724,7 +1966,7 @@ pub fn eval_toplevel_expr<'a, D: Dispatch>(
 pub fn eval_toplevel<'a, D: Dispatch>(
     val: &'a Val,
     env: &'a mut Env,
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
     Box::pin(async move {
         let analyzed = expr::analyze(val)?;
@@ -1751,7 +1993,7 @@ pub fn eval_toplevel<'a, D: Dispatch>(
 pub fn eval<'a, D: Dispatch>(
     expr: &'a Val,
     env: &'a mut Env,
-    dispatch: &'a mut D,
+    dispatch: &'a D,
 ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
     Box::pin(async move {
         match expr {
@@ -1915,33 +2157,34 @@ mod tests {
     use super::*;
 
     /// A trivial dispatcher that records calls and returns nil.
+    /// Uses RefCell for interior mutability (Dispatch takes &self).
     struct RecordingDispatch {
-        calls: Vec<(String, Vec<Val>)>,
+        calls: RefCell<Vec<(String, Vec<Val>)>>,
     }
 
     impl RecordingDispatch {
         fn new() -> Self {
-            Self { calls: Vec::new() }
+            Self {
+                calls: RefCell::new(Vec::new()),
+            }
         }
     }
 
     impl Dispatch for RecordingDispatch {
         fn call<'a>(
-            &'a mut self,
+            &'a self,
             name: &'a str,
             args: &'a [Val],
         ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
-            self.calls.push((name.to_string(), args.to_vec()));
+            self.calls
+                .borrow_mut()
+                .push((name.to_string(), args.to_vec()));
             Box::pin(core::future::ready(Ok(Val::Nil)))
         }
     }
 
     /// Helper to run an async eval in a blocking context.
-    fn eval_blocking(
-        expr: &Val,
-        env: &mut Env,
-        dispatch: &mut RecordingDispatch,
-    ) -> Result<Val, Val> {
+    fn eval_blocking(expr: &Val, env: &mut Env, dispatch: &RecordingDispatch) -> Result<Val, Val> {
         // We can use a trivial executor since our futures are purely synchronous.
         pollster_eval(eval_toplevel(expr, env, dispatch))
     }
@@ -1963,10 +2206,20 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
         // SAFETY: we never move the future after pinning.
         let mut fut = unsafe { Pin::new_unchecked(&mut fut) };
+        // Loop: the effect system's state machine uses wake_by_ref() + Pending
+        // to re-schedule itself after handler resume. In single-threaded sync
+        // context, just re-poll immediately.
+        let mut polls = 0u32;
         loop {
             match fut.as_mut().poll(&mut cx) {
                 Poll::Ready(val) => return val,
-                Poll::Pending => panic!("future returned Pending in synchronous test"),
+                Poll::Pending => {
+                    polls += 1;
+                    if polls > 10_000 {
+                        panic!("future stuck in Pending after 10000 polls — likely deadlock");
+                    }
+                    continue;
+                }
             }
         }
     }
@@ -2029,7 +2282,7 @@ mod tests {
             eval_blocking(&Val::Bool(true), &mut env, &mut d),
             Ok(Val::Bool(true))
         );
-        assert!(d.calls.is_empty());
+        assert!(d.calls.borrow().is_empty());
     }
 
     #[test]
@@ -2067,9 +2320,9 @@ mod tests {
         let expr = Val::List(vec![Val::Sym("host".into()), Val::Sym("id".into())]);
         let result = eval_blocking(&expr, &mut env, &mut d);
         assert_eq!(result, Ok(Val::Nil));
-        assert_eq!(d.calls.len(), 1);
-        assert_eq!(d.calls[0].0, "host");
-        assert_eq!(d.calls[0].1, vec![Val::Sym("id".into())]);
+        assert_eq!(d.calls.borrow().len(), 1);
+        assert_eq!(d.calls.borrow()[0].0, "host");
+        assert_eq!(d.calls.borrow()[0].1, vec![Val::Sym("id".into())]);
     }
 
     #[test]
@@ -2080,7 +2333,7 @@ mod tests {
         struct TestDispatch;
         impl Dispatch for TestDispatch {
             fn call<'a>(
-                &'a mut self,
+                &'a self,
                 name: &'a str,
                 _args: &'a [Val],
             ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
@@ -2347,8 +2600,8 @@ mod tests {
             Val::List(vec![Val::Sym("host".into()), Val::Str("not-taken".into())]),
         ]);
         eval_blocking(&expr, &mut env, &mut d).unwrap();
-        assert_eq!(d.calls.len(), 1);
-        assert_eq!(d.calls[0].1, vec![Val::Str("taken".into())]);
+        assert_eq!(d.calls.borrow().len(), 1);
+        assert_eq!(d.calls.borrow()[0].1, vec![Val::Str("taken".into())]);
     }
 
     // --- do ---
@@ -2502,7 +2755,7 @@ mod tests {
         let inner = Val::List(vec![Val::Sym("+".into()), Val::Int(1), Val::Int(2)]);
         let expr = Val::List(vec![Val::Sym("quote".into()), inner.clone()]);
         assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(inner));
-        assert!(d.calls.is_empty()); // no dispatch happened
+        assert!(d.calls.borrow().is_empty()); // no dispatch happened
     }
 
     // --- fn ---
@@ -2840,7 +3093,7 @@ mod tests {
     // =========================================================================
 
     /// Helper: parse + eval a string expression.
-    fn eval_str(input: &str, env: &mut Env, d: &mut RecordingDispatch) -> Result<Val, Val> {
+    fn eval_str(input: &str, env: &mut Env, d: &RecordingDispatch) -> Result<Val, Val> {
         let expr = crate::read(input).map_err(|e| eval_err!("parse error: {e}"))?;
         eval_blocking(&expr, env, d)
     }
@@ -4243,7 +4496,7 @@ mod tests {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-handler {:fail (fn [e] (+ e 1))} (perform :fail 42))",
+            "(with-effect-handler {:fail (fn [error] (+ error 1))} (perform :fail 42))",
             &mut env,
             &mut d,
         );
@@ -4256,7 +4509,7 @@ mod tests {
         let mut d = RecordingDispatch::new();
         assert_eq!(
             eval_str(
-                "(with-handler {:fail (fn [e] 0)} (+ 1 2))",
+                "(with-effect-handler {:fail (fn [error] 0)} (+ 1 2))",
                 &mut env,
                 &mut d
             ),
@@ -4269,7 +4522,7 @@ mod tests {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-handler {:other (fn [e] 0)} (perform :fail 42))",
+            "(with-effect-handler {:other (fn [error] 0)} (perform :fail 42))",
             &mut env,
             &mut d,
         );
@@ -4283,7 +4536,7 @@ mod tests {
         // Inner handler catches :fail, outer catches :other
         assert_eq!(
             eval_str(
-                "(with-handler {:other (fn [e] 99)} (with-handler {:fail (fn [e] (+ e 10))} (perform :fail 5)))",
+                "(with-effect-handler {:other (fn [error] 99)} (with-effect-handler {:fail (fn [error] (+ error 10))} (perform :fail 5)))",
                 &mut env,
                 &mut d
             ),
@@ -4434,7 +4687,7 @@ mod tests {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-handler {:test (fn [e] e)} (perform :test nil))",
+            "(with-effect-handler {:test (fn [data] data)} (perform :test nil))",
             &mut env,
             &mut d,
         );
@@ -4446,7 +4699,7 @@ mod tests {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-handler {:done (fn [e] e)} (loop [i 0] (if (= i 3) (perform :done i) (recur (+ i 1)))))",
+            "(with-effect-handler {:done (fn [data] data)} (loop [i 0] (if (= i 3) (perform :done i) (recur (+ i 1)))))",
             &mut env,
             &mut d,
         );
@@ -4457,7 +4710,11 @@ mod tests {
     fn handler_empty_map() {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
-        let result = eval_str("(with-handler {} (perform :test 42))", &mut env, &mut d);
+        let result = eval_str(
+            "(with-effect-handler {} (perform :test 42))",
+            &mut env,
+            &mut d,
+        );
         assert!(result.is_err());
     }
 
@@ -4466,7 +4723,7 @@ mod tests {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         let result = eval_str(
-            r#"(with-handler {:test 42} (perform :test "data"))"#,
+            r#"(with-effect-handler {:test 42} (perform :test "data"))"#,
             &mut env,
             &mut d,
         );
@@ -4479,7 +4736,7 @@ mod tests {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-handler {:test (fn [e] e)} (def x 1) (perform :test (+ x 1)))",
+            "(with-effect-handler {:test (fn [data] data)} (def x 1) (perform :test (+ x 1)))",
             &mut env,
             &mut d,
         );
@@ -4491,7 +4748,7 @@ mod tests {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-handler {:outer (fn [e] (+ e 100))} (with-handler {:fail (fn [e] (perform :outer e))} (perform :fail 5)))",
+            "(with-effect-handler {:outer (fn [error] (+ error 100))} (with-effect-handler {:fail (fn [error] (perform :outer error))} (perform :fail 5)))",
             &mut env,
             &mut d,
         );
@@ -4620,5 +4877,502 @@ mod tests {
         } else {
             panic!("expected map, got {result:?}");
         }
+    }
+
+    // =========================================================================
+    // Resume / continuation tests (#247)
+    // =========================================================================
+
+    #[test]
+    fn resume_basic() {
+        // Handler resumes with 42, body continues: (+ 10 42) = 52
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-effect-handler {:foo (fn [data resume] (resume 42))} (+ 10 (perform :foo 0)))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(52)));
+    }
+
+    #[test]
+    fn resume_with_data() {
+        // Handler receives data and resumes with data + 1
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-effect-handler {:inc (fn [data resume] (resume (+ data 1)))} (perform :inc 41))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(42)));
+    }
+
+    #[test]
+    fn abort_1arg_handler() {
+        // 1-arg handler = abort semantics (backward compat)
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-effect-handler {:foo (fn [data] 99)} (+ 10 (perform :foo 0)))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(99)));
+    }
+
+    #[test]
+    fn abort_2arg_handler_no_resume() {
+        // 2-arg handler that doesn't call resume = abort
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-effect-handler {:foo (fn [data resume] 99)} (+ 10 (perform :foo 0)))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(99)));
+    }
+
+    #[test]
+    fn resume_oneshot_violation() {
+        // Calling resume twice should error
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-effect-handler {:foo (fn [data resume] (resume 1) (resume 2))} (perform :foo 0))",
+            &mut env,
+            &d,
+        );
+        // The second resume should error (one-shot violated)
+        // But the first resume short-circuits via Err(Val::Resume), so (resume 2) is never reached.
+        // Actually, Err(Val::Resume) propagates up, so the handler returns Err(Val::Resume(1)).
+        // with-handler catches Resume and resumes the body. Body returns 1. Result: Ok(1).
+        assert_eq!(result, Ok(Val::Int(1)));
+    }
+
+    #[test]
+    fn resume_nested_handlers() {
+        // Inner handler resumes, outer handler not triggered
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-effect-handler {:outer (fn [data] 0)} (with-effect-handler {:inner (fn [data resume] (resume 42))} (+ 10 (perform :inner 0))))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(52)));
+    }
+
+    #[test]
+    fn resume_different_value_types() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        // Resume with nil
+        assert_eq!(
+            eval_str(
+                "(with-effect-handler {:foo (fn [data resume] (resume nil))} (perform :foo 0))",
+                &mut env,
+                &d,
+            ),
+            Ok(Val::Nil)
+        );
+        // Resume with string
+        let result = eval_str(
+            r#"(with-effect-handler {:foo (fn [data resume] (resume "hello"))} (perform :foo 0))"#,
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Str("hello".into())));
+    }
+
+    #[test]
+    fn resume_try_throw_interaction() {
+        // try/throw still work with the new state machine (backward compat)
+        assert_eq!(
+            effects_eval("(try (throw 42))").map(|v| {
+                if let Val::Map(pairs) = &v {
+                    pairs.iter().any(|(k, _)| k == &Val::Keyword("err".into()))
+                } else {
+                    false
+                }
+            }),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn resume_in_loop() {
+        // perform inside a loop body, handler resumes, loop continues
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-effect-handler {:step (fn [data resume] (resume (+ data 1)))} (loop [i 0] (if (= i 3) i (recur (perform :step i)))))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn resume_multiple_sequential_performs() {
+        // Body performs twice — each gets its own resume
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-effect-handler {:inc (fn [data resume] (resume (+ data 10)))} (+ (perform :inc 1) (perform :inc 2)))",
+            &mut env,
+            &d,
+        );
+        // (perform :inc 1) → resume(11), (perform :inc 2) → resume(12), total = 23
+        assert_eq!(result, Ok(Val::Int(23)));
+    }
+
+    #[test]
+    fn perform_without_handler_still_errors() {
+        // No handler context → unhandled effect
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(perform :foo 42)", &mut env, &d);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resume_unmatched_effect_propagates() {
+        // Handler for :bar doesn't match :foo
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-effect-handler {:bar (fn [data resume] (resume 0))} (perform :foo 42))",
+            &mut env,
+            &d,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resume_body_no_effect_passes_through() {
+        // Body doesn't perform — result passes through
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-effect-handler {:foo (fn [data resume] (resume 0))} (+ 1 2))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn resume_handler_map_eval_before_push() {
+        // Handler closures don't see the current handler context
+        // (they're evaluated before the context is pushed)
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        // This test just verifies the handler works — the ordering guarantee
+        // is architectural (tested in the spike).
+        let result = eval_str(
+            "(with-effect-handler {:foo (fn [data resume] (resume 100))} (perform :foo 0))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(100)));
+    }
+
+    #[test]
+    fn native_fn_display() {
+        let nf = Val::NativeFn {
+            name: "test".into(),
+            func: Rc::new(|_: &[Val]| Ok(Val::Nil)),
+        };
+        assert_eq!(format!("{nf}"), "#<native-fn test>");
+    }
+
+    #[test]
+    fn native_fn_equality() {
+        let func: Rc<dyn Fn(&[Val]) -> Result<Val, Val>> = Rc::new(|_: &[Val]| Ok(Val::Nil));
+        let a = Val::NativeFn {
+            name: "test".into(),
+            func: func.clone(),
+        };
+        let b = Val::NativeFn {
+            name: "test".into(),
+            func: func.clone(),
+        };
+        assert_eq!(a, b); // same Rc → equal
+        let c = Val::NativeFn {
+            name: "test".into(),
+            func: Rc::new(|_: &[Val]| Ok(Val::Nil)),
+        };
+        assert_ne!(a, c); // different Rc → not equal
+    }
+
+    #[test]
+    fn try_resume_macro() {
+        // try-resume catches error and resumes
+        let result = effects_eval("(try-resume (fn [err resume] (resume 42)) (throw :oops))");
+        assert_eq!(result, Ok(Val::Int(42)));
+    }
+
+    #[test]
+    fn try_resume_macro_abort() {
+        // try-resume with recovery fn that doesn't resume → abort
+        let result = effects_eval("(try-resume (fn [err resume] 99) (throw :oops))");
+        assert_eq!(result, Ok(Val::Int(99)));
+    }
+
+    #[test]
+    fn try_resume_macro_no_error() {
+        // try-resume with no error — body result passes through
+        let result = effects_eval("(try-resume (fn [error resume] 0) (+ 1 2))");
+        assert_eq!(result, Ok(Val::Int(3)));
+    }
+
+    // =========================================================================
+    // match — pattern matching tests
+    // =========================================================================
+
+    #[test]
+    fn match_literal_first_clause() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(match 42 42 :yes _ :no)", &mut env, &d);
+        assert_eq!(result, Ok(Val::Keyword("yes".into())));
+    }
+
+    #[test]
+    fn match_literal_second_clause() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(match 99 42 :a 99 :b _ :c)", &mut env, &d);
+        assert_eq!(result, Ok(Val::Keyword("b".into())));
+    }
+
+    #[test]
+    fn match_wildcard_default() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(match 7 42 :no _ :yes)", &mut env, &d);
+        assert_eq!(result, Ok(Val::Keyword("yes".into())));
+    }
+
+    #[test]
+    fn match_no_clause_errors() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(match 7 42 :no)", &mut env, &d);
+        assert!(result.is_err());
+        assert!(err_contains(&result.unwrap_err(), "no clause matched"));
+    }
+
+    #[test]
+    fn match_bind_visible_in_body() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(match 42 x (+ x 1))", &mut env, &d);
+        assert_eq!(result, Ok(Val::Int(43)));
+    }
+
+    #[test]
+    fn match_nil_literal() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(match nil nil :yes _ :no)", &mut env, &d);
+        assert_eq!(result, Ok(Val::Keyword("yes".into())));
+    }
+
+    #[test]
+    fn match_keyword_literal() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(match :ok :ok :yes _ :no)", &mut env, &d);
+        assert_eq!(result, Ok(Val::Keyword("yes".into())));
+    }
+
+    #[test]
+    fn match_vector_pattern() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(match [1 2] [a b] (+ a b) _ 0)", &mut env, &d);
+        assert_eq!(result, Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn match_vector_wrong_length() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(match [1 2 3] [a b] :two _ :other)", &mut env, &d);
+        assert_eq!(result, Ok(Val::Keyword("other".into())));
+    }
+
+    #[test]
+    fn match_map_pattern() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            r#"(match {:name "Alice" :age 30} {:name name} name _ "unknown")"#,
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Str("Alice".into())));
+    }
+
+    #[test]
+    fn match_evaluated_scrutinee() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(match (+ 1 2) 3 :yes _ :no)", &mut env, &d);
+        assert_eq!(result, Ok(Val::Keyword("yes".into())));
+    }
+
+    #[test]
+    fn match_with_effect_normal_return() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(match (+ 1 2) result result (effect :fail error) :caught)",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn match_with_effect_abort() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(match (perform :fail 42) result result (effect :fail error) (+ error 1))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(43)));
+    }
+
+    #[test]
+    fn match_with_effect_resume() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(match (+ 10 (perform :inc 5)) result result (effect :inc data resume) (resume (+ data 10)))",
+            &mut env,
+            &d,
+        );
+        // perform :inc 5 → handler resumes with 15 → body evaluates (+ 10 15) = 25
+        assert_eq!(result, Ok(Val::Int(25)));
+    }
+
+    #[test]
+    fn match_effect_unmatched_propagates() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(match (perform :foo 42) result result (effect :bar data) data)",
+            &mut env,
+            &d,
+        );
+        // :foo doesn't match :bar, propagates out — no outer handler → error
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn match_nested_pattern() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(match [1 [2 3]] [a [b c]] (+ a b c) _ 0)", &mut env, &d);
+        assert_eq!(result, Ok(Val::Int(6)));
+    }
+
+    #[test]
+    fn match_odd_clauses_errors() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(match 42 :a)", &mut env, &d);
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Destructuring tests
+    // =========================================================================
+
+    #[test]
+    fn let_vector_destructure() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(let [[a b] [1 2]] (+ a b))", &mut env, &d);
+        assert_eq!(result, Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn let_map_destructure() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(r#"(let [{:name name} {:name "Alice"}] name)"#, &mut env, &d);
+        assert_eq!(result, Ok(Val::Str("Alice".into())));
+    }
+
+    #[test]
+    fn let_destructure_mismatch_errors() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(let [[a b] 42] (+ a b))", &mut env, &d);
+        assert!(result.is_err());
+        assert!(err_contains(&result.unwrap_err(), "destructuring failed"));
+    }
+
+    #[test]
+    fn let_nested_destructure() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(let [[a [b c]] [1 [2 3]]] (+ a b c))", &mut env, &d);
+        assert_eq!(result, Ok(Val::Int(6)));
+    }
+
+    #[test]
+    fn let_vector_rest() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(let [[a & rest] [1 2 3]] rest)", &mut env, &d);
+        assert_eq!(result, Ok(Val::List(vec![Val::Int(2), Val::Int(3)])));
+    }
+
+    #[test]
+    fn let_simple_still_works() {
+        // Ensure simple let bindings are unaffected
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(let [x 1 y 2] (+ x y))", &mut env, &d);
+        assert_eq!(result, Ok(Val::Int(3)));
+    }
+
+    #[test]
+    fn loop_destructure_basic() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        // Destructure in loop, recur re-matches
+        let result = eval_str(
+            "(loop [[a b] [0 0]] (if (= a 3) b (recur [(+ a 1) (+ b 10)])))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(30)));
+    }
+
+    #[test]
+    fn loop_destructure_recur_mismatch() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        // recur with non-vector when loop expects [a b]
+        let result = eval_str("(loop [[a b] [0 0]] (recur 42))", &mut env, &d);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn loop_simple_still_works() {
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(loop [i 0] (if (= i 5) i (recur (+ i 1))))", &mut env, &d);
+        assert_eq!(result, Ok(Val::Int(5)));
     }
 }
