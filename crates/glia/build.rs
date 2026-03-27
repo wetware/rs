@@ -9,7 +9,7 @@ fn main() {
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| std::env::var("GIT_COMMIT").unwrap_or_else(|_| "unknown".to_string()));
 
     // Check for dirty worktree.
     let dirty = Command::new("git")

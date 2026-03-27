@@ -76,6 +76,19 @@ cargo test                     # run tests
 Requires Rust with `wasm32-wasip2` target. Optional:
 [Kubo](https://docs.ipfs.tech/install/) for IPFS resolution.
 
+## Container
+
+```bash
+make container-build                          # build with podman (default)
+CONTAINER_ENGINE=docker make container-build  # or with docker
+podman run --rm wetware:latest                # boots kernel + shell
+podman run --rm wetware:latest --help         # CLI help
+```
+
+The image ships kernel and shell WASM blobs, so `podman run wetware:latest`
+works out of the box. Pass additional layers as arguments to stack on top of
+the default kernel.
+
 ## Learn more
 
 - [Architecture](doc/architecture.md) — design principles and capability flow

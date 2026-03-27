@@ -1,57 +1,90 @@
-# Multi-stage build for wetware Rust application
-FROM rust:alpine as builder
+# Multi-stage build for wetware
+# Works with: podman build -t wetware:latest .
+#         or: docker build -t wetware:latest -f Containerfile .
 
-# Install build dependencies
+# ── Stage 1: Builder ─────────────────────────────────────────────────
+FROM rust:alpine AS builder
+
+ARG GIT_COMMIT=unknown
+
 RUN apk add --no-cache \
+    musl-dev \
     pkgconfig \
-    openssl-dev \
-    musl-dev
+    g++ \
+    make \
+    cmake \
+    curl
 
-# Set working directory
+# Cap'n Proto 1.1.0 from source (must match capnpc crate version)
+RUN curl -fsSL https://capnproto.org/capnproto-c++-1.1.0.tar.gz | tar xz \
+    && cd capnproto-c++-1.1.0 \
+    && ./configure --prefix=/usr/local \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd .. && rm -rf capnproto-c++-1.1.0
+
+# WASM guest target
+RUN rustup target add wasm32-wasip2
+
 WORKDIR /usr/src/app
 
-# Copy manifests
-COPY Cargo.toml Cargo.lock* ./
+# ── Dependency cache layer ───────────────────────────────────────────
+# Copy manifests, lockfile, build scripts, and capnp schemas first.
+# build.rs files in membrane/ and kernel/ reference ../../capnp/*.capnp,
+# so the schema dir must be present for the cache-warming build.
 
-# Create a dummy main.rs to build dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY capnp/ capnp/
 
-# Build dependencies only (this layer will be cached if dependencies don't change)
-RUN cargo build --release
+# Workspace member manifests + build scripts
+COPY crates/atom/Cargo.toml crates/atom/Cargo.toml
+COPY crates/glia/Cargo.toml crates/glia/build.rs crates/glia/
+COPY crates/membrane/Cargo.toml crates/membrane/build.rs crates/membrane/
+COPY crates/guest/auth/Cargo.toml crates/guest/auth/Cargo.toml
+COPY crates/kernel/Cargo.toml crates/kernel/build.rs crates/kernel/
+COPY std/shell/Cargo.toml std/shell/Cargo.toml
+COPY std/system/Cargo.toml std/system/Cargo.toml
+COPY examples/chess/Cargo.toml examples/chess/build.rs examples/chess/
 
-# Remove dummy main.rs and copy real source code
-RUN rm src/main.rs
-COPY src/ ./src/
+# Dummy source files so cargo can resolve the workspace
+RUN mkdir -p src/cli && echo 'fn main() {}' > src/cli/main.rs \
+    && mkdir -p crates/atom/src && echo '' > crates/atom/src/lib.rs \
+    && mkdir -p crates/glia/src && echo '' > crates/glia/src/lib.rs \
+    && mkdir -p crates/membrane/src && echo '' > crates/membrane/src/lib.rs \
+    && mkdir -p crates/guest/auth/src && echo '' > crates/guest/auth/src/lib.rs \
+    && mkdir -p crates/kernel/src && echo 'fn main() {}' > crates/kernel/src/main.rs \
+    && mkdir -p std/shell/src && echo 'fn main() {}' > std/shell/src/main.rs \
+    && mkdir -p std/system/src && echo '' > std/system/src/lib.rs \
+    && mkdir -p examples/chess/src && echo 'fn main() {}' > examples/chess/src/main.rs
 
-# Build the application
-RUN cargo build --release
+# Warm the dependency cache (errors expected from dummy sources; || true)
+RUN cargo build --release || true
+RUN cargo build --release --target wasm32-wasip2 || true
 
-# Runtime stage
-FROM alpine:latest
+# ── Full source build ────────────────────────────────────────────────
+# Remove dummy sources, copy real project
+RUN find . -name '*.rs' -path '*/src/*' -delete
+COPY . .
 
-# Install runtime dependencies
-RUN apk add --no-cache \
-    ca-certificates \
-    libssl3
+# GIT_COMMIT set after cache-warming so the hash doesn't bust dep cache.
+ENV GIT_COMMIT=${GIT_COMMIT}
 
-# Create non-root user
-RUN addgroup -g 1000 wetware && \
-    adduser -D -s /bin/sh -u 1000 -G wetware wetware
+# Build host binary + kernel/shell WASM (skip examples)
+RUN make std host
 
-# Set working directory
-WORKDIR /app
+# ── Stage 2: Runtime ─────────────────────────────────────────────────
+FROM gcr.io/distroless/static-debian12
 
-# Copy binary from builder stage
-COPY --from=builder /usr/src/app/target/release/ww /app/ww
+COPY --from=builder /usr/src/app/target/release/ww /usr/local/bin/ww
 
-# Change ownership to non-root user
-RUN chown wetware:wetware /app/ww
+# Default kernel + shell images (FHS: <path>/bin/main.wasm)
+COPY --from=builder /usr/src/app/crates/kernel/bin/main.wasm \
+     /usr/share/wetware/kernel/bin/main.wasm
+COPY --from=builder /usr/src/app/std/shell/boot/main.wasm \
+     /usr/share/wetware/shell/boot/main.wasm
 
-# Switch to non-root user
-USER wetware
-
-# Expose port (adjust if your app uses different ports)
+USER 1000:1000
 EXPOSE 8080
 
-# Set the binary as entrypoint
-ENTRYPOINT ["/app/ww"]
+ENTRYPOINT ["/usr/local/bin/ww"]
+CMD ["run", "/usr/share/wetware/kernel", "/usr/share/wetware/shell"]

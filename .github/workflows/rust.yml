@@ -204,8 +204,13 @@ jobs:
 
     - name: Build Podman image
       run: |
-        podman build -t wetware:${{ github.event.release.tag_name }} .
+        podman build \
+          --build-arg GIT_COMMIT=$(echo ${{ github.sha }} | cut -c1-7) \
+          -t wetware:${{ github.event.release.tag_name }} .
         podman tag wetware:${{ github.event.release.tag_name }} wetware:latest
+
+    - name: Smoke test container
+      run: podman run --rm wetware:${{ github.event.release.tag_name }} --help
 
     - name: Set up Podman Buildx
       uses: docker/setup-buildx-action@v3

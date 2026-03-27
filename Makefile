@@ -6,7 +6,7 @@
 WASM_TARGET := wasm32-wasip2
 
 .PHONY: all host std kernel shell examples chess clean run-kernel
-.PHONY: podman-build podman-run podman-clean podman-dev
+.PHONY: container-build container-run container-dev container-clean
 
 all: std examples host
 
@@ -52,17 +52,23 @@ clean:
 	rm -f examples/chess/bin/chess-demo.wasm
 	rm -f examples/chess/bin/main.wasm
 
-# --- Podman ------------------------------------------------------------------
+# --- Container ---------------------------------------------------------------
 
-podman-build:
-	podman build -t wetware:latest .
+CONTAINER_ENGINE ?= podman
+CONTAINER_TAG    ?= wetware:latest
 
-podman-run:
-	podman run --rm -it wetware:latest
+container-build:
+	$(CONTAINER_ENGINE) build \
+		--build-arg GIT_COMMIT=$$(git rev-parse --short HEAD) \
+		-t $(CONTAINER_TAG) .
 
-podman-clean:
-	podman rmi wetware:latest || true
-	podman system prune -f
+container-run:
+	$(CONTAINER_ENGINE) run --rm -it -p 8080:8080 $(CONTAINER_TAG)
 
-podman-dev: podman-build
-	podman run --rm -it -v $(PWD):/app wetware:latest
+container-dev: container-build
+	$(CONTAINER_ENGINE) run --rm -it \
+		-v $(PWD)/config:/app/config:ro \
+		-p 8080:8080 $(CONTAINER_TAG)
+
+container-clean:
+	$(CONTAINER_ENGINE) rmi $(CONTAINER_TAG) || true
