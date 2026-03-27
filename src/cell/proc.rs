@@ -45,6 +45,9 @@ pub struct ComponentRunStates {
     pub loader: Option<Box<dyn Loader>>,
     // Guest-side bidirectional stream used to build WASI io/streams resources.
     pub data_stream: Option<tokio::io::DuplexStream>,
+    /// Cache mode for this process. `None` means no cache (default).
+    /// `Shared` shares a global pinset cache; `Isolated` gets a private one.
+    pub cache_mode: Option<cache::CacheMode>,
 }
 
 // Required for WASI IO to work.
@@ -74,6 +77,7 @@ struct ProcInit {
     stderr: BoxAsyncWrite,
     data_streams: Option<tokio::io::DuplexStream>,
     image_root: Option<PathBuf>,
+    cache_mode: Option<cache::CacheMode>,
 }
 
 /// Builder for constructing a Proc configuration
@@ -89,6 +93,7 @@ pub struct Builder {
     stderr: Option<BoxAsyncWrite>,
     data_streams: Option<tokio::io::DuplexStream>,
     image_root: Option<PathBuf>,
+    cache_mode: Option<cache::CacheMode>,
 }
 
 /// Handles for accessing the host-side of data streams.
@@ -130,6 +135,7 @@ impl Builder {
             stderr: None,
             data_streams: None,
             image_root: None,
+            cache_mode: None,
         }
     }
 
@@ -233,6 +239,15 @@ impl Builder {
         self
     }
 
+    /// Set the cache mode for this process.
+    ///
+    /// - `CacheMode::Shared`: shares a global pinset cache (efficient, default for trusted procs)
+    /// - `CacheMode::Isolated`: private pinset, no shared state (for untrusted guests)
+    pub fn with_cache(mut self, mode: cache::CacheMode) -> Self {
+        self.cache_mode = Some(mode);
+        self
+    }
+
     /// Build a Proc instance. All required parameters must be supplied first.
     pub async fn build(self) -> Result<Proc> {
         let bytecode = self
@@ -259,6 +274,7 @@ impl Builder {
             stderr,
             data_streams: self.data_streams,
             image_root: self.image_root,
+            cache_mode: self.cache_mode,
         })
         .await
     }
@@ -295,6 +311,7 @@ impl Proc {
             stderr,
             data_streams,
             image_root,
+            cache_mode,
         } = init;
 
         let stdin_stream = AsyncStdinStream::new(stdin);
@@ -351,6 +368,7 @@ impl Proc {
             resource_table: ResourceTable::new(),
             loader,
             data_stream,
+            cache_mode,
         };
 
         let mut store = Store::new(&engine, state);
