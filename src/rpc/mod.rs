@@ -529,6 +529,44 @@ impl system_capnp::executor::Server for ExecutorImpl {
         Promise::ok(())
     }
 
+    fn bind(
+        self: capnp::capability::Rc<Self>,
+        params: system_capnp::executor::BindParams,
+        mut results: system_capnp::executor::BindResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.check_epoch());
+        let params = pry!(params.get());
+        let wasm = read_data_result(params.get_wasm());
+        let args = read_text_list_result(params.get_args());
+        let env = read_text_list_result(params.get_env());
+
+        if wasm.len() > MAX_WASM_BYTES {
+            return Promise::err(capnp::Error::failed(format!(
+                "WASM binary too large ({} bytes, max {})",
+                wasm.len(),
+                MAX_WASM_BYTES
+            )));
+        }
+
+        let bound = BoundExecutorImpl::new(BoundConfig {
+            bytecode: Arc::new(wasm),
+            args,
+            env,
+            wasm_debug: self.wasm_debug,
+            network_state: self.network_state.clone(),
+            swarm_cmd_tx: self.swarm_cmd_tx.clone(),
+            guard: self.guard.clone(),
+            epoch_rx: self.epoch_rx.clone(),
+            content_store: self.content_store.clone(),
+            signing_key: self.signing_key.clone(),
+            stream_control: self.stream_control.clone(),
+        });
+
+        let client: system_capnp::bound_executor::Client = capnp_rpc::new_client(bound);
+        results.get().set_bound(client);
+        Promise::ok(())
+    }
+
     fn run_bytes(
         self: capnp::capability::Rc<Self>,
         params: system_capnp::executor::RunBytesParams,
@@ -636,6 +674,159 @@ impl system_capnp::executor::Server for ExecutorImpl {
             let stdout =
                 capnp_rpc::new_client(ByteStreamImpl::new(host_stdout, StreamMode::ReadOnly));
             // Child stderr is drained above; provide a no-op stream for the Process interface.
+            let (dummy_stderr, _) = io::duplex(1);
+            let stderr =
+                capnp_rpc::new_client(ByteStreamImpl::new(dummy_stderr, StreamMode::ReadOnly));
+
+            let process_client: system_capnp::process::Client =
+                capnp_rpc::new_client(ProcessImpl::new(stdin, stdout, stderr, exit_rx));
+            results.get().set_process(process_client);
+
+            Ok(())
+        })
+    }
+}
+
+// =========================================================================
+// BoundExecutor — capability-attenuated executor
+// =========================================================================
+
+/// A BoundExecutor that stores WASM bytes (shared via Arc) and args/env.
+/// Each spawn() creates a fresh WASI process from the stored bytecode.
+///
+/// Note: WASM compilation happens per-spawn (in ProcBuilder::build).
+/// Pre-compilation (storing a wasmtime::Module) is a future optimization
+/// that would reduce spawn latency from ~5ms to ~1ms.
+///
+/// Capability attenuation: the holder can spawn workers but cannot change
+/// what binary runs or what args/env are passed.
+pub struct BoundExecutorImpl {
+    /// Pre-bound configuration — everything needed to spawn a process.
+    /// Shared via Arc so the capnp::capability::Rc wrapper works.
+    config: Arc<BoundConfig>,
+}
+
+struct BoundConfig {
+    bytecode: Arc<Vec<u8>>,
+    args: Vec<String>,
+    env: Vec<String>,
+    wasm_debug: bool,
+    network_state: NetworkState,
+    swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
+    guard: Option<EpochGuard>,
+    epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
+    content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
+    signing_key: Option<Arc<k256::ecdsa::SigningKey>>,
+    stream_control: Option<libp2p_stream::Control>,
+}
+
+impl BoundExecutorImpl {
+    fn new(config: BoundConfig) -> Self {
+        Self {
+            config: Arc::new(config),
+        }
+    }
+}
+
+#[allow(refining_impl_trait)]
+impl system_capnp::bound_executor::Server for BoundExecutorImpl {
+    fn spawn(
+        self: capnp::capability::Rc<Self>,
+        _params: system_capnp::bound_executor::SpawnParams,
+        mut results: system_capnp::bound_executor::SpawnResults,
+    ) -> Promise<(), capnp::Error> {
+        if let Some(ref guard) = self.config.guard {
+            pry!(guard.check());
+        }
+
+        let config = self.config.clone();
+
+        Promise::from_future(async move {
+            let (host_stderr, guest_stderr) = io::duplex(64 * 1024);
+            let (host_stdin, guest_stdin) = io::duplex(64 * 1024);
+            let (host_stdout, guest_stdout) = io::duplex(64 * 1024);
+
+            let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+
+            let (builder, mut handles) = ProcBuilder::new()
+                .with_env(config.env.clone())
+                .with_args(config.args.clone())
+                .with_wasm_debug(config.wasm_debug)
+                .with_bytecode((*config.bytecode).clone())
+                .with_stdio(guest_stdin, guest_stdout, guest_stderr)
+                .with_data_streams();
+
+            let proc = builder
+                .build()
+                .await
+                .map_err(|err| capnp::Error::failed(err.to_string()))?;
+
+            let (reader, writer) = handles
+                .take_host_split()
+                .ok_or_else(|| capnp::Error::failed("host stream missing".into()))?;
+
+            let network_state = config.network_state.clone();
+            let swarm_cmd_tx = config.swarm_cmd_tx.clone();
+            let wasm_debug = config.wasm_debug;
+            let epoch_rx = config.epoch_rx.clone();
+            let content_store = config.content_store.clone();
+            let signing_key = config.signing_key.clone();
+            let stream_control = config.stream_control.clone();
+
+            let child_rpc_system = if let (Some(erx), Some(ic), Some(sc)) =
+                (epoch_rx, content_store, stream_control)
+            {
+                let (rpc, _guest) = membrane::build_membrane_rpc(
+                    reader,
+                    writer,
+                    network_state,
+                    swarm_cmd_tx,
+                    wasm_debug,
+                    erx,
+                    ic,
+                    signing_key,
+                    sc,
+                );
+                rpc
+            } else {
+                build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug)
+            };
+
+            tokio::task::spawn_local(async move {
+                let local = tokio::task::LocalSet::new();
+                local.spawn_local(child_rpc_system.map(|_| ()));
+
+                local.spawn_local(async move {
+                    use tokio::io::AsyncBufReadExt;
+                    let reader = tokio::io::BufReader::new(host_stderr);
+                    let mut lines = reader.lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        tracing::info!("{}", line);
+                    }
+                });
+
+                local
+                    .run_until(async move {
+                        let exit_code = match proc.run().await {
+                            Ok(()) => 0,
+                            Err(e) => {
+                                tracing::error!("bound_executor: child process failed: {}", e);
+                                1
+                            }
+                        };
+                        tracing::info!(
+                            "bound_executor: child process exited with code {}",
+                            exit_code
+                        );
+                        let _ = exit_tx.send(exit_code);
+                    })
+                    .await;
+            });
+
+            let stdin =
+                capnp_rpc::new_client(ByteStreamImpl::new(host_stdin, StreamMode::WriteOnly));
+            let stdout =
+                capnp_rpc::new_client(ByteStreamImpl::new(host_stdout, StreamMode::ReadOnly));
             let (dummy_stderr, _) = io::duplex(1);
             let stderr =
                 capnp_rpc::new_client(ByteStreamImpl::new(dummy_stderr, StreamMode::ReadOnly));

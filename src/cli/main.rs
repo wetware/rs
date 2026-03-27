@@ -96,6 +96,14 @@ enum Commands {
         /// Number of confirmations before finalizing a HeadUpdated event.
         #[arg(long, default_value = "6")]
         confirmation_depth: u64,
+
+        /// Run as an MCP server. Reads MCP JSON-RPC from stdin, routes
+        /// tools/call requests to a handler WASM process, writes responses
+        /// to stdout. The handler binary is specified by the MOUNT arg
+        /// (must contain boot/main.wasm). MCP lifecycle methods (initialize,
+        /// tools/list) are handled by the adapter, not the handler.
+        #[arg(long)]
+        mcp: bool,
     },
 
     /// Generate a new secp256k1 identity secret.
@@ -250,7 +258,24 @@ impl Commands {
                 rpc_url,
                 ws_url,
                 confirmation_depth,
+                mcp,
             } => {
+                if mcp {
+                    // TODO(mikel): Wire MCP adapter here.
+                    // The infrastructure is ready:
+                    //   - ProtocolAdapter trait: src/dispatcher/mod.rs
+                    //   - HttpServer::run() accepts any ProtocolAdapter
+                    //   - BoundExecutor: capnp/system.capnp + src/rpc/mod.rs
+                    //   - SwappableReader/Writer: src/cell/swappable.rs (for Mode B)
+                    //
+                    // Implementation steps:
+                    //   1. Implement McpAdapter: ProtocolAdapter for MCP JSON-RPC
+                    //   2. Load handler WASM from boot/main.wasm
+                    //   3. executor.bind(wasm, args, env) → BoundExecutor
+                    //   4. HttpServer::new(bound).run(&mut adapter).await
+                    eprintln!("MCP mode is not yet implemented. See src/dispatcher/mod.rs for the ProtocolAdapter trait.");
+                    std::process::exit(1);
+                }
                 let mut mounts = ww::mount::parse_args(&mount_args)?;
                 // --identity PATH is sugar for PATH:/etc/identity mount.
                 // Appended last so it overrides any /etc/identity from image layers.

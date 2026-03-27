@@ -53,6 +53,19 @@ interface Executor {
 
   echo @1 (message :Text) -> (response :Text);
   # Diagnostic echo — returns the message unmodified.
+
+  bind @2 (wasm :Data, args :List(Text), env :List(Text)) -> (bound :BoundExecutor);
+  # Store WASM bytes and bind args/env. Returns a BoundExecutor
+  # that can only spawn instances of the bound binary.
+  #
+  # Capability attenuation: the caller can scale a pool of identical
+  # workers but cannot spawn arbitrary code.
+}
+
+interface BoundExecutor {
+  spawn @0 () -> (process :Process);
+  # Spawn a new instance of the bound WASM binary.
+  # Each call creates a fresh process with its own stdin/stdout/stderr.
 }
 
 interface Process {
