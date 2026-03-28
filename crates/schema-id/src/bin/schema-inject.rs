@@ -37,10 +37,12 @@ fn main() {
         std::process::exit(1);
     });
 
+    let cid = schema_id::compute_cid(&data);
     eprintln!(
-        "Injected section '{}' ({} bytes) into {}",
+        "Injected section '{}' ({} bytes) into {}\nCID: {}",
         section_name,
         data.len(),
-        wasm_path
+        wasm_path,
+        cid
     );
 }
