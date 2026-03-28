@@ -61,7 +61,7 @@
 ## Epoch-watching in accept loops (RpcListener + Listener)
 **What:** The accept loops in `RpcListenerImpl::listen()` and `ListenerImpl::listen()` check the epoch guard once at entry but never recheck. A guest whose epoch goes stale continues accepting connections and spawning handlers indefinitely.
 **Why:** This is a trust boundary violation. The membrane's epoch-based revocation is supposed to invalidate capabilities, but the long-lived accept loop keeps serving after revocation.
-**Context:** Fix by adding a `tokio::select!` inside the accept loop that watches the epoch guard's `receiver` for changes and breaks when stale. Same pattern needed in both `src/rpc/rpc_listener.rs:70-92` and `src/rpc/listener.rs:75-92`. The dialer has a shorter TOCTOU window but should also recheck epoch after stream establishment.
+**Context:** Fix by adding a `tokio::select!` inside the accept loop that watches the epoch guard's `receiver` for changes and breaks when stale. Same pattern needed in both `src/rpc/rpc_listener.rs` and `src/rpc/listener.rs` (search for the `while let Some` accept loops). The dialer has a shorter TOCTOU window but should also recheck epoch after stream establishment.
 **Effort:** S
 **Priority:** P1
 **Depends on:** PR #270 (RpcListener/RpcDialer)

@@ -2113,8 +2113,8 @@ mod tests {
         );
     }
 
-    /// Verify that injecting a section preserves the original WASM content.
-    /// A section added to a valid component should still parse as valid WASM.
+    /// Verify that injecting a section preserves existing custom sections.
+    /// The original section must survive alongside the newly injected one.
     #[test]
     fn test_inject_preserves_wasm_validity() {
         let base_wasm = wasm_with_custom_section("other.section", b"existing data");

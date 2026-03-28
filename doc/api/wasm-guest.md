@@ -244,8 +244,8 @@ inspects before instantiation.
 `/ww/0.1.0/{cid}`. The host re-derives the CID from the section bytes;
 it never trusts a guest-supplied CID.
 
-**Absence**: If `schema.capnp` is not present, the binary is not an RPC
-handler. Passing it to `rpcListen` is an error.
+**Absence**: If `schema.capnp` is not present or is empty, the binary is
+not an RPC handler. Passing it to `rpcListen` is an error.
 
 ## Implementation Constraints
 
