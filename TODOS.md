@@ -49,3 +49,27 @@
 **Effort:** S
 **Priority:** P1
 **Depends on:** PR #270 (RpcListener/RpcDialer)
+
+## Epoch-watching in accept loops (RpcListener + Listener)
+**What:** The accept loops in `RpcListenerImpl::listen()` and `ListenerImpl::listen()` check the epoch guard once at entry but never recheck. A guest whose epoch goes stale continues accepting connections and spawning handlers indefinitely.
+**Why:** This is a trust boundary violation. The membrane's epoch-based revocation is supposed to invalidate capabilities, but the long-lived accept loop keeps serving after revocation.
+**Context:** Fix by adding a `tokio::select!` inside the accept loop that watches the epoch guard's `receiver` for changes and breaks when stale. Same pattern needed in both `src/rpc/rpc_listener.rs:70-92` and `src/rpc/listener.rs:75-92`. The dialer has a shorter TOCTOU window but should also recheck epoch after stream establishment.
+**Effort:** S
+**Priority:** P1
+**Depends on:** PR #270 (RpcListener/RpcDialer)
+
+## Protocol namespace collision between Listener and RpcListener
+**What:** Both `Listener` (byte-stream) and `RpcListener` (capability) use the same protocol prefix `/ww/0.1.0/{suffix}`. Byte-stream Listener takes an arbitrary user string; RpcListener uses a CID. A guest could register a byte-stream listener with a name that matches a CID, causing a cross-mode collision.
+**Why:** The `control.accept()` call will fail for whichever registers second, but the error won't explain the cross-mode collision. Silent misrouting if a stream-mode handler accidentally claims an RPC protocol address.
+**Context:** Fix by using distinct prefixes, e.g., `/ww/0.1.0/stream/{name}` vs `/ww/0.1.0/rpc/{cid}`. This is a wire protocol change so it should be done before any stable release.
+**Effort:** S
+**Priority:** P2
+**Depends on:** PR #270 (RpcListener/RpcDialer)
+
+## Connection rate limiting for RpcListener
+**What:** Every incoming connection in `RpcListenerImpl` spawns a new WASI handler process with no concurrency limit. A malicious peer (or many peers) can flood connections, causing unbounded process spawning.
+**Why:** Each handler holds WASM memory, an RPC system, and a libp2p stream. Unbounded spawning is a resource exhaustion vector.
+**Context:** Add a semaphore or max-connections limit to the accept loop. Consider making the limit configurable via the `listen()` params or a sensible default (e.g., 64 concurrent handlers per protocol).
+**Effort:** S
+**Priority:** P2
+**Depends on:** PR #270 (RpcListener/RpcDialer)
