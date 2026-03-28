@@ -41,7 +41,7 @@ chess: schema-inject
 	@# The schema bytes were written by build.rs during compilation.
 	@CHESS_OUT=$$(find target/$(WASM_TARGET)/release/build -path '*/chess-*/out/chess_engine_schema.bin' | head -1) && \
 		if [ -n "$$CHESS_OUT" ]; then \
-			cargo run --bin schema-inject --features inject -- \
+			cargo run --bin schema-inject -p schema-id --features inject -- \
 				examples/chess/bin/chess-demo.wasm schema.capnp "$$CHESS_OUT"; \
 		else \
 			echo "WARNING: chess_engine_schema.bin not found; skipping schema injection"; \
