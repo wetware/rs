@@ -42,6 +42,14 @@
 **Context:** IPNS records have a TTL field. `/p2p/` paths resolve via DHT with its own caching semantics. Needs design work around invalidation strategy.
 **Depends on:** `crates/cache` (weighted ARC)
 
+## Import caching (idempotent require)
+**What:** Make `(import "foo")` idempotent. Second call returns cached bindings instead of re-evaluating the file. Like Clojure's `require`.
+**Why:** Without caching, every `(import "utils")` re-reads `/lib/utils.glia`, re-evals it in a fresh Env, and re-binds all prefixed names. Wasteful if called from multiple modules. Also a correctness question: if `utils.glia` has side effects, re-import runs them again.
+**Context:** Cache key options: module name (simple), or CID of the underlying file (content-addressed, survives layer changes). Start with module name. For .glia: cache the resulting bindings map. For .wasm: cache the capability reference (if the process is still alive). Need to decide what happens if the underlying file changes between imports (hot reload?). v1 re-evals every time.
+**Effort:** S
+**Priority:** P2
+**Depends on:** import system (#166)
+
 ## RPC handshake timeout for RpcDialer.dial()
 **What:** Add an RPC-level timeout to `RpcDialerImpl::dial()` so it doesn't silently hang when the remote peer accepts the libp2p stream but never speaks Cap'n Proto.
 **Why:** The 30s `DIAL_TIMEOUT` only covers stream establishment. If the remote accepts the stream but doesn't run an RPC server, `rpc_system.bootstrap()` returns a proxy immediately, but method calls on that proxy hang until the TCP-level timeout (minutes). Guests see a silent hang.
