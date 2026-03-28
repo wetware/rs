@@ -1388,6 +1388,60 @@ mod tests {
             .await;
     }
 
+    #[tokio::test]
+    async fn test_bootstrap_cap_resolves_after_delay() {
+        // Simulate the real scenario: build_membrane_rpc returns a pipelined
+        // bootstrap cap immediately, but the handler hasn't called serve() yet.
+        // Cap'n Proto promise pipelining should queue requests and resolve them
+        // once the underlying cap becomes available.
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+
+                // Create a "delayed" executor cap using new_future_client.
+                // This simulates a pipelined cap that resolves after 200ms.
+                let host_clone = host.clone();
+                let delayed_executor: system_capnp::executor::Client =
+                    capnp_rpc::new_future_client(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        let resp = host_clone.executor_request().send().promise.await?;
+                        Ok(resp.get()?.get_executor()?)
+                    });
+
+                // Store the delayed cap in ProcessImpl.
+                let (stdin, stdout, stderr, exit_rx) = dummy_process_parts();
+                let process_impl = ProcessImpl::with_bootstrap(
+                    stdin,
+                    stdout,
+                    stderr,
+                    exit_rx,
+                    delayed_executor.client.clone(),
+                );
+                let process = setup_process_rpc(process_impl);
+
+                // Call bootstrap() immediately — the cap hasn't resolved yet.
+                let resp = process.bootstrap_request().send().promise.await.unwrap();
+                let cap = resp.get().unwrap().get_cap();
+                let executor: system_capnp::executor::Client =
+                    cap.get_as_capability().unwrap();
+
+                // Use the cap — should block until the delayed future resolves.
+                let mut echo_req = executor.echo_request();
+                echo_req.get().set_message("delayed bootstrap");
+                let echo_resp = echo_req.send().promise.await.unwrap();
+                let text = echo_resp
+                    .get()
+                    .unwrap()
+                    .get_response()
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                assert_eq!(text, "Echo: delayed bootstrap");
+            })
+            .await;
+    }
+
     // =========================================================================
     // Host.network() tests
     // =========================================================================
@@ -1698,6 +1752,231 @@ mod tests {
                 }
             })
             .await;
+    }
+
+    // =========================================================================
+    // RpcListener / RpcDialer validation tests
+    // =========================================================================
+
+    /// Helper: create an EpochGuard and its sender for test manipulation.
+    fn test_epoch_guard(seq: u64) -> (tokio::sync::watch::Sender<::membrane::Epoch>, EpochGuard) {
+        let epoch = ::membrane::Epoch {
+            seq,
+            head: vec![],
+            adopted_block: 0,
+        };
+        let (tx, rx) = tokio::sync::watch::channel(epoch);
+        let guard = EpochGuard {
+            issued_seq: seq,
+            receiver: rx,
+        };
+        (tx, guard)
+    }
+
+    /// Helper: create a dummy stream_control for validation tests.
+    /// The control won't be used for actual I/O in these tests.
+    fn dummy_stream_control() -> libp2p_stream::Control {
+        libp2p_stream::Behaviour::new().new_control()
+    }
+
+    #[tokio::test]
+    async fn test_rpc_listener_empty_schema_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let listener_impl =
+                    rpc_listener::RpcListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::rpc_listener::Client =
+                    capnp_rpc::new_client(listener_impl);
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                let mut req = listener.listen_request();
+                req.get().set_executor(executor);
+                req.get().set_schema(&[]); // empty schema
+                req.get().set_handler(&[0xDE, 0xAD]);
+
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "empty schema should error");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_dialer_empty_schema_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let dialer_impl =
+                    rpc_dialer::RpcDialerImpl::new(dummy_stream_control(), guard);
+                let dialer: system_capnp::rpc_dialer::Client =
+                    capnp_rpc::new_client(dialer_impl);
+
+                let mut req = dialer.dial_request();
+                // Valid peer ID (Ed25519 public key)
+                let keypair = libp2p::identity::Keypair::generate_ed25519();
+                let peer_id = libp2p::PeerId::from_public_key(&keypair.public());
+                req.get().set_peer(&peer_id.to_bytes());
+                req.get().set_schema(&[]); // empty schema
+
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "empty schema should error");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_dialer_invalid_peer_id_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let dialer_impl =
+                    rpc_dialer::RpcDialerImpl::new(dummy_stream_control(), guard);
+                let dialer: system_capnp::rpc_dialer::Client =
+                    capnp_rpc::new_client(dialer_impl);
+
+                let mut req = dialer.dial_request();
+                req.get().set_peer(&[0xFF, 0xFF, 0xFF]); // garbage peer ID
+                req.get().set_schema(b"valid schema bytes");
+
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "invalid peer ID should error");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_listener_stale_epoch_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (tx, guard) = test_epoch_guard(1);
+                let listener_impl =
+                    rpc_listener::RpcListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::rpc_listener::Client =
+                    capnp_rpc::new_client(listener_impl);
+
+                // Advance epoch to make guard stale.
+                tx.send(::membrane::Epoch {
+                    seq: 2,
+                    head: vec![],
+                    adopted_block: 0,
+                })
+                .unwrap();
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                let mut req = listener.listen_request();
+                req.get().set_executor(executor);
+                req.get().set_schema(b"some schema");
+                req.get().set_handler(&[0xDE, 0xAD]);
+
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "stale epoch should error");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_dialer_stale_epoch_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (tx, guard) = test_epoch_guard(1);
+                let dialer_impl =
+                    rpc_dialer::RpcDialerImpl::new(dummy_stream_control(), guard);
+                let dialer: system_capnp::rpc_dialer::Client =
+                    capnp_rpc::new_client(dialer_impl);
+
+                // Advance epoch to make guard stale.
+                tx.send(::membrane::Epoch {
+                    seq: 2,
+                    head: vec![],
+                    adopted_block: 0,
+                })
+                .unwrap();
+
+                let keypair = libp2p::identity::Keypair::generate_ed25519();
+                let peer_id = libp2p::PeerId::from_public_key(&keypair.public());
+
+                let mut req = dialer.dial_request();
+                req.get().set_peer(&peer_id.to_bytes());
+                req.get().set_schema(b"some schema");
+
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "stale epoch should error");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_listener_protocol_collision_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                // Share the same Behaviour so both listeners see the same protocol registry.
+                let behaviour = libp2p_stream::Behaviour::new();
+                let control1 = behaviour.new_control();
+                let control2 = behaviour.new_control();
+
+                let listener1 =
+                    rpc_listener::RpcListenerImpl::new(control1, guard.clone());
+                let client1: system_capnp::rpc_listener::Client =
+                    capnp_rpc::new_client(listener1);
+
+                let listener2 =
+                    rpc_listener::RpcListenerImpl::new(control2, guard);
+                let client2: system_capnp::rpc_listener::Client =
+                    capnp_rpc::new_client(listener2);
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                let schema = b"same schema bytes";
+
+                // First registration should succeed.
+                let mut req1 = client1.listen_request();
+                req1.get().set_executor(executor.clone());
+                req1.get().set_schema(schema);
+                req1.get().set_handler(&[0xDE, 0xAD]);
+                req1.send().promise.await.expect("first listen should succeed");
+
+                // Second registration with same schema should fail (same protocol CID).
+                let mut req2 = client2.listen_request();
+                req2.get().set_executor(executor);
+                req2.get().set_schema(schema);
+                req2.get().set_handler(&[0xBE, 0xEF]);
+                let result = req2.send().promise.await;
+                assert!(result.is_err(), "duplicate protocol registration should error");
+            })
+            .await;
+    }
+
+    #[test]
+    fn test_schema_cid_matches_schema_id_compute_cid() {
+        // Verify the runtime schema_cid() in mod.rs produces the same CID
+        // as the build-time compute_cid() in the schema-id crate.
+        let test_inputs: &[&[u8]] = &[
+            b"test schema bytes",
+            b"\x00\x01\x02\x03",
+            b"",
+            &[0xff; 256],
+        ];
+        for input in test_inputs {
+            let runtime_cid = super::schema_cid(input);
+            let buildtime_cid = schema_id::compute_cid(input);
+            assert_eq!(
+                runtime_cid, buildtime_cid,
+                "CID mismatch for input of length {}",
+                input.len()
+            );
+        }
     }
 
     #[tokio::test]

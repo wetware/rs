@@ -88,7 +88,7 @@ impl system_capnp::rpc_listener::Server for RpcListenerImpl {
                     }
                 });
             }
-            tracing::debug!("RPC subprotocol accept loop ended");
+            tracing::warn!(protocol = %stream_protocol, "RPC subprotocol accept loop ended unexpectedly");
         });
 
         Promise::ok(())

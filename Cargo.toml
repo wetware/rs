@@ -5,6 +5,7 @@ members = [
     "crates/glia",
     "crates/cache",
     "crates/membrane",
+    "crates/schema-id",
     "crates/guest/auth",
     "std/system",
     # "crates/kernel",  # TODO: re-enable when kernel crate is created
@@ -74,6 +75,9 @@ cap-std = "3.4"
 [[bin]]
 name = "ww"
 path = "src/cli/main.rs"
+
+[dev-dependencies]
+schema-id = { path = "crates/schema-id" }
 
 [build-dependencies]
 capnpc = "0.23.3"

@@ -41,3 +41,11 @@
 **Why:** v1 only caches content-addressed paths (`/ipfs/`). Mutable paths need TTL and re-resolution.
 **Context:** IPNS records have a TTL field. `/p2p/` paths resolve via DHT with its own caching semantics. Needs design work around invalidation strategy.
 **Depends on:** `crates/cache` (weighted ARC)
+
+## RPC handshake timeout for RpcDialer.dial()
+**What:** Add an RPC-level timeout to `RpcDialerImpl::dial()` so it doesn't silently hang when the remote peer accepts the libp2p stream but never speaks Cap'n Proto.
+**Why:** The 30s `DIAL_TIMEOUT` only covers stream establishment. If the remote accepts the stream but doesn't run an RPC server, `rpc_system.bootstrap()` returns a proxy immediately, but method calls on that proxy hang until the TCP-level timeout (minutes). Guests see a silent hang.
+**Context:** The fix is to wrap the first RPC operation (or the bootstrap itself) in a timeout. E.g., send a lightweight probe after bootstrap and fail if no response within 30s. Or use `tokio::time::timeout` around the bootstrap cap retrieval.
+**Effort:** S
+**Priority:** P1
+**Depends on:** PR #270 (RpcListener/RpcDialer)

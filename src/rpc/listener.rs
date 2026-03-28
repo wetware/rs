@@ -88,7 +88,7 @@ impl system_capnp::listener::Server for ListenerImpl {
                     }
                 });
             }
-            tracing::debug!("Subprotocol accept loop ended");
+            tracing::warn!(protocol = %stream_protocol, "Subprotocol accept loop ended unexpectedly");
         });
 
         Promise::ok(())

@@ -96,12 +96,18 @@ impl system_capnp::rpc_dialer::Server for RpcDialerImpl {
             // handles shutdown: when the guest drops all capabilities obtained from
             // this RPC system, the system drains and the task completes.
             tokio::task::spawn_local(async move {
-                let _ = rpc_system.await;
-                tracing::debug!(
-                    peer = %peer_id,
-                    protocol = %stream_protocol,
-                    "RPC dial session ended"
-                );
+                match rpc_system.await {
+                    Ok(()) => tracing::debug!(
+                        peer = %peer_id,
+                        protocol = %stream_protocol,
+                        "RPC dial session ended cleanly"
+                    ),
+                    Err(e) => tracing::warn!(
+                        peer = %peer_id,
+                        protocol = %stream_protocol,
+                        "RPC dial session ended with error: {e}"
+                    ),
+                }
             });
 
             results.get().init_cap().set_as_capability(remote_cap.hook);
