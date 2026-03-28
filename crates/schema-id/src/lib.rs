@@ -76,8 +76,7 @@ pub fn extract_schemas(
         capnp::message::ReaderOptions::new(),
     )?;
 
-    let request: capnp::schema_capnp::code_generator_request::Reader =
-        message_reader.get_root()?;
+    let request: capnp::schema_capnp::code_generator_request::Reader = message_reader.get_root()?;
     let nodes = request.get_nodes()?;
 
     let mut results = Vec::new();
@@ -143,10 +142,7 @@ pub fn compute_cid(data: &[u8]) -> String {
 /// /// Content-addressed ID: CIDv1(raw, BLAKE3(canonical schema)).
 /// pub const {NAME}_CID: &str = "...";
 /// ```
-pub fn emit_schema_consts(
-    output_path: &Path,
-    schemas: &[SchemaEntry],
-) -> std::io::Result<()> {
+pub fn emit_schema_consts(output_path: &Path, schemas: &[SchemaEntry]) -> std::io::Result<()> {
     use std::fmt::Write as _;
     use std::io::Write;
 

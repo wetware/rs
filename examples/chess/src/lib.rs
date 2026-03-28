@@ -339,8 +339,7 @@ async fn play_rpc_against_peer(
     req.get().set_peer(peer_id);
     req.get().set_schema(CHESS_ENGINE_SCHEMA);
     let resp = req.send().promise.await?;
-    let engine: chess_capnp::chess_engine::Client =
-        resp.get()?.get_cap().get_as_capability()?;
+    let engine: chess_capnp::chess_engine::Client = resp.get()?.get_cap().get_as_capability()?;
 
     log::info!("game {us} vs {them}: started (RPC)");
     play_rpc_game(&engine, unixfs, &us, &them).await
@@ -413,9 +412,7 @@ async fn play_rpc_game(
                 prev_field(&prev_cid)
             );
             prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
-            log::info!(
-                "game {us} vs {them}: {us} wins after {move_num} moves ({white_move})"
-            );
+            log::info!("game {us} vs {them}: {us} wins after {move_num} moves ({white_move})");
             break;
         }
 
@@ -467,10 +464,7 @@ async fn play_rpc_game(
                 GameStatus::Checkmate => "0-1",
                 _ => "1/2-1/2",
             };
-            let node = format!(
-                r#"{{"result":"{result_str}",{}}}"#,
-                prev_field(&prev_cid)
-            );
+            let node = format!(r#"{{"result":"{result_str}",{}}}"#, prev_field(&prev_cid));
             prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
             log::info!("game {us} vs {them}: {them} wins");
             break;
@@ -529,13 +523,12 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
         provide_req.send().promise.await?;
 
         // Search for peers; RpcDialingSink dials new ones via RPC.
-        let sink: routing_capnp::provider_sink::Client =
-            capnp_rpc::new_client(RpcDialingSink {
-                rpc_dialer: rpc_dialer.clone(),
-                unixfs: unixfs.clone(),
-                self_id: self_id.clone(),
-                seen: seen.clone(),
-            });
+        let sink: routing_capnp::provider_sink::Client = capnp_rpc::new_client(RpcDialingSink {
+            rpc_dialer: rpc_dialer.clone(),
+            unixfs: unixfs.clone(),
+            self_id: self_id.clone(),
+            seen: seen.clone(),
+        });
         let mut fp_req = routing.find_providers_request();
         {
             let mut b = fp_req.get();
@@ -859,11 +852,8 @@ mod tests {
                     assert!(resp.get().unwrap().get_ok(), "move {m} rejected");
                     move_count += 1;
 
-                    let status_resp =
-                        client.get_status_request().send().promise.await.unwrap();
-                    if status_resp.get().unwrap().get_status().unwrap()
-                        != GameStatus::Ongoing
-                    {
+                    let status_resp = client.get_status_request().send().promise.await.unwrap();
+                    if status_resp.get().unwrap().get_status().unwrap() != GameStatus::Ongoing {
                         break;
                     }
 
@@ -889,11 +879,8 @@ mod tests {
                     let resp = req.send().promise.await.unwrap();
                     assert!(resp.get().unwrap().get_ok(), "move {m} rejected");
 
-                    let status_resp =
-                        client.get_status_request().send().promise.await.unwrap();
-                    if status_resp.get().unwrap().get_status().unwrap()
-                        != GameStatus::Ongoing
-                    {
+                    let status_resp = client.get_status_request().send().promise.await.unwrap();
+                    if status_resp.get().unwrap().get_status().unwrap() != GameStatus::Ongoing {
                         break;
                     }
                 }

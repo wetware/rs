@@ -36,11 +36,8 @@ fn main() {
         .expect("failed to compile chess.capnp");
 
     // Extract canonical schema bytes and CIDs for the ChessEngine interface.
-    let schemas = schema_id::extract_schemas(
-        &raw_request,
-        &[("CHESS_ENGINE", 0xd0ac8299df079c61)],
-    )
-    .expect("extract ChessEngine schema");
+    let schemas = schema_id::extract_schemas(&raw_request, &[("CHESS_ENGINE", 0xd0ac8299df079c61)])
+        .expect("extract ChessEngine schema");
 
     schema_id::emit_schema_consts(&out_dir.join("schema_ids.rs"), &schemas)
         .expect("emit schema consts");

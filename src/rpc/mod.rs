@@ -61,9 +61,8 @@ pub(crate) fn extract_wasm_custom_section<'a>(
     use wasmparser::{Parser, Payload};
 
     for payload in Parser::new(0).parse_all(wasm_bytes) {
-        let payload = payload.map_err(|e| {
-            capnp::Error::failed(format!("failed to parse WASM binary: {e}"))
-        })?;
+        let payload = payload
+            .map_err(|e| capnp::Error::failed(format!("failed to parse WASM binary: {e}")))?;
         match payload {
             Payload::CustomSection(reader) if reader.name() == section_name => {
                 return Ok(Some(reader.data()));
@@ -1446,8 +1445,7 @@ mod tests {
                 // Call bootstrap() immediately — the cap hasn't resolved yet.
                 let resp = process.bootstrap_request().send().promise.await.unwrap();
                 let cap = resp.get().unwrap().get_cap();
-                let executor: system_capnp::executor::Client =
-                    cap.get_as_capability().unwrap();
+                let executor: system_capnp::executor::Client = cap.get_as_capability().unwrap();
 
                 // Use the cap — should block until the delayed future resolves.
                 let mut echo_req = executor.echo_request();
@@ -1887,10 +1885,8 @@ mod tests {
         local
             .run_until(async {
                 let (_tx, guard) = test_epoch_guard(1);
-                let dialer_impl =
-                    rpc_dialer::RpcDialerImpl::new(dummy_stream_control(), guard);
-                let dialer: system_capnp::rpc_dialer::Client =
-                    capnp_rpc::new_client(dialer_impl);
+                let dialer_impl = rpc_dialer::RpcDialerImpl::new(dummy_stream_control(), guard);
+                let dialer: system_capnp::rpc_dialer::Client = capnp_rpc::new_client(dialer_impl);
 
                 let mut req = dialer.dial_request();
                 // Valid peer ID (Ed25519 public key)
@@ -1911,10 +1907,8 @@ mod tests {
         local
             .run_until(async {
                 let (_tx, guard) = test_epoch_guard(1);
-                let dialer_impl =
-                    rpc_dialer::RpcDialerImpl::new(dummy_stream_control(), guard);
-                let dialer: system_capnp::rpc_dialer::Client =
-                    capnp_rpc::new_client(dialer_impl);
+                let dialer_impl = rpc_dialer::RpcDialerImpl::new(dummy_stream_control(), guard);
+                let dialer: system_capnp::rpc_dialer::Client = capnp_rpc::new_client(dialer_impl);
 
                 let mut req = dialer.dial_request();
                 req.get().set_peer(&[0xFF, 0xFF, 0xFF]); // garbage peer ID
@@ -1965,10 +1959,8 @@ mod tests {
         local
             .run_until(async {
                 let (tx, guard) = test_epoch_guard(1);
-                let dialer_impl =
-                    rpc_dialer::RpcDialerImpl::new(dummy_stream_control(), guard);
-                let dialer: system_capnp::rpc_dialer::Client =
-                    capnp_rpc::new_client(dialer_impl);
+                let dialer_impl = rpc_dialer::RpcDialerImpl::new(dummy_stream_control(), guard);
+                let dialer: system_capnp::rpc_dialer::Client = capnp_rpc::new_client(dialer_impl);
 
                 // Advance epoch to make guard stale.
                 tx.send(::membrane::Epoch {
@@ -2002,15 +1994,11 @@ mod tests {
                 let control1 = behaviour.new_control();
                 let control2 = behaviour.new_control();
 
-                let listener1 =
-                    rpc_listener::RpcListenerImpl::new(control1, guard.clone());
-                let client1: system_capnp::rpc_listener::Client =
-                    capnp_rpc::new_client(listener1);
+                let listener1 = rpc_listener::RpcListenerImpl::new(control1, guard.clone());
+                let client1: system_capnp::rpc_listener::Client = capnp_rpc::new_client(listener1);
 
-                let listener2 =
-                    rpc_listener::RpcListenerImpl::new(control2, guard);
-                let client2: system_capnp::rpc_listener::Client =
-                    capnp_rpc::new_client(listener2);
+                let listener2 = rpc_listener::RpcListenerImpl::new(control2, guard);
+                let client2: system_capnp::rpc_listener::Client = capnp_rpc::new_client(listener2);
 
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
@@ -2023,14 +2011,20 @@ mod tests {
                 let mut req1 = client1.listen_request();
                 req1.get().set_executor(executor.clone());
                 req1.get().set_handler(&handler);
-                req1.send().promise.await.expect("first listen should succeed");
+                req1.send()
+                    .promise
+                    .await
+                    .expect("first listen should succeed");
 
                 // Second registration with same schema should fail (same protocol CID).
                 let mut req2 = client2.listen_request();
                 req2.get().set_executor(executor);
                 req2.get().set_handler(&handler);
                 let result = req2.send().promise.await;
-                assert!(result.is_err(), "duplicate protocol registration should error");
+                assert!(
+                    result.is_err(),
+                    "duplicate protocol registration should error"
+                );
             })
             .await;
     }
@@ -2039,17 +2033,13 @@ mod tests {
     fn test_schema_cid_matches_schema_id_compute_cid() {
         // Verify the runtime schema_cid() in mod.rs produces the same CID
         // as the build-time compute_cid() in the schema-id crate.
-        let test_inputs: &[&[u8]] = &[
-            b"test schema bytes",
-            b"\x00\x01\x02\x03",
-            b"",
-            &[0xff; 256],
-        ];
+        let test_inputs: &[&[u8]] = &[b"test schema bytes", b"\x00\x01\x02\x03", b"", &[0xff; 256]];
         for input in test_inputs {
             let runtime_cid = super::schema_cid(input);
             let buildtime_cid = schema_id::compute_cid(input);
             assert_eq!(
-                runtime_cid, buildtime_cid,
+                runtime_cid,
+                buildtime_cid,
                 "CID mismatch for input of length {}",
                 input.len()
             );
@@ -2109,12 +2099,18 @@ mod tests {
             .expect("section should be present");
 
         // Bytes must be identical.
-        assert_eq!(extracted, schema_bytes, "extracted bytes don't match injected bytes");
+        assert_eq!(
+            extracted, schema_bytes,
+            "extracted bytes don't match injected bytes"
+        );
 
         // CID derived at runtime must match build-time CID.
         let runtime_cid = super::schema_cid(extracted);
         let buildtime_cid = schema_id::compute_cid(schema_bytes);
-        assert_eq!(runtime_cid, buildtime_cid, "CID mismatch between inject and extract paths");
+        assert_eq!(
+            runtime_cid, buildtime_cid,
+            "CID mismatch between inject and extract paths"
+        );
     }
 
     /// Verify that injecting a section preserves the original WASM content.
@@ -2165,7 +2161,11 @@ mod tests {
                 req.get().set_handler(&handler);
 
                 let result = req.send().promise.await;
-                assert!(result.is_ok(), "WASM with valid schema section should be accepted: {:?}", result.err());
+                assert!(
+                    result.is_ok(),
+                    "WASM with valid schema section should be accepted: {:?}",
+                    result.err()
+                );
             })
             .await;
     }
