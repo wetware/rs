@@ -46,14 +46,25 @@ impl system_capnp::rpc_listener::Server for RpcListenerImpl {
 
         let params = pry!(params.get());
         let executor: system_capnp::executor::Client = pry!(params.get_executor());
-        let schema_bytes = pry!(params.get_schema());
         let handler: Arc<[u8]> = pry!(params.get_handler()).into();
 
-        if schema_bytes.is_empty() {
-            return Promise::err(capnp::Error::failed("schema must not be empty".into()));
-        }
+        // Extract schema from the WASM binary's "schema.capnp" custom section.
+        let schema_bytes = match pry!(super::extract_wasm_custom_section(&handler, "schema.capnp"))
+        {
+            Some(bytes) if !bytes.is_empty() => bytes.to_vec(),
+            Some(_) => {
+                return Promise::err(capnp::Error::failed(
+                    "schema.capnp custom section is empty".into(),
+                ));
+            }
+            None => {
+                return Promise::err(capnp::Error::failed(
+                    "handler WASM does not contain a 'schema.capnp' custom section".into(),
+                ));
+            }
+        };
 
-        let protocol_cid = super::schema_cid(schema_bytes);
+        let protocol_cid = super::schema_cid(&schema_bytes);
         let stream_protocol = pry!(super::schema_protocol(&protocol_cid));
 
         let mut control = self.stream_control.clone();

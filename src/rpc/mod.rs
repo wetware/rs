@@ -51,6 +51,29 @@ pub(crate) fn schema_protocol(cid: &str) -> Result<StreamProtocol, capnp::Error>
         .map_err(|e| capnp::Error::failed(format!("invalid protocol from schema CID: {e}")))
 }
 
+/// Extract a custom section from a WASM binary (component or module).
+///
+/// Returns the section data if found, or `None` if the section doesn't exist.
+pub(crate) fn extract_wasm_custom_section<'a>(
+    wasm_bytes: &'a [u8],
+    section_name: &str,
+) -> Result<Option<&'a [u8]>, capnp::Error> {
+    use wasmparser::{Parser, Payload};
+
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        let payload = payload.map_err(|e| {
+            capnp::Error::failed(format!("failed to parse WASM binary: {e}"))
+        })?;
+        match payload {
+            Payload::CustomSection(reader) if reader.name() == section_name => {
+                return Ok(Some(reader.data()));
+            }
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
 /// Maximum bytes a single ByteStream read may allocate.
 ///
 /// Guards against OOM from callers requesting u32::MAX bytes.
@@ -1779,8 +1802,33 @@ mod tests {
         libp2p_stream::Behaviour::new().new_control()
     }
 
+    /// Build a minimal WASM component with an optional custom section.
+    /// Returns bytes that wasmparser can parse (valid WASM component header).
+    fn wasm_with_custom_section(section_name: &str, data: &[u8]) -> Vec<u8> {
+        use wasm_encoder::ComponentSection;
+        // Minimal WASM component: magic + version + layer
+        let mut bytes = vec![
+            0x00, 0x61, 0x73, 0x6d, // \0asm
+            0x0d, 0x00, 0x01, 0x00, // component version (13.0)
+        ];
+        let custom = wasm_encoder::CustomSection {
+            name: std::borrow::Cow::Borrowed(section_name),
+            data: std::borrow::Cow::Borrowed(data),
+        };
+        custom.append_to_component(&mut bytes);
+        bytes
+    }
+
+    /// Build a minimal WASM component with NO custom sections.
+    fn wasm_without_custom_section() -> Vec<u8> {
+        vec![
+            0x00, 0x61, 0x73, 0x6d, // \0asm
+            0x0d, 0x00, 0x01, 0x00, // component version (13.0)
+        ]
+    }
+
     #[tokio::test]
-    async fn test_rpc_listener_empty_schema_errors() {
+    async fn test_rpc_listener_missing_schema_section_errors() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -1793,13 +1841,42 @@ mod tests {
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
 
+                // Handler WASM without schema.capnp section
+                let handler = wasm_without_custom_section();
+
                 let mut req = listener.listen_request();
                 req.get().set_executor(executor);
-                req.get().set_schema(&[]); // empty schema
-                req.get().set_handler(&[0xDE, 0xAD]);
+                req.get().set_handler(&handler);
 
                 let result = req.send().promise.await;
-                assert!(result.is_err(), "empty schema should error");
+                assert!(result.is_err(), "missing schema section should error");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_listener_empty_schema_section_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let listener_impl =
+                    rpc_listener::RpcListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::rpc_listener::Client =
+                    capnp_rpc::new_client(listener_impl);
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                // Handler WASM with empty schema.capnp section
+                let handler = wasm_with_custom_section("schema.capnp", &[]);
+
+                let mut req = listener.listen_request();
+                req.get().set_executor(executor);
+                req.get().set_handler(&handler);
+
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "empty schema section should error");
             })
             .await;
     }
@@ -1871,10 +1948,10 @@ mod tests {
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
 
+                let handler = wasm_with_custom_section("schema.capnp", b"some schema");
                 let mut req = listener.listen_request();
                 req.get().set_executor(executor);
-                req.get().set_schema(b"some schema");
-                req.get().set_handler(&[0xDE, 0xAD]);
+                req.get().set_handler(&handler);
 
                 let result = req.send().promise.await;
                 assert!(result.is_err(), "stale epoch should error");
@@ -1939,19 +2016,19 @@ mod tests {
                 let executor = host.executor_request().send().pipeline.get_executor();
 
                 let schema = b"same schema bytes";
+                // Both handlers have the same schema section → same protocol CID.
+                let handler = wasm_with_custom_section("schema.capnp", schema);
 
                 // First registration should succeed.
                 let mut req1 = client1.listen_request();
                 req1.get().set_executor(executor.clone());
-                req1.get().set_schema(schema);
-                req1.get().set_handler(&[0xDE, 0xAD]);
+                req1.get().set_handler(&handler);
                 req1.send().promise.await.expect("first listen should succeed");
 
                 // Second registration with same schema should fail (same protocol CID).
                 let mut req2 = client2.listen_request();
                 req2.get().set_executor(executor);
-                req2.get().set_schema(schema);
-                req2.get().set_handler(&[0xBE, 0xEF]);
+                req2.get().set_handler(&handler);
                 let result = req2.send().promise.await;
                 assert!(result.is_err(), "duplicate protocol registration should error");
             })
@@ -1977,6 +2054,120 @@ mod tests {
                 input.len()
             );
         }
+    }
+
+    #[test]
+    fn test_extract_wasm_custom_section_found() {
+        let data = b"canonical schema bytes";
+        let wasm = wasm_with_custom_section("schema.capnp", data);
+        let result = super::extract_wasm_custom_section(&wasm, "schema.capnp").unwrap();
+        assert_eq!(result, Some(data.as_slice()));
+    }
+
+    #[test]
+    fn test_extract_wasm_custom_section_not_found() {
+        let wasm = wasm_without_custom_section();
+        let result = super::extract_wasm_custom_section(&wasm, "schema.capnp").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_wasm_custom_section_wrong_name() {
+        let wasm = wasm_with_custom_section("other.section", b"data");
+        let result = super::extract_wasm_custom_section(&wasm, "schema.capnp").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_wasm_custom_section_invalid_wasm() {
+        let result = super::extract_wasm_custom_section(b"not wasm", "schema.capnp");
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Integration: inject → extract → CID round-trip
+    // =========================================================================
+
+    /// The critical integration test: schema bytes injected at build time
+    /// via `schema_id::inject_custom_section` must be recoverable at runtime
+    /// via `extract_wasm_custom_section`, and the CID derived from the
+    /// extracted bytes must match the build-time CID.
+    ///
+    /// If this test fails, peers built from the same schema will compute
+    /// different protocol CIDs and silently fail to discover each other.
+    #[test]
+    fn test_inject_extract_cid_round_trip() {
+        let schema_bytes = b"canonical ChessEngine schema.Node bytes";
+
+        // Build time: inject into a minimal WASM component.
+        let base_wasm = wasm_without_custom_section();
+        let injected = schema_id::inject_custom_section(&base_wasm, "schema.capnp", schema_bytes);
+
+        // Runtime: extract the section back out.
+        let extracted = super::extract_wasm_custom_section(&injected, "schema.capnp")
+            .expect("extraction should succeed")
+            .expect("section should be present");
+
+        // Bytes must be identical.
+        assert_eq!(extracted, schema_bytes, "extracted bytes don't match injected bytes");
+
+        // CID derived at runtime must match build-time CID.
+        let runtime_cid = super::schema_cid(extracted);
+        let buildtime_cid = schema_id::compute_cid(schema_bytes);
+        assert_eq!(runtime_cid, buildtime_cid, "CID mismatch between inject and extract paths");
+    }
+
+    /// Verify that injecting a section preserves the original WASM content.
+    /// A section added to a valid component should still parse as valid WASM.
+    #[test]
+    fn test_inject_preserves_wasm_validity() {
+        let base_wasm = wasm_with_custom_section("other.section", b"existing data");
+        let injected = schema_id::inject_custom_section(&base_wasm, "schema.capnp", b"schema");
+
+        // Both sections should be extractable.
+        let other = super::extract_wasm_custom_section(&injected, "other.section")
+            .expect("parse should succeed")
+            .expect("other.section should survive injection");
+        assert_eq!(other, b"existing data");
+
+        let schema = super::extract_wasm_custom_section(&injected, "schema.capnp")
+            .expect("parse should succeed")
+            .expect("schema.capnp should be present");
+        assert_eq!(schema, b"schema");
+    }
+
+    /// End-to-end: build a WASM with an embedded schema section, hand it to
+    /// an RpcListener, and verify it successfully registers a protocol.
+    /// This tests the full path from injection through to protocol registration.
+    #[tokio::test]
+    async fn test_rpc_listener_accepts_wasm_with_schema_section() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let listener_impl =
+                    rpc_listener::RpcListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::rpc_listener::Client =
+                    capnp_rpc::new_client(listener_impl);
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                // Build a WASM with a valid schema section via the inject path.
+                let handler = schema_id::inject_custom_section(
+                    &wasm_without_custom_section(),
+                    "schema.capnp",
+                    b"valid schema bytes for ChessEngine",
+                );
+
+                let mut req = listener.listen_request();
+                req.get().set_executor(executor);
+                req.get().set_handler(&handler);
+
+                let result = req.send().promise.await;
+                assert!(result.is_ok(), "WASM with valid schema section should be accepted: {:?}", result.err());
+            })
+            .await;
     }
 
     #[tokio::test]

@@ -89,9 +89,10 @@ interface Process {
 }
 
 interface RpcListener {
-  listen @0 (executor :Executor, schema :Data, handler :Data) -> ();
+  listen @0 (executor :Executor, handler :Data) -> ();
   # Accept incoming streams on /ww/0.1.0/{cid} where cid = CIDv1(raw, BLAKE3(schema)).
-  # The schema is the canonical Cap'n Proto encoding of a schema.Node — its id field
+  # The schema is extracted from the handler WASM binary's "schema.capnp" custom section.
+  # The section contains the canonical Cap'n Proto encoding of a schema.Node — its id field
   # (the 64-bit unique type ID) is part of the hash input, so identical structures
   # with different IDs produce different protocol addresses.
   #
@@ -101,6 +102,8 @@ interface RpcListener {
   #
   # The handler's Membrane is never exposed to the remote peer.
   # OCAP: caller delegates spawn authority via executor.
+  #
+  # Errors if the handler WASM does not contain a "schema.capnp" custom section.
 }
 
 interface RpcDialer {
