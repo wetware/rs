@@ -45,6 +45,10 @@ fn main() {
     schema_id::emit_schema_consts(&out_dir.join("schema_ids.rs"), &schemas)
         .expect("emit schema consts");
 
+    // Write raw schema bytes for post-build injection into WASM custom section.
+    schema_id::write_schema_bytes(&out_dir.join("chess_engine_schema.bin"), &schemas[0])
+        .expect("write schema bytes");
+
     for schema in &["system", "ipfs", "routing", "stem"] {
         println!(
             "cargo:rerun-if-changed={}",
