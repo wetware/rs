@@ -193,6 +193,35 @@ pub fn emit_schema_consts(
     Ok(())
 }
 
+/// Write raw schema bytes to a file for post-build injection.
+///
+/// Call this from `build.rs` alongside `emit_schema_consts()` to save
+/// the canonical bytes that will be injected into the WASM binary as a
+/// custom section.
+pub fn write_schema_bytes(output_path: &Path, entry: &SchemaEntry) -> std::io::Result<()> {
+    std::fs::write(output_path, &entry.canonical_bytes)
+}
+
+/// Inject a custom section into a WASM binary.
+///
+/// Parses the input WASM (component or module), appends a custom section
+/// with the given name and data, and returns the modified bytes.
+///
+/// Requires the `inject` feature.
+#[cfg(feature = "inject")]
+pub fn inject_custom_section(wasm_bytes: &[u8], section_name: &str, data: &[u8]) -> Vec<u8> {
+    use wasm_encoder::ComponentSection;
+
+    let custom = wasm_encoder::CustomSection {
+        name: std::borrow::Cow::Borrowed(section_name),
+        data: std::borrow::Cow::Borrowed(data),
+    };
+
+    let mut output = wasm_bytes.to_vec();
+    custom.append_to_component(&mut output);
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
