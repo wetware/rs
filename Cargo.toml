@@ -76,6 +76,9 @@ cap-std = "3.4"
 name = "ww"
 path = "src/cli/main.rs"
 
+[dev-dependencies]
+schema-id = { path = "crates/schema-id" }
+
 [build-dependencies]
 capnpc = "0.23.3"
 

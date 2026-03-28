@@ -127,7 +127,7 @@ fn canonicalize_node(node: capnp::schema_capnp::node::Reader) -> capnp::Result<V
 }
 
 /// Compute CIDv1(raw, BLAKE3(data)).
-fn compute_cid(data: &[u8]) -> String {
+pub fn compute_cid(data: &[u8]) -> String {
     let digest = blake3::hash(data);
     let mh = cid::multihash::Multihash::<64>::wrap(0x1e, digest.as_bytes())
         .expect("blake3 digest always fits in 64-byte multihash");
