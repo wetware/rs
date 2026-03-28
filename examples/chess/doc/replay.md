@@ -39,7 +39,7 @@ Normal nodes have `n`, `w`, `b`, `prev`.  The terminal node adds
 
 - `1-0` — White wins (opponent has no legal moves after White's move)
 - `0-1` — Black wins (White has no legal moves at start of turn)
-- `*` — game interrupted (stream closed or empty response)
+- `*` — game interrupted (connection dropped or RPC error)
 
 ## Viewing a replay
 
