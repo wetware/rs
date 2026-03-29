@@ -2402,33 +2402,35 @@ async fn perform_dispatch(
     data: Val,
 ) -> Result<Val, Val> {
     // Walk stack in reverse (newest first) to find a matching handler.
-    let stack = handler_stack.borrow();
-    let matching_ctx = match &effect_target {
-        effect::EffectTarget::Keyword(_) => {
-            // Keyword effects skip cap handler frames (target: Some(Cap{..}))
-            // and land on the nearest keyword handler frame (target: None).
-            stack
-                .iter()
-                .rev()
-                .find(|ctx| ctx.borrow().target.is_none())
-                .cloned()
-        }
-        effect::EffectTarget::Cap { .. } => {
-            // Cap effects walk the stack looking for a frame whose target
-            // matches by Rc::ptr_eq (identity).
-            stack
-                .iter()
-                .rev()
-                .find(|ctx| {
-                    let ctx = ctx.borrow();
-                    ctx.target
-                        .as_ref()
-                        .map_or(false, |t| t.matches(&effect_target))
-                })
-                .cloned()
+    // Scoped borrow — released before any .await.
+    let matching_ctx = {
+        let stack = handler_stack.borrow();
+        match &effect_target {
+            effect::EffectTarget::Keyword(_) => {
+                // Keyword effects skip cap handler frames (target: Some(Cap{..}))
+                // and land on the nearest keyword handler frame (target: None).
+                stack
+                    .iter()
+                    .rev()
+                    .find(|ctx| ctx.borrow().target.is_none())
+                    .cloned()
+            }
+            effect::EffectTarget::Cap { .. } => {
+                // Cap effects walk the stack looking for a frame whose target
+                // matches by Rc::ptr_eq (identity).
+                stack
+                    .iter()
+                    .rev()
+                    .find(|ctx| {
+                        ctx.borrow()
+                            .target
+                            .as_ref()
+                            .is_some_and(|t| t.matches(&effect_target))
+                    })
+                    .cloned()
+            }
         }
     };
-    drop(stack); // release borrow before await
 
     match matching_ctx {
         Some(ctx) => {
