@@ -12,11 +12,41 @@ use std::rc::Rc;
 // Types
 // =========================================================================
 
-/// Shared state between `perform` and `with-effect-handler`'s poll loop.
-/// `perform` writes here; `with-effect-handler` reads and dispatches.
+/// The target of a `perform` — either a keyword (environmental) or a Cap (object-scoped).
+#[derive(Clone, Debug)]
+pub enum EffectTarget {
+    /// `(perform :keyword data)` — global/environmental effect.
+    Keyword(String),
+    /// `(perform cap :method args...)` — object-scoped capability effect.
+    Cap {
+        name: String,
+        inner: Rc<dyn std::any::Any>,
+    },
+}
+
+impl EffectTarget {
+    /// Does this target match the given handler's target?
+    ///
+    /// Keywords match by string equality. Caps match by `Rc::ptr_eq` (identity).
+    pub fn matches(&self, other: &EffectTarget) -> bool {
+        match (self, other) {
+            (EffectTarget::Keyword(a), EffectTarget::Keyword(b)) => a == b,
+            (EffectTarget::Cap { inner: a, .. }, EffectTarget::Cap { inner: b, .. }) => {
+                Rc::ptr_eq(a, b)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Maximum handler stack depth — prevents pathological nesting from causing unbounded walk cost.
+pub const MAX_HANDLER_DEPTH: usize = 64;
+
+/// Shared state between `perform` and handler poll loops.
+/// `perform` writes here; the matching handler reads and dispatches.
 #[derive(Default)]
 pub struct EffectSlot {
-    pub pending: Option<(String, Val, oneshot::Sender)>,
+    pub pending: Option<(EffectTarget, Val, oneshot::Sender)>,
 }
 
 impl core::fmt::Debug for EffectSlot {
@@ -39,9 +69,13 @@ impl EffectSlot {
     }
 }
 
-/// One frame on the handler stack. Each `with-handler` pushes one.
+/// One frame on the handler stack. Each `with-handler` or `with-cap-handler` pushes one.
 pub struct HandlerContext {
     pub slot: Rc<RefCell<EffectSlot>>,
+    /// What this handler handles. `None` for keyword handlers (they match
+    /// by inspecting the handler map inside the poll loop). `Some(Cap{..})`
+    /// for cap handlers (matched by identity during stack walk).
+    pub target: Option<EffectTarget>,
 }
 
 /// The dynamic handler stack — shared across all eval calls in a session.
@@ -138,6 +172,7 @@ mod tests {
 
         let ctx = Rc::new(RefCell::new(HandlerContext {
             slot: Rc::new(RefCell::new(EffectSlot::new())),
+            target: None,
         }));
         hs.borrow_mut().push(ctx.clone());
         assert_eq!(hs.borrow().len(), 1);
@@ -152,7 +187,7 @@ mod tests {
         assert!(slot.borrow().pending.is_none());
 
         let (tx, _rx) = oneshot::channel();
-        slot.borrow_mut().pending = Some(("foo".into(), Val::Int(1), tx));
+        slot.borrow_mut().pending = Some((EffectTarget::Keyword("foo".into()), Val::Int(1), tx));
         assert!(slot.borrow().pending.is_some());
 
         let taken = slot.borrow_mut().pending.take();
