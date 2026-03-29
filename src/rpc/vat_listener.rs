@@ -1,8 +1,8 @@
 //! VatListener capability: guest-exported subprotocols via Cap'n Proto RPC.
 //!
-//! The `VatListener` capability lets a guest register a libp2p subprotocol handler
+//! The `VatListener` capability lets a guest register a libp2p subprotocol cell
 //! that exports a typed capability. For each incoming connection, the host spawns a
-//! handler process (via the guest-provided `Executor`), captures the handler's
+//! cell process (via the guest-provided `Executor`), captures the cell's
 //! `system::serve()` exported bootstrap capability, and serves it to the
 //! connecting peer via Cap'n Proto RPC bootstrapping.
 //!
@@ -71,12 +71,12 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
             pry!(control
                 .accept(stream_protocol.clone())
                 .map_err(|e| capnp::Error::failed(format!(
-                    "failed to register vat protocol handler: {e}"
+                    "failed to register vat protocol cell: {e}"
                 ))));
 
-        tracing::info!(protocol = %stream_protocol, "Registered vat subprotocol handler");
+        tracing::info!(protocol = %stream_protocol, "Registered vat subprotocol cell");
 
-        // Accept loop: for each incoming connection, spawn a handler and bridge RPC.
+        // Accept loop: for each incoming connection, spawn a cell and bridge RPC.
         tokio::task::spawn_local(async move {
             while let Some((peer_id, stream)) = incoming.next().await {
                 tracing::debug!(
@@ -91,10 +91,7 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
                     if let Err(e) =
                         handle_vat_connection(executor, &wasm, stream, &protocol_cid).await
                     {
-                        tracing::error!(
-                            protocol = protocol_cid,
-                            "Vat handler connection error: {e}"
-                        );
+                        tracing::error!(protocol = protocol_cid, "Vat cell connection error: {e}");
                     }
                 });
             }
@@ -105,51 +102,51 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
     }
 }
 
-/// Spawn a handler process for a single connection and bridge its
+/// Spawn a cell process for a single connection and bridge its
 /// exported bootstrap capability to the connecting peer via Cap'n Proto RPC.
 ///
 /// Architecture (two-RPC-system bridge):
 ///
 /// ```text
-/// Remote peer  ←──[libp2p stream]──→  Host bridge  ←──[WASI bidi]──→  Handler
+/// Remote peer  ←──[libp2p stream]──→  Host bridge  ←──[WASI bidi]──→  Cell
 ///                  RPC system B                        RPC system A
 ///                  (Side::Server)                      (Side::Server)
 ///                  bootstrap =                         bootstrap = Membrane
-///                  handler_cap ←── captures ←───────── handler exports via serve()
+///                  cell_cap ←── captures ←───────── cell exports via serve()
 /// ```
 async fn handle_vat_connection(
     executor: system_capnp::executor::Client,
-    handler_wasm: &[u8],
+    cell_wasm: &[u8],
     stream: libp2p::Stream,
     protocol_cid: &str,
 ) -> Result<(), capnp::Error> {
-    // 1. Spawn handler process via executor.runBytes.
+    // 1. Spawn cell process via executor.runBytes.
     let mut req = executor.run_bytes_request();
-    req.get().set_wasm(handler_wasm);
+    req.get().set_wasm(cell_wasm);
     req.get().init_args(0);
     {
         let mut env = req.get().init_env(3);
-        env.set(0, "WW_HANDLER=1");
+        env.set(0, "WW_CELL=1");
         env.set(1, format!("WW_PROTOCOL={protocol_cid}"));
         env.set(2, "PATH=/bin");
     }
     let response = req.send().promise.await?;
     let process = response.get()?.get_process()?;
 
-    // 2. Get the handler's exported bootstrap capability.
+    // 2. Get the cell's exported bootstrap capability.
     let bootstrap_resp = process.bootstrap_request().send().promise.await?;
     let bootstrap_cap: capnp::capability::Client =
         bootstrap_resp.get()?.get_cap().get_as_capability()?;
 
-    // 3. Bridge: serve the handler's cap to the remote peer over the libp2p stream.
+    // 3. Bridge: serve the cell's cap to the remote peer over the libp2p stream.
     let (reader, writer) = Box::pin(stream).split();
     let network = VatNetwork::new(reader, writer, Side::Server, Default::default());
     let peer_rpc = RpcSystem::new(Box::new(network), Some(bootstrap_cap));
 
-    // 4. Drive the peer RPC system and handler process concurrently.
-    //    When EITHER side finishes (peer disconnects OR handler exits),
+    // 4. Drive the peer RPC system and cell process concurrently.
+    //    When EITHER side finishes (peer disconnects OR cell exits),
     //    we tear down both to avoid serving a dead capability or
-    //    keeping a handler alive with no peer.
+    //    keeping a cell alive with no peer.
     let wait_fut = async {
         let resp = process.wait_request().send().promise.await;
         match resp {
@@ -160,13 +157,13 @@ async fn handle_vat_connection(
 
     tokio::select! {
         _ = peer_rpc => {
-            tracing::debug!(protocol = protocol_cid, "Peer disconnected, cleaning up handler");
+            tracing::debug!(protocol = protocol_cid, "Peer disconnected, cleaning up cell");
             // Peer disconnected. Drop process capability to trigger cleanup.
-            // The handler will see its host RPC connection close.
+            // The cell will see its host RPC connection close.
         }
         exit_code = wait_fut => {
-            tracing::debug!(exit_code, protocol = protocol_cid, "Vat handler process exited");
-            // Handler exited. The peer RPC will get disconnected errors
+            tracing::debug!(exit_code, protocol = protocol_cid, "Vat cell process exited");
+            // Cell exited. The peer RPC will get disconnected errors
             // on subsequent calls since the bootstrap cap is dead.
         }
     }

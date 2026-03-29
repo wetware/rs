@@ -1,4 +1,4 @@
-//! Minimal WASI echo handler for integration testing.
+//! Minimal WASI echo cell for integration testing.
 //!
 //! Reads all of stdin, writes it to stdout unchanged, then exits.
 //! Used by HttpServer integration tests to validate the full
@@ -9,9 +9,9 @@ use wasip2::cli::stdout::get_stdout;
 use wasip2::exports::cli::run::Guest;
 use wasip2::io::streams::{InputStream, OutputStream};
 
-struct EchoHandler;
+struct EchoCell;
 
-impl Guest for EchoHandler {
+impl Guest for EchoCell {
     fn run() -> Result<(), ()> {
         let stdin: InputStream = get_stdin();
         let stdout: OutputStream = get_stdout();
@@ -51,4 +51,4 @@ impl Guest for EchoHandler {
     }
 }
 
-wasip2::cli::command::export!(EchoHandler);
+wasip2::cli::command::export!(EchoCell);

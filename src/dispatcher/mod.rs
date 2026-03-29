@@ -1,6 +1,6 @@
 //! Generic request dispatcher for wetware.
 //!
-//! Handles routing external requests (MCP, HTTP) to WASI handler processes.
+//! Handles routing external requests (MCP, HTTP) to WASI cell processes.
 //! The dispatcher (HttpServer) is generic over a ProtocolAdapter — adding a
 //! new protocol means implementing one trait.
 //!
@@ -11,7 +11,7 @@
 //!   between requests via SwappableReader/Writer. ~1.6us overhead.
 //!
 //! ```text
-//!  Protocol Client ──transport──► ProtocolAdapter ──► HttpServer ──► Handler process
+//!  Protocol Client ──transport──► ProtocolAdapter ──► HttpServer ──► Cell process
 //!  (MCP/HTTP)                     (framing)           (dispatch)     (WASI guest)
 //! ```
 //!
@@ -55,11 +55,11 @@ pub trait ProtocolAdapter {
     /// HTTP: accepts connection, parses HTTP request via hyper.
     async fn next_request(&mut self) -> Result<Option<Self::Request>, Self::Error>;
 
-    /// Extract the body bytes to write to the handler process's stdin.
+    /// Extract the body bytes to write to the cell process's stdin.
     /// Called once per request. The process reads these bytes then sees EOF.
     fn request_body(req: &Self::Request) -> Vec<u8>;
 
-    /// Build a response from the handler process's stdout output.
+    /// Build a response from the cell process's stdout output.
     fn build_response(req: &Self::Request, stdout: Vec<u8>, exit_code: i32) -> Self::Response;
 
     /// Build an error response (spawn failure, crash, etc.).
@@ -73,11 +73,11 @@ pub trait ProtocolAdapter {
 // HttpServer — the dispatcher
 // =========================================================================
 
-/// Maximum response size from a handler process (16 MiB).
-/// Prevents OOM from buggy/malicious handlers writing unlimited data to stdout.
+/// Maximum response size from a cell process (16 MiB).
+/// Prevents OOM from buggy/malicious cells writing unlimited data to stdout.
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
-/// Host-side request handler. Routes protocol requests to WASI handler processes.
+/// Host-side request dispatcher. Routes protocol requests to WASI cell processes.
 ///
 /// Mode A (per-request spawn): each handle() call spawns a fresh process.
 /// Mode B (long-lived worker): not yet implemented — will use SwappableReader/Writer.
@@ -127,7 +127,7 @@ impl HttpServer {
                 // Kill the process and return error
                 let _ = process.wait_request().send().promise.await;
                 return Err(capnp::Error::failed(format!(
-                    "handler response exceeded {} bytes",
+                    "cell response exceeded {} bytes",
                     MAX_RESPONSE_BYTES
                 )));
             }
@@ -141,7 +141,7 @@ impl HttpServer {
     }
 
     /// Run the dispatcher loop: read requests from the adapter, route to
-    /// handler processes, send responses back.
+    /// cell processes, send responses back.
     ///
     /// Processes requests serially. Returns when the adapter signals EOF
     /// (next_request returns None) or encounters an error.

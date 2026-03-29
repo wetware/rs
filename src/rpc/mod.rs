@@ -1412,7 +1412,7 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrap_cap_resolves_after_delay() {
         // Simulate the real scenario: build_membrane_rpc returns a pipelined
-        // bootstrap cap immediately, but the handler hasn't called serve() yet.
+        // bootstrap cap immediately, but the cell hasn't called serve() yet.
         // Cap'n Proto promise pipelining should queue requests and resolve them
         // once the underlying cap becomes available.
         let local = tokio::task::LocalSet::new();
@@ -1498,7 +1498,7 @@ mod tests {
                 let process_impl = ProcessImpl::new(stdin, stdout, stderr, exit_rx);
                 let process = setup_process_rpc(process_impl);
 
-                // Send exit code from the "handler" side.
+                // Send exit code from the "cell" side.
                 exit_tx.send(42).unwrap();
 
                 let resp = process.wait_request().send().promise.await.unwrap();
@@ -1538,13 +1538,13 @@ mod tests {
     // These test the full capability bridge pattern used by VatListener/VatClient
     // without requiring libp2p or WASM. We simulate the bridge with duplex streams:
     //
-    //   Handler (Executor echo)
+    //   Cell (Executor echo)
     //       ↓ bootstrap cap
     //   Process.bootstrap()
     //       ↓ cap over duplex
-    //   Host bridge (Side::Server, bootstrap = handler_cap)
+    //   Host bridge (Side::Server, bootstrap = cell_cap)
     //       ↓ duplex stream
-    //   Remote peer (Side::Client, bootstraps → gets handler_cap)
+    //   Remote peer (Side::Client, bootstraps → gets cell_cap)
     //       ↓
     //   Uses the cap (echo request)
 
@@ -1557,7 +1557,7 @@ mod tests {
         let (bridge_read, bridge_write) = io::split(bridge_stream);
         let (peer_read, peer_write) = io::split(peer_stream);
 
-        // Host bridge side: serve the handler's cap.
+        // Host bridge side: serve the cell's cap.
         let bridge_network = VatNetwork::new(
             bridge_read.compat(),
             bridge_write.compat_write(),
@@ -1569,7 +1569,7 @@ mod tests {
             let _ = bridge_rpc.await;
         });
 
-        // Remote peer side: bootstrap to get the handler's cap.
+        // Remote peer side: bootstrap to get the cell's cap.
         let peer_network = VatNetwork::new(
             peer_read.compat(),
             peer_write.compat_write(),
@@ -1587,12 +1587,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_rpc_bridge_cap_flows_to_remote_peer() {
-        // The golden path: handler exports a cap → Process.bootstrap() →
+        // The golden path: cell exports a cap → Process.bootstrap() →
         // host serves it over a stream → remote peer bootstraps and uses it.
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                // 1. Create a real Executor (the "handler's exported cap").
+                // 1. Create a real Executor (the "cell's exported cap").
                 let (host, _server, _rx) = setup_rpc();
                 let executor_cap = host.executor_request().send().pipeline.get_executor();
 
@@ -1838,12 +1838,12 @@ mod tests {
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
 
-                // Handler WASM without schema.capnp section
-                let handler = wasm_without_custom_section();
+                // Cell WASM without schema.capnp section
+                let cell = wasm_without_custom_section();
 
                 let mut req = listener.listen_request();
                 req.get().set_executor(executor);
-                req.get().set_wasm(&handler);
+                req.get().set_wasm(&cell);
 
                 let result = req.send().promise.await;
                 assert!(result.is_err(), "missing schema section should error");
@@ -1865,12 +1865,12 @@ mod tests {
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
 
-                // Handler WASM with empty schema.capnp section
-                let handler = wasm_with_custom_section("schema.capnp", &[]);
+                // Cell WASM with empty schema.capnp section
+                let cell = wasm_with_custom_section("schema.capnp", &[]);
 
                 let mut req = listener.listen_request();
                 req.get().set_executor(executor);
-                req.get().set_wasm(&handler);
+                req.get().set_wasm(&cell);
 
                 let result = req.send().promise.await;
                 assert!(result.is_err(), "empty schema section should error");
@@ -1941,10 +1941,10 @@ mod tests {
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
 
-                let handler = wasm_with_custom_section("schema.capnp", b"some schema");
+                let cell = wasm_with_custom_section("schema.capnp", b"some schema");
                 let mut req = listener.listen_request();
                 req.get().set_executor(executor);
-                req.get().set_wasm(&handler);
+                req.get().set_wasm(&cell);
 
                 let result = req.send().promise.await;
                 assert!(result.is_err(), "stale epoch should error");
@@ -2003,13 +2003,13 @@ mod tests {
                 let executor = host.executor_request().send().pipeline.get_executor();
 
                 let schema = b"same schema bytes";
-                // Both handlers have the same schema section → same protocol CID.
-                let handler = wasm_with_custom_section("schema.capnp", schema);
+                // Both cells have the same schema section → same protocol CID.
+                let cell = wasm_with_custom_section("schema.capnp", schema);
 
                 // First registration should succeed.
                 let mut req1 = client1.listen_request();
                 req1.get().set_executor(executor.clone());
-                req1.get().set_wasm(&handler);
+                req1.get().set_wasm(&cell);
                 req1.send()
                     .promise
                     .await
@@ -2018,7 +2018,7 @@ mod tests {
                 // Second registration with same schema should fail (same protocol CID).
                 let mut req2 = client2.listen_request();
                 req2.get().set_executor(executor);
-                req2.get().set_wasm(&handler);
+                req2.get().set_wasm(&cell);
                 let result = req2.send().promise.await;
                 assert!(
                     result.is_err(),
@@ -2149,7 +2149,7 @@ mod tests {
                 let executor = host.executor_request().send().pipeline.get_executor();
 
                 // Build a WASM with a valid schema section via the inject path.
-                let handler = schema_id::inject_custom_section(
+                let cell = schema_id::inject_custom_section(
                     &wasm_without_custom_section(),
                     "schema.capnp",
                     b"valid schema bytes for ChessEngine",
@@ -2157,7 +2157,7 @@ mod tests {
 
                 let mut req = listener.listen_request();
                 req.get().set_executor(executor);
-                req.get().set_wasm(&handler);
+                req.get().set_wasm(&cell);
 
                 let result = req.send().promise.await;
                 assert!(
@@ -2170,44 +2170,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rpc_bridge_dead_handler_returns_error() {
-        // When the handler's RPC system dies (process exits), the cap served
+    async fn test_rpc_bridge_dead_cell_returns_error() {
+        // When the cell's RPC system dies (process exits), the cap served
         // through the bridge should break. We simulate this by creating a
-        // handler-side RPC system we directly control, then abort() it.
+        // cell-side RPC system we directly control, then abort() it.
         //
         // Topology:
-        //   handler RPC (Side::Server, serves executor)
+        //   cell RPC (Side::Server, serves executor)
         //       ↓ bootstrap
-        //   handler_cap (client ref to executor)
+        //   cell_cap (client ref to executor)
         //       ↓ bridged over
-        //   bridge RPC (Side::Server, bootstrap = handler_cap)
+        //   bridge RPC (Side::Server, bootstrap = cell_cap)
         //       ↓ bootstrap
         //   remote_executor (remote peer's view)
         //
-        // We abort the handler RPC task, which drops the RPC system,
+        // We abort the cell RPC task, which drops the RPC system,
         // closes the duplex half, and disconnects the executor cap.
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                // Create a real executor to serve as the handler's exported cap.
+                // Create a real executor to serve as the cell's exported cap.
                 let (host, _server, _rx) = setup_rpc();
                 let executor_cap = host.executor_request().send().pipeline.get_executor();
 
-                // Set up a handler-side RPC system we control.
-                let (handler_stream, host_stream) = io::duplex(8 * 1024);
-                let (h_read, h_write) = io::split(handler_stream);
+                // Set up a cell-side RPC system we control.
+                let (cell_stream, host_stream) = io::duplex(8 * 1024);
+                let (h_read, h_write) = io::split(cell_stream);
                 let (c_read, c_write) = io::split(host_stream);
 
-                let handler_network = VatNetwork::new(
+                let cell_network = VatNetwork::new(
                     h_read.compat(),
                     h_write.compat_write(),
                     Side::Server,
                     Default::default(),
                 );
-                let handler_rpc =
-                    RpcSystem::new(Box::new(handler_network), Some(executor_cap.client));
-                let handler_task = tokio::task::spawn_local(async move {
-                    let _ = handler_rpc.await;
+                let cell_rpc = RpcSystem::new(Box::new(cell_network), Some(executor_cap.client));
+                let cell_task = tokio::task::spawn_local(async move {
+                    let _ = cell_rpc.await;
                 });
 
                 let client_network = VatNetwork::new(
@@ -2217,16 +2216,15 @@ mod tests {
                     Default::default(),
                 );
                 let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
-                let handler_cap: system_capnp::executor::Client =
-                    client_rpc.bootstrap(Side::Server);
-                let handler_cap = handler_cap.client;
+                let cell_cap: system_capnp::executor::Client = client_rpc.bootstrap(Side::Server);
+                let cell_cap = cell_cap.client;
                 tokio::task::spawn_local(async move {
                     let _ = client_rpc.await;
                 });
 
-                // Bridge the handler cap to a remote peer.
+                // Bridge the cell cap to a remote peer.
                 let (remote_executor, _bridge): (system_capnp::executor::Client, _) =
-                    setup_bridge(handler_cap);
+                    setup_bridge(cell_cap);
 
                 // Verify it works while alive.
                 let mut req = remote_executor.echo_request();
@@ -2242,8 +2240,8 @@ mod tests {
                     "Echo: alive"
                 );
 
-                // Kill the handler's RPC system.
-                handler_task.abort();
+                // Kill the cell's RPC system.
+                cell_task.abort();
                 // Let the runtime propagate the disconnection.
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -2255,7 +2253,7 @@ mod tests {
                         .await;
 
                 // Either the inner call errors (disconnected) or the timeout fires
-                // (cap is dead but stream hasn't noticed yet). Both prove the handler
+                // (cap is dead but stream hasn't noticed yet). Both prove the cell
                 // death propagated — a live cap would return Ok instantly.
                 let is_dead = match result {
                     Err(_) => true,     // timeout — stream stalled
@@ -2265,10 +2263,7 @@ mod tests {
                         resp.get().is_err()
                     }
                 };
-                assert!(
-                    is_dead,
-                    "call through bridge should fail after handler dies"
-                );
+                assert!(is_dead, "call through bridge should fail after cell dies");
             })
             .await;
     }

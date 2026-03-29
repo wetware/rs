@@ -8,12 +8,12 @@ members = [
     "crates/schema-id",
     "crates/guest/auth",
     "std/system",
-    # "crates/kernel",  # TODO: re-enable when kernel crate is created
+    "crates/kernel",
     "std/shell",
     "examples/chess",
 ]
 exclude = [
-    "examples/echo-handler",  # WASI guest — targets wasm32-wasip2, not host
+    "examples/echo-cell",  # WASI guest — targets wasm32-wasip2, not host
 ]
 
 [package]

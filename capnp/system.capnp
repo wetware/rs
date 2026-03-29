@@ -34,11 +34,11 @@ interface Host {
 interface StreamListener {
   listen @0 (executor :Executor, protocol :Text, wasm :Data) -> ();
   # Accept incoming libp2p streams on /ww/0.1.0/stream/{protocol}.
-  # For each stream, spawn a handler process via executor.runBytes(wasm)
+  # For each stream, spawn a cell process via executor.runBytes(wasm)
   # and wire stdin/stdout to the stream.
   #
   # OCAP: caller delegates spawn authority via executor. Wrap executor in an attenuating
-  # proxy to restrict handler resources (memory, CPU, network).
+  # proxy to restrict cell resources (memory, CPU, network).
 }
 
 interface StreamDialer {
@@ -98,14 +98,14 @@ interface VatListener {
   # (the 64-bit unique type ID) is part of the hash input, so identical structures
   # with different IDs produce different protocol addresses.
   #
-  # For each connection, spawn a handler process via executor.runBytes(wasm).
-  # The handler calls system::serve() to export a bootstrap capability, which
+  # For each connection, spawn a cell process via executor.runBytes(wasm).
+  # The cell calls system::serve() to export a bootstrap capability, which
   # flows back to the connecting peer via Cap'n Proto RPC bootstrapping.
   #
-  # The handler's Membrane is never exposed to the remote peer.
+  # The cell's Membrane is never exposed to the remote peer.
   # OCAP: caller delegates spawn authority via executor.
   #
-  # Errors if the handler WASM does not contain a "schema.capnp" custom section.
+  # Errors if the cell WASM does not contain a "schema.capnp" custom section.
 }
 
 interface VatClient {
@@ -114,7 +114,7 @@ interface VatClient {
   # where cid = CIDv1(raw, BLAKE3(schema)).
   # The schema is the canonical Cap'n Proto encoding of a schema.Node.
   # Bootstraps a Cap'n Proto vat over the stream and returns the remote
-  # handler's bootstrap capability.
+  # cell's bootstrap capability.
   #
   # The returned cap is type-erased (AnyPointer) — cast it to the expected
   # interface type on the guest side.
