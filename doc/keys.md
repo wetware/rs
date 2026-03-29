@@ -2,10 +2,10 @@
 
 ## Design decisions
 
-### Ed25519 node keys (planned migration)
+### Ed25519 node keys
 
-wetware currently uses **secp256k1** for node identity but is migrating to
-**Ed25519**. The decision separates two concerns that were previously conflated:
+wetware uses **Ed25519** for node identity. The decision separates two
+concerns that were previously conflated:
 
 1. **Node identity (Ed25519)** — the `PeerId` derived from the Ed25519 public
    key identifies the node on the p2p network and is used for Terminal
@@ -26,14 +26,10 @@ on-chain identity, the binding can be solved separately via a registry
 contract, signed attestation, or ERC-4337 Account Abstraction with Ed25519
 verification.
 
-**Migration scope:**
-- `src/keys.rs`: replace `k256::ecdsa::SigningKey` with `ed25519_dalek::SigningKey`
-- `src/host.rs`: swap libp2p `secp256k1` feature for `ed25519`
-- `crates/membrane/src/terminal.rs`: SignedEnvelope already supports Ed25519
-- `crates/guest/auth/src/lib.rs`: signing domain logic is algorithm-agnostic
-- Drop `k256`, `sha3` dependencies; add `ed25519-dalek`
-- Remove `ethereum_address()` from node key module
-- `Cargo.toml`: swap libp2p features `secp256k1` -> `ed25519`
+**Implementation:** PR #289 completed the migration. `k256`/`sha3` dropped from
+the host binary; `ed25519-dalek` added. `ethereum_address()` removed. Terminal
+challenge-response auth uses `try_into_ed25519()`. Guest auth
+(`crates/guest/auth`) was already algorithm-agnostic and required no changes.
 
 ### Key storage
 
@@ -102,6 +98,5 @@ $ ww keygen 2>/dev/null
 
 $ ww keygen --output ~/.ww/key
 Secret written to: /home/user/.ww/key
-EVM address:    0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b
 Peer ID:        12D3KooWAbcDef...
 ```
