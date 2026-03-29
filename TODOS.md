@@ -1,12 +1,7 @@
 # TODOs
 
-## Async NativeFn variant
-**What:** Add `Val::AsyncNativeFn` — a Rust-side closure returning a `Pin<Box<dyn Future<Output = Result<Val, Val>>>>`.
-**Why:** BLOCKER for caps-as-effects. Every cap handler (executor, host, ipfs, routing) needs to make async Cap'n Proto RPC calls from inside effect handler dispatch. Current NativeFn is sync-only.
-**Context:** The eval loop is already async on `tokio::task::LocalSet`. Cap'n Proto RPC futures are `!Send` (Rc-based), which is fine on LocalSet. The handler future slot in `poll_fn` (eval.rs:1669-1702) already stores and manually polls `Pin<Box<dyn Future>>`. AsyncNativeFn closures return futures stored in that same slot. Resume function stays sync (channel send is instant). ~15 NativeFn call sites in eval.rs need parallel AsyncNativeFn match arms (mechanical).
-**Effort:** M (human: ~1 day, CC: ~30 min)
-**Priority:** P1
-**Depends on:** nothing (this IS the blocker for caps-as-effects)
+## ~~Async NativeFn variant~~ ✅
+**RESOLVED:** `Val::AsyncNativeFn` added in PR #281. Takes `Vec<Val>` (owned) → `Pin<Box<dyn Future<Output = Result<Val, Val>>>>`. Wired into all eval.rs invocation sites + cap handler dispatch.
 
 ## Glia-level finally / resource cleanup via effects
 **What:** `with-resource` or `finally` pattern — cleanup handlers that run on scope exit.

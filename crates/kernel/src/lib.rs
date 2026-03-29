@@ -18,12 +18,12 @@ mod system_capnp {
     include!(concat!(env!("OUT_DIR"), "/system_capnp.rs"));
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, clippy::extra_unused_type_parameters)]
 mod stem_capnp {
     include!(concat!(env!("OUT_DIR"), "/stem_capnp.rs"));
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, clippy::match_single_binding)]
 mod ipfs_capnp {
     include!(concat!(env!("OUT_DIR"), "/ipfs_capnp.rs"));
 }
@@ -99,7 +99,7 @@ fn resolve_ipfs_path(path: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch table — single source of truth for command routing
+// Dispatch table — builtins that don't go through the effect system
 // ---------------------------------------------------------------------------
 
 /// Async handler: takes evaluated args and the shell context.
@@ -108,14 +108,10 @@ type HandlerFn = for<'a> fn(
     &'a RefCell<Session>,
 ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>>;
 
-/// Build the dispatch table. Each capability and built-in is registered here.
-/// Adding a new verb = one `table.insert(...)` call.
+/// Build the dispatch table for builtins only. Capability verbs (host, executor,
+/// ipfs, routing) are handled via cap-targeted perform + with-cap-handler.
 fn build_dispatch() -> HashMap<&'static str, HandlerFn> {
     let mut t: HashMap<&'static str, HandlerFn> = HashMap::new();
-    t.insert("host", |a, c| Box::pin(eval_host(a, c)));
-    t.insert("executor", |a, c| Box::pin(eval_executor(a, c)));
-    t.insert("ipfs", |a, c| Box::pin(eval_ipfs(a, c)));
-    t.insert("routing", |a, c| Box::pin(eval_routing(a, c)));
     t.insert("load", |a, _| Box::pin(std::future::ready(eval_load(a))));
     t.insert("cd", |a, c| Box::pin(std::future::ready(eval_cd(a, c))));
     t.insert("help", |_, _| {
@@ -200,423 +196,445 @@ fn eval<'a>(
     })
 }
 
-async fn eval_host(args: &[Val], ctx: &RefCell<Session>) -> Result<Val, Val> {
-    let method = match args.first() {
-        Some(Val::Sym(s)) => s.as_str(),
-        _ => return Err(Val::from("(host <method> [args...])")),
-    };
-    match method {
-        "id" => {
-            let resp = ctx
-                .borrow()
-                .host
-                .id_request()
-                .send()
-                .promise
-                .await
-                .map_err(|e| Val::from(e.to_string()))?;
-            let id = resp
-                .get()
-                .map_err(|e| Val::from(e.to_string()))?
-                .get_peer_id()
-                .map_err(|e| Val::from(e.to_string()))?;
-            Ok(Val::Str(bs58::encode(id).into_string()))
-        }
-        "addrs" => {
-            let resp = ctx
-                .borrow()
-                .host
-                .addrs_request()
-                .send()
-                .promise
-                .await
-                .map_err(|e| Val::from(e.to_string()))?;
-            let addrs = resp
-                .get()
-                .map_err(|e| Val::from(e.to_string()))?
-                .get_addrs()
-                .map_err(|e| Val::from(e.to_string()))?;
-            let items: Vec<Val> = (0..addrs.len())
-                .filter_map(|i| {
-                    addrs
-                        .get(i)
-                        .ok()
-                        .and_then(|d| multiaddr::Multiaddr::try_from(d.to_vec()).ok())
-                        .map(|m| Val::Str(m.to_string()))
-                })
-                .collect();
-            Ok(Val::List(items))
-        }
-        "peers" => {
-            let resp = ctx
-                .borrow()
-                .host
-                .peers_request()
-                .send()
-                .promise
-                .await
-                .map_err(|e| Val::from(e.to_string()))?;
-            let peers = resp
-                .get()
-                .map_err(|e| Val::from(e.to_string()))?
-                .get_peers()
-                .map_err(|e| Val::from(e.to_string()))?;
-            let items: Vec<Val> = (0..peers.len())
-                .filter_map(|i| {
-                    let peer = peers.get(i);
-                    let id = peer
-                        .get_peer_id()
-                        .ok()
-                        .map(|b| bs58::encode(b).into_string())?;
-                    let addrs = peer.get_addrs().ok()?;
-                    let addr_vals: Vec<Val> = (0..addrs.len())
-                        .filter_map(|j| {
-                            addrs
-                                .get(j)
-                                .ok()
-                                .and_then(|a| multiaddr::Multiaddr::try_from(a.to_vec()).ok())
-                                .map(|m| Val::Str(m.to_string()))
-                        })
-                        .collect();
-                    Some(Val::Map(vec![
-                        (Val::Keyword("peer-id".into()), Val::Str(id)),
-                        (Val::Keyword("addrs".into()), Val::List(addr_vals)),
-                    ]))
-                })
-                .collect();
-            Ok(Val::List(items))
-        }
-        "listen" => {
-            // Unified listen: the caller explicitly passes the executor capability.
-            //   (host listen executor <wasm>)              → VatListener (schema in WASM)
-            //   (host listen executor "protocol" <wasm>)   → StreamListener
-            //
-            // The executor arg must be the capability token bound by the kernel.
-            // No ambient authority — the caller declares what spawn authority they're
-            // delegating to the listener.
-            let executor = match args.get(1) {
-                Some(Val::Cap { name, inner }) if name == "executor" => {
-                    inner
-                        .downcast_ref::<system_capnp::executor::Client>()
-                        .cloned()
-                        .ok_or_else(|| Val::from("(host listen executor ...): executor cap has wrong inner type"))?
-                }
-                Some(Val::Cap { name, .. }) => {
-                    return Err(
-                        format!("(host listen executor ...): expected executor capability, got '{name}' capability").into(),
-                    )
-                }
-                _ => {
-                    return Err(
-                        "(host listen executor <wasm>): executor capability required".into(),
-                    )
-                }
-            };
-            match args.len() {
-                3 => {
-                    // VatListener mode — WASM has schema.capnp custom section.
-                    let wasm = match args.get(2) {
-                        Some(Val::Bytes(b)) => b.clone(),
-                        _ => return Err("(host listen executor <wasm>): expected bytes".into()),
-                    };
-                    let network_resp = ctx
-                        .borrow()
-                        .host
-                        .network_request()
-                        .send()
-                        .promise
-                        .await
-                        .map_err(|e| Val::from(e.to_string()))?;
-                    let network = network_resp.get().map_err(|e| Val::from(e.to_string()))?;
-                    let listener = network
-                        .get_vat_listener()
-                        .map_err(|e| Val::from(e.to_string()))?;
-                    let mut req = listener.listen_request();
-                    req.get().set_executor(executor);
-                    req.get().set_wasm(&wasm);
-                    req.send()
-                        .promise
-                        .await
-                        .map_err(|e| Val::from(e.to_string()))?;
-                    log::info!("init.d: registered vat handler");
-                    Ok(Val::Nil)
-                }
-                4 => {
-                    // StreamListener mode — explicit protocol name.
-                    let protocol =
-                        match args.get(2) {
-                            Some(Val::Str(s)) => s.clone(),
-                            _ => return Err(
-                                "(host listen executor \"<protocol>\" <wasm>): first arg must be a string"
-                                    .into(),
-                            ),
-                        };
-                    let wasm = match args.get(3) {
-                        Some(Val::Bytes(b)) => b.clone(),
-                        _ => {
-                            return Err(
-                                "(host listen executor \"<protocol>\" <wasm>): second arg must be bytes"
-                                    .into(),
-                            )
-                        }
-                    };
-                    let network_resp = ctx
-                        .borrow()
-                        .host
-                        .network_request()
-                        .send()
-                        .promise
-                        .await
-                        .map_err(|e| Val::from(e.to_string()))?;
-                    let network = network_resp.get().map_err(|e| Val::from(e.to_string()))?;
-                    let listener = network
-                        .get_stream_listener()
-                        .map_err(|e| Val::from(e.to_string()))?;
-                    let mut req = listener.listen_request();
-                    req.get().set_executor(executor);
-                    req.get().set_protocol(&protocol);
-                    req.get().set_wasm(&wasm);
-                    req.send()
-                        .promise
-                        .await
-                        .map_err(|e| Val::from(e.to_string()))?;
-                    log::info!("init.d: registered stream handler /ww/0.1.0/stream/{protocol}");
-                    Ok(Val::Nil)
-                }
-                _ => Err(
-                    "(host listen executor <wasm>) or (host listen executor \"protocol\" <wasm>)"
-                        .into(),
-                ),
-            }
-        }
-        _ => Err(Val::from(format!("unknown host method: {method}"))),
+// ---------------------------------------------------------------------------
+// Cap handlers — AsyncNativeFn closures that dispatch cap-targeted performs
+// ---------------------------------------------------------------------------
+//
+// Each handler receives (data, resume) where data = (:method args...).
+// The handler makes the RPC call and calls resume(result) to continue the body.
+//
+// Pattern: handler calls resume → returns Err(Val::Resume(val)) → poll_fn
+// catches it → body future resumes with the value from the oneshot channel.
+
+/// Call the resume function with a result value.
+/// Returns the Resume sentinel that the poll_fn state machine expects.
+fn call_resume(resume: &Val, val: Val) -> Result<Val, Val> {
+    match resume {
+        Val::NativeFn { func, .. } => func(&[val]),
+        _ => Err(Val::from("cap handler: invalid resume function")),
     }
 }
 
-async fn eval_executor(args: &[Val], ctx: &RefCell<Session>) -> Result<Val, Val> {
-    let method = match args.first() {
-        Some(Val::Sym(s)) => s.as_str(),
-        _ => return Err(Val::from("(executor <method> [args...])")),
+/// Extract (method_keyword, rest_args) from the data payload.
+fn extract_method(data: &Val) -> Result<(String, Vec<Val>), Val> {
+    let items = match data {
+        Val::List(items) => items,
+        _ => return Err(Val::from("cap handler: expected list data")),
     };
-    match method {
-        "echo" => {
-            let msg = match args.get(1) {
-                Some(Val::Str(s)) => s.clone(),
-                Some(Val::Sym(s)) => s.clone(),
-                _ => return Err("(executor echo \"<message>\")".into()),
-            };
-            let mut req = ctx.borrow().executor.echo_request();
-            req.get().set_message(&msg);
-            let resp = req
-                .send()
-                .promise
-                .await
-                .map_err(|e| Val::from(e.to_string()))?;
-            let text = resp
-                .get()
-                .map_err(|e| Val::from(e.to_string()))?
-                .get_response()
-                .map_err(|e| Val::from(e.to_string()))?
-                .to_str()
-                .map_err(|e| Val::from(e.to_string()))?;
-            Ok(Val::Str(text.to_string()))
+    let method = match items.first() {
+        Some(Val::Keyword(s)) => s.clone(),
+        _ => {
+            return Err(Val::from(
+                "cap handler: first arg must be a keyword method (e.g. :id, :run)",
+            ))
         }
-        "run" => {
-            // (executor run <wasm-bytes> :env {"KEY" "VAL" ...})
-            let wasm = match args.get(1) {
-                Some(Val::Bytes(b)) => b.clone(),
-                _ => {
-                    return Err(
-                        "(executor run <wasm-bytes> [:env {map}]): wasm must be bytes".into(),
-                    )
-                }
-            };
+    };
+    Ok((method, items[1..].to_vec()))
+}
 
-            // Parse optional keyword args: :env {map}
-            let mut env_pairs: Vec<String> = Vec::new();
-            let mut i = 2;
-            while i < args.len() {
-                match &args[i] {
-                    Val::Keyword(k) if k == "env" => {
-                        i += 1;
-                        if let Some(Val::Map(pairs)) = args.get(i) {
-                            for (k, v) in pairs {
-                                let key = match k {
-                                    Val::Str(s) => s.clone(),
-                                    Val::Sym(s) => s.clone(),
-                                    other => format!("{other}"),
+fn make_host_handler(host: system_capnp::host::Client) -> Val {
+    Val::AsyncNativeFn {
+        name: "host-handler".into(),
+        func: Rc::new(move |args: Vec<Val>| {
+            let host = host.clone();
+            Box::pin(async move {
+                let (method, rest) = extract_method(&args[0])?;
+                let resume = &args[1];
+                let result = match method.as_str() {
+                    "id" => {
+                        let resp = host
+                            .id_request()
+                            .send()
+                            .promise
+                            .await
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let id = resp
+                            .get()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .get_peer_id()
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        Val::Str(bs58::encode(id).into_string())
+                    }
+                    "addrs" => {
+                        let resp = host
+                            .addrs_request()
+                            .send()
+                            .promise
+                            .await
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let addrs = resp
+                            .get()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .get_addrs()
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let items: Vec<Val> = (0..addrs.len())
+                            .filter_map(|i| {
+                                addrs
+                                    .get(i)
+                                    .ok()
+                                    .and_then(|d| multiaddr::Multiaddr::try_from(d.to_vec()).ok())
+                                    .map(|m| Val::Str(m.to_string()))
+                            })
+                            .collect();
+                        Val::List(items)
+                    }
+                    "peers" => {
+                        let resp = host
+                            .peers_request()
+                            .send()
+                            .promise
+                            .await
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let peers = resp
+                            .get()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .get_peers()
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let items: Vec<Val> = (0..peers.len())
+                            .filter_map(|i| {
+                                let peer = peers.get(i);
+                                let id = peer
+                                    .get_peer_id()
+                                    .ok()
+                                    .map(|b| bs58::encode(b).into_string())?;
+                                let addrs = peer.get_addrs().ok()?;
+                                let addr_vals: Vec<Val> = (0..addrs.len())
+                                    .filter_map(|j| {
+                                        addrs
+                                            .get(j)
+                                            .ok()
+                                            .and_then(|a| {
+                                                multiaddr::Multiaddr::try_from(a.to_vec()).ok()
+                                            })
+                                            .map(|m| Val::Str(m.to_string()))
+                                    })
+                                    .collect();
+                                Some(Val::Map(vec![
+                                    (Val::Keyword("peer-id".into()), Val::Str(id)),
+                                    (Val::Keyword("addrs".into()), Val::List(addr_vals)),
+                                ]))
+                            })
+                            .collect();
+                        Val::List(items)
+                    }
+                    "listen" => {
+                        // (perform host :listen executor <wasm>)         → VatListener
+                        // (perform host :listen executor "proto" <wasm>) → StreamListener
+                        let executor = match rest.first() {
+                            Some(Val::Cap { name, inner }) if name == "executor" => inner
+                                .downcast_ref::<system_capnp::executor::Client>()
+                                .cloned()
+                                .ok_or_else(|| {
+                                    Val::from("host :listen — executor cap has wrong inner type")
+                                })?,
+                            Some(Val::Cap { name, .. }) => {
+                                return Err(Val::from(format!(
+                                    "host :listen — expected executor cap, got '{name}'"
+                                )))
+                            }
+                            _ => {
+                                return Err(Val::from(
+                                    "host :listen — executor capability required",
+                                ))
+                            }
+                        };
+                        match rest.len() {
+                            2 => {
+                                // VatListener mode.
+                                let wasm = match rest.get(1) {
+                                    Some(Val::Bytes(b)) => b.clone(),
+                                    _ => {
+                                        return Err(Val::from(
+                                            "host :listen — expected wasm bytes",
+                                        ))
+                                    }
                                 };
-                                let val = match v {
-                                    Val::Str(s) => s.clone(),
-                                    Val::Sym(s) => s.clone(),
-                                    other => format!("{other}"),
+                                let network_resp = host
+                                    .network_request()
+                                    .send()
+                                    .promise
+                                    .await
+                                    .map_err(|e| Val::from(e.to_string()))?;
+                                let network = network_resp
+                                    .get()
+                                    .map_err(|e| Val::from(e.to_string()))?;
+                                let listener = network
+                                    .get_vat_listener()
+                                    .map_err(|e| Val::from(e.to_string()))?;
+                                let mut req = listener.listen_request();
+                                req.get().set_executor(executor);
+                                req.get().set_wasm(&wasm);
+                                req.send()
+                                    .promise
+                                    .await
+                                    .map_err(|e| Val::from(e.to_string()))?;
+                                log::info!("host :listen — registered vat handler");
+                                Val::Nil
+                            }
+                            3 => {
+                                // StreamListener mode.
+                                let protocol = match rest.get(1) {
+                                    Some(Val::Str(s)) => s.clone(),
+                                    _ => {
+                                        return Err(Val::from(
+                                            "host :listen — protocol must be a string",
+                                        ))
+                                    }
                                 };
-                                env_pairs.push(format!("{key}={val}"));
+                                let wasm = match rest.get(2) {
+                                    Some(Val::Bytes(b)) => b.clone(),
+                                    _ => {
+                                        return Err(Val::from(
+                                            "host :listen — expected wasm bytes",
+                                        ))
+                                    }
+                                };
+                                let network_resp = host
+                                    .network_request()
+                                    .send()
+                                    .promise
+                                    .await
+                                    .map_err(|e| Val::from(e.to_string()))?;
+                                let network = network_resp
+                                    .get()
+                                    .map_err(|e| Val::from(e.to_string()))?;
+                                let listener = network
+                                    .get_stream_listener()
+                                    .map_err(|e| Val::from(e.to_string()))?;
+                                let mut req = listener.listen_request();
+                                req.get().set_executor(executor);
+                                req.get().set_protocol(&protocol);
+                                req.get().set_wasm(&wasm);
+                                req.send()
+                                    .promise
+                                    .await
+                                    .map_err(|e| Val::from(e.to_string()))?;
+                                log::info!(
+                                    "host :listen — registered stream handler /ww/0.1.0/stream/{protocol}"
+                                );
+                                Val::Nil
+                            }
+                            _ => {
+                                return Err(Val::from(
+                                    "host :listen — usage: (perform host :listen executor <wasm>) or (perform host :listen executor \"proto\" <wasm>)",
+                                ))
                             }
                         }
                     }
-                    _ => {}
-                }
-                i += 1;
-            }
+                    _ => return Err(Val::from(format!("host: unknown method :{method}"))),
+                };
+                call_resume(resume, result)
+            })
+        }),
+    }
+}
 
-            log::info!(
-                "executor run: spawning process ({} bytes, {} env vars)",
-                wasm.len(),
-                env_pairs.len()
-            );
-
-            let mut req = ctx.borrow().executor.run_bytes_request();
-            {
-                let mut b = req.get();
-                b.set_wasm(&wasm);
-                if !env_pairs.is_empty() {
-                    let mut env_list = b.init_env(env_pairs.len() as u32);
-                    for (j, e) in env_pairs.iter().enumerate() {
-                        env_list.set(j as u32, e);
+fn make_executor_handler(executor: system_capnp::executor::Client) -> Val {
+    Val::AsyncNativeFn {
+        name: "executor-handler".into(),
+        func: Rc::new(move |args: Vec<Val>| {
+            let executor = executor.clone();
+            Box::pin(async move {
+                let (method, rest) = extract_method(&args[0])?;
+                let resume = &args[1];
+                let result = match method.as_str() {
+                    "echo" => {
+                        let msg = match rest.first() {
+                            Some(Val::Str(s)) | Some(Val::Sym(s)) => s.clone(),
+                            _ => return Err(Val::from("executor :echo — expected string")),
+                        };
+                        let mut req = executor.echo_request();
+                        req.get().set_message(&msg);
+                        let resp = req
+                            .send()
+                            .promise
+                            .await
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let text = resp
+                            .get()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .get_response()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .to_str()
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        Val::Str(text.to_string())
                     }
-                }
-            }
-            let resp = req
-                .send()
-                .promise
-                .await
-                .map_err(|e| Val::from(e.to_string()))?;
-            let process = resp
-                .get()
-                .map_err(|e| Val::from(e.to_string()))?
-                .get_process()
-                .map_err(|e| Val::from(e.to_string()))?;
+                    "run" => {
+                        // (perform executor :run <wasm-bytes> :env {"KEY" "VAL" ...})
+                        let wasm = match rest.first() {
+                            Some(Val::Bytes(b)) => b.clone(),
+                            _ => {
+                                return Err(Val::from(
+                                    "executor :run — first arg must be wasm bytes",
+                                ))
+                            }
+                        };
+                        // Parse optional keyword args: :env {map}
+                        let mut env_pairs: Vec<String> = Vec::new();
+                        let mut i = 1;
+                        while i < rest.len() {
+                            if let Val::Keyword(k) = &rest[i] {
+                                if k == "env" {
+                                    i += 1;
+                                    if let Some(Val::Map(pairs)) = rest.get(i) {
+                                        for (k, v) in pairs {
+                                            let key = match k {
+                                                Val::Str(s) | Val::Sym(s) => s.clone(),
+                                                other => format!("{other}"),
+                                            };
+                                            let val = match v {
+                                                Val::Str(s) | Val::Sym(s) => s.clone(),
+                                                other => format!("{other}"),
+                                            };
+                                            env_pairs.push(format!("{key}={val}"));
+                                        }
+                                    }
+                                }
+                            }
+                            i += 1;
+                        }
 
-            // Block until the process exits.
-            log::info!("executor run: process spawned, waiting for exit");
-            let wait_resp = process
-                .wait_request()
-                .send()
-                .promise
-                .await
-                .map_err(|e| Val::from(e.to_string()))?;
-            let exit_code = wait_resp
-                .get()
-                .map_err(|e| Val::from(e.to_string()))?
-                .get_exit_code();
-            log::info!("executor run: process exited ({})", exit_code);
-            Ok(Val::Int(exit_code as i64))
-        }
-        _ => Err(Val::from(format!("unknown executor method: {method}"))),
+                        log::info!(
+                            "executor :run — spawning process ({} bytes, {} env vars)",
+                            wasm.len(),
+                            env_pairs.len()
+                        );
+
+                        let mut req = executor.run_bytes_request();
+                        {
+                            let mut b = req.get();
+                            b.set_wasm(&wasm);
+                            if !env_pairs.is_empty() {
+                                let mut env_list = b.init_env(env_pairs.len() as u32);
+                                for (j, e) in env_pairs.iter().enumerate() {
+                                    env_list.set(j as u32, e);
+                                }
+                            }
+                        }
+                        let resp = req
+                            .send()
+                            .promise
+                            .await
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let process = resp
+                            .get()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .get_process()
+                            .map_err(|e| Val::from(e.to_string()))?;
+
+                        log::info!("executor :run — process spawned, waiting for exit");
+                        let wait_resp = process
+                            .wait_request()
+                            .send()
+                            .promise
+                            .await
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let exit_code = wait_resp
+                            .get()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .get_exit_code();
+                        log::info!("executor :run — process exited ({})", exit_code);
+                        Val::Int(exit_code as i64)
+                    }
+                    _ => return Err(Val::from(format!("executor: unknown method :{method}"))),
+                };
+                call_resume(resume, result)
+            })
+        }),
     }
 }
 
-async fn eval_ipfs(args: &[Val], ctx: &RefCell<Session>) -> Result<Val, Val> {
-    let method = match args.first() {
-        Some(Val::Sym(s)) => s.as_str(),
-        _ => return Err(Val::from("(ipfs <method> [args...])")),
-    };
-    match method {
-        "cat" => {
-            let raw_path = match args.get(1) {
-                Some(Val::Str(s)) => s.clone(),
-                _ => return Err("(ipfs cat \"<path>\")".into()),
-            };
-            let path = resolve_ipfs_path(&raw_path);
-
-            let unixfs_resp = ctx
-                .borrow()
-                .ipfs
-                .unixfs_request()
-                .send()
-                .promise
-                .await
-                .map_err(|e| Val::from(e.to_string()))?;
-            let unixfs = unixfs_resp
-                .get()
-                .map_err(|e| Val::from(e.to_string()))?
-                .get_api()
-                .map_err(|e| Val::from(e.to_string()))?;
-            let mut req = unixfs.cat_request();
-            req.get().set_path(&path);
-            let resp = req
-                .send()
-                .promise
-                .await
-                .map_err(|e| Val::from(e.to_string()))?;
-            let data = resp
-                .get()
-                .map_err(|e| Val::from(e.to_string()))?
-                .get_data()
-                .map_err(|e| Val::from(e.to_string()))?;
-            Ok(Val::Bytes(data.to_vec()))
-        }
-        "ls" => {
-            let raw_path = match args.get(1) {
-                Some(Val::Str(s)) => s.clone(),
-                _ => return Err("(ipfs ls \"<path>\")".into()),
-            };
-            let path = resolve_ipfs_path(&raw_path);
-
-            let unixfs_resp = ctx
-                .borrow()
-                .ipfs
-                .unixfs_request()
-                .send()
-                .promise
-                .await
-                .map_err(|e| Val::from(e.to_string()))?;
-            let unixfs = unixfs_resp
-                .get()
-                .map_err(|e| Val::from(e.to_string()))?
-                .get_api()
-                .map_err(|e| Val::from(e.to_string()))?;
-            let mut req = unixfs.ls_request();
-            req.get().set_path(&path);
-            let resp = req
-                .send()
-                .promise
-                .await
-                .map_err(|e| Val::from(e.to_string()))?;
-            let entries = resp
-                .get()
-                .map_err(|e| Val::from(e.to_string()))?
-                .get_entries()
-                .map_err(|e| Val::from(e.to_string()))?;
-            let items: Vec<Val> = (0..entries.len())
-                .filter_map(|i| {
-                    let e = entries.get(i);
-                    let name = e.get_name().ok()?.to_str().ok()?;
-                    let size = e.get_size();
-                    Some(Val::List(vec![
-                        Val::Str(name.to_string()),
-                        Val::Sym(size.to_string()),
-                    ]))
-                })
-                .collect();
-            Ok(Val::List(items))
-        }
-        _ => Err(Val::from(format!("unknown ipfs method: {method}"))),
+fn make_ipfs_handler(ipfs: ipfs_capnp::client::Client) -> Val {
+    Val::AsyncNativeFn {
+        name: "ipfs-handler".into(),
+        func: Rc::new(move |args: Vec<Val>| {
+            let ipfs = ipfs.clone();
+            Box::pin(async move {
+                let (method, rest) = extract_method(&args[0])?;
+                let resume = &args[1];
+                let result = match method.as_str() {
+                    "cat" => {
+                        let raw_path = match rest.first() {
+                            Some(Val::Str(s)) => s.clone(),
+                            _ => return Err(Val::from("ipfs :cat — expected string path")),
+                        };
+                        let path = resolve_ipfs_path(&raw_path);
+                        let unixfs_resp = ipfs
+                            .unixfs_request()
+                            .send()
+                            .promise
+                            .await
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let unixfs = unixfs_resp
+                            .get()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .get_api()
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let mut req = unixfs.cat_request();
+                        req.get().set_path(&path);
+                        let resp = req
+                            .send()
+                            .promise
+                            .await
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let data = resp
+                            .get()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .get_data()
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        Val::Bytes(data.to_vec())
+                    }
+                    "ls" => {
+                        let raw_path = match rest.first() {
+                            Some(Val::Str(s)) => s.clone(),
+                            _ => return Err(Val::from("ipfs :ls — expected string path")),
+                        };
+                        let path = resolve_ipfs_path(&raw_path);
+                        let unixfs_resp = ipfs
+                            .unixfs_request()
+                            .send()
+                            .promise
+                            .await
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let unixfs = unixfs_resp
+                            .get()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .get_api()
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let mut req = unixfs.ls_request();
+                        req.get().set_path(&path);
+                        let resp = req
+                            .send()
+                            .promise
+                            .await
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let entries = resp
+                            .get()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .get_entries()
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let items: Vec<Val> = (0..entries.len())
+                            .filter_map(|i| {
+                                let e = entries.get(i);
+                                let name = e.get_name().ok()?.to_str().ok()?;
+                                let size = e.get_size();
+                                Some(Val::List(vec![
+                                    Val::Str(name.to_string()),
+                                    Val::Sym(size.to_string()),
+                                ]))
+                            })
+                            .collect();
+                        Val::List(items)
+                    }
+                    _ => return Err(Val::from(format!("ipfs: unknown method :{method}"))),
+                };
+                call_resume(resume, result)
+            })
+        }),
     }
-}
-
-/// Hash a name to a CID via the host's routing.hash() RPC.
-async fn routing_hash(
-    routing: &routing_capnp::routing::Client,
-    name: &str,
-) -> Result<String, String> {
-    let mut req = routing.hash_request();
-    req.get().set_data(name.as_bytes());
-    let resp = req.send().promise.await.map_err(|e| e.to_string())?;
-    resp.get()
-        .map_err(|e| e.to_string())?
-        .get_key()
-        .map_err(|e| e.to_string())?
-        .to_str()
-        .map(|s| s.to_string())
-        .map_err(|e| e.to_string())
 }
 
 /// ProviderSink that collects streamed results into a channel.
-/// The guest is single-threaded WASM — the capnp-rpc event loop
-/// dispatches all provider() and done() callbacks before findProviders
-/// resolves, so try_recv() on the consumer side drains the full result set.
 struct CollectorSink {
     tx: std::sync::mpsc::Sender<(Vec<u8>, Vec<Vec<u8>>)>,
 }
@@ -646,108 +664,124 @@ impl routing_capnp::provider_sink::Server for CollectorSink {
     }
 }
 
-async fn eval_routing(args: &[Val], ctx: &RefCell<Session>) -> Result<Val, Val> {
-    let method = match args.first() {
-        Some(Val::Sym(s)) => s.as_str(),
-        _ => return Err(Val::from("(routing <method> [args...])")),
-    };
-    match method {
-        "provide" => {
-            // (routing provide "name") — hashes internally, then announces to DHT.
-            let name = match args.get(1) {
-                Some(Val::Str(s)) => s.clone(),
-                _ => return Err("(routing provide \"<name>\")".into()),
-            };
-            let cid = routing_hash(&ctx.borrow().routing, &name).await?;
-            let mut req = ctx.borrow().routing.provide_request();
-            req.get().set_key(&cid);
-            req.send()
-                .promise
-                .await
-                .map_err(|e| Val::from(e.to_string()))?;
-            Ok(Val::Nil)
-        }
-        "find" => {
-            // (routing find "name")            — default count 20
-            // (routing find "name" :count 5)   — override count
-            let name = match args.get(1) {
-                Some(Val::Str(s)) => s.clone(),
-                _ => return Err("(routing find \"<name>\" [:count N])".into()),
-            };
-            // Parse optional :count keyword.
-            // Positive value = limit; zero or negative = no limit (u32::MAX).
-            let mut count: u32 = 20;
-            let mut i = 2;
-            while i < args.len() {
-                if let Val::Keyword(k) = &args[i] {
-                    if k == "count" {
-                        i += 1;
-                        if let Some(Val::Int(n)) = args.get(i) {
-                            count = if *n <= 0 { u32::MAX } else { *n as u32 };
-                        }
+/// Hash a name to a CID via routing.hash() RPC.
+async fn routing_hash(routing: &routing_capnp::routing::Client, name: &str) -> Result<String, Val> {
+    let mut req = routing.hash_request();
+    req.get().set_data(name.as_bytes());
+    let resp = req
+        .send()
+        .promise
+        .await
+        .map_err(|e| Val::from(e.to_string()))?;
+    resp.get()
+        .map_err(|e| Val::from(e.to_string()))?
+        .get_key()
+        .map_err(|e| Val::from(e.to_string()))?
+        .to_str()
+        .map(|s| s.to_string())
+        .map_err(|e| Val::from(e.to_string()))
+}
+
+fn make_routing_handler(routing: routing_capnp::routing::Client) -> Val {
+    Val::AsyncNativeFn {
+        name: "routing-handler".into(),
+        func: Rc::new(move |args: Vec<Val>| {
+            let routing = routing.clone();
+            Box::pin(async move {
+                let (method, rest) = extract_method(&args[0])?;
+                let resume = &args[1];
+                let result = match method.as_str() {
+                    "provide" => {
+                        let name = match rest.first() {
+                            Some(Val::Str(s)) => s.clone(),
+                            _ => return Err(Val::from("routing :provide — expected string")),
+                        };
+                        let cid = routing_hash(&routing, &name).await?;
+                        let mut req = routing.provide_request();
+                        req.get().set_key(&cid);
+                        req.send()
+                            .promise
+                            .await
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        Val::Nil
                     }
-                }
-                i += 1;
-            }
+                    "find" => {
+                        let name = match rest.first() {
+                            Some(Val::Str(s)) => s.clone(),
+                            _ => return Err(Val::from("routing :find — expected string")),
+                        };
+                        // Parse optional :count keyword.
+                        let mut count: u32 = 20;
+                        let mut i = 1;
+                        while i < rest.len() {
+                            if let Val::Keyword(k) = &rest[i] {
+                                if k == "count" {
+                                    i += 1;
+                                    if let Some(Val::Int(n)) = rest.get(i) {
+                                        count = if *n <= 0 { u32::MAX } else { *n as u32 };
+                                    }
+                                }
+                            }
+                            i += 1;
+                        }
 
-            let cid = routing_hash(&ctx.borrow().routing, &name).await?;
+                        let cid = routing_hash(&routing, &name).await?;
 
-            // Create a CollectorSink to receive streamed providers.
-            let (tx, rx) = std::sync::mpsc::channel();
-            let sink: routing_capnp::provider_sink::Client =
-                capnp_rpc::new_client(CollectorSink { tx });
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let sink: routing_capnp::provider_sink::Client =
+                            capnp_rpc::new_client(CollectorSink { tx });
 
-            let mut req = ctx.borrow().routing.find_providers_request();
-            req.get().set_key(&cid);
-            req.get().set_count(count);
-            req.get().set_sink(sink);
-            req.send()
-                .promise
-                .await
-                .map_err(|e| Val::from(e.to_string()))?;
+                        let mut req = routing.find_providers_request();
+                        req.get().set_key(&cid);
+                        req.get().set_count(count);
+                        req.get().set_sink(sink);
+                        req.send()
+                            .promise
+                            .await
+                            .map_err(|e| Val::from(e.to_string()))?;
 
-            // Collect results from the channel. Single-threaded capnp-rpc
-            // guarantees all provider() callbacks complete before findProviders
-            // resolves, so try_recv() drains the full result set.
-            let mut providers = Vec::new();
-            while let Ok((peer_id, addrs)) = rx.try_recv() {
-                let id_str = bs58::encode(&peer_id).into_string();
-                let addr_vals: Vec<Val> = addrs
-                    .into_iter()
-                    .filter_map(|a| multiaddr::Multiaddr::try_from(a).ok())
-                    .map(|m| Val::Str(m.to_string()))
-                    .collect();
-                providers.push(Val::Map(vec![
-                    (Val::Keyword("peer-id".into()), Val::Str(id_str)),
-                    (Val::Keyword("addrs".into()), Val::List(addr_vals)),
-                ]));
-            }
-            Ok(Val::List(providers))
-        }
-        "hash" => {
-            // (routing hash "data") — exposed for advanced use; provide hashes internally.
-            let data = match args.get(1) {
-                Some(Val::Str(s)) => s.as_bytes().to_vec(),
-                Some(Val::Bytes(b)) => b.clone(),
-                _ => return Err("(routing hash \"<data>\")".into()),
-            };
-            let mut req = ctx.borrow().routing.hash_request();
-            req.get().set_data(&data);
-            let resp = req
-                .send()
-                .promise
-                .await
-                .map_err(|e| Val::from(e.to_string()))?;
-            let key = resp
-                .get()
-                .map_err(|e| Val::from(e.to_string()))?
-                .get_key()
-                .map_err(|e| Val::from(e.to_string()))?
-                .to_str()
-                .map_err(|e| Val::from(e.to_string()))?;
-            Ok(Val::Str(key.to_string()))
-        }
-        _ => Err(Val::from(format!("unknown routing method: {method}"))),
+                        let mut providers = Vec::new();
+                        while let Ok((peer_id, addrs)) = rx.try_recv() {
+                            let id_str = bs58::encode(&peer_id).into_string();
+                            let addr_vals: Vec<Val> = addrs
+                                .into_iter()
+                                .filter_map(|a| multiaddr::Multiaddr::try_from(a).ok())
+                                .map(|m| Val::Str(m.to_string()))
+                                .collect();
+                            providers.push(Val::Map(vec![
+                                (Val::Keyword("peer-id".into()), Val::Str(id_str)),
+                                (Val::Keyword("addrs".into()), Val::List(addr_vals)),
+                            ]));
+                        }
+                        Val::List(providers)
+                    }
+                    "hash" => {
+                        let data = match rest.first() {
+                            Some(Val::Str(s)) => s.as_bytes().to_vec(),
+                            Some(Val::Bytes(b)) => b.clone(),
+                            _ => return Err(Val::from("routing :hash — expected string or bytes")),
+                        };
+                        let mut req = routing.hash_request();
+                        req.get().set_data(&data);
+                        let resp = req
+                            .send()
+                            .promise
+                            .await
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let key = resp
+                            .get()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .get_key()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .to_str()
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        Val::Str(key.to_string())
+                    }
+                    _ => return Err(Val::from(format!("routing: unknown method :{method}"))),
+                };
+                call_resume(resume, result)
+            })
+        }),
     }
 }
 
@@ -849,25 +883,25 @@ async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &RefCell<Session>) -> Re
 }
 
 const HELP_TEXT: &str = "\
-Capabilities:
-  (host id)                      Peer ID
-  (host addrs)                   Listen addresses
-  (host peers)                   Connected peers
-  (host listen executor <wasm>)          Register RPC handler (schema in WASM)
-  (host listen executor \"p\" <wasm>)    Register stream handler
+Capabilities (via perform):
+  (perform host :id)                         Peer ID
+  (perform host :addrs)                      Listen addresses
+  (perform host :peers)                      Connected peers
+  (perform host :listen executor <wasm>)     Register RPC handler (schema in WASM)
+  (perform host :listen executor \"p\" <wasm>) Register stream handler
 
-  (executor echo \"<msg>\")        Diagnostic echo
-  (executor run <wasm> :env {})  Spawn foreground process
+  (perform executor :echo \"<msg>\")           Diagnostic echo
+  (perform executor :run <wasm> :env {})     Spawn foreground process
 
-  (ipfs cat \"<path>\")            Fetch IPFS content (bytes)
-  (ipfs ls \"<path>\")             List IPFS directory
+  (perform ipfs :cat \"<path>\")               Fetch IPFS content (bytes)
+  (perform ipfs :ls \"<path>\")                List IPFS directory
 
-  (routing provide \"<name>\")      Announce to DHT (hashes internally)
-  (routing find \"<name>\" [:count N])  Discover providers (default 20)
-  (routing hash \"<data>\")        Hash data to CID
+  (perform routing :provide \"<name>\")        Announce to DHT (hashes internally)
+  (perform routing :find \"<name>\" :count N)  Discover providers (default 20)
+  (perform routing :hash \"<data>\")           Hash data to CID
 
 Effects:
-  (perform :load \"<path>\")       Load bytes from virtual filesystem
+  (perform :load \"<path>\")                   Load bytes from virtual filesystem
 
 Built-ins:
   (load \"<path>\")                Load bytes (dispatch form)
@@ -904,12 +938,23 @@ fn parse_initd_script(name: &str, data: &[u8]) -> Option<Vec<Val>> {
     }
 }
 
-/// Wrap a form in `(with-effect-handler {:load (fn [path resume] (resume (load path)))} <form>)`.
-/// This installs default effect handlers so init.d scripts (and the shell)
-/// can use `(perform :load "path")` to load bytes from the virtual filesystem.
-fn wrap_with_default_effects(form: &Val) -> Val {
-    // (with-effect-handler {:load (fn [path resume] (resume (load path)))} <form>)
-    Val::List(vec![
+/// Wrap a form in cap handlers + keyword effect handlers.
+///
+/// Produces:
+/// ```glia
+/// (with-cap-handler host host-handler
+///   (with-cap-handler executor executor-handler
+///     (with-cap-handler ipfs ipfs-handler
+///       (with-cap-handler routing routing-handler
+///         (with-effect-handler {:load (fn [path resume] (resume (load path)))}
+///           <form>)))))
+/// ```
+///
+/// Cap handlers are looked up from the environment by name. Keyword effect
+/// handlers wrap builtins that use the effect protocol.
+fn wrap_with_handlers(form: &Val) -> Val {
+    // Innermost: keyword effect handler for :load.
+    let with_load = Val::List(vec![
         Val::Sym("with-effect-handler".into()),
         Val::Map(vec![(
             Val::Keyword("load".into()),
@@ -923,7 +968,21 @@ fn wrap_with_default_effects(form: &Val) -> Val {
             ]),
         )]),
         form.clone(),
-    ])
+    ]);
+
+    // Wrap in cap handlers (innermost to outermost).
+    let caps = ["routing", "ipfs", "executor", "host"];
+    let mut wrapped = with_load;
+    for cap_name in &caps {
+        let handler_name = format!("{cap_name}-handler");
+        wrapped = Val::List(vec![
+            Val::Sym("with-cap-handler".into()),
+            Val::Sym(cap_name.to_string()),
+            Val::Sym(handler_name),
+            wrapped,
+        ]);
+    }
+    wrapped
 }
 
 /// Scan `$WW_ROOT/etc/init.d/*.glia` via IPFS UnixFS, parse and evaluate
@@ -942,14 +1001,8 @@ async fn run_initd(
     let root = ww_root.trim_end_matches('/');
 
     // Get the UnixFS API.
-    let unixfs_resp = ctx
-        .borrow()
-        .ipfs
-        .unixfs_request()
-        .send()
-        .promise
-        .await
-        .map_err(|e| Val::from(e.to_string()))?;
+    let unixfs_req = ctx.borrow().ipfs.unixfs_request().send().promise;
+    let unixfs_resp = unixfs_req.await.map_err(|e| Val::from(e.to_string()))?;
     let unixfs = unixfs_resp
         .get()
         .map_err(|e| Val::from(e.to_string()))?
@@ -1023,7 +1076,7 @@ async fn run_initd(
             log::info!("init.d: {name}: evaluating form {}/{}", i + 1, forms.len());
             // Wrap each form in default effect handlers so init.d
             // scripts can use (perform :load ...) etc.
-            let wrapped = wrap_with_default_effects(form);
+            let wrapped = wrap_with_handlers(form);
             match eval(&wrapped, env, ctx, dispatch).await {
                 Ok(Val::Nil) => {}
                 Ok(Val::Int(code)) => {
@@ -1090,7 +1143,7 @@ async fn run_shell(
 
             match read(line) {
                 Ok(expr) => {
-                    let wrapped = wrap_with_default_effects(&expr);
+                    let wrapped = wrap_with_handlers(&expr);
                     match eval(&wrapped, env, &ctx, dispatch).await {
                         Ok(Val::Nil) => {}
                         Ok(result) => {
@@ -1164,15 +1217,45 @@ fn run_impl() {
         let dispatch = build_dispatch();
         let mut env = Env::new();
 
-        // Bind capability values in the environment. Scripts pass these
-        // explicitly to functions that need them — no ambient authority.
-        env.set(
-            "executor".to_string(),
-            Val::Cap {
-                name: "executor".into(),
-                inner: Rc::new(ctx.borrow().executor.clone()),
-            },
-        );
+        // Bind capability values + their effect handlers in the environment.
+        // Scripts use (perform cap :method args...) to invoke capabilities.
+        // The with-cap-handler wrapping (in wrap_with_handlers) routes
+        // performs to these handlers via the effect system.
+        {
+            let s = ctx.borrow();
+            let caps: [(&str, Rc<dyn std::any::Any>, Val); 4] = [
+                (
+                    "host",
+                    Rc::new(s.host.clone()),
+                    make_host_handler(s.host.clone()),
+                ),
+                (
+                    "executor",
+                    Rc::new(s.executor.clone()),
+                    make_executor_handler(s.executor.clone()),
+                ),
+                (
+                    "ipfs",
+                    Rc::new(s.ipfs.clone()),
+                    make_ipfs_handler(s.ipfs.clone()),
+                ),
+                (
+                    "routing",
+                    Rc::new(s.routing.clone()),
+                    make_routing_handler(s.routing.clone()),
+                ),
+            ];
+            for (name, inner, handler) in caps {
+                env.set(
+                    name.to_string(),
+                    Val::Cap {
+                        name: name.into(),
+                        inner,
+                    },
+                );
+                env.set(format!("{name}-handler"), handler);
+            }
+        }
 
         // Load the prelude (standard macros: when, and, or, defn, cond, not).
         {
@@ -1339,23 +1422,23 @@ mod tests {
         assert!(eval_load(&[Val::Int(42)]).is_err());
     }
 
-    // --- wrap_with_default_effects ---
+    // --- wrap_with_handlers ---
 
     #[test]
-    fn wrap_with_default_effects_produces_with_effect_handler() {
-        let form = Val::List(vec![Val::Sym("host".into()), Val::Sym("id".into())]);
-        let wrapped = wrap_with_default_effects(&form);
-        // Should be (with-effect-handler {:load <fn>} <form>)
+    fn wrap_with_handlers_nests_cap_and_effect_handlers() {
+        let form = Val::Sym("body".into());
+        let wrapped = wrap_with_handlers(&form);
+        // Outermost should be (with-cap-handler host host-handler ...)
         if let Val::List(items) = &wrapped {
-            assert_eq!(items.len(), 3);
-            assert_eq!(items[0], Val::Sym("with-effect-handler".into()));
-            if let Val::Map(pairs) = &items[1] {
-                assert_eq!(pairs.len(), 1);
-                assert_eq!(pairs[0].0, Val::Keyword("load".into()));
+            assert_eq!(items[0], Val::Sym("with-cap-handler".into()));
+            assert_eq!(items[1], Val::Sym("host".into()));
+            assert_eq!(items[2], Val::Sym("host-handler".into()));
+            // items[3] is (with-cap-handler executor ...)
+            if let Val::List(inner) = &items[3] {
+                assert_eq!(inner[1], Val::Sym("executor".into()));
             } else {
-                panic!("expected Map, got {:?}", items[1]);
+                panic!("expected nested cap handler");
             }
-            assert_eq!(items[2], form);
         } else {
             panic!("expected List");
         }
@@ -1364,11 +1447,9 @@ mod tests {
     // --- dispatch table ---
 
     #[test]
-    fn dispatch_table_has_all_verbs() {
+    fn dispatch_table_has_builtins() {
         let table = build_dispatch();
-        let expected = [
-            "host", "executor", "ipfs", "routing", "load", "cd", "help", "exit",
-        ];
+        let expected = ["load", "cd", "help", "exit"];
         for verb in &expected {
             assert!(table.contains_key(verb), "missing dispatch entry: {verb}");
         }
@@ -1704,16 +1785,7 @@ mod tests {
         }
     }
 
-    /// Create a Val::Cap wrapping the executor from a test session.
-    fn test_executor_cap(ctx: &RefCell<Session>) -> Val {
-        Val::Cap {
-            name: "executor".into(),
-            inner: Rc::new(ctx.borrow().executor.clone()),
-        }
-    }
-
     /// Run an async block on a single-threaded tokio + capnp-rpc LocalSet.
-    /// capnp-rpc clients are !Send, so we need LocalSet::run_until.
     async fn run_local<F, T>(f: F) -> T
     where
         F: Future<Output = T>,
@@ -1721,14 +1793,47 @@ mod tests {
         tokio::task::LocalSet::new().run_until(f).await
     }
 
+    /// Call an AsyncNativeFn handler with a method keyword + rest args.
+    /// Provides a resume function and extracts the resumed value.
+    /// Returns Ok(resumed_value) or the handler's Err.
+    async fn call_handler(handler: &Val, method: &str, rest: &[Val]) -> Result<Val, Val> {
+        let func = match handler {
+            Val::AsyncNativeFn { func, .. } => func.clone(),
+            _ => panic!("expected AsyncNativeFn"),
+        };
+        let mut data_items = vec![Val::Keyword(method.into())];
+        data_items.extend_from_slice(rest);
+        let data = Val::List(data_items);
+
+        // Create a resume function that captures the value.
+        let captured: Rc<RefCell<Option<Val>>> = Rc::new(RefCell::new(None));
+        let cap = captured.clone();
+        let resume = Val::NativeFn {
+            name: "test-resume".into(),
+            func: Rc::new(move |args: &[Val]| {
+                *cap.borrow_mut() = Some(args[0].clone());
+                Err(Val::Resume(Box::new(args[0].clone())))
+            }),
+        };
+
+        match func(vec![data, resume]).await {
+            Err(Val::Resume(_)) => {
+                // Handler called resume — extract the value.
+                Ok(captured.borrow().clone().unwrap())
+            }
+            Err(e) => Err(e),
+            Ok(v) => Ok(v), // Handler returned directly without resume.
+        }
+    }
+
     // --- host tests ---
 
     #[tokio::test]
     async fn test_host_id_returns_bs58() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![Val::Sym("id".into())];
-            let result = eval_host(&args, &ctx).await.unwrap();
+            let s = test_session();
+            let handler = make_host_handler(s.host.clone());
+            let result = call_handler(&handler, "id", &[]).await.unwrap();
             let expected = bs58::encode(STUB_PEER_ID).into_string();
             assert_eq!(result, Val::Str(expected));
         })
@@ -1738,13 +1843,12 @@ mod tests {
     #[tokio::test]
     async fn test_host_addrs_returns_multiaddr_strings() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![Val::Sym("addrs".into())];
-            let result = eval_host(&args, &ctx).await.unwrap();
+            let s = test_session();
+            let handler = make_host_handler(s.host.clone());
+            let result = call_handler(&handler, "addrs", &[]).await.unwrap();
             match result {
                 Val::List(addrs) => {
                     assert_eq!(addrs.len(), 1);
-                    // STUB_MULTIADDR = /ip4/127.0.0.1/tcp/4001
                     assert_eq!(addrs[0], Val::Str("/ip4/127.0.0.1/tcp/4001".into()));
                 }
                 other => panic!("expected list, got {other:?}"),
@@ -1756,9 +1860,9 @@ mod tests {
     #[tokio::test]
     async fn test_host_peers_returns_map_format() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![Val::Sym("peers".into())];
-            let result = eval_host(&args, &ctx).await.unwrap();
+            let s = test_session();
+            let handler = make_host_handler(s.host.clone());
+            let result = call_handler(&handler, "peers", &[]).await.unwrap();
             match result {
                 Val::List(peers) => {
                     assert_eq!(peers.len(), 1);
@@ -1782,11 +1886,11 @@ mod tests {
     #[tokio::test]
     async fn test_host_unknown_method_returns_error() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![Val::Sym("bogus".into())];
-            let err = eval_host(&args, &ctx).await.unwrap_err();
+            let s = test_session();
+            let handler = make_host_handler(s.host.clone());
+            let err = call_handler(&handler, "bogus", &[]).await.unwrap_err();
             let msg = format!("{err}");
-            assert!(msg.contains("unknown host method"), "got: {msg}");
+            assert!(msg.contains("unknown method"), "got: {msg}");
         })
         .await;
     }
@@ -1796,15 +1900,18 @@ mod tests {
     #[tokio::test]
     async fn test_host_listen_vat_passes_executor() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            // (host listen executor <wasm-bytes>) — VatListener mode
-            let executor_cap = test_executor_cap(&ctx);
-            let args = vec![
-                Val::Sym("listen".into()),
-                executor_cap,
-                Val::Bytes(b"fake-wasm".to_vec()),
-            ];
-            let result = eval_host(&args, &ctx).await;
+            let s = test_session();
+            let handler = make_host_handler(s.host.clone());
+            let executor_cap = Val::Cap {
+                name: "executor".into(),
+                inner: Rc::new(s.executor.clone()),
+            };
+            let result = call_handler(
+                &handler,
+                "listen",
+                &[executor_cap, Val::Bytes(b"fake-wasm".to_vec())],
+            )
+            .await;
             assert!(
                 result.is_ok(),
                 "VatListener listen failed: {:?}",
@@ -1817,16 +1924,22 @@ mod tests {
     #[tokio::test]
     async fn test_host_listen_stream_passes_executor() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            // (host listen executor "my-protocol" <wasm-bytes>) — StreamListener mode
-            let executor_cap = test_executor_cap(&ctx);
-            let args = vec![
-                Val::Sym("listen".into()),
-                executor_cap,
-                Val::Str("my-protocol".into()),
-                Val::Bytes(b"fake-wasm".to_vec()),
-            ];
-            let result = eval_host(&args, &ctx).await;
+            let s = test_session();
+            let handler = make_host_handler(s.host.clone());
+            let executor_cap = Val::Cap {
+                name: "executor".into(),
+                inner: Rc::new(s.executor.clone()),
+            };
+            let result = call_handler(
+                &handler,
+                "listen",
+                &[
+                    executor_cap,
+                    Val::Str("my-protocol".into()),
+                    Val::Bytes(b"fake-wasm".to_vec()),
+                ],
+            )
+            .await;
             assert!(
                 result.is_ok(),
                 "StreamListener listen failed: {:?}",
@@ -1839,10 +1952,9 @@ mod tests {
     #[tokio::test]
     async fn test_host_listen_missing_executor_errors() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            // No executor cap — should error
-            let args = vec![Val::Sym("listen".into()), Val::Bytes(b"wasm".to_vec())];
-            let err = eval_host(&args, &ctx).await;
+            let s = test_session();
+            let handler = make_host_handler(s.host.clone());
+            let err = call_handler(&handler, "listen", &[Val::Bytes(b"wasm".to_vec())]).await;
             assert!(err.is_err(), "should require executor capability");
         })
         .await;
@@ -1851,18 +1963,14 @@ mod tests {
     #[tokio::test]
     async fn test_host_listen_wrong_cap_type_errors() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            // A Cap with the wrong name — should error with a clear message.
+            let s = test_session();
+            let handler = make_host_handler(s.host.clone());
             let bad_cap = Val::Cap {
                 name: "not-executor".into(),
                 inner: Rc::new(42i32),
             };
-            let args = vec![
-                Val::Sym("listen".into()),
-                bad_cap,
-                Val::Bytes(b"wasm".to_vec()),
-            ];
-            let err = eval_host(&args, &ctx).await;
+            let err =
+                call_handler(&handler, "listen", &[bad_cap, Val::Bytes(b"wasm".to_vec())]).await;
             assert!(err.is_err(), "should reject wrong capability type");
             let msg = format!("{}", err.unwrap_err());
             assert!(
@@ -1873,89 +1981,81 @@ mod tests {
         .await;
     }
 
-    /// Adversarial: a Cap named "executor" wrapping the wrong inner type.
-    /// This simulates a forgery attempt — correct name tag, wrong payload.
-    /// Must hit the downcast_ref failure path, not the name mismatch path.
     #[tokio::test]
     async fn test_host_listen_forged_executor_cap_wrong_inner_type() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            // Right name, wrong guts: wraps an i32 instead of executor::Client.
+            let s = test_session();
+            let handler = make_host_handler(s.host.clone());
             let forged_cap = Val::Cap {
                 name: "executor".into(),
                 inner: Rc::new(42i32),
             };
-            let args = vec![
-                Val::Sym("listen".into()),
-                forged_cap,
-                Val::Bytes(b"wasm".to_vec()),
-            ];
-            let err = eval_host(&args, &ctx).await;
+            let err = call_handler(
+                &handler,
+                "listen",
+                &[forged_cap, Val::Bytes(b"wasm".to_vec())],
+            )
+            .await;
             assert!(err.is_err(), "forged cap should be rejected");
             let msg = format!("{}", err.unwrap_err());
-            assert!(
-                msg.contains("wrong inner type"),
-                "should report inner type mismatch, got: {msg}"
-            );
+            assert!(msg.contains("wrong inner type"), "got: {msg}");
         })
         .await;
     }
 
-    /// Adversarial: pass a plain string where executor Cap is expected.
-    /// Simulates `(def executor "hacked")` then `(host listen executor ...)`.
     #[tokio::test]
     async fn test_host_listen_string_instead_of_cap_errors() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![
-                Val::Sym("listen".into()),
-                Val::Str("executor".into()),
-                Val::Bytes(b"wasm".to_vec()),
-            ];
-            let err = eval_host(&args, &ctx).await;
+            let s = test_session();
+            let handler = make_host_handler(s.host.clone());
+            let err = call_handler(
+                &handler,
+                "listen",
+                &[Val::Str("executor".into()), Val::Bytes(b"wasm".to_vec())],
+            )
+            .await;
             assert!(err.is_err(), "string should not pass as executor cap");
             let msg = format!("{}", err.unwrap_err());
-            assert!(
-                msg.contains("executor capability required"),
-                "should demand a Cap, got: {msg}"
-            );
+            assert!(msg.contains("executor capability required"), "got: {msg}");
         })
         .await;
     }
 
-    /// Adversarial: pass nil where executor Cap is expected.
     #[tokio::test]
     async fn test_host_listen_nil_instead_of_cap_errors() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![
-                Val::Sym("listen".into()),
-                Val::Nil,
-                Val::Bytes(b"wasm".to_vec()),
-            ];
-            let err = eval_host(&args, &ctx).await;
+            let s = test_session();
+            let handler = make_host_handler(s.host.clone());
+            let err = call_handler(
+                &handler,
+                "listen",
+                &[Val::Nil, Val::Bytes(b"wasm".to_vec())],
+            )
+            .await;
             assert!(err.is_err(), "nil should not pass as executor cap");
         })
         .await;
     }
 
-    /// Adversarial: StreamListener mode with wrong cap name.
-    /// Ensures the executor gate applies to both listen modes, not just Vat.
     #[tokio::test]
     async fn test_host_listen_stream_wrong_cap_type_errors() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
+            let s = test_session();
+            let handler = make_host_handler(s.host.clone());
             let bad_cap = Val::Cap {
                 name: "imposter".into(),
                 inner: Rc::new(42i32),
             };
-            let args = vec![
-                Val::Sym("listen".into()),
-                bad_cap,
-                Val::Str("my-protocol".into()),
-                Val::Bytes(b"wasm".to_vec()),
-            ];
-            let err = eval_host(&args, &ctx).await;
+            let err = call_handler(
+                &handler,
+                "listen",
+                &[
+                    bad_cap,
+                    Val::Str("my-protocol".into()),
+                    Val::Bytes(b"wasm".to_vec()),
+                ],
+            )
+            .await;
             assert!(err.is_err(), "wrong cap should be rejected in stream mode");
             let msg = format!("{}", err.unwrap_err());
             assert!(
@@ -1966,18 +2066,17 @@ mod tests {
         .await;
     }
 
-    /// Adversarial: StreamListener mode with no executor at all.
     #[tokio::test]
     async fn test_host_listen_stream_missing_executor_errors() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            // Old-style call without executor: (host listen "proto" <wasm>)
-            let args = vec![
-                Val::Sym("listen".into()),
-                Val::Str("my-protocol".into()),
-                Val::Bytes(b"wasm".to_vec()),
-            ];
-            let err = eval_host(&args, &ctx).await;
+            let s = test_session();
+            let handler = make_host_handler(s.host.clone());
+            let err = call_handler(
+                &handler,
+                "listen",
+                &[Val::Str("my-protocol".into()), Val::Bytes(b"wasm".to_vec())],
+            )
+            .await;
             assert!(err.is_err(), "stream listen without executor should error");
         })
         .await;
@@ -1986,20 +2085,27 @@ mod tests {
     #[tokio::test]
     async fn test_host_listen_wrong_arity_returns_error() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let executor_cap = test_executor_cap(&ctx);
-            // 0 args after "listen" — should error
-            let args = vec![Val::Sym("listen".into())];
-            assert!(eval_host(&args, &ctx).await.is_err());
-            // 4 args after "listen" — should error (executor + protocol + wasm + extra)
-            let args = vec![
-                Val::Sym("listen".into()),
-                executor_cap,
-                Val::Str("a".into()),
-                Val::Bytes(b"b".to_vec()),
-                Val::Str("extra".into()),
-            ];
-            assert!(eval_host(&args, &ctx).await.is_err());
+            let s = test_session();
+            let handler = make_host_handler(s.host.clone());
+            // 0 args after :listen — should error
+            assert!(call_handler(&handler, "listen", &[]).await.is_err());
+            // 4 args after :listen — should error
+            let executor_cap = Val::Cap {
+                name: "executor".into(),
+                inner: Rc::new(s.executor.clone()),
+            };
+            assert!(call_handler(
+                &handler,
+                "listen",
+                &[
+                    executor_cap,
+                    Val::Str("a".into()),
+                    Val::Bytes(b"b".to_vec()),
+                    Val::Str("extra".into()),
+                ],
+            )
+            .await
+            .is_err());
         })
         .await;
     }
@@ -2009,9 +2115,11 @@ mod tests {
     #[tokio::test]
     async fn test_executor_echo() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![Val::Sym("echo".into()), Val::Str("hello".into())];
-            let result = eval_executor(&args, &ctx).await.unwrap();
+            let s = test_session();
+            let handler = make_executor_handler(s.executor.clone());
+            let result = call_handler(&handler, "echo", &[Val::Str("hello".into())])
+                .await
+                .unwrap();
             assert_eq!(result, Val::Str("hello".into()));
         })
         .await;
@@ -2022,9 +2130,11 @@ mod tests {
     #[tokio::test]
     async fn test_routing_provide_succeeds() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![Val::Sym("provide".into()), Val::Str("oracle".into())];
-            let result = eval_routing(&args, &ctx).await.unwrap();
+            let s = test_session();
+            let handler = make_routing_handler(s.routing.clone());
+            let result = call_handler(&handler, "provide", &[Val::Str("oracle".into())])
+                .await
+                .unwrap();
             assert_eq!(result, Val::Nil);
         })
         .await;
@@ -2033,11 +2143,11 @@ mod tests {
     #[tokio::test]
     async fn test_routing_provide_missing_name() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![Val::Sym("provide".into())];
-            let err = eval_routing(&args, &ctx).await.unwrap_err();
+            let s = test_session();
+            let handler = make_routing_handler(s.routing.clone());
+            let err = call_handler(&handler, "provide", &[]).await.unwrap_err();
             let msg = format!("{err}");
-            assert!(msg.contains("routing provide"), "got: {msg}");
+            assert!(msg.contains("routing :provide"), "got: {msg}");
         })
         .await;
     }
@@ -2045,12 +2155,13 @@ mod tests {
     #[tokio::test]
     async fn test_routing_find_default_count() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![Val::Sym("find".into()), Val::Str("oracle".into())];
-            let result = eval_routing(&args, &ctx).await.unwrap();
+            let s = test_session();
+            let handler = make_routing_handler(s.routing.clone());
+            let result = call_handler(&handler, "find", &[Val::Str("oracle".into())])
+                .await
+                .unwrap();
             match result {
                 Val::List(providers) => {
-                    // TestRouting streams min(count, 2) = min(20, 2) = 2 providers
                     assert_eq!(providers.len(), 2);
                     match &providers[0] {
                         Val::Map(entries) => {
@@ -2072,19 +2183,21 @@ mod tests {
     #[tokio::test]
     async fn test_routing_find_custom_count() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![
-                Val::Sym("find".into()),
-                Val::Str("oracle".into()),
-                Val::Keyword("count".into()),
-                Val::Int(1),
-            ];
-            let result = eval_routing(&args, &ctx).await.unwrap();
+            let s = test_session();
+            let handler = make_routing_handler(s.routing.clone());
+            let result = call_handler(
+                &handler,
+                "find",
+                &[
+                    Val::Str("oracle".into()),
+                    Val::Keyword("count".into()),
+                    Val::Int(1),
+                ],
+            )
+            .await
+            .unwrap();
             match result {
-                Val::List(providers) => {
-                    // TestRouting streams min(1, 2) = 1 provider
-                    assert_eq!(providers.len(), 1);
-                }
+                Val::List(providers) => assert_eq!(providers.len(), 1),
                 other => panic!("expected list, got {other:?}"),
             }
         })
@@ -2094,19 +2207,21 @@ mod tests {
     #[tokio::test]
     async fn test_routing_find_zero_count_means_no_limit() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![
-                Val::Sym("find".into()),
-                Val::Str("oracle".into()),
-                Val::Keyword("count".into()),
-                Val::Int(0),
-            ];
-            let result = eval_routing(&args, &ctx).await.unwrap();
+            let s = test_session();
+            let handler = make_routing_handler(s.routing.clone());
+            let result = call_handler(
+                &handler,
+                "find",
+                &[
+                    Val::Str("oracle".into()),
+                    Val::Keyword("count".into()),
+                    Val::Int(0),
+                ],
+            )
+            .await
+            .unwrap();
             match result {
-                Val::List(providers) => {
-                    // count=0 → u32::MAX, TestRouting streams min(u32::MAX, 2) = 2
-                    assert_eq!(providers.len(), 2);
-                }
+                Val::List(providers) => assert_eq!(providers.len(), 2),
                 other => panic!("expected list, got {other:?}"),
             }
         })
@@ -2116,11 +2231,11 @@ mod tests {
     #[tokio::test]
     async fn test_routing_find_missing_name() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![Val::Sym("find".into())];
-            let err = eval_routing(&args, &ctx).await.unwrap_err();
+            let s = test_session();
+            let handler = make_routing_handler(s.routing.clone());
+            let err = call_handler(&handler, "find", &[]).await.unwrap_err();
             let msg = format!("{err}");
-            assert!(msg.contains("routing find"), "got: {msg}");
+            assert!(msg.contains("routing :find"), "got: {msg}");
         })
         .await;
     }
@@ -2128,9 +2243,11 @@ mod tests {
     #[tokio::test]
     async fn test_routing_hash() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![Val::Sym("hash".into()), Val::Str("test-data".into())];
-            let result = eval_routing(&args, &ctx).await.unwrap();
+            let s = test_session();
+            let handler = make_routing_handler(s.routing.clone());
+            let result = call_handler(&handler, "hash", &[Val::Str("test-data".into())])
+                .await
+                .unwrap();
             assert_eq!(result, Val::Str("QmTestCid123".into()));
         })
         .await;
@@ -2139,18 +2256,54 @@ mod tests {
     #[tokio::test]
     async fn test_routing_unknown_method_returns_error() {
         run_local(async {
-            let ctx = RefCell::new(test_session());
-            let args = vec![Val::Sym("bogus".into())];
-            let err = eval_routing(&args, &ctx).await.unwrap_err();
+            let s = test_session();
+            let handler = make_routing_handler(s.routing.clone());
+            let err = call_handler(&handler, "bogus", &[]).await.unwrap_err();
             let msg = format!("{err}");
-            assert!(msg.contains("unknown routing method"), "got: {msg}");
+            assert!(msg.contains("unknown method"), "got: {msg}");
         })
         .await;
     }
 
     // --- perform :load effect round-trip ---
 
-    /// Verify that (perform :load "path") inside wrap_with_default_effects
+    /// Helper: bind all caps + handlers in env (same as kernel boot).
+    fn bind_caps_in_env(env: &mut Env, session: &Session) {
+        let caps: [(&str, Rc<dyn std::any::Any>, Val); 4] = [
+            (
+                "host",
+                Rc::new(session.host.clone()),
+                make_host_handler(session.host.clone()),
+            ),
+            (
+                "executor",
+                Rc::new(session.executor.clone()),
+                make_executor_handler(session.executor.clone()),
+            ),
+            (
+                "ipfs",
+                Rc::new(session.ipfs.clone()),
+                make_ipfs_handler(session.ipfs.clone()),
+            ),
+            (
+                "routing",
+                Rc::new(session.routing.clone()),
+                make_routing_handler(session.routing.clone()),
+            ),
+        ];
+        for (name, inner, handler) in caps {
+            env.set(
+                name.to_string(),
+                Val::Cap {
+                    name: name.into(),
+                    inner,
+                },
+            );
+            env.set(format!("{name}-handler"), handler);
+        }
+    }
+
+    /// Verify that (perform :load "path") inside wrap_with_handlers
     /// actually resolves through the effect handler → eval_load → filesystem.
     #[tokio::test]
     async fn test_perform_load_resolves_through_effect_handler() {
@@ -2158,22 +2311,19 @@ mod tests {
             let ctx = RefCell::new(test_session());
             let dispatch = build_dispatch();
             let mut env = Env::new();
+            bind_caps_in_env(&mut env, &ctx.borrow());
 
-            // Write a temp file so eval_load can read it.
             let dir = tempfile::tempdir().unwrap();
             let file_path = dir.path().join("test.bin");
             std::fs::write(&file_path, b"hello-bytes").unwrap();
-
-            // Clear WW_ROOT so resolve_ipfs_path doesn't mangle the absolute path.
             std::env::remove_var("WW_ROOT");
 
-            // (perform :load "/absolute/path/test.bin")
             let form = Val::List(vec![
                 Val::Sym("perform".into()),
                 Val::Keyword("load".into()),
                 Val::Str(file_path.to_str().unwrap().to_string()),
             ]);
-            let wrapped = wrap_with_default_effects(&form);
+            let wrapped = wrap_with_handlers(&form);
             let result = eval(&wrapped, &mut env, &ctx, &dispatch).await;
             assert_eq!(result.unwrap(), Val::Bytes(b"hello-bytes".to_vec()));
         })
@@ -2187,6 +2337,7 @@ mod tests {
             let ctx = RefCell::new(test_session());
             let dispatch = build_dispatch();
             let mut env = Env::new();
+            bind_caps_in_env(&mut env, &ctx.borrow());
 
             std::env::remove_var("WW_ROOT");
 
@@ -2195,7 +2346,7 @@ mod tests {
                 Val::Keyword("load".into()),
                 Val::Str("/nonexistent/path/missing.wasm".to_string()),
             ]);
-            let wrapped = wrap_with_default_effects(&form);
+            let wrapped = wrap_with_handlers(&form);
             let result = eval(&wrapped, &mut env, &ctx, &dispatch).await;
             assert!(result.is_err(), "expected error for missing file");
         })
@@ -2204,41 +2355,26 @@ mod tests {
 
     // --- init script eval integration ---
 
-    /// Eval (host listen executor (perform :load "path")) end-to-end: the effect
-    /// handler resolves :load to file bytes, the evaluator resolves `executor` to
-    /// Val::Cap, then the kernel dispatches (host listen <cap> <bytes>) to VatListener.
+    /// Eval (perform host :listen executor (perform :load "path")) end-to-end.
     #[tokio::test]
     async fn test_chess_glia_listen_form_evals_end_to_end() {
         run_local(async {
             let ctx = RefCell::new(test_session());
             let dispatch = build_dispatch();
             let mut env = Env::new();
+            bind_caps_in_env(&mut env, &ctx.borrow());
 
-            // Bind executor capability in the env (as the kernel does at boot).
-            env.set(
-                "executor".to_string(),
-                Val::Cap {
-                    name: "executor".into(),
-                    inner: Rc::new(ctx.borrow().executor.clone()),
-                },
-            );
-
-            // Write fake WASM so (perform :load ...) has something to read.
             let dir = tempfile::tempdir().unwrap();
             let wasm_path = dir.path().join("chess-demo.wasm");
             std::fs::write(&wasm_path, b"fake-wasm-bytes").unwrap();
-
-            // Clear WW_ROOT so resolve_ipfs_path doesn't mangle the path.
             std::env::remove_var("WW_ROOT");
 
-            // Parse the actual chess.glia form syntax:
-            // (host listen executor (perform :load "/path/to/chess-demo.wasm"))
             let script = format!(
-                r#"(host listen executor (perform :load "{}"))"#,
+                r#"(perform host :listen executor (perform :load "{}"))"#,
                 wasm_path.to_str().unwrap()
             );
             let form = read(&script).unwrap();
-            let wrapped = wrap_with_default_effects(&form);
+            let wrapped = wrap_with_handlers(&form);
             let result = eval(&wrapped, &mut env, &ctx, &dispatch).await;
             assert!(
                 result.is_ok(),
@@ -2250,38 +2386,22 @@ mod tests {
     }
 
     /// Eval the full chess.glia script through the kernel eval pipeline.
-    /// Both forms should succeed: (host listen executor ...) and (executor run ...).
-    /// executor.run_bytes is stubbed to return an error (no real WASM runtime),
-    /// so we only test that the first form (host listen) evaluates cleanly.
     #[tokio::test]
     async fn test_chess_glia_full_script_parses_and_first_form_evals() {
         run_local(async {
             let ctx = RefCell::new(test_session());
             let dispatch = build_dispatch();
             let mut env = Env::new();
+            bind_caps_in_env(&mut env, &ctx.borrow());
 
-            // Bind executor capability in the env.
-            env.set(
-                "executor".to_string(),
-                Val::Cap {
-                    name: "executor".into(),
-                    inner: Rc::new(ctx.borrow().executor.clone()),
-                },
-            );
-
-            // Write fake WASM.
             let dir = tempfile::tempdir().unwrap();
             let wasm_path = dir.path().join("chess-demo.wasm");
             std::fs::write(&wasm_path, b"fake-wasm-bytes").unwrap();
-
-            // Clear WW_ROOT so resolve_ipfs_path doesn't mangle the path.
             std::env::remove_var("WW_ROOT");
 
-            // Simulate chess.glia with absolute paths (since we don't have
-            // the IPFS virtual filesystem in test mode).
             let script = format!(
-                r#"(host listen executor (perform :load "{}"))
-                   (executor run (perform :load "{}"))"#,
+                r#"(perform host :listen executor (perform :load "{}"))
+                   (perform executor :run (perform :load "{}"))"#,
                 wasm_path.to_str().unwrap(),
                 wasm_path.to_str().unwrap()
             );
@@ -2289,23 +2409,20 @@ mod tests {
             let forms = read_many(&script).unwrap();
             assert_eq!(forms.len(), 2, "chess.glia should have 2 forms");
 
-            // First form: (host listen ...) — should succeed via VatListener stub.
-            let wrapped = wrap_with_default_effects(&forms[0]);
+            // First form: (perform host :listen ...) — should succeed.
+            let wrapped = wrap_with_handlers(&forms[0]);
             let result = eval(&wrapped, &mut env, &ctx, &dispatch).await;
             assert!(
                 result.is_ok(),
-                "first form (host listen) failed: {:?}",
+                "first form failed: {:?}",
                 result.unwrap_err()
             );
 
-            // Second form: (executor run ...) — will fail because TestExecutor
-            // returns "unimplemented" for run_bytes. That's expected.
-            let wrapped = wrap_with_default_effects(&forms[1]);
+            // Second form: (perform executor :run ...) — fails because TestExecutor
+            // returns "unimplemented" for run_bytes. Expected.
+            let wrapped = wrap_with_handlers(&forms[1]);
             let result = eval(&wrapped, &mut env, &ctx, &dispatch).await;
-            assert!(
-                result.is_err(),
-                "executor run should fail against stub (no real WASM runtime)"
-            );
+            assert!(result.is_err(), "executor run should fail against stub");
         })
         .await;
     }
