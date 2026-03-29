@@ -34,14 +34,22 @@ fn cid_to_kad_key(cid_str: &str) -> Result<Vec<u8>, capnp::Error> {
 /// Multiple nodes can share the same `LocalRouting` (via `Arc<Mutex<…>>`) to
 /// simulate provide/findProviders without network non-determinism.
 pub struct LocalRouting {
-    providers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<crate::rpc::PeerInfo>>>>,
+    providers: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<crate::rpc::PeerInfo>>>,
+    >,
+}
+
+impl Default for LocalRouting {
+    fn default() -> Self {
+        Self {
+            providers: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
 }
 
 impl LocalRouting {
     pub fn new() -> Self {
-        Self {
-            providers: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        }
+        Self::default()
     }
 
     /// Create a second handle to the same provider table.
