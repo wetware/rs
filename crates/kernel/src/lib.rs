@@ -6,6 +6,8 @@ use std::pin::Pin;
 use glia::eval::{self, Dispatch, Env};
 use glia::{read, read_many, Val};
 
+use std::rc::Rc;
+
 use wasip2::cli::stderr::get_stderr;
 use wasip2::cli::stdin::get_stdin;
 use wasip2::cli::stdout::get_stdout;
@@ -285,15 +287,37 @@ async fn eval_host(args: &[Val], ctx: &RefCell<Session>) -> Result<Val, Val> {
             Ok(Val::List(items))
         }
         "listen" => {
-            // Unified listen: arity determines mode.
-            //   (host listen <wasm>)              → VatListener (schema in WASM)
-            //   (host listen "protocol" <wasm>)   → StreamListener
+            // Unified listen: the caller explicitly passes the executor capability.
+            //   (host listen executor <wasm>)              → VatListener (schema in WASM)
+            //   (host listen executor "protocol" <wasm>)   → StreamListener
+            //
+            // The executor arg must be the capability token bound by the kernel.
+            // No ambient authority — the caller declares what spawn authority they're
+            // delegating to the listener.
+            let executor = match args.get(1) {
+                Some(Val::Cap { name, inner }) if name == "executor" => {
+                    inner
+                        .downcast_ref::<system_capnp::executor::Client>()
+                        .cloned()
+                        .ok_or_else(|| Val::from("(host listen executor ...): executor cap has wrong inner type"))?
+                }
+                Some(Val::Cap { name, .. }) => {
+                    return Err(
+                        format!("(host listen executor ...): expected executor capability, got '{name}' capability").into(),
+                    )
+                }
+                _ => {
+                    return Err(
+                        "(host listen executor <wasm>): executor capability required".into(),
+                    )
+                }
+            };
             match args.len() {
-                2 => {
-                    // 1 arg: VatListener mode — WASM has schema.capnp custom section.
-                    let wasm = match args.get(1) {
+                3 => {
+                    // VatListener mode — WASM has schema.capnp custom section.
+                    let wasm = match args.get(2) {
                         Some(Val::Bytes(b)) => b.clone(),
-                        _ => return Err("(host listen <wasm>): expected bytes".into()),
+                        _ => return Err("(host listen executor <wasm>): expected bytes".into()),
                     };
                     let network_resp = ctx
                         .borrow()
@@ -308,7 +332,7 @@ async fn eval_host(args: &[Val], ctx: &RefCell<Session>) -> Result<Val, Val> {
                         .get_vat_listener()
                         .map_err(|e| Val::from(e.to_string()))?;
                     let mut req = listener.listen_request();
-                    req.get().set_executor(ctx.borrow().executor.clone());
+                    req.get().set_executor(executor);
                     req.get().set_wasm(&wasm);
                     req.send()
                         .promise
@@ -317,21 +341,21 @@ async fn eval_host(args: &[Val], ctx: &RefCell<Session>) -> Result<Val, Val> {
                     log::info!("init.d: registered vat handler");
                     Ok(Val::Nil)
                 }
-                3 => {
-                    // 2 args: StreamListener mode — explicit protocol name.
+                4 => {
+                    // StreamListener mode — explicit protocol name.
                     let protocol =
-                        match args.get(1) {
+                        match args.get(2) {
                             Some(Val::Str(s)) => s.clone(),
                             _ => return Err(
-                                "(host listen \"<protocol>\" <wasm>): first arg must be a string"
+                                "(host listen executor \"<protocol>\" <wasm>): first arg must be a string"
                                     .into(),
                             ),
                         };
-                    let wasm = match args.get(2) {
+                    let wasm = match args.get(3) {
                         Some(Val::Bytes(b)) => b.clone(),
                         _ => {
                             return Err(
-                                "(host listen \"<protocol>\" <wasm>): second arg must be bytes"
+                                "(host listen executor \"<protocol>\" <wasm>): second arg must be bytes"
                                     .into(),
                             )
                         }
@@ -349,7 +373,7 @@ async fn eval_host(args: &[Val], ctx: &RefCell<Session>) -> Result<Val, Val> {
                         .get_stream_listener()
                         .map_err(|e| Val::from(e.to_string()))?;
                     let mut req = listener.listen_request();
-                    req.get().set_executor(ctx.borrow().executor.clone());
+                    req.get().set_executor(executor);
                     req.get().set_protocol(&protocol);
                     req.get().set_wasm(&wasm);
                     req.send()
@@ -359,7 +383,10 @@ async fn eval_host(args: &[Val], ctx: &RefCell<Session>) -> Result<Val, Val> {
                     log::info!("init.d: registered stream handler /ww/0.1.0/stream/{protocol}");
                     Ok(Val::Nil)
                 }
-                _ => Err("(host listen <wasm>) or (host listen \"protocol\" <wasm>)".into()),
+                _ => Err(
+                    "(host listen executor <wasm>) or (host listen executor \"protocol\" <wasm>)"
+                        .into(),
+                ),
             }
         }
         _ => Err(Val::from(format!("unknown host method: {method}"))),
@@ -826,8 +853,8 @@ Capabilities:
   (host id)                      Peer ID
   (host addrs)                   Listen addresses
   (host peers)                   Connected peers
-  (host listen <wasm>)           Register RPC handler (schema in WASM)
-  (host listen \"p\" <wasm>)       Register stream handler
+  (host listen executor <wasm>)          Register RPC handler (schema in WASM)
+  (host listen executor \"p\" <wasm>)    Register stream handler
 
   (executor echo \"<msg>\")        Diagnostic echo
   (executor run <wasm> :env {})  Spawn foreground process
@@ -1136,6 +1163,16 @@ fn run_impl() {
 
         let dispatch = build_dispatch();
         let mut env = Env::new();
+
+        // Bind capability values in the environment. Scripts pass these
+        // explicitly to functions that need them — no ambient authority.
+        env.set(
+            "executor".to_string(),
+            Val::Cap {
+                name: "executor".into(),
+                inner: Rc::new(ctx.borrow().executor.clone()),
+            },
+        );
 
         // Load the prelude (standard macros: when, and, or, defn, cond, not).
         {
@@ -1667,6 +1704,14 @@ mod tests {
         }
     }
 
+    /// Create a Val::Cap wrapping the executor from a test session.
+    fn test_executor_cap(ctx: &RefCell<Session>) -> Val {
+        Val::Cap {
+            name: "executor".into(),
+            inner: Rc::new(ctx.borrow().executor.clone()),
+        }
+    }
+
     /// Run an async block on a single-threaded tokio + capnp-rpc LocalSet.
     /// capnp-rpc clients are !Send, so we need LocalSet::run_until.
     async fn run_local<F, T>(f: F) -> T
@@ -1752,8 +1797,13 @@ mod tests {
     async fn test_host_listen_vat_passes_executor() {
         run_local(async {
             let ctx = RefCell::new(test_session());
-            // (host listen <wasm-bytes>) — VatListener mode
-            let args = vec![Val::Sym("listen".into()), Val::Bytes(b"fake-wasm".to_vec())];
+            // (host listen executor <wasm-bytes>) — VatListener mode
+            let executor_cap = test_executor_cap(&ctx);
+            let args = vec![
+                Val::Sym("listen".into()),
+                executor_cap,
+                Val::Bytes(b"fake-wasm".to_vec()),
+            ];
             let result = eval_host(&args, &ctx).await;
             assert!(
                 result.is_ok(),
@@ -1768,9 +1818,11 @@ mod tests {
     async fn test_host_listen_stream_passes_executor() {
         run_local(async {
             let ctx = RefCell::new(test_session());
-            // (host listen "my-protocol" <wasm-bytes>) — StreamListener mode
+            // (host listen executor "my-protocol" <wasm-bytes>) — StreamListener mode
+            let executor_cap = test_executor_cap(&ctx);
             let args = vec![
                 Val::Sym("listen".into()),
+                executor_cap,
                 Val::Str("my-protocol".into()),
                 Val::Bytes(b"fake-wasm".to_vec()),
             ];
@@ -1785,15 +1837,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_host_listen_missing_executor_errors() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            // No executor cap — should error
+            let args = vec![Val::Sym("listen".into()), Val::Bytes(b"wasm".to_vec())];
+            let err = eval_host(&args, &ctx).await;
+            assert!(err.is_err(), "should require executor capability");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_host_listen_wrong_cap_type_errors() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            // A Cap with the wrong name — should error with a clear message.
+            let bad_cap = Val::Cap {
+                name: "not-executor".into(),
+                inner: Rc::new(42i32),
+            };
+            let args = vec![
+                Val::Sym("listen".into()),
+                bad_cap,
+                Val::Bytes(b"wasm".to_vec()),
+            ];
+            let err = eval_host(&args, &ctx).await;
+            assert!(err.is_err(), "should reject wrong capability type");
+            let msg = format!("{}", err.unwrap_err());
+            assert!(
+                msg.contains("not-executor"),
+                "error should name the wrong cap: {msg}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_host_listen_wrong_arity_returns_error() {
         run_local(async {
             let ctx = RefCell::new(test_session());
+            let executor_cap = test_executor_cap(&ctx);
             // 0 args after "listen" — should error
             let args = vec![Val::Sym("listen".into())];
             assert!(eval_host(&args, &ctx).await.is_err());
-            // 3 args after "listen" — should error
+            // 4 args after "listen" — should error (executor + protocol + wasm + extra)
             let args = vec![
                 Val::Sym("listen".into()),
+                executor_cap,
                 Val::Str("a".into()),
                 Val::Bytes(b"b".to_vec()),
                 Val::Str("extra".into()),
@@ -2003,15 +2094,24 @@ mod tests {
 
     // --- init script eval integration ---
 
-    /// Eval (host listen (perform :load "path")) end-to-end: the effect handler
-    /// resolves :load to file bytes, then the kernel dispatches (host listen <bytes>)
-    /// to the VatListener stub.
+    /// Eval (host listen executor (perform :load "path")) end-to-end: the effect
+    /// handler resolves :load to file bytes, the evaluator resolves `executor` to
+    /// Val::Cap, then the kernel dispatches (host listen <cap> <bytes>) to VatListener.
     #[tokio::test]
     async fn test_chess_glia_listen_form_evals_end_to_end() {
         run_local(async {
             let ctx = RefCell::new(test_session());
             let dispatch = build_dispatch();
             let mut env = Env::new();
+
+            // Bind executor capability in the env (as the kernel does at boot).
+            env.set(
+                "executor".to_string(),
+                Val::Cap {
+                    name: "executor".into(),
+                    inner: Rc::new(ctx.borrow().executor.clone()),
+                },
+            );
 
             // Write fake WASM so (perform :load ...) has something to read.
             let dir = tempfile::tempdir().unwrap();
@@ -2022,9 +2122,9 @@ mod tests {
             std::env::remove_var("WW_ROOT");
 
             // Parse the actual chess.glia form syntax:
-            // (host listen (perform :load "/path/to/chess-demo.wasm"))
+            // (host listen executor (perform :load "/path/to/chess-demo.wasm"))
             let script = format!(
-                r#"(host listen (perform :load "{}"))"#,
+                r#"(host listen executor (perform :load "{}"))"#,
                 wasm_path.to_str().unwrap()
             );
             let form = read(&script).unwrap();
@@ -2040,7 +2140,7 @@ mod tests {
     }
 
     /// Eval the full chess.glia script through the kernel eval pipeline.
-    /// Both forms should succeed: (host listen ...) and (executor run ...).
+    /// Both forms should succeed: (host listen executor ...) and (executor run ...).
     /// executor.run_bytes is stubbed to return an error (no real WASM runtime),
     /// so we only test that the first form (host listen) evaluates cleanly.
     #[tokio::test]
@@ -2049,6 +2149,15 @@ mod tests {
             let ctx = RefCell::new(test_session());
             let dispatch = build_dispatch();
             let mut env = Env::new();
+
+            // Bind executor capability in the env.
+            env.set(
+                "executor".to_string(),
+                Val::Cap {
+                    name: "executor".into(),
+                    inner: Rc::new(ctx.borrow().executor.clone()),
+                },
+            );
 
             // Write fake WASM.
             let dir = tempfile::tempdir().unwrap();
@@ -2061,7 +2170,7 @@ mod tests {
             // Simulate chess.glia with absolute paths (since we don't have
             // the IPFS virtual filesystem in test mode).
             let script = format!(
-                r#"(host listen (perform :load "{}"))
+                r#"(host listen executor (perform :load "{}"))
                    (executor run (perform :load "{}"))"#,
                 wasm_path.to_str().unwrap(),
                 wasm_path.to_str().unwrap()

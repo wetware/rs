@@ -2,12 +2,16 @@
 ;
 ; Each form is wrapped in default effect handlers by the kernel,
 ; so (perform :load ...) resolves via the virtual filesystem.
+; The kernel binds `executor` as a capability value in the environment.
 
 ; Register RPC cell for the ChessEngine capability.
 ; The schema is extracted from the WASM binary's "schema.capnp" custom section.
 ; VatListener spawns a cell process per connection; the cell exports
 ; a ChessEngine capability via system::serve().
-(host listen (perform :load "bin/chess-demo.wasm"))
+;
+; The executor is passed explicitly — it's the spawn authority the listener
+; needs to create cell processes. No ambient injection.
+(host listen executor (perform :load "bin/chess-demo.wasm"))
 
 ; Run the chess demo in service mode — blocks until exit.
 ; The service process discovers peers via DHT and dials them with VatClient

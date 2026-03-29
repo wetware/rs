@@ -138,6 +138,16 @@ pub enum Val {
     /// eval chain. Propagates via Err like Effect and Recur. Must NOT be caught
     /// by nested `with-handler` — always re-propagated.
     Resume(Box<Val>),
+    /// An opaque capability reference — a value the script can pass around but
+    /// not inspect. The kernel creates these (e.g. executor, host) and dispatch
+    /// handlers downcast them back to typed Cap'n Proto clients.
+    ///
+    /// `name` is the display/identity label (e.g. "executor").
+    /// `inner` is the type-erased capability, downcasted by the kernel.
+    Cap {
+        name: String,
+        inner: std::rc::Rc<dyn std::any::Any>,
+    },
 }
 
 impl core::fmt::Debug for Val {
@@ -165,6 +175,7 @@ impl core::fmt::Debug for Val {
                 .finish(),
             Val::NativeFn { name, .. } => write!(f, "NativeFn({name})"),
             Val::Resume(v) => f.debug_tuple("Resume").field(v).finish(),
+            Val::Cap { name, .. } => write!(f, "Cap({name})"),
         }
     }
 }
@@ -213,6 +224,8 @@ impl PartialEq for Val {
             (Val::NativeFn { func: a, .. }, Val::NativeFn { func: b, .. }) => {
                 std::rc::Rc::ptr_eq(a, b)
             }
+            // Caps use identity semantics (same Rc = same cap).
+            (Val::Cap { inner: a, .. }, Val::Cap { inner: b, .. }) => std::rc::Rc::ptr_eq(a, b),
             // Recur, Effect, and Resume are internal sentinels — never equal.
             (Val::Recur(_), _) | (_, Val::Recur(_)) => false,
             (Val::Effect { .. }, _) | (_, Val::Effect { .. }) => false,
@@ -264,6 +277,7 @@ impl core::fmt::Display for Val {
                 write!(f, "#<effect :{effect_type} {data}>")
             }
             Val::NativeFn { name, .. } => write!(f, "#<native-fn {name}>"),
+            Val::Cap { name, .. } => write!(f, "#<cap {name}>"),
             Val::Resume(val) => write!(f, "#<resume {val}>"),
         }
     }

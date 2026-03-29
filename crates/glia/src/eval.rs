@@ -906,6 +906,7 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
                 Val::Macro { .. } => "macro",
                 Val::Effect { .. } => "effect",
                 Val::NativeFn { .. } => "native-fn",
+                Val::Cap { .. } => "cap",
                 Val::Resume(_) => "resume",
             };
             Some(Ok(Val::Keyword(kw.into())))

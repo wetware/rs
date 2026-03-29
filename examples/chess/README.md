@@ -2,11 +2,42 @@
 
 Two-node cross-network chess over libp2p RPC capabilities.
 
-Each node registers an `VatListener` for the ChessEngine schema,
-announces the schema CID on the Kademlia DHT, discovers peers, and
-plays random UCI moves via typed Cap'n Proto RPC. Every completed game
-publishes a content-addressed replay log to IPFS (see
-[doc/replay.md](doc/replay.md)).
+## How it works
+
+The `ww run` command takes one or more **image layers** as positional args.
+Each layer is a directory that gets merged into a single FHS root, left to
+right. The kernel (PID 0) sees this merged root as its virtual filesystem.
+
+```sh
+cargo run --bin ww -- run --port=2025 crates/kernel examples/chess
+```
+
+Here, `crates/kernel` is the base layer (the kernel WASM binary) and
+`examples/chess` is stacked on top. After merging, the kernel's filesystem
+contains everything from both directories. Concretely, the contents of
+`examples/chess/` are available to PID 0 under `$WW_ROOT/`:
+
+```
+$WW_ROOT/
+├── bin/
+│   └── chess-demo.wasm    ← from examples/chess (built by `make chess`)
+├── etc/
+│   └── init.d/
+│       └── chess.glia     ← from examples/chess
+├── boot/
+│   └── main.wasm          ← from crates/kernel
+└── ...
+```
+
+The host publishes this merged directory to IPFS and sets `$WW_ROOT` to
+`/ipfs/<cid>`. When the kernel's init system reads `etc/init.d/chess.glia`,
+the `(perform :load "bin/chess-demo.wasm")` call resolves the path relative
+to `$WW_ROOT`, fetching the bytes from the merged image via the WASI
+filesystem interceptor.
+
+This is the key idea: **any directory can be an image layer.** You build a
+chess demo by putting the right files in the right FHS paths and stacking
+the directory onto the kernel.
 
 ## Architecture
 
@@ -32,6 +63,34 @@ Two execution modes, selected by the init.d script:
   dials them with `VatClient` to get typed `ChessEngine` capabilities,
   and plays random games. Exponential backoff (2 s to 15 min).
 
+Each node registers a `VatListener` for the ChessEngine schema,
+announces the schema CID on the Kademlia DHT, discovers peers, and
+plays random UCI moves via typed Cap'n Proto RPC. Every completed game
+publishes a content-addressed replay log to IPFS (see
+[doc/replay.md](doc/replay.md)).
+
+## Init.d Script
+
+`etc/init.d/chess.glia` is evaluated by the kernel at boot. Each form
+is a capability invocation. The kernel binds `executor` as a capability
+value in the Glia environment, and scripts pass it explicitly to
+functions that need spawn authority.
+
+```clojure
+; Register RPC cell — schema extracted from WASM custom section.
+; The executor is passed explicitly (no ambient authority).
+(host listen executor (perform :load "bin/chess-demo.wasm"))
+
+; Run the chess demo in service mode — blocks until exit.
+(executor run (perform :load "bin/chess-demo.wasm"))
+```
+
+`(perform :load "bin/chess-demo.wasm")` loads bytes via the `:load` effect
+handler, resolved relative to `$WW_ROOT` (the merged image root). The
+executor capability is the spawn authority that `VatListener` needs to
+create cell processes. The host inspects the WASM binary's `schema.capnp`
+custom section to derive the protocol CID.
+
 ## Schema CID
 
 The protocol address is derived at build time from the ChessEngine
@@ -41,25 +100,6 @@ This CID serves as both the DHT key and the subprotocol address
 WASM binary as a custom section named `schema.capnp`. The host
 extracts the section and derives the CID at runtime. See `build.rs`,
 the `schema-id` crate, and `make chess` for the injection step.
-
-## Init.d Script
-
-`etc/init.d/chess.glia` is evaluated by the kernel at boot. Each form
-is a capability invocation — inner expressions resolve first.
-
-```clojure
-; Register RPC cell — schema extracted from WASM custom section.
-(host listen (perform :load "bin/chess-demo.wasm"))
-
-; Run the chess demo in service mode — blocks until exit.
-(executor run (perform :load "bin/chess-demo.wasm"))
-```
-
-`(perform :load "bin/chess-demo.wasm")` loads bytes via the `:load` effect
-handler, resolved relative to `$WW_ROOT` (the merged IPFS image root set
-by the host at kernel spawn time). `(host listen <wasm>)` takes a single
-argument: the cell WASM binary. The host inspects the `schema.capnp`
-custom section to determine the protocol.
 
 ## Prerequisites
 
@@ -77,9 +117,7 @@ make chess
 
 ## Running
 
-Stack the chess layer on top of the kernel. The kernel reads
-`etc/init.d/chess.glia` and handles RPC cell registration, DHT
-announcement, and peer discovery automatically.
+Stack the chess layer on top of the kernel:
 
 ```sh
 # Terminal 1
