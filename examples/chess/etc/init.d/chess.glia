@@ -3,10 +3,13 @@
 ; Each form is a capability invocation using the kernel's evaluator.
 ; Inner expressions are evaluated first (recursive eval).
 
-; Register handler on chess protocol.
-(host listen "chess" (ipfs cat "bin/chess-demo.wasm"))
+; Register RPC handler for the ChessEngine capability.
+; The schema is extracted from the WASM binary's "schema.capnp" custom section.
+; RpcListener spawns a handler process per connection; the handler exports
+; a ChessEngine capability via system::serve().
+(host rpcListen (ipfs cat "bin/chess-demo.wasm"))
 
 ; Run the chess demo in service mode — blocks until exit.
-; The service process handles DHT provide/findProviders in its own loop.
-(executor run (ipfs cat "bin/chess-demo.wasm")
-  :env {"WW_NS" "ww.chess.v1"})
+; The service process discovers peers via DHT and dials them with RpcDialer
+; to get typed ChessEngine capabilities.
+(executor run (ipfs cat "bin/chess-demo.wasm"))
