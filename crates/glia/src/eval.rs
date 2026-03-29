@@ -906,6 +906,7 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
                 Val::Macro { .. } => "macro",
                 Val::Effect { .. } => "effect",
                 Val::NativeFn { .. } => "native-fn",
+                Val::AsyncNativeFn { .. } => "async-native-fn",
                 Val::Cap { .. } => "cap",
                 Val::Resume(_) => "resume",
             };
@@ -1961,6 +1962,25 @@ pub fn eval_expr<'a, D: Dispatch>(
                                                             }
                                                         }
                                                     }
+                                                    Val::AsyncNativeFn { func, .. } => {
+                                                        hs.borrow_mut().pop();
+                                                        let resume_fn =
+                                                            effect::make_resume_fn(resume_tx);
+                                                        let func = func.clone();
+                                                        let handler_fut: Pin<
+                                                            Box<
+                                                                dyn Future<
+                                                                        Output = Result<Val, Val>,
+                                                                    > + '_,
+                                                            >,
+                                                        > = Box::pin(
+                                                            func(vec![data, resume_fn]),
+                                                        );
+                                                        state = CapHandlerState::Handling(
+                                                            handler_fut,
+                                                        );
+                                                        continue;
+                                                    }
                                                     other => {
                                                         drop(resume_tx);
                                                         return Poll::Ready(Err(eval_err!(
@@ -2067,6 +2087,11 @@ pub fn eval_expr<'a, D: Dispatch>(
                     let evaled_args = eval_expr_args(args, env, dispatch).await?;
                     return func(&evaled_args);
                 }
+                if let Some(Val::AsyncNativeFn { func, .. }) = env.get(head) {
+                    let func = func.clone();
+                    let evaled_args = eval_expr_args(args, env, dispatch).await?;
+                    return func(evaled_args).await;
+                }
 
                 // 3. Evaluate args for remaining paths
                 let evaled_args = eval_expr_args(args, env, dispatch).await?;
@@ -2120,6 +2145,9 @@ pub fn eval_expr<'a, D: Dispatch>(
                         if let Some(Val::NativeFn { func, .. }) = env.get(fname) {
                             return func.clone()(&spread);
                         }
+                        if let Some(Val::AsyncNativeFn { func, .. }) = env.get(fname) {
+                            return func.clone()(spread).await;
+                        }
                         if let Some(result) = eval_builtin(fname, &spread) {
                             return result;
                         }
@@ -2134,6 +2162,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                         invoke_fn(&arities, &captured_env, &spread, dispatch).await
                     }
                     Val::NativeFn { func, .. } => func(&spread),
+                    Val::AsyncNativeFn { func, .. } => func(spread).await,
                     other => Err(eval_err!(
                         "apply: first arg must be a symbol or fn, got {other}"
                     )),
@@ -5884,6 +5913,75 @@ mod tests {
         if let Err(err) = &result {
             assert!(err_contains(err, "keyword or cap"));
         }
+    }
+
+    #[test]
+    fn async_native_fn_basic() {
+        // AsyncNativeFn should be callable and its result awaited.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        env.set(
+            "afn".into(),
+            Val::AsyncNativeFn {
+                name: "afn".into(),
+                func: Rc::new(|args: Vec<Val>| {
+                    Box::pin(core::future::ready(Ok(Val::Int(
+                        if let Val::Int(n) = &args[0] {
+                            n + 100
+                        } else {
+                            -1
+                        },
+                    ))))
+                }),
+            },
+        );
+        let result = eval_str("(afn 5)", &mut env, &d);
+        assert_eq!(result, Ok(Val::Int(105)));
+    }
+
+    #[test]
+    fn async_native_fn_error() {
+        // AsyncNativeFn returning Err should propagate as an error.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        env.set(
+            "fail-async".into(),
+            Val::AsyncNativeFn {
+                name: "fail-async".into(),
+                func: Rc::new(|_args: Vec<Val>| {
+                    Box::pin(core::future::ready(Err(Val::from(
+                        "async boom".to_string(),
+                    ))))
+                }),
+            },
+        );
+        let result = eval_str("(fail-async 1)", &mut env, &d);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn async_native_fn_in_cap_handler() {
+        // AsyncNativeFn used as a cap handler should work correctly.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let cap = make_test_cap("svc", 1);
+        env.set("my-cap".into(), cap.clone());
+        env.set(
+            "async-handler".into(),
+            Val::AsyncNativeFn {
+                name: "async-handler".into(),
+                func: Rc::new(|_args: Vec<Val>| {
+                    // Handler returns 999 directly.
+                    Box::pin(core::future::ready(Ok(Val::Int(999))))
+                }),
+            },
+        );
+        let result = eval_str(
+            "(with-cap-handler my-cap async-handler (perform my-cap :ping 1))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(999)));
     }
 
     #[test]
