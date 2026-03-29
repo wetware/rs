@@ -383,7 +383,10 @@ async fn eval_host(args: &[Val], ctx: &RefCell<Session>) -> Result<Val, Val> {
                     log::info!("init.d: registered stream handler /ww/0.1.0/stream/{protocol}");
                     Ok(Val::Nil)
                 }
-                _ => Err("(host listen executor <wasm>) or (host listen executor \"protocol\" <wasm>)".into()),
+                _ => Err(
+                    "(host listen executor <wasm>) or (host listen executor \"protocol\" <wasm>)"
+                        .into(),
+                ),
             }
         }
         _ => Err(Val::from(format!("unknown host method: {method}"))),
