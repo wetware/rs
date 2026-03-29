@@ -67,8 +67,8 @@ Standard WASI P2 interfaces provided by the host. Implemented via
 | `get-stderr` | `() -> output-stream` | Guest's standard error. Connected to host-provided pipe. |
 
 **Stdio behavior**: The host provides explicit async pipes for each stream.
-In byte-stream mode (`Listener`/`Dialer`), stdin/stdout are wired to the
-libp2p stream. In RPC mode (`RpcListener`/`RpcDialer`), stdin/stdout are
+In byte-stream mode (`StreamListener`/`StreamDialer`), stdin/stdout are wired to the
+libp2p stream. In RPC mode (`VatListener`/`VatClient`), stdin/stdout are
 used for direct RPC bootstrapping via `serve_stdio()`. Stderr is always
 available for logging.
 
@@ -173,7 +173,7 @@ Full interface reference for the capabilities available to guests.
 | `addrs` | `() -> (addrs: List(Data))` | Multiaddrs this node listens on. |
 | `peers` | `() -> (peers: List(PeerInfo))` | Currently connected peers. |
 | `executor` | `() -> (executor: Executor)` | Get an epoch-scoped Executor. |
-| `network` | `() -> (listener, dialer, rpcListener, rpcDialer)` | Get network interfaces (byte-stream + RPC modes). |
+| `network` | `() -> (streamListener, streamDialer, vatListener, vatClient)` | Get network interfaces (byte-stream + RPC modes). |
 
 ### Executor
 
@@ -207,29 +207,29 @@ Full interface reference for the capabilities available to guests.
 | `write` | `(data: Data) -> ()` | Write data to stream. |
 | `close` | `() -> ()` | Close stream. Further reads return EOF, writes fail. |
 
-### Listener (byte-stream mode)
+### StreamListener (byte-stream mode)
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `listen` | `(executor: Executor, protocol: Text, handler: Data) -> ()` | Accept streams on `/ww/0.1.0/{protocol}`. Per-stream: spawn handler, wire stdin/stdout. |
+| `listen` | `(executor: Executor, protocol: Text, wasm: Data) -> ()` | Accept streams on `/ww/0.1.0/stream/{protocol}`. Per-stream: spawn handler, wire stdin/stdout. |
 
-### Dialer (byte-stream mode)
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `dial` | `(peer: Data, protocol: Text) -> (stream: ByteStream)` | Open stream to peer on `/ww/0.1.0/{protocol}`. Returns bidirectional ByteStream. |
-
-### RpcListener (capability mode)
+### StreamDialer (byte-stream mode)
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `listen` | `(executor: Executor, handler: Data) -> ()` | Accept streams on `/ww/0.1.0/{cid}`. Schema extracted from handler WASM's `schema.capnp` custom section. Per-stream: spawn handler, bridge bootstrap cap to peer. |
+| `dial` | `(peer: Data, protocol: Text) -> (stream: ByteStream)` | Open stream to peer on `/ww/0.1.0/stream/{protocol}`. Returns bidirectional ByteStream. |
 
-### RpcDialer (capability mode)
+### VatListener (capability mode)
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `dial` | `(peer: Data, schema: Data) -> (cap: AnyPointer)` | Open stream to peer on `/ww/0.1.0/{cid}`. Bootstrap RPC, return remote's capability. Type-erased. |
+| `listen` | `(executor: Executor, wasm: Data) -> ()` | Accept connections on `/ww/0.1.0/rpc/{cid}`. Schema extracted from WASM binary's `schema.capnp` custom section. Per-connection: spawn handler, bridge bootstrap cap to peer. |
+
+### VatClient (capability mode)
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `dial` | `(peer: Data, schema: Data) -> (cap: AnyPointer)` | Open connection to peer on `/ww/0.1.0/rpc/{cid}`. Bootstrap RPC, return remote's capability. Type-erased. |
 
 ## WASM Custom Sections
 
