@@ -8,7 +8,7 @@ members = [
     "crates/schema-id",
     "crates/guest/auth",
     "std/system",
-    # "crates/kernel",  # TODO: re-enable when kernel crate is created
+    "crates/kernel",
     "std/shell",
     "examples/chess",
 ]

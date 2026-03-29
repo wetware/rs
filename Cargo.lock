@@ -1388,6 +1388,7 @@ dependencies = [
  "hex",
  "log",
  "rand 0.9.2",
+ "schema-id",
  "serde_json",
  "shakmaty",
  "system",
@@ -3406,6 +3407,23 @@ checksum = "b646a74e746cd25045aa0fd42f4f7f78aa6d119380182c7e63a5593c4ab8df6f"
 dependencies = [
  "digest 0.10.7",
  "sha3-asm",
+]
+
+[[package]]
+name = "kernel"
+version = "0.1.0"
+dependencies = [
+ "bs58",
+ "capnp",
+ "capnp-rpc",
+ "capnpc",
+ "glia",
+ "hex",
+ "log",
+ "multiaddr 0.18.2",
+ "system",
+ "tokio",
+ "wasip2",
 ]
 
 [[package]]
