@@ -141,8 +141,17 @@ Capabilities after grafting:
 Quick start:
 ```
 rustup target add wasm32-wasip2
-make
-cargo run -- run crates/kernel    # drops into Glia shell
+make                             # builds everything (host + kernel + shell + chess)
+cargo run -- run crates/kernel   # drops into Glia shell
+```
+
+Rebuilding after changes:
+```
+make kernel    # rebuild kernel WASM (crates/kernel → crates/kernel/bin/main.wasm)
+make chess     # rebuild chess example (examples/chess → examples/chess/bin/chess-demo.wasm)
+make shell     # rebuild shell WASM (std/shell → std/shell/boot/main.wasm)
+make host      # rebuild host binary only (cargo build --release)
+make           # rebuild everything
 ```
 
 Once in the shell:
