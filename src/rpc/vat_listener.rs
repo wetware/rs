@@ -1,12 +1,12 @@
-//! RpcListener capability: guest-exported subprotocols via Cap'n Proto RPC.
+//! VatListener capability: guest-exported subprotocols via Cap'n Proto RPC.
 //!
-//! The `RpcListener` capability lets a guest register a libp2p subprotocol handler
-//! that exports a typed capability. For each incoming stream, the host spawns a
+//! The `VatListener` capability lets a guest register a libp2p subprotocol handler
+//! that exports a typed capability. For each incoming connection, the host spawns a
 //! handler process (via the guest-provided `Executor`), captures the handler's
 //! `system::serve()` exported bootstrap capability, and serves it to the
 //! connecting peer via Cap'n Proto RPC bootstrapping.
 //!
-//! This is the capability-mode counterpart of `Listener` (byte-stream mode).
+//! This is the capability-mode counterpart of `StreamListener` (byte-stream mode).
 
 use std::sync::Arc;
 
@@ -21,12 +21,12 @@ use membrane::EpochGuard;
 
 use crate::system_capnp;
 
-pub struct RpcListenerImpl {
+pub struct VatListenerImpl {
     stream_control: libp2p_stream::Control,
     guard: EpochGuard,
 }
 
-impl RpcListenerImpl {
+impl VatListenerImpl {
     pub fn new(stream_control: libp2p_stream::Control, guard: EpochGuard) -> Self {
         Self {
             stream_control,
@@ -36,24 +36,34 @@ impl RpcListenerImpl {
 }
 
 #[allow(refining_impl_trait)]
-impl system_capnp::rpc_listener::Server for RpcListenerImpl {
+impl system_capnp::vat_listener::Server for VatListenerImpl {
     fn listen(
         self: capnp::capability::Rc<Self>,
-        params: system_capnp::rpc_listener::ListenParams,
-        _results: system_capnp::rpc_listener::ListenResults,
+        params: system_capnp::vat_listener::ListenParams,
+        _results: system_capnp::vat_listener::ListenResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
 
         let params = pry!(params.get());
         let executor: system_capnp::executor::Client = pry!(params.get_executor());
-        let schema_bytes = pry!(params.get_schema());
-        let handler: Arc<[u8]> = pry!(params.get_handler()).into();
+        let wasm: Arc<[u8]> = pry!(params.get_wasm()).into();
 
-        if schema_bytes.is_empty() {
-            return Promise::err(capnp::Error::failed("schema must not be empty".into()));
-        }
+        // Extract schema from the WASM binary's "schema.capnp" custom section.
+        let schema_bytes = match pry!(super::extract_wasm_custom_section(&wasm, "schema.capnp")) {
+            Some(bytes) if !bytes.is_empty() => bytes.to_vec(),
+            Some(_) => {
+                return Promise::err(capnp::Error::failed(
+                    "schema.capnp custom section is empty".into(),
+                ));
+            }
+            None => {
+                return Promise::err(capnp::Error::failed(
+                    "WASM binary does not contain a 'schema.capnp' custom section".into(),
+                ));
+            }
+        };
 
-        let protocol_cid = super::schema_cid(schema_bytes);
+        let protocol_cid = super::schema_cid(&schema_bytes);
         let stream_protocol = pry!(super::schema_protocol(&protocol_cid));
 
         let mut control = self.stream_control.clone();
@@ -61,10 +71,10 @@ impl system_capnp::rpc_listener::Server for RpcListenerImpl {
             pry!(control
                 .accept(stream_protocol.clone())
                 .map_err(|e| capnp::Error::failed(format!(
-                    "failed to register RPC protocol handler: {e}"
+                    "failed to register vat protocol handler: {e}"
                 ))));
 
-        tracing::info!(protocol = %stream_protocol, "Registered RPC subprotocol handler");
+        tracing::info!(protocol = %stream_protocol, "Registered vat subprotocol handler");
 
         // Accept loop: for each incoming connection, spawn a handler and bridge RPC.
         tokio::task::spawn_local(async move {
@@ -72,23 +82,23 @@ impl system_capnp::rpc_listener::Server for RpcListenerImpl {
                 tracing::debug!(
                     peer = %peer_id,
                     protocol = %stream_protocol,
-                    "Incoming RPC subprotocol connection"
+                    "Incoming vat connection"
                 );
                 let executor = executor.clone();
-                let handler = Arc::clone(&handler);
+                let wasm = Arc::clone(&wasm);
                 let protocol_cid = protocol_cid.clone();
                 tokio::task::spawn_local(async move {
                     if let Err(e) =
-                        handle_rpc_connection(executor, &handler, stream, &protocol_cid).await
+                        handle_vat_connection(executor, &wasm, stream, &protocol_cid).await
                     {
                         tracing::error!(
                             protocol = protocol_cid,
-                            "RPC handler connection error: {e}"
+                            "Vat handler connection error: {e}"
                         );
                     }
                 });
             }
-            tracing::warn!(protocol = %stream_protocol, "RPC subprotocol accept loop ended unexpectedly");
+            tracing::warn!(protocol = %stream_protocol, "Vat accept loop ended unexpectedly");
         });
 
         Promise::ok(())
@@ -107,7 +117,7 @@ impl system_capnp::rpc_listener::Server for RpcListenerImpl {
 ///                  bootstrap =                         bootstrap = Membrane
 ///                  handler_cap ←── captures ←───────── handler exports via serve()
 /// ```
-async fn handle_rpc_connection(
+async fn handle_vat_connection(
     executor: system_capnp::executor::Client,
     handler_wasm: &[u8],
     stream: libp2p::Stream,
@@ -155,7 +165,7 @@ async fn handle_rpc_connection(
             // The handler will see its host RPC connection close.
         }
         exit_code = wait_fut => {
-            tracing::debug!(exit_code, protocol = protocol_cid, "RPC handler process exited");
+            tracing::debug!(exit_code, protocol = protocol_cid, "Vat handler process exited");
             // Handler exited. The peer RPC will get disconnected errors
             // on subsequent calls since the bootstrap cap is dead.
         }

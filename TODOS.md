@@ -42,10 +42,42 @@
 **Context:** IPNS records have a TTL field. `/p2p/` paths resolve via DHT with its own caching semantics. Needs design work around invalidation strategy.
 **Depends on:** `crates/cache` (weighted ARC)
 
-## RPC handshake timeout for RpcDialer.dial()
-**What:** Add an RPC-level timeout to `RpcDialerImpl::dial()` so it doesn't silently hang when the remote peer accepts the libp2p stream but never speaks Cap'n Proto.
+## Import caching (idempotent require)
+**What:** Make `(import "foo")` idempotent. Second call returns cached bindings instead of re-evaluating the file. Like Clojure's `require`.
+**Why:** Without caching, every `(import "utils")` re-reads `/lib/utils.glia`, re-evals it in a fresh Env, and re-binds all prefixed names. Wasteful if called from multiple modules. Also a correctness question: if `utils.glia` has side effects, re-import runs them again.
+**Context:** Cache key options: module name (simple), or CID of the underlying file (content-addressed, survives layer changes). Start with module name. For .glia: cache the resulting bindings map. For .wasm: cache the capability reference (if the process is still alive). Need to decide what happens if the underlying file changes between imports (hot reload?). v1 re-evals every time.
+**Effort:** S
+**Priority:** P2
+**Depends on:** import system (#166)
+
+## RPC handshake timeout for VatClient.dial()
+**What:** Add an RPC-level timeout to `VatClientImpl::dial()` so it doesn't silently hang when the remote peer accepts the libp2p stream but never speaks Cap'n Proto.
 **Why:** The 30s `DIAL_TIMEOUT` only covers stream establishment. If the remote accepts the stream but doesn't run an RPC server, `rpc_system.bootstrap()` returns a proxy immediately, but method calls on that proxy hang until the TCP-level timeout (minutes). Guests see a silent hang.
 **Context:** The fix is to wrap the first RPC operation (or the bootstrap itself) in a timeout. E.g., send a lightweight probe after bootstrap and fail if no response within 30s. Or use `tokio::time::timeout` around the bootstrap cap retrieval.
 **Effort:** S
 **Priority:** P1
-**Depends on:** PR #270 (RpcListener/RpcDialer)
+
+## Epoch-watching in accept loops (VatListener + StreamListener)
+**What:** The accept loops in `VatListenerImpl::listen()` and `StreamListenerImpl::listen()` check the epoch guard once at entry but never recheck. A guest whose epoch goes stale continues accepting connections and spawning handlers indefinitely.
+**Why:** This is a trust boundary violation. The membrane's epoch-based revocation is supposed to invalidate capabilities, but the long-lived accept loop keeps serving after revocation.
+**Context:** Fix by adding a `tokio::select!` inside the accept loop that watches the epoch guard's `receiver` for changes and breaks when stale. Same pattern needed in both `src/rpc/vat_listener.rs` and `src/rpc/stream_listener.rs` (search for the `while let Some` accept loops). The dialer has a shorter TOCTOU window but should also recheck epoch after stream establishment.
+**Effort:** S
+**Priority:** P1
+
+## ~~Protocol namespace collision between StreamListener and VatListener~~
+**RESOLVED:** Stream and vat protocols now use distinct prefixes:
+`/ww/0.1.0/stream/{name}` vs `/ww/0.1.0/rpc/{cid}`.
+
+## Connection rate limiting for VatListener
+**What:** Every incoming connection in `VatListenerImpl` spawns a new WASI handler process with no concurrency limit. A malicious peer (or many peers) can flood connections, causing unbounded process spawning.
+**Why:** Each handler holds WASM memory, an RPC system, and a libp2p stream. Unbounded spawning is a resource exhaustion vector.
+**Context:** Add a semaphore or max-connections limit to the accept loop. Consider making the limit configurable via the `listen()` params or a sensible default (e.g., 64 concurrent handlers per protocol).
+**Effort:** S
+**Priority:** P2
+
+## Bootstrap timeout in handle_vat_connection
+**What:** `handle_vat_connection()` awaits `process.bootstrap_request()` without a timeout. If the handler WASM fails to call `system::serve()`, the host blocks indefinitely. The peer on the libp2p stream is also stuck waiting for the RPC bootstrap.
+**Why:** Silent deadlock. Both sides hang until TCP timeout (minutes). No error, no log.
+**Context:** Wrap `bootstrap_request().send().promise` in `tokio::time::timeout(Duration::from_secs(10), ...)`. Same pattern as the RPC handshake timeout TODO above.
+**Effort:** S
+**Priority:** P1

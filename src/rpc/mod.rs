@@ -4,12 +4,12 @@
 //! streams (no TCP listener). See [`build_peer_rpc`] for the entry point.
 #![cfg(not(target_arch = "wasm32"))]
 
-pub mod dialer;
-pub mod listener;
 pub mod membrane;
 pub mod routing;
-pub mod rpc_dialer;
-pub mod rpc_listener;
+pub mod stream_dialer;
+pub mod stream_listener;
+pub mod vat_client;
+pub mod vat_listener;
 
 use std::sync::Arc;
 
@@ -47,8 +47,30 @@ pub(crate) fn schema_cid(schema_bytes: &[u8]) -> String {
 
 /// Build a `StreamProtocol` from a schema CID string.
 pub(crate) fn schema_protocol(cid: &str) -> Result<StreamProtocol, capnp::Error> {
-    StreamProtocol::try_from_owned(format!("/ww/0.1.0/{cid}"))
+    StreamProtocol::try_from_owned(format!("/ww/0.1.0/rpc/{cid}"))
         .map_err(|e| capnp::Error::failed(format!("invalid protocol from schema CID: {e}")))
+}
+
+/// Extract a custom section from a WASM binary (component or module).
+///
+/// Returns the section data if found, or `None` if the section doesn't exist.
+pub(crate) fn extract_wasm_custom_section<'a>(
+    wasm_bytes: &'a [u8],
+    section_name: &str,
+) -> Result<Option<&'a [u8]>, capnp::Error> {
+    use wasmparser::{Parser, Payload};
+
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        let payload = payload
+            .map_err(|e| capnp::Error::failed(format!("failed to parse WASM binary: {e}")))?;
+        match payload {
+            Payload::CustomSection(reader) if reader.name() == section_name => {
+                return Ok(Some(reader.data()));
+            }
+            _ => {}
+        }
+    }
+    Ok(None)
 }
 
 /// Maximum bytes a single ByteStream read may allocate.
@@ -469,22 +491,21 @@ impl system_capnp::host::Server for HostImpl {
                 ))
             }
         };
-        let listener: system_capnp::listener::Client = capnp_rpc::new_client(
-            listener::ListenerImpl::new(stream_control.clone(), guard.clone()),
+        let stream_listener: system_capnp::stream_listener::Client = capnp_rpc::new_client(
+            stream_listener::StreamListenerImpl::new(stream_control.clone(), guard.clone()),
         );
-        let dialer: system_capnp::dialer::Client = capnp_rpc::new_client(dialer::DialerImpl::new(
-            stream_control.clone(),
-            guard.clone(),
-        ));
-        let rpc_listener: system_capnp::rpc_listener::Client = capnp_rpc::new_client(
-            rpc_listener::RpcListenerImpl::new(stream_control.clone(), guard.clone()),
+        let stream_dialer: system_capnp::stream_dialer::Client = capnp_rpc::new_client(
+            stream_dialer::StreamDialerImpl::new(stream_control.clone(), guard.clone()),
         );
-        let rpc_dialer: system_capnp::rpc_dialer::Client =
-            capnp_rpc::new_client(rpc_dialer::RpcDialerImpl::new(stream_control, guard));
-        results.get().set_listener(listener);
-        results.get().set_dialer(dialer);
-        results.get().set_rpc_listener(rpc_listener);
-        results.get().set_rpc_dialer(rpc_dialer);
+        let vat_listener: system_capnp::vat_listener::Client = capnp_rpc::new_client(
+            vat_listener::VatListenerImpl::new(stream_control.clone(), guard.clone()),
+        );
+        let vat_client: system_capnp::vat_client::Client =
+            capnp_rpc::new_client(vat_client::VatClientImpl::new(stream_control, guard));
+        results.get().set_stream_listener(stream_listener);
+        results.get().set_stream_dialer(stream_dialer);
+        results.get().set_vat_listener(vat_listener);
+        results.get().set_vat_client(vat_client);
         Promise::ok(())
     }
 }
@@ -1423,8 +1444,7 @@ mod tests {
                 // Call bootstrap() immediately — the cap hasn't resolved yet.
                 let resp = process.bootstrap_request().send().promise.await.unwrap();
                 let cap = resp.get().unwrap().get_cap();
-                let executor: system_capnp::executor::Client =
-                    cap.get_as_capability().unwrap();
+                let executor: system_capnp::executor::Client = cap.get_as_capability().unwrap();
 
                 // Use the cap — should block until the delayed future resolves.
                 let mut echo_req = executor.echo_request();
@@ -1515,7 +1535,7 @@ mod tests {
     // RPC bridge integration tests
     // =========================================================================
     //
-    // These test the full capability bridge pattern used by RpcListener/RpcDialer
+    // These test the full capability bridge pattern used by VatListener/VatClient
     // without requiring libp2p or WASM. We simulate the bridge with duplex streams:
     //
     //   Handler (Executor echo)
@@ -1755,7 +1775,7 @@ mod tests {
     }
 
     // =========================================================================
-    // RpcListener / RpcDialer validation tests
+    // VatListener / VatClient validation tests
     // =========================================================================
 
     /// Helper: create an EpochGuard and its sender for test manipulation.
@@ -1779,41 +1799,93 @@ mod tests {
         libp2p_stream::Behaviour::new().new_control()
     }
 
+    /// Build a minimal WASM component with an optional custom section.
+    /// Returns bytes that wasmparser can parse (valid WASM component header).
+    fn wasm_with_custom_section(section_name: &str, data: &[u8]) -> Vec<u8> {
+        use wasm_encoder::ComponentSection;
+        // Minimal WASM component: magic + version + layer
+        let mut bytes = vec![
+            0x00, 0x61, 0x73, 0x6d, // \0asm
+            0x0d, 0x00, 0x01, 0x00, // component version (13.0)
+        ];
+        let custom = wasm_encoder::CustomSection {
+            name: std::borrow::Cow::Borrowed(section_name),
+            data: std::borrow::Cow::Borrowed(data),
+        };
+        custom.append_to_component(&mut bytes);
+        bytes
+    }
+
+    /// Build a minimal WASM component with NO custom sections.
+    fn wasm_without_custom_section() -> Vec<u8> {
+        vec![
+            0x00, 0x61, 0x73, 0x6d, // \0asm
+            0x0d, 0x00, 0x01, 0x00, // component version (13.0)
+        ]
+    }
+
     #[tokio::test]
-    async fn test_rpc_listener_empty_schema_errors() {
+    async fn test_vat_listener_missing_schema_section_errors() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let (_tx, guard) = test_epoch_guard(1);
                 let listener_impl =
-                    rpc_listener::RpcListenerImpl::new(dummy_stream_control(), guard);
-                let listener: system_capnp::rpc_listener::Client =
+                    vat_listener::VatListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::vat_listener::Client =
                     capnp_rpc::new_client(listener_impl);
 
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
 
+                // Handler WASM without schema.capnp section
+                let handler = wasm_without_custom_section();
+
                 let mut req = listener.listen_request();
                 req.get().set_executor(executor);
-                req.get().set_schema(&[]); // empty schema
-                req.get().set_handler(&[0xDE, 0xAD]);
+                req.get().set_wasm(&handler);
 
                 let result = req.send().promise.await;
-                assert!(result.is_err(), "empty schema should error");
+                assert!(result.is_err(), "missing schema section should error");
             })
             .await;
     }
 
     #[tokio::test]
-    async fn test_rpc_dialer_empty_schema_errors() {
+    async fn test_vat_listener_empty_schema_section_errors() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let (_tx, guard) = test_epoch_guard(1);
-                let dialer_impl =
-                    rpc_dialer::RpcDialerImpl::new(dummy_stream_control(), guard);
-                let dialer: system_capnp::rpc_dialer::Client =
-                    capnp_rpc::new_client(dialer_impl);
+                let listener_impl =
+                    vat_listener::VatListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::vat_listener::Client =
+                    capnp_rpc::new_client(listener_impl);
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                // Handler WASM with empty schema.capnp section
+                let handler = wasm_with_custom_section("schema.capnp", &[]);
+
+                let mut req = listener.listen_request();
+                req.get().set_executor(executor);
+                req.get().set_wasm(&handler);
+
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "empty schema section should error");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_vat_client_empty_schema_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let dialer_impl = vat_client::VatClientImpl::new(dummy_stream_control(), guard);
+                let dialer: system_capnp::vat_client::Client = capnp_rpc::new_client(dialer_impl);
 
                 let mut req = dialer.dial_request();
                 // Valid peer ID (Ed25519 public key)
@@ -1829,15 +1901,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rpc_dialer_invalid_peer_id_errors() {
+    async fn test_vat_client_invalid_peer_id_errors() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let (_tx, guard) = test_epoch_guard(1);
-                let dialer_impl =
-                    rpc_dialer::RpcDialerImpl::new(dummy_stream_control(), guard);
-                let dialer: system_capnp::rpc_dialer::Client =
-                    capnp_rpc::new_client(dialer_impl);
+                let dialer_impl = vat_client::VatClientImpl::new(dummy_stream_control(), guard);
+                let dialer: system_capnp::vat_client::Client = capnp_rpc::new_client(dialer_impl);
 
                 let mut req = dialer.dial_request();
                 req.get().set_peer(&[0xFF, 0xFF, 0xFF]); // garbage peer ID
@@ -1850,14 +1920,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rpc_listener_stale_epoch_errors() {
+    async fn test_vat_listener_stale_epoch_errors() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let (tx, guard) = test_epoch_guard(1);
                 let listener_impl =
-                    rpc_listener::RpcListenerImpl::new(dummy_stream_control(), guard);
-                let listener: system_capnp::rpc_listener::Client =
+                    vat_listener::VatListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::vat_listener::Client =
                     capnp_rpc::new_client(listener_impl);
 
                 // Advance epoch to make guard stale.
@@ -1871,10 +1941,10 @@ mod tests {
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
 
+                let handler = wasm_with_custom_section("schema.capnp", b"some schema");
                 let mut req = listener.listen_request();
                 req.get().set_executor(executor);
-                req.get().set_schema(b"some schema");
-                req.get().set_handler(&[0xDE, 0xAD]);
+                req.get().set_wasm(&handler);
 
                 let result = req.send().promise.await;
                 assert!(result.is_err(), "stale epoch should error");
@@ -1883,15 +1953,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rpc_dialer_stale_epoch_errors() {
+    async fn test_vat_client_stale_epoch_errors() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let (tx, guard) = test_epoch_guard(1);
-                let dialer_impl =
-                    rpc_dialer::RpcDialerImpl::new(dummy_stream_control(), guard);
-                let dialer: system_capnp::rpc_dialer::Client =
-                    capnp_rpc::new_client(dialer_impl);
+                let dialer_impl = vat_client::VatClientImpl::new(dummy_stream_control(), guard);
+                let dialer: system_capnp::vat_client::Client = capnp_rpc::new_client(dialer_impl);
 
                 // Advance epoch to make guard stale.
                 tx.send(::membrane::Epoch {
@@ -1915,7 +1983,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rpc_listener_protocol_collision_errors() {
+    async fn test_vat_listener_protocol_collision_errors() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -1925,35 +1993,37 @@ mod tests {
                 let control1 = behaviour.new_control();
                 let control2 = behaviour.new_control();
 
-                let listener1 =
-                    rpc_listener::RpcListenerImpl::new(control1, guard.clone());
-                let client1: system_capnp::rpc_listener::Client =
-                    capnp_rpc::new_client(listener1);
+                let listener1 = vat_listener::VatListenerImpl::new(control1, guard.clone());
+                let client1: system_capnp::vat_listener::Client = capnp_rpc::new_client(listener1);
 
-                let listener2 =
-                    rpc_listener::RpcListenerImpl::new(control2, guard);
-                let client2: system_capnp::rpc_listener::Client =
-                    capnp_rpc::new_client(listener2);
+                let listener2 = vat_listener::VatListenerImpl::new(control2, guard);
+                let client2: system_capnp::vat_listener::Client = capnp_rpc::new_client(listener2);
 
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
 
                 let schema = b"same schema bytes";
+                // Both handlers have the same schema section → same protocol CID.
+                let handler = wasm_with_custom_section("schema.capnp", schema);
 
                 // First registration should succeed.
                 let mut req1 = client1.listen_request();
                 req1.get().set_executor(executor.clone());
-                req1.get().set_schema(schema);
-                req1.get().set_handler(&[0xDE, 0xAD]);
-                req1.send().promise.await.expect("first listen should succeed");
+                req1.get().set_wasm(&handler);
+                req1.send()
+                    .promise
+                    .await
+                    .expect("first listen should succeed");
 
                 // Second registration with same schema should fail (same protocol CID).
                 let mut req2 = client2.listen_request();
                 req2.get().set_executor(executor);
-                req2.get().set_schema(schema);
-                req2.get().set_handler(&[0xBE, 0xEF]);
+                req2.get().set_wasm(&handler);
                 let result = req2.send().promise.await;
-                assert!(result.is_err(), "duplicate protocol registration should error");
+                assert!(
+                    result.is_err(),
+                    "duplicate protocol registration should error"
+                );
             })
             .await;
     }
@@ -1962,21 +2032,141 @@ mod tests {
     fn test_schema_cid_matches_schema_id_compute_cid() {
         // Verify the runtime schema_cid() in mod.rs produces the same CID
         // as the build-time compute_cid() in the schema-id crate.
-        let test_inputs: &[&[u8]] = &[
-            b"test schema bytes",
-            b"\x00\x01\x02\x03",
-            b"",
-            &[0xff; 256],
-        ];
+        let test_inputs: &[&[u8]] = &[b"test schema bytes", b"\x00\x01\x02\x03", b"", &[0xff; 256]];
         for input in test_inputs {
             let runtime_cid = super::schema_cid(input);
             let buildtime_cid = schema_id::compute_cid(input);
             assert_eq!(
-                runtime_cid, buildtime_cid,
+                runtime_cid,
+                buildtime_cid,
                 "CID mismatch for input of length {}",
                 input.len()
             );
         }
+    }
+
+    #[test]
+    fn test_extract_wasm_custom_section_found() {
+        let data = b"canonical schema bytes";
+        let wasm = wasm_with_custom_section("schema.capnp", data);
+        let result = super::extract_wasm_custom_section(&wasm, "schema.capnp").unwrap();
+        assert_eq!(result, Some(data.as_slice()));
+    }
+
+    #[test]
+    fn test_extract_wasm_custom_section_not_found() {
+        let wasm = wasm_without_custom_section();
+        let result = super::extract_wasm_custom_section(&wasm, "schema.capnp").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_wasm_custom_section_wrong_name() {
+        let wasm = wasm_with_custom_section("other.section", b"data");
+        let result = super::extract_wasm_custom_section(&wasm, "schema.capnp").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_wasm_custom_section_invalid_wasm() {
+        let result = super::extract_wasm_custom_section(b"not wasm", "schema.capnp");
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Integration: inject → extract → CID round-trip
+    // =========================================================================
+
+    /// The critical integration test: schema bytes injected at build time
+    /// via `schema_id::inject_custom_section` must be recoverable at runtime
+    /// via `extract_wasm_custom_section`, and the CID derived from the
+    /// extracted bytes must match the build-time CID.
+    ///
+    /// If this test fails, peers built from the same schema will compute
+    /// different protocol CIDs and silently fail to discover each other.
+    #[test]
+    fn test_inject_extract_cid_round_trip() {
+        let schema_bytes = b"canonical ChessEngine schema.Node bytes";
+
+        // Build time: inject into a minimal WASM component.
+        let base_wasm = wasm_without_custom_section();
+        let injected = schema_id::inject_custom_section(&base_wasm, "schema.capnp", schema_bytes);
+
+        // Runtime: extract the section back out.
+        let extracted = super::extract_wasm_custom_section(&injected, "schema.capnp")
+            .expect("extraction should succeed")
+            .expect("section should be present");
+
+        // Bytes must be identical.
+        assert_eq!(
+            extracted, schema_bytes,
+            "extracted bytes don't match injected bytes"
+        );
+
+        // CID derived at runtime must match build-time CID.
+        let runtime_cid = super::schema_cid(extracted);
+        let buildtime_cid = schema_id::compute_cid(schema_bytes);
+        assert_eq!(
+            runtime_cid, buildtime_cid,
+            "CID mismatch between inject and extract paths"
+        );
+    }
+
+    /// Verify that injecting a section preserves existing custom sections.
+    /// The original section must survive alongside the newly injected one.
+    #[test]
+    fn test_inject_preserves_wasm_validity() {
+        let base_wasm = wasm_with_custom_section("other.section", b"existing data");
+        let injected = schema_id::inject_custom_section(&base_wasm, "schema.capnp", b"schema");
+
+        // Both sections should be extractable.
+        let other = super::extract_wasm_custom_section(&injected, "other.section")
+            .expect("parse should succeed")
+            .expect("other.section should survive injection");
+        assert_eq!(other, b"existing data");
+
+        let schema = super::extract_wasm_custom_section(&injected, "schema.capnp")
+            .expect("parse should succeed")
+            .expect("schema.capnp should be present");
+        assert_eq!(schema, b"schema");
+    }
+
+    /// End-to-end: build a WASM with an embedded schema section, hand it to
+    /// a VatListener, and verify it successfully registers a protocol.
+    /// This tests the full path from injection through to protocol registration.
+    #[tokio::test]
+    async fn test_vat_listener_accepts_wasm_with_schema_section() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let listener_impl =
+                    vat_listener::VatListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::vat_listener::Client =
+                    capnp_rpc::new_client(listener_impl);
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                // Build a WASM with a valid schema section via the inject path.
+                let handler = schema_id::inject_custom_section(
+                    &wasm_without_custom_section(),
+                    "schema.capnp",
+                    b"valid schema bytes for ChessEngine",
+                );
+
+                let mut req = listener.listen_request();
+                req.get().set_executor(executor);
+                req.get().set_wasm(&handler);
+
+                let result = req.send().promise.await;
+                assert!(
+                    result.is_ok(),
+                    "WASM with valid schema section should be accepted: {:?}",
+                    result.err()
+                );
+            })
+            .await;
     }
 
     #[tokio::test]

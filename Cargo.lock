@@ -5379,6 +5379,8 @@ dependencies = [
  "capnp",
  "capnpc",
  "cid",
+ "wasm-encoder 0.243.0",
+ "wasmparser 0.243.0",
 ]
 
 [[package]]
@@ -7739,6 +7741,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
+ "wasm-encoder 0.243.0",
+ "wasmparser 0.243.0",
  "wasmtime",
  "wasmtime-wasi",
  "wasmtime-wasi-io",

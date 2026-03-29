@@ -1,6 +1,6 @@
-//! Listener capability: guest-exported subprotocols via process-per-connection.
+//! StreamListener capability: guest-exported subprotocols via process-per-connection.
 //!
-//! The `Listener` capability lets a guest register a libp2p subprotocol handler.
+//! The `StreamListener` capability lets a guest register a libp2p subprotocol handler.
 //! For each incoming stream on that subprotocol, the host spawns a fresh WASI
 //! process (via the guest-provided `Executor`) with stdin/stdout wired to the
 //! stream — the handler speaks whatever wire protocol it wants over stdio.
@@ -14,12 +14,12 @@ use membrane::EpochGuard;
 
 use crate::system_capnp;
 
-pub struct ListenerImpl {
+pub struct StreamListenerImpl {
     stream_control: libp2p_stream::Control,
     guard: EpochGuard,
 }
 
-impl ListenerImpl {
+impl StreamListenerImpl {
     pub fn new(stream_control: libp2p_stream::Control, guard: EpochGuard) -> Self {
         Self {
             stream_control,
@@ -29,11 +29,11 @@ impl ListenerImpl {
 }
 
 #[allow(refining_impl_trait)]
-impl system_capnp::listener::Server for ListenerImpl {
+impl system_capnp::stream_listener::Server for StreamListenerImpl {
     fn listen(
         self: capnp::capability::Rc<Self>,
-        params: system_capnp::listener::ListenParams,
-        _results: system_capnp::listener::ListenResults,
+        params: system_capnp::stream_listener::ListenParams,
+        _results: system_capnp::stream_listener::ListenResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
 
@@ -42,7 +42,7 @@ impl system_capnp::listener::Server for ListenerImpl {
         let protocol_str = pry!(pry!(params.get_protocol())
             .to_str()
             .map_err(|e| capnp::Error::failed(e.to_string())));
-        let handler = pry!(params.get_handler()).to_vec();
+        let wasm = pry!(params.get_wasm()).to_vec();
 
         if protocol_str.is_empty() {
             return Promise::err(capnp::Error::failed(
@@ -57,7 +57,7 @@ impl system_capnp::listener::Server for ListenerImpl {
 
         let protocol_suffix = protocol_str.to_string();
         let stream_protocol = pry!(StreamProtocol::try_from_owned(format!(
-            "/ww/0.1.0/{protocol_suffix}"
+            "/ww/0.1.0/stream/{protocol_suffix}"
         ))
         .map_err(|e| capnp::Error::failed(format!("invalid protocol: {e}"))));
 
@@ -69,7 +69,7 @@ impl system_capnp::listener::Server for ListenerImpl {
                     "failed to register protocol handler: {e}"
                 ))));
 
-        tracing::info!(protocol = %stream_protocol, "Registered subprotocol handler");
+        tracing::info!(protocol = %stream_protocol, "Registered stream subprotocol handler");
 
         // Accept loop: for each incoming connection, spawn a handler process.
         tokio::task::spawn_local(async move {
@@ -77,18 +77,18 @@ impl system_capnp::listener::Server for ListenerImpl {
                 tracing::debug!(
                     peer = %peer_id,
                     protocol = %stream_protocol,
-                    "Incoming subprotocol connection"
+                    "Incoming stream subprotocol connection"
                 );
                 let executor = executor.clone();
-                let handler = handler.clone();
+                let wasm = wasm.clone();
                 let protocol = protocol_suffix.clone();
                 tokio::task::spawn_local(async move {
-                    if let Err(e) = handle_connection(executor, &handler, stream, &protocol).await {
-                        tracing::error!(protocol, "Handler connection error: {e}");
+                    if let Err(e) = handle_connection(executor, &wasm, stream, &protocol).await {
+                        tracing::error!(protocol, "Stream handler connection error: {e}");
                     }
                 });
             }
-            tracing::warn!(protocol = %stream_protocol, "Subprotocol accept loop ended unexpectedly");
+            tracing::warn!(protocol = %stream_protocol, "Stream subprotocol accept loop ended unexpectedly");
         });
 
         Promise::ok(())
