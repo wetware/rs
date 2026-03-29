@@ -123,7 +123,9 @@ fn is_lan_ip(ip: IpAddr) -> bool {
             // link-local
         }
         IpAddr::V6(v6) => {
-            v6.is_loopback() || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 ULA (private IPv6)
         }
     }
 }
@@ -688,6 +690,17 @@ fn handle_kad_event(
                         .entry(target)
                         .or_default()
                         .extend(info.addrs.iter().cloned());
+                    // Deliver the now-addressable provider to the owning find request.
+                    if let Some(req_id) = owner_req {
+                        if let Some(find_req) = pending_finds.get(&req_id) {
+                            if !info.addrs.is_empty() {
+                                let _ = find_req.sender.send(PeerInfo {
+                                    peer_id: target.to_bytes(),
+                                    addrs: info.addrs.iter().map(|a| a.to_vec()).collect(),
+                                });
+                            }
+                        }
+                    }
                 } else {
                     tracing::debug!(
                         dht = label,
@@ -859,6 +872,12 @@ mod tests {
             let addr: Multiaddr = addr_str.parse().unwrap();
             assert!(is_lan_addr(&addr), "{addr_str} should be LAN");
         }
+    }
+
+    #[test]
+    fn test_is_lan_addr_ipv6_ula() {
+        let addr: Multiaddr = "/ip6/fd12:3456:789a::1/tcp/4001".parse().unwrap();
+        assert!(is_lan_addr(&addr), "IPv6 ULA (fd00::/8) should be LAN");
     }
 
     #[test]
