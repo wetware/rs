@@ -7,10 +7,10 @@
 //! Only content routing (provide/findProviders) lives here.
 //! Data transfer (add/cat) is on the IPFS UnixFS capability.
 
+use blake3;
 use capnp::capability::Promise;
 use capnp_rpc::pry;
 use cid::Cid;
-use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 
 use ::membrane::EpochGuard;
@@ -121,9 +121,11 @@ impl routing_capnp::routing::Server for LocalRouting {
         mut results: routing_capnp::routing::HashResults,
     ) -> Promise<(), capnp::Error> {
         let data = pry!(pry!(params.get()).get_data());
-        let digest = Sha256::digest(data);
-        let mh = pry!(cid::multihash::Multihash::<64>::wrap(0x12, &digest)
-            .map_err(|e| capnp::Error::failed(format!("multihash wrap: {e}"))));
+        let digest = blake3::hash(data);
+        let mh = pry!(
+            cid::multihash::Multihash::<64>::wrap(0x1e, digest.as_bytes())
+                .map_err(|e| capnp::Error::failed(format!("multihash wrap: {e}")))
+        );
         let c = Cid::new_v1(0x55, mh);
         results.get().set_key(c.to_string());
         Promise::ok(())
@@ -221,10 +223,12 @@ impl routing_capnp::routing::Server for RoutingImpl {
         mut results: routing_capnp::routing::HashResults,
     ) -> Promise<(), capnp::Error> {
         let data = pry!(pry!(params.get()).get_data());
-        let digest = Sha256::digest(data);
-        // multihash: varint(0x12) ++ varint(32) ++ sha256(data)
-        let mh = pry!(cid::multihash::Multihash::<64>::wrap(0x12, &digest)
-            .map_err(|e| capnp::Error::failed(format!("multihash wrap: {e}"))));
+        let digest = blake3::hash(data);
+        // multihash: varint(0x1e) ++ varint(32) ++ blake3(data)
+        let mh = pry!(
+            cid::multihash::Multihash::<64>::wrap(0x1e, digest.as_bytes())
+                .map_err(|e| capnp::Error::failed(format!("multihash wrap: {e}")))
+        );
         let c = Cid::new_v1(0x55, mh); // 0x55 = raw codec
         results.get().set_key(c.to_string());
         Promise::ok(())
@@ -304,10 +308,10 @@ mod tests {
     // Key derivation — both nodes must agree on the same Kad key
     // -------------------------------------------------------------------
 
-    /// Build a CID the same way the `hash` RPC method does (CIDv1, raw, sha256).
+    /// Build a CID the same way the `hash` RPC method does (CIDv1, raw, blake3).
     fn hash_to_cid(data: &[u8]) -> String {
-        let digest = Sha256::digest(data);
-        let mh = cid::multihash::Multihash::<64>::wrap(0x12, &digest).unwrap();
+        let digest = blake3::hash(data);
+        let mh = cid::multihash::Multihash::<64>::wrap(0x1e, digest.as_bytes()).unwrap();
         Cid::new_v1(0x55, mh).to_string()
     }
 
@@ -407,7 +411,7 @@ mod tests {
     // RPC round-trip tests — happy path through Cap'n Proto serialization
     // -------------------------------------------------------------------
 
-    /// RPC round-trip for `hash`: data → CIDv1 (raw, sha256).
+    /// RPC round-trip for `hash`: data → CIDv1 (raw, blake3).
     ///
     /// Exercises Cap'n Proto serialization of the Data param and Text result.
     #[tokio::test]
