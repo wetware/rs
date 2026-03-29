@@ -13,7 +13,7 @@ use auth::SigningDomain;
 use capnp::capability::Promise;
 use capnp::Error;
 use capnp_rpc::pry;
-use k256::ecdsa::VerifyingKey;
+use ed25519_dalek::VerifyingKey;
 use libp2p_core::SignedEnvelope;
 
 /// Authentication gate that guards access to a capability via challenge-response.
@@ -103,12 +103,11 @@ where
             }
 
             // Check the signing key matches the expected verifying key.
-            let envelope_secp = pubkey
+            let envelope_ed = pubkey
                 .clone()
-                .try_into_secp256k1()
-                .map_err(|_| Error::failed("login auth failed: not a secp256k1 key".into()))?;
-            let expected_bytes = vk.to_encoded_point(true);
-            if envelope_secp.to_bytes() != expected_bytes.as_bytes() {
+                .try_into_ed25519()
+                .map_err(|_| Error::failed("login auth failed: not an ed25519 key".into()))?;
+            if envelope_ed.to_bytes() != vk.to_bytes() {
                 return Err(Error::failed(
                     "login auth failed: signing key does not match expected identity".into(),
                 ));
@@ -123,12 +122,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k256::ecdsa::SigningKey;
+    use ed25519_dalek::SigningKey;
 
     #[test]
     fn terminal_server_constructs_with_membrane_owned() {
-        let sk = SigningKey::random(&mut rand::thread_rng());
-        let vk = *sk.verifying_key();
+        let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+        let vk = sk.verifying_key();
 
         // Build a null membrane client to use as session.
         let (_tx, rx) = tokio::sync::watch::channel(crate::epoch::Epoch {
@@ -147,8 +146,8 @@ mod tests {
 
     #[test]
     fn terminal_server_verifying_key_is_stored() {
-        let sk = SigningKey::random(&mut rand::thread_rng());
-        let vk = *sk.verifying_key();
+        let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+        let vk = sk.verifying_key();
 
         let (_tx, rx) = tokio::sync::watch::channel(crate::epoch::Epoch {
             seq: 1,

@@ -1,9 +1,11 @@
-//! secp256k1 key management for wetware hosts.
+//! Ed25519 key management for wetware hosts.
 //!
-//! A single secp256k1 keypair serves as the node's unified identity:
-//! - libp2p PeerId (via libp2p's secp256k1 support)
-//! - Ethereum / Monad address for on-chain operations
+//! A single Ed25519 keypair serves as the node's identity:
+//! - libp2p PeerId (via libp2p's ed25519 support)
 //! - Membrane Signer for epoch-scoped session authentication
+//!
+//! Operator identity (secp256k1 for on-chain Stem contract ownership) is a
+//! separate concern managed outside the node runtime.
 //!
 //! Keys are stored as base58btc (Bitcoin alphabet, ~44 chars for 32 bytes)
 //! on the local filesystem, aligning with the libp2p ecosystem.
@@ -11,19 +13,17 @@
 
 use anyhow::{bail, Context, Result};
 use base58::{FromBase58, ToBase58};
-use k256::ecdsa::SigningKey;
+use ed25519_dalek::SigningKey;
 use libp2p::identity::Keypair;
-use sha3::{Digest, Keccak256};
 
-/// Generate a new random secp256k1 signing key using the OS CSPRNG.
+/// Generate a new random Ed25519 signing key using the OS CSPRNG.
 pub fn generate() -> Result<SigningKey> {
     use rand::TryRngCore;
     let mut secret_bytes = [0u8; 32];
     rand::rngs::OsRng
         .try_fill_bytes(&mut secret_bytes)
         .context("OS CSPRNG failed")?;
-    SigningKey::from_bytes((&secret_bytes).into())
-        .context("secp256k1 key generation failed (CSPRNG produced invalid scalar)")
+    Ok(SigningKey::from_bytes(&secret_bytes))
 }
 
 /// Encode a signing key as a base58btc string.
@@ -31,28 +31,13 @@ pub fn encode(sk: &SigningKey) -> String {
     sk.to_bytes().to_base58()
 }
 
-/// Convert a k256 [`SigningKey`] into a libp2p [`Keypair`] (secp256k1).
+/// Convert an Ed25519 [`SigningKey`] into a libp2p [`Keypair`].
 ///
 /// The resulting keypair can be used directly with [`SwarmBuilder::with_existing_identity`].
 pub fn to_libp2p(sk: &SigningKey) -> Result<Keypair> {
-    let secret = libp2p::identity::secp256k1::SecretKey::try_from_bytes(sk.to_bytes().to_vec())
-        .context("failed to convert secp256k1 key to libp2p identity")?;
-    let kp = libp2p::identity::secp256k1::Keypair::from(secret);
+    let kp = libp2p::identity::ed25519::Keypair::try_from_bytes(&mut sk.to_keypair_bytes())
+        .context("failed to convert Ed25519 key to libp2p identity")?;
     Ok(Keypair::from(kp))
-}
-
-/// Derive the Ethereum address from a secp256k1 signing key.
-///
-/// Returns the last 20 bytes of `Keccak256(uncompressed_pubkey[1..])`,
-/// which is the standard EVM / Monad address derivation.
-pub fn ethereum_address(sk: &SigningKey) -> [u8; 20] {
-    let vk = sk.verifying_key();
-    let uncompressed = vk.to_encoded_point(false); // 65 bytes: 0x04 || x || y
-    let pubkey_bytes = &uncompressed.as_bytes()[1..]; // drop the 0x04 prefix
-    let hash = Keccak256::digest(pubkey_bytes);
-    let mut addr = [0u8; 20];
-    addr.copy_from_slice(&hash[12..]);
-    addr
 }
 
 /// Decode a base58btc string into a 32-byte signing key.
@@ -65,17 +50,19 @@ fn decode(s: &str) -> Result<SigningKey> {
         bail!("expected 32-byte key, got {} bytes", bytes.len());
     }
 
-    SigningKey::from_bytes(bytes.as_slice().into()).context("invalid secp256k1 secret key bytes")
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(SigningKey::from_bytes(&arr))
 }
 
-/// Load a secp256k1 private key from a local filesystem path (base58btc).
+/// Load an Ed25519 private key from a local filesystem path (base58btc).
 pub fn load(path: &str) -> Result<SigningKey> {
     let contents =
         std::fs::read_to_string(path).with_context(|| format!("read key file: {path}"))?;
     decode(contents.trim()).with_context(|| format!("invalid key in {path}"))
 }
 
-/// Write a base58btc-encoded secp256k1 private key to disk.
+/// Write a base58btc-encoded Ed25519 private key to disk.
 ///
 /// Parent directories are created as needed.
 pub fn save(sk: &SigningKey, path: &std::path::Path) -> Result<()> {

@@ -11,7 +11,7 @@ use atom::{AtomIndexer, Epoch, IndexerConfig, MembraneServer, TerminalServer};
 use auth::SigningDomain;
 use capnp_rpc::new_client;
 use common::{deploy_atom, set_head, spawn_anvil, FullStubSessionBuilder, StubSessionBuilder};
-use k256::ecdsa::SigningKey;
+use ed25519_dalek::SigningKey;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,13 +25,11 @@ struct TestSigner {
 }
 
 impl TestSigner {
-    fn from_k256(sk: &SigningKey) -> Self {
-        let mut sk_bytes = sk.to_bytes().to_vec();
-        let secp_secret = libp2p_identity::secp256k1::SecretKey::try_from_bytes(&mut sk_bytes)
+    fn from_ed25519(sk: &SigningKey) -> Self {
+        let ed_kp = libp2p_identity::ed25519::Keypair::try_from_bytes(&mut sk.to_keypair_bytes())
             .expect("valid key");
-        let secp_kp: libp2p_identity::secp256k1::Keypair = secp_secret.into();
         Self {
-            keypair: secp_kp.into(),
+            keypair: ed_kp.into(),
         }
     }
 }
@@ -75,7 +73,7 @@ fn stub_membrane(rx: watch::Receiver<Epoch>) -> stem_capnp::membrane::Client {
 /// Helper: wrap a Membrane client in Terminal (challenge-response auth gate).
 fn terminal_membrane(
     rx: watch::Receiver<Epoch>,
-    vk: k256::ecdsa::VerifyingKey,
+    vk: ed25519_dalek::VerifyingKey,
 ) -> stem_capnp::terminal::Client<stem_capnp::membrane::Owned> {
     let membrane = stub_membrane(rx);
     new_client(TerminalServer::<stem_capnp::membrane::Owned>::new(
@@ -155,12 +153,12 @@ async fn test_membrane_graft_echo_against_anvil() {
         adopted_block: first_ev.block_number + 1,
     };
 
-    let sk = SigningKey::random(&mut rand::thread_rng());
-    let vk = *sk.verifying_key();
+    let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+    let vk = sk.verifying_key();
 
     let (tx, rx) = watch::channel(epoch1.clone());
     let terminal = terminal_membrane(rx, vk);
-    let signer_client: stem_capnp::signer::Client = new_client(TestSigner::from_k256(&sk));
+    let signer_client: stem_capnp::signer::Client = new_client(TestSigner::from_ed25519(&sk));
 
     // Login via Terminal → get Membrane → graft → echo → Ok
     let mut login_req = terminal.login_request();
@@ -331,13 +329,13 @@ async fn test_terminal_wrong_key_rejected() {
     };
 
     // Terminal expects key A, signer holds key B.
-    let sk_a = SigningKey::random(&mut rand::thread_rng());
-    let sk_b = SigningKey::random(&mut rand::thread_rng());
-    let vk_a = *sk_a.verifying_key();
+    let sk_a = SigningKey::generate(&mut rand::rngs::OsRng);
+    let sk_b = SigningKey::generate(&mut rand::rngs::OsRng);
+    let vk_a = sk_a.verifying_key();
 
     let (_tx, rx) = watch::channel(epoch);
     let terminal = terminal_membrane(rx, vk_a);
-    let signer_client: stem_capnp::signer::Client = new_client(TestSigner::from_k256(&sk_b));
+    let signer_client: stem_capnp::signer::Client = new_client(TestSigner::from_ed25519(&sk_b));
 
     let mut login_req = terminal.login_request();
     login_req.get().set_signer(signer_client);
@@ -366,8 +364,8 @@ async fn test_terminal_missing_signer_rejected() {
         adopted_block: 100,
     };
 
-    let sk = SigningKey::random(&mut rand::thread_rng());
-    let vk = *sk.verifying_key();
+    let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+    let vk = sk.verifying_key();
 
     let (_tx, rx) = watch::channel(epoch);
     let terminal = terminal_membrane(rx, vk);
@@ -461,8 +459,8 @@ async fn test_terminal_over_stream_pair() {
         head: b"head".to_vec(),
         adopted_block: 100,
     };
-    let sk = SigningKey::random(&mut rand::thread_rng());
-    let vk = *sk.verifying_key();
+    let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+    let vk = sk.verifying_key();
     let (_tx, rx) = watch::channel(epoch);
     let membrane = full_stub_membrane(rx);
 
@@ -501,7 +499,8 @@ async fn test_terminal_over_stream_pair() {
             });
 
             // Login with correct signer → get Membrane → graft → echo.
-            let signer_client: stem_capnp::signer::Client = new_client(TestSigner::from_k256(&sk));
+            let signer_client: stem_capnp::signer::Client =
+                new_client(TestSigner::from_ed25519(&sk));
             let mut login_req = remote_terminal.login_request();
             login_req.get().set_signer(signer_client);
 
@@ -555,9 +554,9 @@ async fn test_terminal_over_stream_wrong_key_rejected() {
         head: b"head".to_vec(),
         adopted_block: 100,
     };
-    let host_sk = SigningKey::random(&mut rand::thread_rng());
-    let host_vk = *host_sk.verifying_key();
-    let wrong_sk = SigningKey::random(&mut rand::thread_rng());
+    let host_sk = SigningKey::generate(&mut rand::rngs::OsRng);
+    let host_vk = host_sk.verifying_key();
+    let wrong_sk = SigningKey::generate(&mut rand::rngs::OsRng);
 
     let (_tx, rx) = watch::channel(epoch);
     let membrane = full_stub_membrane(rx);
@@ -597,7 +596,7 @@ async fn test_terminal_over_stream_wrong_key_rejected() {
 
             // Login with wrong key — should fail.
             let signer_client: stem_capnp::signer::Client =
-                new_client(TestSigner::from_k256(&wrong_sk));
+                new_client(TestSigner::from_ed25519(&wrong_sk));
             let mut login_req = remote_terminal.login_request();
             login_req.get().set_signer(signer_client);
 
@@ -620,7 +619,7 @@ async fn test_terminal_over_stream_wrong_key_rejected() {
         .await;
 }
 
-/// Signer that returns malformed (non-k256) signature bytes.
+/// Signer that returns malformed signature bytes.
 struct MalformedSigner;
 
 #[allow(refining_impl_trait)]
@@ -630,7 +629,7 @@ impl stem_capnp::signer::Server for MalformedSigner {
         _params: stem_capnp::signer::SignParams,
         mut results: stem_capnp::signer::SignResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        // 64 bytes of 0xFF is not a valid secp256k1 ECDSA signature.
+        // 64 bytes of 0xFF is not a valid signed envelope.
         results.get().set_sig(&[0xFF; 64]);
         capnp::capability::Promise::ok(())
     }
@@ -645,8 +644,8 @@ async fn test_terminal_malformed_signature_rejected() {
         adopted_block: 100,
     };
 
-    let sk = SigningKey::random(&mut rand::thread_rng());
-    let vk = *sk.verifying_key();
+    let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+    let vk = sk.verifying_key();
 
     let (_tx, rx) = watch::channel(epoch);
     let terminal = terminal_membrane(rx, vk);
