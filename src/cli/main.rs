@@ -98,10 +98,10 @@ enum Commands {
         confirmation_depth: u64,
 
         /// Run as an MCP server. Reads MCP JSON-RPC from stdin, routes
-        /// tools/call requests to a handler WASM process, writes responses
-        /// to stdout. The handler binary is specified by the MOUNT arg
+        /// tools/call requests to a cell WASM process, writes responses
+        /// to stdout. The cell binary is specified by the MOUNT arg
         /// (must contain boot/main.wasm). MCP lifecycle methods (initialize,
-        /// tools/list) are handled by the adapter, not the handler.
+        /// tools/list) are handled by the adapter, not the cell.
         #[arg(long)]
         mcp: bool,
     },
@@ -270,7 +270,7 @@ impl Commands {
                     //
                     // Implementation steps:
                     //   1. Implement McpAdapter: ProtocolAdapter for MCP JSON-RPC
-                    //   2. Load handler WASM from boot/main.wasm
+                    //   2. Load cell WASM from boot/main.wasm
                     //   3. executor.bind(wasm, args, env) → BoundExecutor
                     //   4. HttpServer::new(bound).run(&mut adapter).await
                     eprintln!("MCP mode is not yet implemented. See src/dispatcher/mod.rs for the ProtocolAdapter trait.");
@@ -962,7 +962,7 @@ pub extern "C" fn _start() {
         let cell = builder.build();
 
         // spawn_serving registers a /wetware/capnp/1.0.0 libp2p stream
-        // handler that bootstraps each incoming connection with the
+        // cell that bootstraps each incoming connection with the
         // membrane exported by the kernel.
         let result = cell.spawn_serving(stream_control).await?;
         tracing::info!(code = result.exit_code, "Kernel exited");

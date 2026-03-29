@@ -3,9 +3,9 @@
 ; Each form is wrapped in default effect handlers by the kernel,
 ; so (perform :load ...) resolves via the virtual filesystem.
 
-; Register RPC handler for the ChessEngine capability.
+; Register RPC cell for the ChessEngine capability.
 ; The schema is extracted from the WASM binary's "schema.capnp" custom section.
-; VatListener spawns a handler process per connection; the handler exports
+; VatListener spawns a cell process per connection; the cell exports
 ; a ChessEngine capability via system::serve().
 (host listen (perform :load "bin/chess-demo.wasm"))
 

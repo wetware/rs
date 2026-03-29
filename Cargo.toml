@@ -13,7 +13,7 @@ members = [
     "examples/chess",
 ]
 exclude = [
-    "examples/echo-handler",  # WASI guest — targets wasm32-wasip2, not host
+    "examples/echo-cell",  # WASI guest — targets wasm32-wasip2, not host
 ]
 
 [package]

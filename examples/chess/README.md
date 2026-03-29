@@ -17,13 +17,13 @@ publishes a content-addressed replay log to IPFS (see
              ┌────┴────┐
    (host rpcListen)  (executor run)
           │              │
-     handler mode    service mode
+      cell mode      service mode
     (per-connection) (discovery loop)
 ```
 
 Two execution modes, selected by the init.d script:
 
-- **Handler** (`WW_HANDLER`): per-connection RPC handler spawned by
+- **Cell** (`WW_CELL`): per-connection RPC cell spawned by
   `RpcListener`. Creates a `ChessEngineImpl` and exports it via
   `system::serve()`. The host bridges the capability to the connecting
   peer via Cap'n Proto RPC bootstrapping.
@@ -48,7 +48,7 @@ the `schema-id` crate, and `make chess` for the injection step.
 is a capability invocation — inner expressions resolve first.
 
 ```clojure
-; Register RPC handler — schema extracted from WASM custom section.
+; Register RPC cell — schema extracted from WASM custom section.
 (host rpcListen (ipfs cat "bin/chess-demo.wasm"))
 
 ; Run the chess demo in service mode — blocks until exit.
@@ -57,7 +57,7 @@ is a capability invocation — inner expressions resolve first.
 
 `(ipfs cat "bin/chess-demo.wasm")` is resolved relative to `$WW_ROOT`
 (the merged IPFS image root set by the host at kernel spawn time).
-`rpcListen` takes a single argument: the handler WASM binary. The host
+`rpcListen` takes a single argument: the cell WASM binary. The host
 inspects the `schema.capnp` custom section to determine the protocol.
 
 ## Prerequisites
@@ -77,7 +77,7 @@ make chess
 ## Running
 
 Stack the chess layer on top of the kernel. The kernel reads
-`etc/init.d/chess.glia` and handles RPC handler registration, DHT
+`etc/init.d/chess.glia` and handles RPC cell registration, DHT
 announcement, and peer discovery automatically.
 
 ```sh

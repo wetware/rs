@@ -1,15 +1,15 @@
-//! Chess guest: cross-node play via RPC capability handlers.
+//! Chess guest: cross-node play via RPC capability cells.
 //!
 //! This binary serves two roles, selected by env vars set in the
 //! init.d script (`etc/init.d/chess.glia`):
 //!
-//! **Handler mode** (`WW_HANDLER=1`): An RPC capability handler spawned
+//! **Cell mode** (`WW_CELL=1`): An RPC capability cell spawned
 //! by RpcListener. Creates a ChessEngine and exports it via
 //! `system::serve()`. The host bridges the capability to the connecting
 //! peer via Cap'n Proto RPC bootstrapping.
 //!
 //! **Service mode** (default): Spawned by an init.d script after the
-//! RPC handler is registered. Provides the schema CID on the DHT,
+//! RPC cell is registered. Provides the schema CID on the DHT,
 //! discovers peers via `routing.find_providers()`, dials them via
 //! `RpcDialer` to get typed ChessEngine capabilities, and plays random
 //! games logging replays to IPFS.
@@ -110,7 +110,7 @@ fn init_logging() {
 /// Chess engine backed by shakmaty.
 ///
 /// Implements `chess_capnp::chess_engine::Server`. Exported via
-/// `system::serve` in handler mode; used directly in unit tests.
+/// `system::serve` in cell mode; used directly in unit tests.
 pub struct ChessEngineImpl {
     pos: RefCell<Chess>,
 }
@@ -225,18 +225,18 @@ impl chess_capnp::chess_engine::Server for ChessEngineImpl {
 }
 
 // ---------------------------------------------------------------------------
-// Handler mode — RPC capability export via system::serve()
+// Cell mode — RPC capability export via system::serve()
 // ---------------------------------------------------------------------------
 
-/// RPC handler for RpcListener-spawned processes.
+/// RPC cell for RpcListener-spawned processes.
 ///
 /// Creates a ChessEngine and exports it as the bootstrap capability.
 /// The host bridges this cap to the connecting peer. The process stays
 /// alive until the host drops the RPC connection.
-fn run_handler() {
+fn run_cell() {
     let engine = ChessEngineImpl::new();
     let client: chess_capnp::chess_engine::Client = capnp_rpc::new_client(engine);
-    log::info!("handler: exporting ChessEngine via RPC");
+    log::info!("cell: exporting ChessEngine via RPC");
     system::serve(client.client, |_membrane: Membrane| async move {
         // Keep alive until the host drops the RPC connection.
         // drive_rpc_with_future exits when rpc_done becomes true.
@@ -563,9 +563,9 @@ struct ChessGuest;
 impl Guest for ChessGuest {
     fn run() -> Result<(), ()> {
         init_logging();
-        if std::env::var("WW_HANDLER").is_ok() {
-            // Handler mode: export ChessEngine via RPC.
-            run_handler();
+        if std::env::var("WW_CELL").is_ok() {
+            // Cell mode: export ChessEngine via RPC.
+            run_cell();
         } else {
             // Service mode: discovery loop with RpcDialer.
             log::info!("chess guest starting (service mode)");

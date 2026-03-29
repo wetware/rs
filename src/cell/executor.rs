@@ -432,7 +432,7 @@ impl Cell {
         let membrane_stream_control = stream_control.clone().unwrap_or_else(|| {
             // Non-serving mode: Server.serve() will fail at accept() time,
             // which is acceptable — guests that don't have a real swarm
-            // shouldn't be registering subprotocol handlers.
+            // shouldn't be registering subprotocol cells.
             libp2p_stream::Behaviour::new().new_control()
         });
 
@@ -492,7 +492,7 @@ async fn accept_capnp_streams(mut control: libp2p_stream::Control, membrane: Gue
     let mut incoming = match control.accept(CAPNP_PROTOCOL) {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!("failed to register capnp stream handler: {}", e);
+            tracing::error!("failed to register capnp stream cell: {}", e);
             return;
         }
     };
@@ -527,7 +527,7 @@ async fn accept_terminal_streams(
     let mut incoming = match control.accept(CAPNP_PROTOCOL) {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!("failed to register terminal stream handler: {}", e);
+            tracing::error!("failed to register terminal stream cell: {}", e);
             return;
         }
     };

@@ -9,7 +9,7 @@
 ## Glia-level finally / resource cleanup via effects
 **What:** `with-resource` or `finally` pattern — cleanup handlers that run on scope exit.
 **Why:** Rust Drop handles Rust-side cleanup, but Glia code can't hook into scope exit.
-**Context:** Design doc notes this as follow-up. Key question: does `finally` run if handler resumes?
+**Context:** Design doc notes this as follow-up. Key question: does `finally` run if effect handler resumes?
 **Depends on:** #247 (needs with-handler resume infrastructure)
 
 ## `glia lint` — static analysis for effect type consistency
@@ -58,7 +58,7 @@
 **Priority:** P1
 
 ## Epoch-watching in accept loops (VatListener + StreamListener)
-**What:** The accept loops in `VatListenerImpl::listen()` and `StreamListenerImpl::listen()` check the epoch guard once at entry but never recheck. A guest whose epoch goes stale continues accepting connections and spawning handlers indefinitely.
+**What:** The accept loops in `VatListenerImpl::listen()` and `StreamListenerImpl::listen()` check the epoch guard once at entry but never recheck. A guest whose epoch goes stale continues accepting connections and spawning cells indefinitely.
 **Why:** This is a trust boundary violation. The membrane's epoch-based revocation is supposed to invalidate capabilities, but the long-lived accept loop keeps serving after revocation.
 **Context:** Fix by adding a `tokio::select!` inside the accept loop that watches the epoch guard's `receiver` for changes and breaks when stale. Same pattern needed in both `src/rpc/vat_listener.rs` and `src/rpc/stream_listener.rs` (search for the `while let Some` accept loops). The dialer has a shorter TOCTOU window but should also recheck epoch after stream establishment.
 **Effort:** S
@@ -69,14 +69,14 @@
 `/ww/0.1.0/stream/{name}` vs `/ww/0.1.0/rpc/{cid}`.
 
 ## Connection rate limiting for VatListener
-**What:** Every incoming connection in `VatListenerImpl` spawns a new WASI handler process with no concurrency limit. A malicious peer (or many peers) can flood connections, causing unbounded process spawning.
-**Why:** Each handler holds WASM memory, an RPC system, and a libp2p stream. Unbounded spawning is a resource exhaustion vector.
-**Context:** Add a semaphore or max-connections limit to the accept loop. Consider making the limit configurable via the `listen()` params or a sensible default (e.g., 64 concurrent handlers per protocol).
+**What:** Every incoming connection in `VatListenerImpl` spawns a new WASI cell process with no concurrency limit. A malicious peer (or many peers) can flood connections, causing unbounded process spawning.
+**Why:** Each cell holds WASM memory, an RPC system, and a libp2p stream. Unbounded spawning is a resource exhaustion vector.
+**Context:** Add a semaphore or max-connections limit to the accept loop. Consider making the limit configurable via the `listen()` params or a sensible default (e.g., 64 concurrent cells per protocol).
 **Effort:** S
 **Priority:** P2
 
 ## Bootstrap timeout in handle_vat_connection
-**What:** `handle_vat_connection()` awaits `process.bootstrap_request()` without a timeout. If the handler WASM fails to call `system::serve()`, the host blocks indefinitely. The peer on the libp2p stream is also stuck waiting for the RPC bootstrap.
+**What:** `handle_vat_connection()` awaits `process.bootstrap_request()` without a timeout. If the cell WASM fails to call `system::serve()`, the host blocks indefinitely. The peer on the libp2p stream is also stuck waiting for the RPC bootstrap.
 **Why:** Silent deadlock. Both sides hang until TCP timeout (minutes). No error, no log.
 **Context:** Wrap `bootstrap_request().send().promise` in `tokio::time::timeout(Duration::from_secs(10), ...)`. Same pattern as the RPC handshake timeout TODO above.
 **Effort:** S
