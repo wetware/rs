@@ -6,7 +6,7 @@
 
 HTTP interop for wetware: outgoing HTTP calls via an HttpClient capability,
 incoming HTTP serving via `--with-http host:port` with raw HTTP bytes piped
-to handler processes on stdin/stdout.
+to cell processes on stdin/stdout.
 
 All HTTP capabilities are Cap'n Proto native, epoch-scoped, and follow
 wetware's zero-ambient-authority model.
@@ -40,7 +40,7 @@ struct Header {
   value @1 :Text;
 }
 
-struct HandlerSpec {
+struct CellSpec {
   union {
     path @0 :Text;            # UnixFS path (.wasm or .glia, extension-detected)
     wasmBinary @1 :Data;      # inline WASM bytes
@@ -68,7 +68,7 @@ interface HttpServer {
 }
 
 interface HttpRouter {
-  handle @0 (pattern :Text, spec :HandlerSpec,
+  handle @0 (pattern :Text, spec :CellSpec,
              args :List(Text), env :List(Text)) -> (route :UInt128);
   remove @1 (route :UInt128) -> ();
 }
@@ -111,8 +111,8 @@ WASI Guest ──Cap'n Proto RPC──> EpochGuardedHttpClient (reqwest) ──>
 ### Incoming HTTP (--with-http)
 
 ```
-Internet ──> hyper listener ──> route table ──> handler stdin  (raw HTTP request)
-                                            <── handler stdout (raw HTTP response)
+Internet ──> hyper listener ──> route table ──> cell stdin  (raw HTTP request)
+                                            <── cell stdout (raw HTTP response)
 ```
 
 - `--with-http host:port` — operator opt-in. No flag = no listener = httpServer is null.
@@ -123,22 +123,22 @@ Internet ──> hyper listener ──> route table ──> handler stdin  (raw 
 ### Executor Attenuation
 
 HttpServer.router(executor) binds the Executor into the Router. PID0 binds,
-delegates the bound Router to children. Children can register HTTP handlers
-but cannot access the raw Executor for arbitrary process spawning. Handler
+delegates the bound Router to children. Children can register HTTP cells
+but cannot access the raw Executor for arbitrary process spawning. Cell
 lifecycle is constrained to route lifetime.
 
 ```
 PID0: httpServer.router(executor) → bound Router
   │
-  └── child A: router.handle("/api/*", spec) → registers handler
+  └── child A: router.handle("/api/*", spec) → registers cell
       │
       └── child A has Router but NOT raw Executor
-          Can register HTTP handlers, cannot spawn arbitrary processes
+          Can register HTTP cells, cannot spawn arbitrary processes
 ```
 
 ### CGI Model — Raw HTTP on stdin/stdout
 
-The host pipes complete HTTP request bytes to the handler's stdin. The handler
+The host pipes complete HTTP request bytes to the cell's stdin. The cell
 reads a full HTTP request (method line, headers, body), processes it, and
 writes a full HTTP response (status line, headers, body) to stdout.
 
@@ -146,43 +146,43 @@ No sideband protocol. No environment variable metadata. No RPC for request
 metadata. HTTP is self-describing — method, path, headers are all in the
 byte stream.
 
-The handler needs an HTTP parser (small library in any language). For Glia
-handlers, the Glia evaluator WASM includes one.
+The cell needs an HTTP parser (small library in any language). For Glia
+cells, the Glia evaluator WASM includes one.
 
 HTTP requests are self-delimiting (Content-Length / chunked encoding), which
-solves the per-request framing question for long-lived handlers.
+solves the per-request framing question for long-lived cells.
 
-### Handler Lifecycle
+### Cell Lifecycle
 
-- Handler processes are long-lived (gen_server model). Not per-request spawning.
-- Default serial: requests to a handler are queued and processed one at a time.
+- Cell processes are long-lived (gen_server model). Not per-request spawning.
+- Default serial: requests to a cell are queued and processed one at a time.
 - Developer opts into concurrency by spawning sub-workers via Executor.
-- Handler process owns its route. Handler dies → Router auto-removes route.
+- Cell process owns its route. Cell dies → Router auto-removes route.
 - Route token (u128, CSPRNG) is an external kill switch for manual removal.
-- Registering process can exit freely — route persists as long as handler lives.
+- Registering process can exit freely — route persists as long as cell lives.
 
-### HandlerSpec Dispatch
+### CellSpec Dispatch
 
 ```
-HandlerSpec.path       → detect extension:
-                           .wasm → spawn WASM binary directly
-                           .glia → spawn Glia evaluator WASM with script as arg
-HandlerSpec.wasmBinary → spawn from inline bytes
-HandlerSpec.wasmCid    → fetch from IPFS, then spawn
-HandlerSpec.gliaCid    → fetch Glia script from IPFS, spawn evaluator with script
+CellSpec.path       → detect extension:
+                        .wasm → spawn WASM binary directly
+                        .glia → spawn Glia evaluator WASM with script as arg
+CellSpec.wasmBinary → spawn from inline bytes
+CellSpec.wasmCid    → fetch from IPFS, then spawn
+CellSpec.gliaCid    → fetch Glia script from IPFS, spawn evaluator with script
 ```
 
 CIDs are safe designators — content-addressed, immutable, unforgeable. Passing
 a CID doesn't grant authority, only designation. The Executor bound in the
 Router provides execution authority. Router has internal IPFS access.
 
-Glia handlers are schema-transparent: the Glia evaluator is "just another
+Glia cells are schema-transparent: the Glia evaluator is "just another
 WASM binary" in the FHS image. Schema is language-agnostic.
 
 ### Epoch Transitions
 
-Epoch advance kills all HTTP handlers. Clean break:
-1. All handler processes terminated
+Epoch advance kills all HTTP cells. Clean break:
+1. All cell processes terminated
 2. All routes cleared from table
 3. All HTTP capabilities go stale (EpochGuard)
 4. After re-graft, PID0 re-registers routes via init.d
@@ -191,20 +191,20 @@ This matches how all other epoch-scoped capabilities work.
 
 ### Error Handling
 
-- Handler crashes mid-request → host returns HTTP 502 Bad Gateway
-- Handler dead on request arrival → 503 Service Unavailable
-- Handler timeout → 504 Gateway Timeout
+- Cell crashes mid-request → host returns HTTP 502 Bad Gateway
+- Cell dead on request arrival → 503 Service Unavailable
+- Cell timeout → 504 Gateway Timeout
 - Unmatched route → 404 Not Found
 - Queue overflow → 503 Service Unavailable
 - Request body exceeds max size → 413 Payload Too Large
-- Handler restart managed by init.d supervision (no HTTP-specific supervisor)
+- Cell restart managed by init.d supervision (no HTTP-specific supervisor)
 
 ### Backpressure & Limits
 
-- Byte-bounded per-handler request queue (default 1 MiB). 503 when exceeded.
+- Byte-bounded per-cell request queue (default 1 MiB). 503 when exceeded.
 - Max request body size (default 10 MiB, configurable).
 - Per-request timeout (default 30s).
-- TCP backpressure: if handler's stdin buffer is full, host pauses socket read.
+- TCP backpressure: if cell's stdin buffer is full, host pauses socket read.
 
 ## Implementation Phases
 
@@ -226,12 +226,12 @@ length-prefix framing).
 - HttpServer.router(executor) → HttpRouter
 - HttpRouter.handle(pattern, spec) → route token
 - stdin/stdout re-wiring, raw HTTP bytes
-- Handler lifecycle, epoch transitions
+- Cell lifecycle, epoch transitions
 
-### Phase 3: Full HttpHandler RPC Mode (#245)
-- HttpHandler.handle(req, body) → (resp, body) interface
+### Phase 3: Full HttpCell RPC Mode (#245)
+- HttpCell.handle(req, body) → (resp, body) interface
 - Streaming bodies via ByteStream
-- Alternative to CGI for handlers needing structured access
+- Alternative to CGI for cells needing structured access
 
 ### Phase 4: WebSocket (#246)
 Requires separate design doc. HTTP upgrade at host, bidirectional stream

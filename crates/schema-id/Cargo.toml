@@ -1,0 +1,21 @@
+[package]
+name = "schema-id"
+version = "0.1.0"
+edition = "2021"
+description = "Build-time helper: extract canonical schema bytes and CIDs from Cap'n Proto schemas"
+
+[dependencies]
+capnp = "0.23.2"
+capnpc = "0.23.3"
+blake3 = "1"
+cid = "0.11"
+wasmparser = { version = "0.243", optional = true }
+wasm-encoder = { version = "0.243", optional = true }
+
+[features]
+default = []
+inject = ["wasmparser", "wasm-encoder"]
+
+[[bin]]
+name = "schema-inject"
+required-features = ["inject"]

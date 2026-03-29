@@ -1,12 +1,15 @@
 ; Chess init.d script — evaluated by the kernel at boot.
 ;
-; Each form is a capability invocation using the kernel's evaluator.
-; Inner expressions are evaluated first (recursive eval).
+; Each form is wrapped in default effect handlers by the kernel,
+; so (perform :load ...) resolves via the virtual filesystem.
 
-; Register handler on chess protocol.
-(host listen "chess" (ipfs cat "bin/chess-demo.wasm"))
+; Register RPC cell for the ChessEngine capability.
+; The schema is extracted from the WASM binary's "schema.capnp" custom section.
+; VatListener spawns a cell process per connection; the cell exports
+; a ChessEngine capability via system::serve().
+(host listen (perform :load "bin/chess-demo.wasm"))
 
 ; Run the chess demo in service mode — blocks until exit.
-; The service process handles DHT provide/findProviders in its own loop.
-(executor run (ipfs cat "bin/chess-demo.wasm")
-  :env {"WW_NS" "ww.chess.v1"})
+; The service process discovers peers via DHT and dials them with VatClient
+; to get typed ChessEngine capabilities.
+(executor run (perform :load "bin/chess-demo.wasm"))

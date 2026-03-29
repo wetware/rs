@@ -1,9 +1,9 @@
-//! Listener capability: guest-exported subprotocols via process-per-connection.
+//! StreamListener capability: guest-exported subprotocols via process-per-connection.
 //!
-//! The `Listener` capability lets a guest register a libp2p subprotocol handler.
+//! The `StreamListener` capability lets a guest register a libp2p subprotocol cell.
 //! For each incoming stream on that subprotocol, the host spawns a fresh WASI
 //! process (via the guest-provided `Executor`) with stdin/stdout wired to the
-//! stream — the handler speaks whatever wire protocol it wants over stdio.
+//! stream — the cell speaks whatever wire protocol it wants over stdio.
 
 use capnp::capability::Promise;
 use capnp_rpc::pry;
@@ -14,12 +14,12 @@ use membrane::EpochGuard;
 
 use crate::system_capnp;
 
-pub struct ListenerImpl {
+pub struct StreamListenerImpl {
     stream_control: libp2p_stream::Control,
     guard: EpochGuard,
 }
 
-impl ListenerImpl {
+impl StreamListenerImpl {
     pub fn new(stream_control: libp2p_stream::Control, guard: EpochGuard) -> Self {
         Self {
             stream_control,
@@ -29,11 +29,11 @@ impl ListenerImpl {
 }
 
 #[allow(refining_impl_trait)]
-impl system_capnp::listener::Server for ListenerImpl {
+impl system_capnp::stream_listener::Server for StreamListenerImpl {
     fn listen(
         self: capnp::capability::Rc<Self>,
-        params: system_capnp::listener::ListenParams,
-        _results: system_capnp::listener::ListenResults,
+        params: system_capnp::stream_listener::ListenParams,
+        _results: system_capnp::stream_listener::ListenResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
 
@@ -42,7 +42,7 @@ impl system_capnp::listener::Server for ListenerImpl {
         let protocol_str = pry!(pry!(params.get_protocol())
             .to_str()
             .map_err(|e| capnp::Error::failed(e.to_string())));
-        let handler = pry!(params.get_handler()).to_vec();
+        let wasm = pry!(params.get_wasm()).to_vec();
 
         if protocol_str.is_empty() {
             return Promise::err(capnp::Error::failed(
@@ -57,58 +57,55 @@ impl system_capnp::listener::Server for ListenerImpl {
 
         let protocol_suffix = protocol_str.to_string();
         let stream_protocol = pry!(StreamProtocol::try_from_owned(format!(
-            "/ww/0.1.0/{protocol_suffix}"
+            "/ww/0.1.0/stream/{protocol_suffix}"
         ))
         .map_err(|e| capnp::Error::failed(format!("invalid protocol: {e}"))));
 
         let mut control = self.stream_control.clone();
-        let mut incoming =
-            pry!(control
-                .accept(stream_protocol.clone())
-                .map_err(|e| capnp::Error::failed(format!(
-                    "failed to register protocol handler: {e}"
-                ))));
+        let mut incoming = pry!(control
+            .accept(stream_protocol.clone())
+            .map_err(|e| capnp::Error::failed(format!("failed to register protocol cell: {e}"))));
 
-        tracing::info!(protocol = %stream_protocol, "Registered subprotocol handler");
+        tracing::info!(protocol = %stream_protocol, "Registered stream subprotocol cell");
 
-        // Accept loop: for each incoming connection, spawn a handler process.
+        // Accept loop: for each incoming connection, spawn a cell process.
         tokio::task::spawn_local(async move {
             while let Some((peer_id, stream)) = incoming.next().await {
                 tracing::debug!(
                     peer = %peer_id,
                     protocol = %stream_protocol,
-                    "Incoming subprotocol connection"
+                    "Incoming stream subprotocol connection"
                 );
                 let executor = executor.clone();
-                let handler = handler.clone();
+                let wasm = wasm.clone();
                 let protocol = protocol_suffix.clone();
                 tokio::task::spawn_local(async move {
-                    if let Err(e) = handle_connection(executor, &handler, stream, &protocol).await {
-                        tracing::error!(protocol, "Handler connection error: {e}");
+                    if let Err(e) = handle_connection(executor, &wasm, stream, &protocol).await {
+                        tracing::error!(protocol, "Stream cell connection error: {e}");
                     }
                 });
             }
-            tracing::debug!("Subprotocol accept loop ended");
+            tracing::warn!(protocol = %stream_protocol, "Stream subprotocol accept loop ended unexpectedly");
         });
 
         Promise::ok(())
     }
 }
 
-/// Spawn a handler process for a single connection and pump
+/// Spawn a cell process for a single connection and pump
 /// stdin/stdout between the libp2p stream and the process.
 pub(crate) async fn handle_connection(
     executor: system_capnp::executor::Client,
-    handler_wasm: &[u8],
+    cell_wasm: &[u8],
     stream: libp2p::Stream,
     protocol: &str,
 ) -> Result<(), capnp::Error> {
-    // Spawn handler process via executor.runBytes.
+    // Spawn cell process via executor.runBytes.
     let mut req = executor.run_bytes_request();
-    req.get().set_wasm(handler_wasm);
+    req.get().set_wasm(cell_wasm);
     {
         let mut env = req.get().init_env(3);
-        env.set(0, "WW_HANDLER=1");
+        env.set(0, "WW_CELL=1");
         env.set(1, format!("WW_PROTOCOL={protocol}"));
         env.set(2, "PATH=/bin");
     }
@@ -136,18 +133,18 @@ pub(crate) async fn handle_connection(
     )
     .await;
 
-    // Ensure stdin is closed so the handler sees EOF.
+    // Ensure stdin is closed so the cell sees EOF.
     let _ = stdin_close.close_request().send().promise.await;
 
-    // Wait for the handler process to exit.
+    // Wait for the cell process to exit.
     let wait_resp = process.wait_request().send().promise.await?;
     let exit_code = wait_resp.get()?.get_exit_code();
-    tracing::debug!(exit_code, protocol, "Handler process exited");
+    tracing::debug!(exit_code, protocol, "Cell process exited");
 
     Ok(())
 }
 
-/// Read from the libp2p stream and write to the handler's stdin.
+/// Read from the libp2p stream and write to the cell's stdin.
 pub(crate) async fn pump_stream_to_stdin(
     mut reader: impl futures::io::AsyncRead + Unpin,
     stdin: system_capnp::byte_stream::Client,
@@ -176,7 +173,7 @@ pub(crate) async fn pump_stream_to_stdin(
     }
 }
 
-/// Read from the handler's stdout and write to the libp2p stream.
+/// Read from the cell's stdout and write to the libp2p stream.
 pub(crate) async fn pump_stdout_to_stream(
     stdout: system_capnp::byte_stream::Client,
     mut writer: impl futures::io::AsyncWrite + Unpin,

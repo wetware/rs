@@ -1,6 +1,6 @@
-//! Dialer capability: open outgoing subprotocol streams to remote peers.
+//! StreamDialer capability: open outgoing libp2p subprotocol streams to remote peers.
 //!
-//! The `Dialer` capability lets a guest open a libp2p stream to a specific peer
+//! The `StreamDialer` capability lets a guest open a libp2p stream to a specific peer
 //! on a named subprotocol. The host opens the stream and returns a bidirectional
 //! `ByteStream` capability — the guest reads/writes whatever wire protocol it
 //! wants directly.
@@ -17,12 +17,12 @@ use crate::system_capnp;
 
 use super::{ByteStreamImpl, StreamMode};
 
-pub struct DialerImpl {
+pub struct StreamDialerImpl {
     stream_control: libp2p_stream::Control,
     guard: EpochGuard,
 }
 
-impl DialerImpl {
+impl StreamDialerImpl {
     pub fn new(stream_control: libp2p_stream::Control, guard: EpochGuard) -> Self {
         Self {
             stream_control,
@@ -32,11 +32,11 @@ impl DialerImpl {
 }
 
 #[allow(refining_impl_trait)]
-impl system_capnp::dialer::Server for DialerImpl {
+impl system_capnp::stream_dialer::Server for StreamDialerImpl {
     fn dial(
         self: capnp::capability::Rc<Self>,
-        params: system_capnp::dialer::DialParams,
-        mut results: system_capnp::dialer::DialResults,
+        params: system_capnp::stream_dialer::DialParams,
+        mut results: system_capnp::stream_dialer::DialResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
 
@@ -61,7 +61,7 @@ impl system_capnp::dialer::Server for DialerImpl {
             .map_err(|e| capnp::Error::failed(format!("invalid peer ID: {e}"))));
 
         let stream_protocol = pry!(StreamProtocol::try_from_owned(format!(
-            "/ww/0.1.0/{protocol_str}"
+            "/ww/0.1.0/stream/{protocol_str}"
         ))
         .map_err(|e| capnp::Error::failed(format!("invalid protocol: {e}"))));
 
@@ -71,7 +71,7 @@ impl system_capnp::dialer::Server for DialerImpl {
             tracing::debug!(
                 peer = %peer_id,
                 protocol = %stream_protocol,
-                "Dialing subprotocol"
+                "Dialing stream subprotocol"
             );
 
             let stream = control

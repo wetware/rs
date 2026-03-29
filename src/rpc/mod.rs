@@ -4,10 +4,12 @@
 //! streams (no TCP listener). See [`build_peer_rpc`] for the entry point.
 #![cfg(not(target_arch = "wasm32"))]
 
-pub mod dialer;
-pub mod listener;
 pub mod membrane;
 pub mod routing;
+pub mod stream_dialer;
+pub mod stream_listener;
+pub mod vat_client;
+pub mod vat_listener;
 
 use std::sync::Arc;
 
@@ -23,9 +25,53 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use ::membrane::EpochGuard;
 
+use libp2p::StreamProtocol;
+
 use crate::cell::proc::Builder as ProcBuilder;
 use crate::host::SwarmCommand;
 use crate::system_capnp;
+
+/// Derive a content-addressed protocol ID from canonical schema bytes.
+///
+/// The input is the canonical Cap'n Proto encoding of a `schema.Node`, which
+/// includes the 64-bit unique type ID. Two interfaces with identical structure
+/// but different type IDs produce different CIDs.
+///
+/// Returns the CID as a string: `CIDv1(raw, BLAKE3(schema_bytes))`.
+pub(crate) fn schema_cid(schema_bytes: &[u8]) -> String {
+    let digest = blake3::hash(schema_bytes);
+    let mh = cid::multihash::Multihash::<64>::wrap(0x1e, digest.as_bytes())
+        .expect("blake3 digest always fits in 64-byte multihash");
+    cid::Cid::new_v1(0x55, mh).to_string()
+}
+
+/// Build a `StreamProtocol` from a schema CID string.
+pub(crate) fn schema_protocol(cid: &str) -> Result<StreamProtocol, capnp::Error> {
+    StreamProtocol::try_from_owned(format!("/ww/0.1.0/rpc/{cid}"))
+        .map_err(|e| capnp::Error::failed(format!("invalid protocol from schema CID: {e}")))
+}
+
+/// Extract a custom section from a WASM binary (component or module).
+///
+/// Returns the section data if found, or `None` if the section doesn't exist.
+pub(crate) fn extract_wasm_custom_section<'a>(
+    wasm_bytes: &'a [u8],
+    section_name: &str,
+) -> Result<Option<&'a [u8]>, capnp::Error> {
+    use wasmparser::{Parser, Payload};
+
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        let payload = payload
+            .map_err(|e| capnp::Error::failed(format!("failed to parse WASM binary: {e}")))?;
+        match payload {
+            Payload::CustomSection(reader) if reader.name() == section_name => {
+                return Ok(Some(reader.data()));
+            }
+            _ => {}
+        }
+    }
+    Ok(None)
+}
 
 /// Maximum bytes a single ByteStream read may allocate.
 ///
@@ -220,6 +266,7 @@ pub struct ProcessImpl {
     stdout: system_capnp::byte_stream::Client,
     stderr: system_capnp::byte_stream::Client,
     exit_rx: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<i32>>>>,
+    bootstrap_cap: Option<capnp::capability::Client>,
 }
 
 impl ProcessImpl {
@@ -234,6 +281,23 @@ impl ProcessImpl {
             stdout,
             stderr,
             exit_rx: Arc::new(Mutex::new(Some(exit_rx))),
+            bootstrap_cap: None,
+        }
+    }
+
+    pub(crate) fn with_bootstrap(
+        stdin: system_capnp::byte_stream::Client,
+        stdout: system_capnp::byte_stream::Client,
+        stderr: system_capnp::byte_stream::Client,
+        exit_rx: tokio::sync::oneshot::Receiver<i32>,
+        bootstrap_cap: capnp::capability::Client,
+    ) -> Self {
+        Self {
+            stdin,
+            stdout,
+            stderr,
+            exit_rx: Arc::new(Mutex::new(Some(exit_rx))),
+            bootstrap_cap: Some(bootstrap_cap),
         }
     }
 }
@@ -279,6 +343,23 @@ impl system_capnp::process::Server for ProcessImpl {
             })?;
             let code = rx.await.unwrap_or(1);
             results.get().set_exit_code(code);
+            Ok(())
+        })
+    }
+
+    fn bootstrap(
+        self: capnp::capability::Rc<Self>,
+        _params: system_capnp::process::BootstrapParams,
+        mut results: system_capnp::process::BootstrapResults,
+    ) -> impl std::future::Future<Output = Result<(), capnp::Error>> + 'static {
+        let cap = self.bootstrap_cap.clone();
+        Promise::from_future(async move {
+            let cap = cap.ok_or_else(|| {
+                capnp::Error::failed(
+                    "process did not export a bootstrap capability via system::serve()".into(),
+                )
+            })?;
+            results.get().init_cap().set_as_capability(cap.hook);
             Ok(())
         })
     }
@@ -410,13 +491,21 @@ impl system_capnp::host::Server for HostImpl {
                 ))
             }
         };
-        let listener: system_capnp::listener::Client = capnp_rpc::new_client(
-            listener::ListenerImpl::new(stream_control.clone(), guard.clone()),
+        let stream_listener: system_capnp::stream_listener::Client = capnp_rpc::new_client(
+            stream_listener::StreamListenerImpl::new(stream_control.clone(), guard.clone()),
         );
-        let dialer: system_capnp::dialer::Client =
-            capnp_rpc::new_client(dialer::DialerImpl::new(stream_control, guard));
-        results.get().set_listener(listener);
-        results.get().set_dialer(dialer);
+        let stream_dialer: system_capnp::stream_dialer::Client = capnp_rpc::new_client(
+            stream_dialer::StreamDialerImpl::new(stream_control.clone(), guard.clone()),
+        );
+        let vat_listener: system_capnp::vat_listener::Client = capnp_rpc::new_client(
+            vat_listener::VatListenerImpl::new(stream_control.clone(), guard.clone()),
+        );
+        let vat_client: system_capnp::vat_client::Client =
+            capnp_rpc::new_client(vat_client::VatClientImpl::new(stream_control, guard));
+        results.get().set_stream_listener(stream_listener);
+        results.get().set_stream_dialer(stream_dialer);
+        results.get().set_vat_listener(vat_listener);
+        results.get().set_vat_client(vat_client);
         Promise::ok(())
     }
 }
@@ -618,10 +707,10 @@ impl system_capnp::executor::Server for ExecutorImpl {
             let (reader, writer) = handles
                 .take_host_split()
                 .ok_or_else(|| capnp::Error::failed("host stream missing".into()))?;
-            let child_rpc_system = if let (Some(erx), Some(ic), Some(sc)) =
+            let (child_rpc_system, bootstrap_cap) = if let (Some(erx), Some(ic), Some(sc)) =
                 (epoch_rx, content_store, stream_control)
             {
-                let (rpc, _guest) = membrane::build_membrane_rpc(
+                let (rpc, guest) = membrane::build_membrane_rpc(
                     reader,
                     writer,
                     network_state,
@@ -632,9 +721,12 @@ impl system_capnp::executor::Server for ExecutorImpl {
                     signing_key,
                     sc,
                 );
-                rpc
+                (rpc, Some(guest.client))
             } else {
-                build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug)
+                (
+                    build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug),
+                    None,
+                )
             };
 
             tokio::task::spawn_local(async move {
@@ -678,8 +770,12 @@ impl system_capnp::executor::Server for ExecutorImpl {
             let stderr =
                 capnp_rpc::new_client(ByteStreamImpl::new(dummy_stderr, StreamMode::ReadOnly));
 
-            let process_client: system_capnp::process::Client =
-                capnp_rpc::new_client(ProcessImpl::new(stdin, stdout, stderr, exit_rx));
+            let process_impl = if let Some(cap) = bootstrap_cap {
+                ProcessImpl::with_bootstrap(stdin, stdout, stderr, exit_rx, cap)
+            } else {
+                ProcessImpl::new(stdin, stdout, stderr, exit_rx)
+            };
+            let process_client: system_capnp::process::Client = capnp_rpc::new_client(process_impl);
             results.get().set_process(process_client);
 
             Ok(())
@@ -773,10 +869,10 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
             let signing_key = config.signing_key.clone();
             let stream_control = config.stream_control.clone();
 
-            let child_rpc_system = if let (Some(erx), Some(ic), Some(sc)) =
+            let (child_rpc_system, bootstrap_cap) = if let (Some(erx), Some(ic), Some(sc)) =
                 (epoch_rx, content_store, stream_control)
             {
-                let (rpc, _guest) = membrane::build_membrane_rpc(
+                let (rpc, guest) = membrane::build_membrane_rpc(
                     reader,
                     writer,
                     network_state,
@@ -787,9 +883,12 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
                     signing_key,
                     sc,
                 );
-                rpc
+                (rpc, Some(guest.client))
             } else {
-                build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug)
+                (
+                    build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug),
+                    None,
+                )
             };
 
             tokio::task::spawn_local(async move {
@@ -831,8 +930,12 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
             let stderr =
                 capnp_rpc::new_client(ByteStreamImpl::new(dummy_stderr, StreamMode::ReadOnly));
 
-            let process_client: system_capnp::process::Client =
-                capnp_rpc::new_client(ProcessImpl::new(stdin, stdout, stderr, exit_rx));
+            let process_impl = if let Some(cap) = bootstrap_cap {
+                ProcessImpl::with_bootstrap(stdin, stdout, stderr, exit_rx, cap)
+            } else {
+                ProcessImpl::new(stdin, stdout, stderr, exit_rx)
+            };
+            let process_client: system_capnp::process::Client = capnp_rpc::new_client(process_impl);
             results.get().set_process(process_client);
 
             Ok(())
@@ -1100,5 +1203,1068 @@ mod tests {
 
         let snap = state2.snapshot().await;
         assert_eq!(snap.listen_addrs.len(), 1);
+    }
+
+    // =========================================================================
+    // schema_cid / schema_protocol tests
+    // =========================================================================
+
+    #[test]
+    fn test_schema_cid_deterministic() {
+        let schema = b"some canonical schema bytes with id 0xdeadbeef";
+        let cid1 = super::schema_cid(schema);
+        let cid2 = super::schema_cid(schema);
+        assert_eq!(cid1, cid2, "same schema bytes must produce same CID");
+    }
+
+    #[test]
+    fn test_schema_cid_different_for_different_schemas() {
+        let schema_a = b"\x00\x00\x00\x00\x00\x00\x00\x01interface A";
+        let schema_b = b"\x00\x00\x00\x00\x00\x00\x00\x02interface A";
+        let cid_a = super::schema_cid(schema_a);
+        let cid_b = super::schema_cid(schema_b);
+        assert_ne!(
+            cid_a, cid_b,
+            "different type IDs must produce different CIDs"
+        );
+    }
+
+    #[test]
+    fn test_schema_cid_is_valid_cid() {
+        let schema = b"test schema node bytes";
+        let cid_str = super::schema_cid(schema);
+        // Must parse back as a valid CID.
+        let parsed = cid_str.parse::<cid::Cid>();
+        assert!(parsed.is_ok(), "schema_cid must produce a valid CID string");
+        let cid = parsed.unwrap();
+        assert_eq!(cid.version(), cid::Version::V1);
+        assert_eq!(cid.codec(), 0x55); // raw codec
+    }
+
+    #[test]
+    fn test_schema_protocol_builds_valid_protocol() {
+        let schema = b"test schema";
+        let cid_str = super::schema_cid(schema);
+        let protocol = super::schema_protocol(&cid_str);
+        assert!(protocol.is_ok());
+        let proto = protocol.unwrap();
+        assert!(proto.as_ref().starts_with("/ww/0.1.0/"));
+        assert!(proto.as_ref().contains(&cid_str));
+    }
+
+    // =========================================================================
+    // Process.bootstrap() tests
+    // =========================================================================
+
+    /// Helper: create an in-memory RPC pair for a Process capability.
+    fn setup_process_rpc(process_impl: ProcessImpl) -> system_capnp::process::Client {
+        let (client_stream, server_stream) = io::duplex(8 * 1024);
+        let (client_read, client_write) = io::split(client_stream);
+        let (server_read, server_write) = io::split(server_stream);
+
+        let process_cap: system_capnp::process::Client = capnp_rpc::new_client(process_impl);
+
+        let server_network = VatNetwork::new(
+            server_read.compat(),
+            server_write.compat_write(),
+            Side::Server,
+            Default::default(),
+        );
+        let server_rpc = RpcSystem::new(Box::new(server_network), Some(process_cap.client));
+        tokio::task::spawn_local(async move {
+            let _ = server_rpc.await;
+        });
+
+        let client_network = VatNetwork::new(
+            client_read.compat(),
+            client_write.compat_write(),
+            Side::Client,
+            Default::default(),
+        );
+        let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
+        let client: system_capnp::process::Client = client_rpc.bootstrap(Side::Server);
+        tokio::task::spawn_local(async move {
+            let _ = client_rpc.await;
+        });
+
+        client
+    }
+
+    /// Helper: create a dummy ByteStream + exit channel for ProcessImpl.
+    fn dummy_process_parts() -> (
+        system_capnp::byte_stream::Client,
+        system_capnp::byte_stream::Client,
+        system_capnp::byte_stream::Client,
+        tokio::sync::oneshot::Receiver<i32>,
+    ) {
+        let (dummy_in, _) = io::duplex(1);
+        let (dummy_out, _) = io::duplex(1);
+        let (dummy_err, _) = io::duplex(1);
+        let stdin = capnp_rpc::new_client(ByteStreamImpl::new(dummy_in, StreamMode::WriteOnly));
+        let stdout = capnp_rpc::new_client(ByteStreamImpl::new(dummy_out, StreamMode::ReadOnly));
+        let stderr = capnp_rpc::new_client(ByteStreamImpl::new(dummy_err, StreamMode::ReadOnly));
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        (stdin, stdout, stderr, rx)
+    }
+
+    #[tokio::test]
+    async fn test_process_bootstrap_returns_stored_cap() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // Create a mock capability: use an Executor echo as the bootstrap cap.
+                let (host, _server, _rx) = setup_rpc();
+                let executor_cap = host.executor_request().send().pipeline.get_executor();
+
+                let (stdin, stdout, stderr, exit_rx) = dummy_process_parts();
+                let process_impl = ProcessImpl::with_bootstrap(
+                    stdin,
+                    stdout,
+                    stderr,
+                    exit_rx,
+                    executor_cap.client.clone(),
+                );
+                let process = setup_process_rpc(process_impl);
+
+                // Call bootstrap() — should return the stored cap.
+                let resp = process.bootstrap_request().send().promise.await.unwrap();
+                let cap = resp.get().unwrap().get_cap();
+
+                // Cast it back to an Executor and verify it works.
+                let executor: system_capnp::executor::Client = cap.get_as_capability().unwrap();
+                let mut echo_req = executor.echo_request();
+                echo_req.get().set_message("via bootstrap");
+                let echo_resp = echo_req.send().promise.await.unwrap();
+                let text = echo_resp
+                    .get()
+                    .unwrap()
+                    .get_response()
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                assert_eq!(text, "Echo: via bootstrap");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_process_bootstrap_errors_without_cap() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (stdin, stdout, stderr, exit_rx) = dummy_process_parts();
+                let process_impl = ProcessImpl::new(stdin, stdout, stderr, exit_rx);
+                let process = setup_process_rpc(process_impl);
+
+                // Call bootstrap() without a stored cap — should error.
+                let result = process.bootstrap_request().send().promise.await;
+                assert!(
+                    result.is_err() || {
+                        let resp = result.unwrap();
+                        // The error may come from get_cap() trying to read a missing cap,
+                        // or from the server returning an error in the response.
+                        resp.get().is_err()
+                    }
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_process_bootstrap_cap_survives_multiple_calls() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+                let executor_cap = host.executor_request().send().pipeline.get_executor();
+
+                let (stdin, stdout, stderr, exit_rx) = dummy_process_parts();
+                let process_impl = ProcessImpl::with_bootstrap(
+                    stdin,
+                    stdout,
+                    stderr,
+                    exit_rx,
+                    executor_cap.client.clone(),
+                );
+                let process = setup_process_rpc(process_impl);
+
+                // Call bootstrap() twice — both should return working caps.
+                for i in 0..2 {
+                    let resp = process.bootstrap_request().send().promise.await.unwrap();
+                    let cap = resp.get().unwrap().get_cap();
+                    let executor: system_capnp::executor::Client = cap.get_as_capability().unwrap();
+                    let mut req = executor.echo_request();
+                    req.get().set_message(format!("call-{i}"));
+                    let echo_resp = req.send().promise.await.unwrap();
+                    let text = echo_resp
+                        .get()
+                        .unwrap()
+                        .get_response()
+                        .unwrap()
+                        .to_str()
+                        .unwrap();
+                    assert_eq!(text, format!("Echo: call-{i}"));
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_cap_resolves_after_delay() {
+        // Simulate the real scenario: build_membrane_rpc returns a pipelined
+        // bootstrap cap immediately, but the cell hasn't called serve() yet.
+        // Cap'n Proto promise pipelining should queue requests and resolve them
+        // once the underlying cap becomes available.
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+
+                // Create a "delayed" executor cap using new_future_client.
+                // This simulates a pipelined cap that resolves after 200ms.
+                let host_clone = host.clone();
+                let delayed_executor: system_capnp::executor::Client =
+                    capnp_rpc::new_future_client(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        let resp = host_clone.executor_request().send().promise.await?;
+                        Ok(resp.get()?.get_executor()?)
+                    });
+
+                // Store the delayed cap in ProcessImpl.
+                let (stdin, stdout, stderr, exit_rx) = dummy_process_parts();
+                let process_impl = ProcessImpl::with_bootstrap(
+                    stdin,
+                    stdout,
+                    stderr,
+                    exit_rx,
+                    delayed_executor.client.clone(),
+                );
+                let process = setup_process_rpc(process_impl);
+
+                // Call bootstrap() immediately — the cap hasn't resolved yet.
+                let resp = process.bootstrap_request().send().promise.await.unwrap();
+                let cap = resp.get().unwrap().get_cap();
+                let executor: system_capnp::executor::Client = cap.get_as_capability().unwrap();
+
+                // Use the cap — should block until the delayed future resolves.
+                let mut echo_req = executor.echo_request();
+                echo_req.get().set_message("delayed bootstrap");
+                let echo_resp = echo_req.send().promise.await.unwrap();
+                let text = echo_resp
+                    .get()
+                    .unwrap()
+                    .get_response()
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                assert_eq!(text, "Echo: delayed bootstrap");
+            })
+            .await;
+    }
+
+    // =========================================================================
+    // Host.network() tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_host_network_errors_without_epoch() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // setup_rpc() creates a non-epoch-scoped Host (no guard, no stream_control).
+                let (host, _server, _rx) = setup_rpc();
+
+                let result = host.network_request().send().promise.await;
+                assert!(
+                    result.is_err(),
+                    "network() should fail on non-epoch-scoped Host"
+                );
+            })
+            .await;
+    }
+
+    // =========================================================================
+    // Process.wait() tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_process_wait_returns_exit_code() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (stdin, stdout, stderr, _) = dummy_process_parts();
+                // Create our own channel so we control the sender.
+                let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+                let process_impl = ProcessImpl::new(stdin, stdout, stderr, exit_rx);
+                let process = setup_process_rpc(process_impl);
+
+                // Send exit code from the "cell" side.
+                exit_tx.send(42).unwrap();
+
+                let resp = process.wait_request().send().promise.await.unwrap();
+                let exit_code = resp.get().unwrap().get_exit_code();
+                assert_eq!(exit_code, 42);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_process_wait_double_call_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (stdin, stdout, stderr, _) = dummy_process_parts();
+                let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+                let process_impl = ProcessImpl::new(stdin, stdout, stderr, exit_rx);
+                let process = setup_process_rpc(process_impl);
+
+                exit_tx.send(0).unwrap();
+
+                // First call succeeds.
+                let resp = process.wait_request().send().promise.await.unwrap();
+                assert_eq!(resp.get().unwrap().get_exit_code(), 0);
+
+                // Second call should error (receiver already consumed).
+                let result = process.wait_request().send().promise.await;
+                assert!(result.is_err(), "wait() called twice should fail");
+            })
+            .await;
+    }
+
+    // =========================================================================
+    // RPC bridge integration tests
+    // =========================================================================
+    //
+    // These test the full capability bridge pattern used by VatListener/VatClient
+    // without requiring libp2p or WASM. We simulate the bridge with duplex streams:
+    //
+    //   Cell (Executor echo)
+    //       ↓ bootstrap cap
+    //   Process.bootstrap()
+    //       ↓ cap over duplex
+    //   Host bridge (Side::Server, bootstrap = cell_cap)
+    //       ↓ duplex stream
+    //   Remote peer (Side::Client, bootstraps → gets cell_cap)
+    //       ↓
+    //   Uses the cap (echo request)
+
+    /// Simulate the host bridge: serve a bootstrap cap over a duplex stream,
+    /// return the "remote peer" side client that bootstrapped from it.
+    fn setup_bridge<T: capnp::capability::FromClientHook>(
+        bootstrap_cap: capnp::capability::Client,
+    ) -> (T, tokio::task::JoinHandle<()>) {
+        let (peer_stream, bridge_stream) = io::duplex(8 * 1024);
+        let (bridge_read, bridge_write) = io::split(bridge_stream);
+        let (peer_read, peer_write) = io::split(peer_stream);
+
+        // Host bridge side: serve the cell's cap.
+        let bridge_network = VatNetwork::new(
+            bridge_read.compat(),
+            bridge_write.compat_write(),
+            Side::Server,
+            Default::default(),
+        );
+        let bridge_rpc = RpcSystem::new(Box::new(bridge_network), Some(bootstrap_cap));
+        let bridge_handle = tokio::task::spawn_local(async move {
+            let _ = bridge_rpc.await;
+        });
+
+        // Remote peer side: bootstrap to get the cell's cap.
+        let peer_network = VatNetwork::new(
+            peer_read.compat(),
+            peer_write.compat_write(),
+            Side::Client,
+            Default::default(),
+        );
+        let mut peer_rpc = RpcSystem::new(Box::new(peer_network), None);
+        let remote_cap: T = peer_rpc.bootstrap(Side::Server);
+        tokio::task::spawn_local(async move {
+            let _ = peer_rpc.await;
+        });
+
+        (remote_cap, bridge_handle)
+    }
+
+    #[tokio::test]
+    async fn test_rpc_bridge_cap_flows_to_remote_peer() {
+        // The golden path: cell exports a cap → Process.bootstrap() →
+        // host serves it over a stream → remote peer bootstraps and uses it.
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // 1. Create a real Executor (the "cell's exported cap").
+                let (host, _server, _rx) = setup_rpc();
+                let executor_cap = host.executor_request().send().pipeline.get_executor();
+
+                // 2. Store it in a ProcessImpl (simulates build_membrane_rpc capture).
+                let (stdin, stdout, stderr, exit_rx) = dummy_process_parts();
+                let process_impl = ProcessImpl::with_bootstrap(
+                    stdin,
+                    stdout,
+                    stderr,
+                    exit_rx,
+                    executor_cap.client.clone(),
+                );
+                let process = setup_process_rpc(process_impl);
+
+                // 3. Call Process.bootstrap() to get the cap (what handle_rpc_connection does).
+                let resp = process.bootstrap_request().send().promise.await.unwrap();
+                let bootstrap_cap: capnp::capability::Client =
+                    resp.get().unwrap().get_cap().get_as_capability().unwrap();
+
+                // 4. Bridge: serve it over a duplex (simulates the libp2p stream bridge).
+                let (remote_executor, _bridge): (system_capnp::executor::Client, _) =
+                    setup_bridge(bootstrap_cap);
+
+                // 5. Remote peer uses the cap through the bridge.
+                let mut echo_req = remote_executor.echo_request();
+                echo_req.get().set_message("hello from remote peer");
+                let echo_resp = echo_req.send().promise.await.unwrap();
+                let text = echo_resp
+                    .get()
+                    .unwrap()
+                    .get_response()
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                assert_eq!(text, "Echo: hello from remote peer");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_bridge_multiple_calls_through_bridge() {
+        // Verify the bridge handles multiple sequential RPC calls, not just one.
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+                let executor_cap = host.executor_request().send().pipeline.get_executor();
+
+                let (stdin, stdout, stderr, exit_rx) = dummy_process_parts();
+                let process_impl = ProcessImpl::with_bootstrap(
+                    stdin,
+                    stdout,
+                    stderr,
+                    exit_rx,
+                    executor_cap.client.clone(),
+                );
+                let process = setup_process_rpc(process_impl);
+
+                let resp = process.bootstrap_request().send().promise.await.unwrap();
+                let bootstrap_cap: capnp::capability::Client =
+                    resp.get().unwrap().get_cap().get_as_capability().unwrap();
+
+                let (remote_executor, _bridge): (system_capnp::executor::Client, _) =
+                    setup_bridge(bootstrap_cap);
+
+                // Make 5 calls through the bridge.
+                for i in 0..5 {
+                    let mut req = remote_executor.echo_request();
+                    req.get().set_message(format!("msg-{i}"));
+                    let resp = req.send().promise.await.unwrap();
+                    let text = resp
+                        .get()
+                        .unwrap()
+                        .get_response()
+                        .unwrap()
+                        .to_str()
+                        .unwrap();
+                    assert_eq!(text, format!("Echo: msg-{i}"));
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_bridge_concurrent_calls() {
+        // Verify pipelined (concurrent) calls work through the bridge.
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+                let executor_cap = host.executor_request().send().pipeline.get_executor();
+
+                let (stdin, stdout, stderr, exit_rx) = dummy_process_parts();
+                let process_impl = ProcessImpl::with_bootstrap(
+                    stdin,
+                    stdout,
+                    stderr,
+                    exit_rx,
+                    executor_cap.client.clone(),
+                );
+                let process = setup_process_rpc(process_impl);
+
+                let resp = process.bootstrap_request().send().promise.await.unwrap();
+                let bootstrap_cap: capnp::capability::Client =
+                    resp.get().unwrap().get_cap().get_as_capability().unwrap();
+
+                let (remote_executor, _bridge): (system_capnp::executor::Client, _) =
+                    setup_bridge(bootstrap_cap);
+
+                // Fire 5 calls concurrently (pipelined), then collect results.
+                let mut futures = Vec::new();
+                for i in 0..5 {
+                    let mut req = remote_executor.echo_request();
+                    req.get().set_message(format!("concurrent-{i}"));
+                    futures.push(req.send().promise);
+                }
+
+                for (i, fut) in futures.into_iter().enumerate() {
+                    let resp = fut.await.unwrap();
+                    let text = resp
+                        .get()
+                        .unwrap()
+                        .get_response()
+                        .unwrap()
+                        .to_str()
+                        .unwrap();
+                    assert_eq!(text, format!("Echo: concurrent-{i}"));
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_bridge_distinct_caps_stay_independent() {
+        // Two separate bridges with different bootstrap caps don't interfere.
+        // This validates that the bridge correctly isolates per-connection state.
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (host, _server, _rx) = setup_rpc();
+                let executor_cap = host.executor_request().send().pipeline.get_executor();
+
+                // Create two independent process+bridge chains.
+                let mut remote_executors = Vec::new();
+                for _ in 0..2 {
+                    let (stdin, stdout, stderr, exit_rx) = dummy_process_parts();
+                    let process_impl = ProcessImpl::with_bootstrap(
+                        stdin,
+                        stdout,
+                        stderr,
+                        exit_rx,
+                        executor_cap.client.clone(),
+                    );
+                    let process = setup_process_rpc(process_impl);
+
+                    let resp = process.bootstrap_request().send().promise.await.unwrap();
+                    let cap: capnp::capability::Client =
+                        resp.get().unwrap().get_cap().get_as_capability().unwrap();
+
+                    let (remote, _bridge): (system_capnp::executor::Client, _) = setup_bridge(cap);
+                    remote_executors.push(remote);
+                }
+
+                // Both bridges work independently.
+                for (i, remote) in remote_executors.iter().enumerate() {
+                    let mut req = remote.echo_request();
+                    req.get().set_message(format!("bridge-{i}"));
+                    let resp = req.send().promise.await.unwrap();
+                    let text = resp
+                        .get()
+                        .unwrap()
+                        .get_response()
+                        .unwrap()
+                        .to_str()
+                        .unwrap();
+                    assert_eq!(text, format!("Echo: bridge-{i}"));
+                }
+            })
+            .await;
+    }
+
+    // =========================================================================
+    // VatListener / VatClient validation tests
+    // =========================================================================
+
+    /// Helper: create an EpochGuard and its sender for test manipulation.
+    fn test_epoch_guard(seq: u64) -> (tokio::sync::watch::Sender<::membrane::Epoch>, EpochGuard) {
+        let epoch = ::membrane::Epoch {
+            seq,
+            head: vec![],
+            adopted_block: 0,
+        };
+        let (tx, rx) = tokio::sync::watch::channel(epoch);
+        let guard = EpochGuard {
+            issued_seq: seq,
+            receiver: rx,
+        };
+        (tx, guard)
+    }
+
+    /// Helper: create a dummy stream_control for validation tests.
+    /// The control won't be used for actual I/O in these tests.
+    fn dummy_stream_control() -> libp2p_stream::Control {
+        libp2p_stream::Behaviour::new().new_control()
+    }
+
+    /// Build a minimal WASM component with an optional custom section.
+    /// Returns bytes that wasmparser can parse (valid WASM component header).
+    fn wasm_with_custom_section(section_name: &str, data: &[u8]) -> Vec<u8> {
+        use wasm_encoder::ComponentSection;
+        // Minimal WASM component: magic + version + layer
+        let mut bytes = vec![
+            0x00, 0x61, 0x73, 0x6d, // \0asm
+            0x0d, 0x00, 0x01, 0x00, // component version (13.0)
+        ];
+        let custom = wasm_encoder::CustomSection {
+            name: std::borrow::Cow::Borrowed(section_name),
+            data: std::borrow::Cow::Borrowed(data),
+        };
+        custom.append_to_component(&mut bytes);
+        bytes
+    }
+
+    /// Build a minimal WASM component with NO custom sections.
+    fn wasm_without_custom_section() -> Vec<u8> {
+        vec![
+            0x00, 0x61, 0x73, 0x6d, // \0asm
+            0x0d, 0x00, 0x01, 0x00, // component version (13.0)
+        ]
+    }
+
+    #[tokio::test]
+    async fn test_vat_listener_missing_schema_section_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let listener_impl =
+                    vat_listener::VatListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::vat_listener::Client =
+                    capnp_rpc::new_client(listener_impl);
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                // Cell WASM without schema.capnp section
+                let cell = wasm_without_custom_section();
+
+                let mut req = listener.listen_request();
+                req.get().set_executor(executor);
+                req.get().set_wasm(&cell);
+
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "missing schema section should error");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_vat_listener_empty_schema_section_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let listener_impl =
+                    vat_listener::VatListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::vat_listener::Client =
+                    capnp_rpc::new_client(listener_impl);
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                // Cell WASM with empty schema.capnp section
+                let cell = wasm_with_custom_section("schema.capnp", &[]);
+
+                let mut req = listener.listen_request();
+                req.get().set_executor(executor);
+                req.get().set_wasm(&cell);
+
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "empty schema section should error");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_vat_client_empty_schema_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let dialer_impl = vat_client::VatClientImpl::new(dummy_stream_control(), guard);
+                let dialer: system_capnp::vat_client::Client = capnp_rpc::new_client(dialer_impl);
+
+                let mut req = dialer.dial_request();
+                // Valid peer ID (Ed25519 public key)
+                let keypair = libp2p::identity::Keypair::generate_ed25519();
+                let peer_id = libp2p::PeerId::from_public_key(&keypair.public());
+                req.get().set_peer(&peer_id.to_bytes());
+                req.get().set_schema(&[]); // empty schema
+
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "empty schema should error");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_vat_client_invalid_peer_id_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let dialer_impl = vat_client::VatClientImpl::new(dummy_stream_control(), guard);
+                let dialer: system_capnp::vat_client::Client = capnp_rpc::new_client(dialer_impl);
+
+                let mut req = dialer.dial_request();
+                req.get().set_peer(&[0xFF, 0xFF, 0xFF]); // garbage peer ID
+                req.get().set_schema(b"valid schema bytes");
+
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "invalid peer ID should error");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_vat_listener_stale_epoch_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (tx, guard) = test_epoch_guard(1);
+                let listener_impl =
+                    vat_listener::VatListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::vat_listener::Client =
+                    capnp_rpc::new_client(listener_impl);
+
+                // Advance epoch to make guard stale.
+                tx.send(::membrane::Epoch {
+                    seq: 2,
+                    head: vec![],
+                    adopted_block: 0,
+                })
+                .unwrap();
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                let cell = wasm_with_custom_section("schema.capnp", b"some schema");
+                let mut req = listener.listen_request();
+                req.get().set_executor(executor);
+                req.get().set_wasm(&cell);
+
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "stale epoch should error");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_vat_client_stale_epoch_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (tx, guard) = test_epoch_guard(1);
+                let dialer_impl = vat_client::VatClientImpl::new(dummy_stream_control(), guard);
+                let dialer: system_capnp::vat_client::Client = capnp_rpc::new_client(dialer_impl);
+
+                // Advance epoch to make guard stale.
+                tx.send(::membrane::Epoch {
+                    seq: 2,
+                    head: vec![],
+                    adopted_block: 0,
+                })
+                .unwrap();
+
+                let keypair = libp2p::identity::Keypair::generate_ed25519();
+                let peer_id = libp2p::PeerId::from_public_key(&keypair.public());
+
+                let mut req = dialer.dial_request();
+                req.get().set_peer(&peer_id.to_bytes());
+                req.get().set_schema(b"some schema");
+
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "stale epoch should error");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_vat_listener_protocol_collision_errors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                // Share the same Behaviour so both listeners see the same protocol registry.
+                let behaviour = libp2p_stream::Behaviour::new();
+                let control1 = behaviour.new_control();
+                let control2 = behaviour.new_control();
+
+                let listener1 = vat_listener::VatListenerImpl::new(control1, guard.clone());
+                let client1: system_capnp::vat_listener::Client = capnp_rpc::new_client(listener1);
+
+                let listener2 = vat_listener::VatListenerImpl::new(control2, guard);
+                let client2: system_capnp::vat_listener::Client = capnp_rpc::new_client(listener2);
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                let schema = b"same schema bytes";
+                // Both cells have the same schema section → same protocol CID.
+                let cell = wasm_with_custom_section("schema.capnp", schema);
+
+                // First registration should succeed.
+                let mut req1 = client1.listen_request();
+                req1.get().set_executor(executor.clone());
+                req1.get().set_wasm(&cell);
+                req1.send()
+                    .promise
+                    .await
+                    .expect("first listen should succeed");
+
+                // Second registration with same schema should fail (same protocol CID).
+                let mut req2 = client2.listen_request();
+                req2.get().set_executor(executor);
+                req2.get().set_wasm(&cell);
+                let result = req2.send().promise.await;
+                assert!(
+                    result.is_err(),
+                    "duplicate protocol registration should error"
+                );
+            })
+            .await;
+    }
+
+    #[test]
+    fn test_schema_cid_matches_schema_id_compute_cid() {
+        // Verify the runtime schema_cid() in mod.rs produces the same CID
+        // as the build-time compute_cid() in the schema-id crate.
+        let test_inputs: &[&[u8]] = &[b"test schema bytes", b"\x00\x01\x02\x03", b"", &[0xff; 256]];
+        for input in test_inputs {
+            let runtime_cid = super::schema_cid(input);
+            let buildtime_cid = schema_id::compute_cid(input);
+            assert_eq!(
+                runtime_cid,
+                buildtime_cid,
+                "CID mismatch for input of length {}",
+                input.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_wasm_custom_section_found() {
+        let data = b"canonical schema bytes";
+        let wasm = wasm_with_custom_section("schema.capnp", data);
+        let result = super::extract_wasm_custom_section(&wasm, "schema.capnp").unwrap();
+        assert_eq!(result, Some(data.as_slice()));
+    }
+
+    #[test]
+    fn test_extract_wasm_custom_section_not_found() {
+        let wasm = wasm_without_custom_section();
+        let result = super::extract_wasm_custom_section(&wasm, "schema.capnp").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_wasm_custom_section_wrong_name() {
+        let wasm = wasm_with_custom_section("other.section", b"data");
+        let result = super::extract_wasm_custom_section(&wasm, "schema.capnp").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_wasm_custom_section_invalid_wasm() {
+        let result = super::extract_wasm_custom_section(b"not wasm", "schema.capnp");
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Integration: inject → extract → CID round-trip
+    // =========================================================================
+
+    /// The critical integration test: schema bytes injected at build time
+    /// via `schema_id::inject_custom_section` must be recoverable at runtime
+    /// via `extract_wasm_custom_section`, and the CID derived from the
+    /// extracted bytes must match the build-time CID.
+    ///
+    /// If this test fails, peers built from the same schema will compute
+    /// different protocol CIDs and silently fail to discover each other.
+    #[test]
+    fn test_inject_extract_cid_round_trip() {
+        let schema_bytes = b"canonical ChessEngine schema.Node bytes";
+
+        // Build time: inject into a minimal WASM component.
+        let base_wasm = wasm_without_custom_section();
+        let injected = schema_id::inject_custom_section(&base_wasm, "schema.capnp", schema_bytes);
+
+        // Runtime: extract the section back out.
+        let extracted = super::extract_wasm_custom_section(&injected, "schema.capnp")
+            .expect("extraction should succeed")
+            .expect("section should be present");
+
+        // Bytes must be identical.
+        assert_eq!(
+            extracted, schema_bytes,
+            "extracted bytes don't match injected bytes"
+        );
+
+        // CID derived at runtime must match build-time CID.
+        let runtime_cid = super::schema_cid(extracted);
+        let buildtime_cid = schema_id::compute_cid(schema_bytes);
+        assert_eq!(
+            runtime_cid, buildtime_cid,
+            "CID mismatch between inject and extract paths"
+        );
+    }
+
+    /// Verify that injecting a section preserves existing custom sections.
+    /// The original section must survive alongside the newly injected one.
+    #[test]
+    fn test_inject_preserves_wasm_validity() {
+        let base_wasm = wasm_with_custom_section("other.section", b"existing data");
+        let injected = schema_id::inject_custom_section(&base_wasm, "schema.capnp", b"schema");
+
+        // Both sections should be extractable.
+        let other = super::extract_wasm_custom_section(&injected, "other.section")
+            .expect("parse should succeed")
+            .expect("other.section should survive injection");
+        assert_eq!(other, b"existing data");
+
+        let schema = super::extract_wasm_custom_section(&injected, "schema.capnp")
+            .expect("parse should succeed")
+            .expect("schema.capnp should be present");
+        assert_eq!(schema, b"schema");
+    }
+
+    /// End-to-end: build a WASM with an embedded schema section, hand it to
+    /// a VatListener, and verify it successfully registers a protocol.
+    /// This tests the full path from injection through to protocol registration.
+    #[tokio::test]
+    async fn test_vat_listener_accepts_wasm_with_schema_section() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let listener_impl =
+                    vat_listener::VatListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::vat_listener::Client =
+                    capnp_rpc::new_client(listener_impl);
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                // Build a WASM with a valid schema section via the inject path.
+                let cell = schema_id::inject_custom_section(
+                    &wasm_without_custom_section(),
+                    "schema.capnp",
+                    b"valid schema bytes for ChessEngine",
+                );
+
+                let mut req = listener.listen_request();
+                req.get().set_executor(executor);
+                req.get().set_wasm(&cell);
+
+                let result = req.send().promise.await;
+                assert!(
+                    result.is_ok(),
+                    "WASM with valid schema section should be accepted: {:?}",
+                    result.err()
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_bridge_dead_cell_returns_error() {
+        // When the cell's RPC system dies (process exits), the cap served
+        // through the bridge should break. We simulate this by creating a
+        // cell-side RPC system we directly control, then abort() it.
+        //
+        // Topology:
+        //   cell RPC (Side::Server, serves executor)
+        //       ↓ bootstrap
+        //   cell_cap (client ref to executor)
+        //       ↓ bridged over
+        //   bridge RPC (Side::Server, bootstrap = cell_cap)
+        //       ↓ bootstrap
+        //   remote_executor (remote peer's view)
+        //
+        // We abort the cell RPC task, which drops the RPC system,
+        // closes the duplex half, and disconnects the executor cap.
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // Create a real executor to serve as the cell's exported cap.
+                let (host, _server, _rx) = setup_rpc();
+                let executor_cap = host.executor_request().send().pipeline.get_executor();
+
+                // Set up a cell-side RPC system we control.
+                let (cell_stream, host_stream) = io::duplex(8 * 1024);
+                let (h_read, h_write) = io::split(cell_stream);
+                let (c_read, c_write) = io::split(host_stream);
+
+                let cell_network = VatNetwork::new(
+                    h_read.compat(),
+                    h_write.compat_write(),
+                    Side::Server,
+                    Default::default(),
+                );
+                let cell_rpc = RpcSystem::new(Box::new(cell_network), Some(executor_cap.client));
+                let cell_task = tokio::task::spawn_local(async move {
+                    let _ = cell_rpc.await;
+                });
+
+                let client_network = VatNetwork::new(
+                    c_read.compat(),
+                    c_write.compat_write(),
+                    Side::Client,
+                    Default::default(),
+                );
+                let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
+                let cell_cap: system_capnp::executor::Client = client_rpc.bootstrap(Side::Server);
+                let cell_cap = cell_cap.client;
+                tokio::task::spawn_local(async move {
+                    let _ = client_rpc.await;
+                });
+
+                // Bridge the cell cap to a remote peer.
+                let (remote_executor, _bridge): (system_capnp::executor::Client, _) =
+                    setup_bridge(cell_cap);
+
+                // Verify it works while alive.
+                let mut req = remote_executor.echo_request();
+                req.get().set_message("alive");
+                let resp = req.send().promise.await.unwrap();
+                assert_eq!(
+                    resp.get()
+                        .unwrap()
+                        .get_response()
+                        .unwrap()
+                        .to_str()
+                        .unwrap(),
+                    "Echo: alive"
+                );
+
+                // Kill the cell's RPC system.
+                cell_task.abort();
+                // Let the runtime propagate the disconnection.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+                // Call through the bridge should now fail.
+                let mut req = remote_executor.echo_request();
+                req.get().set_message("should fail");
+                let result =
+                    tokio::time::timeout(std::time::Duration::from_millis(500), req.send().promise)
+                        .await;
+
+                // Either the inner call errors (disconnected) or the timeout fires
+                // (cap is dead but stream hasn't noticed yet). Both prove the cell
+                // death propagated — a live cap would return Ok instantly.
+                let is_dead = match result {
+                    Err(_) => true,     // timeout — stream stalled
+                    Ok(Err(_)) => true, // RPC error — disconnected
+                    Ok(Ok(resp)) => {
+                        // If somehow a response came back, it should be an error.
+                        resp.get().is_err()
+                    }
+                };
+                assert!(is_dead, "call through bridge should fail after cell dies");
+            })
+            .await;
     }
 }

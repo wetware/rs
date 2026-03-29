@@ -5,14 +5,15 @@ members = [
     "crates/glia",
     "crates/cache",
     "crates/membrane",
+    "crates/schema-id",
     "crates/guest/auth",
     "std/system",
-    # "crates/kernel",  # TODO: re-enable when kernel crate is created
+    "crates/kernel",
     "std/shell",
     "examples/chess",
 ]
 exclude = [
-    "examples/echo-handler",  # WASI guest — targets wasm32-wasip2, not host
+    "examples/echo-cell",  # WASI guest — targets wasm32-wasip2, not host
 ]
 
 [package]
@@ -70,10 +71,15 @@ sha2 = "0.10"
 sha3 = "0.10"
 dirs = "5"
 cap-std = "3.4"
+wasmparser = "0.243"
 
 [[bin]]
 name = "ww"
 path = "src/cli/main.rs"
+
+[dev-dependencies]
+schema-id = { path = "crates/schema-id", features = ["inject"] }
+wasm-encoder = "0.243"
 
 [build-dependencies]
 capnpc = "0.23.3"
