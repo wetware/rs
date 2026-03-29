@@ -2,28 +2,38 @@
 
 ## Design decisions
 
-### One key, two roles
+### Ed25519 node keys (planned migration)
 
-wetware uses a single **secp256k1** keypair as the node's unified identity.
-The same 32-byte private key serves:
+wetware currently uses **secp256k1** for node identity but is migrating to
+**Ed25519**. The decision separates two concerns that were previously conflated:
 
-1. **libp2p Peer ID** — the `PeerId` derived from the secp256k1 public key
-   identifies the node on the p2p network.
-2. **EVM / Monad address** — the standard Ethereum address (Keccak256 of the
-   uncompressed public key, last 20 bytes) is used for on-chain operations
-   against the Stem contract and for Terminal challenge-response signing.
+1. **Node identity (Ed25519)** — the `PeerId` derived from the Ed25519 public
+   key identifies the node on the p2p network and is used for Terminal
+   challenge-response signing. Ed25519 is libp2p's default and best-supported
+   key type: simpler (32-byte seed, 32-byte pubkey, no compressed/uncompressed
+   distinction), and the ecosystem default.
 
-This was a deliberate choice against maintaining two separate keys (ed25519 for
-p2p, secp256k1 for EVM). One key means:
+2. **Operator identity (secp256k1)** — the Stem contract owner key. This is
+   the one key that calls `setHead()` to advance the on-chain epoch. It is
+   an operator concern, not a node concern. Nodes are chain readers (they
+   watch HeadUpdated events via the AtomIndexer); they never transact.
 
-- **Single source of truth** — your Ethereum address *is* your node identity.
-- **Simpler key management** — one file to back up, one file to lose.
-- **EVM-native** — secp256k1 is what Monad (and all EVM chains) understand
-  natively; ed25519 would require cross-curve bridging.
+**Why the split:** The original "one key, two roles" design gave every node
+an EVM address it never used. Nodes don't transact on-chain. Only the cluster
+operator does. Tying node identity to secp256k1 for a speculative future use
+case (agentic wallets, on-chain metering) is premature. If nodes ever need
+on-chain identity, the binding can be solved separately via a registry
+contract, signed attestation, or ERC-4337 Account Abstraction with Ed25519
+verification.
 
-The performance difference between ed25519 and secp256k1 for libp2p handshakes
-is negligible compared to network I/O. libp2p 0.55 supports secp256k1 natively
-via the `secp256k1` feature flag.
+**Migration scope:**
+- `src/keys.rs`: replace `k256::ecdsa::SigningKey` with `ed25519_dalek::SigningKey`
+- `src/host.rs`: swap libp2p `secp256k1` feature for `ed25519`
+- `crates/membrane/src/terminal.rs`: SignedEnvelope already supports Ed25519
+- `crates/guest/auth/src/lib.rs`: signing domain logic is algorithm-agnostic
+- Drop `k256`, `sha3` dependencies; add `ed25519-dalek`
+- Remove `ethereum_address()` from node key module
+- `Cargo.toml`: swap libp2p features `secp256k1` -> `ed25519`
 
 ### Key storage
 
