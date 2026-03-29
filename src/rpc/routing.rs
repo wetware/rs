@@ -28,6 +28,108 @@ fn cid_to_kad_key(cid_str: &str) -> Result<Vec<u8>, capnp::Error> {
     Ok(cid.hash().to_bytes())
 }
 
+/// In-memory routing table for deterministic integration tests.
+///
+/// No DHT, no swarm, no epoch guard — just a `HashMap<String, Vec<PeerInfo>>`.
+/// Multiple nodes can share the same `LocalRouting` (via `Arc<Mutex<…>>`) to
+/// simulate provide/findProviders without network non-determinism.
+pub struct LocalRouting {
+    providers: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<crate::rpc::PeerInfo>>>,
+    >,
+}
+
+impl Default for LocalRouting {
+    fn default() -> Self {
+        Self {
+            providers: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+}
+
+impl LocalRouting {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a second handle to the same provider table.
+    pub fn clone_table(&self) -> Self {
+        Self {
+            providers: self.providers.clone(),
+        }
+    }
+
+    /// Pre-seed a provider entry so `findProviders` returns it.
+    pub fn provide_as(&self, cid: &str, peer: crate::rpc::PeerInfo) {
+        let mut table = self.providers.lock().unwrap();
+        table.entry(cid.to_string()).or_default().push(peer);
+    }
+}
+
+#[allow(refining_impl_trait)]
+impl routing_capnp::routing::Server for LocalRouting {
+    fn provide(
+        self: capnp::capability::Rc<Self>,
+        params: routing_capnp::routing::ProvideParams,
+        _results: routing_capnp::routing::ProvideResults,
+    ) -> Promise<(), capnp::Error> {
+        let key_str = pry!(pry!(params.get()).get_key())
+            .to_string()
+            .unwrap_or_default();
+        let _: Cid = pry!(key_str
+            .parse()
+            .map_err(|e| capnp::Error::failed(format!("invalid CID '{key_str}': {e}"))));
+
+        let mut table = self.providers.lock().unwrap();
+        table.entry(key_str).or_default();
+        Promise::ok(())
+    }
+
+    fn find_providers(
+        self: capnp::capability::Rc<Self>,
+        params: routing_capnp::routing::FindProvidersParams,
+        _results: routing_capnp::routing::FindProvidersResults,
+    ) -> Promise<(), capnp::Error> {
+        let reader = pry!(params.get());
+        let key_str = pry!(reader.get_key()).to_string().unwrap_or_default();
+        let sink = pry!(reader.get_sink());
+
+        let providers = {
+            let table = self.providers.lock().unwrap();
+            table.get(&key_str).cloned().unwrap_or_default()
+        };
+
+        Promise::from_future(async move {
+            for peer_info in &providers {
+                let mut req = sink.provider_request();
+                let mut info = req.get().get_info()?;
+                info.set_peer_id(&peer_info.peer_id);
+                let mut addr_list = info.init_addrs(peer_info.addrs.len() as u32);
+                for (j, addr) in peer_info.addrs.iter().enumerate() {
+                    addr_list.set(j as u32, addr);
+                }
+                req.send().await?;
+            }
+            sink.done_request().send().promise.await?;
+            Ok(())
+        })
+    }
+
+    fn hash(
+        self: capnp::capability::Rc<Self>,
+        params: routing_capnp::routing::HashParams,
+        mut results: routing_capnp::routing::HashResults,
+    ) -> Promise<(), capnp::Error> {
+        let data = pry!(pry!(params.get()).get_data());
+        let digest = Sha256::digest(data);
+        let mh = pry!(cid::multihash::Multihash::<64>::wrap(0x12, &digest)
+            .map_err(|e| capnp::Error::failed(format!("multihash wrap: {e}"))));
+        let c = Cid::new_v1(0x55, mh);
+        results.get().set_key(c.to_string());
+        Promise::ok(())
+    }
+}
+
 /// Routing capability served to guests via the Membrane graft.
 pub struct RoutingImpl {
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
@@ -520,6 +622,179 @@ mod tests {
                     2,
                     "second provider should have 2 addrs"
                 );
+            })
+            .await;
+    }
+
+    // -------------------------------------------------------------------
+    // LocalRouting tests — deterministic, no swarm
+    // -------------------------------------------------------------------
+
+    /// Bootstrap a LocalRouting client over in-memory duplex.
+    fn setup_local_routing(local: &LocalRouting) -> routing_capnp::routing::Client {
+        let (client_stream, server_stream) = io::duplex(64 * 1024);
+        let (client_read, client_write) = io::split(client_stream);
+        let (server_read, server_write) = io::split(server_stream);
+
+        let routing_server: routing_capnp::routing::Client =
+            capnp_rpc::new_client(local.clone_table());
+
+        let server_network = VatNetwork::new(
+            server_read.compat(),
+            server_write.compat_write(),
+            Side::Server,
+            Default::default(),
+        );
+        let server_rpc = RpcSystem::new(Box::new(server_network), Some(routing_server.client));
+        tokio::task::spawn_local(async move {
+            let _ = server_rpc.await;
+        });
+
+        let client_network = VatNetwork::new(
+            client_read.compat(),
+            client_write.compat_write(),
+            Side::Client,
+            Default::default(),
+        );
+        let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
+        let client: routing_capnp::routing::Client = client_rpc.bootstrap(Side::Server);
+        tokio::task::spawn_local(async move {
+            let _ = client_rpc.await;
+        });
+
+        client
+    }
+
+    #[tokio::test]
+    async fn test_local_routing_hash_matches_real() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let routing = LocalRouting::new();
+                let client = setup_local_routing(&routing);
+
+                let data = b"ww.chess.v1";
+                let mut req = client.hash_request();
+                req.get().set_data(data);
+                let response = req.send().promise.await.expect("hash RPC");
+                let key = response
+                    .get()
+                    .expect("get results")
+                    .get_key()
+                    .expect("get key")
+                    .to_str()
+                    .expect("key utf8");
+
+                assert_eq!(key, hash_to_cid(data));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_local_routing_provide_and_find() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let routing = LocalRouting::new();
+                let cid = hash_to_cid(b"ww.chess.v1");
+
+                routing.provide_as(
+                    &cid,
+                    PeerInfo {
+                        peer_id: b"peer-local".to_vec(),
+                        addrs: vec![b"/ip4/127.0.0.1/tcp/9000".to_vec()],
+                    },
+                );
+
+                let client = setup_local_routing(&routing);
+
+                let (collector_tx, mut collector_rx) = mpsc::unbounded_channel();
+                let sink: routing_capnp::provider_sink::Client =
+                    capnp_rpc::new_client(CollectorSink { tx: collector_tx });
+
+                let mut req = client.find_providers_request();
+                req.get().set_key(&cid);
+                req.get().set_count(10);
+                req.get().set_sink(sink);
+                req.send()
+                    .promise
+                    .await
+                    .expect("findProviders should succeed");
+
+                let mut received = Vec::new();
+                while let Ok(info) = collector_rx.try_recv() {
+                    received.push(info);
+                }
+                assert_eq!(received.len(), 1);
+                assert_eq!(received[0].peer_id, b"peer-local");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_local_routing_shared_table() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let routing = LocalRouting::new();
+                let cid = hash_to_cid(b"ww.chess.v1");
+
+                routing.provide_as(
+                    &cid,
+                    PeerInfo {
+                        peer_id: b"node-a".to_vec(),
+                        addrs: vec![b"/ip4/127.0.0.1/tcp/9001".to_vec()],
+                    },
+                );
+
+                let client_b = setup_local_routing(&routing);
+
+                let (collector_tx, mut collector_rx) = mpsc::unbounded_channel();
+                let sink: routing_capnp::provider_sink::Client =
+                    capnp_rpc::new_client(CollectorSink { tx: collector_tx });
+
+                let mut req = client_b.find_providers_request();
+                req.get().set_key(&cid);
+                req.get().set_count(10);
+                req.get().set_sink(sink);
+                req.send()
+                    .promise
+                    .await
+                    .expect("findProviders should succeed");
+
+                let mut received = Vec::new();
+                while let Ok(info) = collector_rx.try_recv() {
+                    received.push(info);
+                }
+                assert_eq!(received.len(), 1);
+                assert_eq!(received[0].peer_id, b"node-a");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_local_routing_empty_find() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let routing = LocalRouting::new();
+                let client = setup_local_routing(&routing);
+                let cid = hash_to_cid(b"nonexistent");
+
+                let (collector_tx, mut collector_rx) = mpsc::unbounded_channel();
+                let sink: routing_capnp::provider_sink::Client =
+                    capnp_rpc::new_client(CollectorSink { tx: collector_tx });
+
+                let mut req = client.find_providers_request();
+                req.get().set_key(&cid);
+                req.get().set_count(10);
+                req.get().set_sink(sink);
+                req.send()
+                    .promise
+                    .await
+                    .expect("findProviders (empty) should succeed");
+
+                assert!(collector_rx.try_recv().is_err());
             })
             .await;
     }
