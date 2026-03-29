@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 
 use clap::{Parser, Subcommand};
-use k256::ecdsa::VerifyingKey;
+use ed25519_dalek::VerifyingKey;
 use membrane::Epoch;
 use std::path::{Path, PathBuf};
 use tokio::sync::watch;
@@ -74,7 +74,7 @@ enum Commands {
         #[arg(long)]
         wasm_debug: bool,
 
-        /// Path to a secp256k1 identity file. Sugar for PATH:/etc/identity mount.
+        /// Path to an Ed25519 identity file. Sugar for PATH:/etc/identity mount.
         /// Works well with direnv: `export WW_IDENTITY=~/.ww/identity` in .envrc.
         #[arg(long, env = "WW_IDENTITY", value_name = "PATH")]
         identity: Option<String>,
@@ -106,10 +106,10 @@ enum Commands {
         mcp: bool,
     },
 
-    /// Generate a new secp256k1 identity secret.
+    /// Generate a new Ed25519 identity secret.
     ///
-    /// Prints a base58btc-encoded secret key to stdout.  Metadata (EVM
-    /// address, Peer ID) is printed to stderr so stdout stays pipeable:
+    /// Prints a base58btc-encoded secret key to stdout.  Metadata (Peer ID)
+    /// is printed to stderr so stdout stays pipeable:
     ///
     ///     ww keygen > ~/.ww/identity
     ///     ww keygen --output ~/.ww/identity   # equivalent
@@ -164,7 +164,7 @@ enum DaemonAction {
     /// a platform service file (launchd on macOS, systemd on Linux),
     /// and prints the activation command.
     Install {
-        /// Path to a secp256k1 identity file. Defaults to ~/.ww/identity;
+        /// Path to an Ed25519 identity file. Defaults to ~/.ww/identity;
         /// generated automatically if the file does not exist.
         #[arg(long, value_name = "PATH")]
         identity: Option<PathBuf>,
@@ -507,7 +507,7 @@ pub extern "C" fn _start() {
         Ok(())
     }
 
-    /// Resolve the node's secp256k1 signing key from `/etc/identity` in the FHS.
+    /// Resolve the node's Ed25519 signing key from `/etc/identity` in the FHS.
     ///
     /// If `/etc/identity` exists (placed by an image layer or a targeted mount
     /// like `~/.ww/identity:/etc/identity`), the key is loaded from it.
@@ -517,30 +517,29 @@ pub extern "C" fn _start() {
     /// Returns `(signing_key, verifying_key, source_description)`.
     fn resolve_identity(
         merged_root: &std::path::Path,
-    ) -> Result<(k256::ecdsa::SigningKey, VerifyingKey, &'static str)> {
+    ) -> Result<(ed25519_dalek::SigningKey, VerifyingKey, &'static str)> {
         let identity_path = merged_root.join("etc/identity");
         if identity_path.exists() {
             let path_str = identity_path
                 .to_str()
                 .context("/etc/identity path is non-UTF-8")?;
             let sk = ww::keys::load(path_str)?;
-            let vk = *sk.verifying_key();
+            let vk = sk.verifying_key();
             Ok((sk, vk, "/etc/identity"))
         } else {
             tracing::warn!("No /etc/identity found; using ephemeral key (will be lost on exit)");
             let sk = ww::keys::generate()?;
-            let vk = *sk.verifying_key();
+            let vk = sk.verifying_key();
             Ok((sk, vk, "ephemeral"))
         }
     }
 
-    /// Generate a new secp256k1 identity secret.
+    /// Generate a new Ed25519 identity secret.
     async fn keygen(output: Option<PathBuf>) -> Result<()> {
         let sk = ww::keys::generate()?;
         let encoded = ww::keys::encode(&sk);
 
         let kp = ww::keys::to_libp2p(&sk)?;
-        let addr = ww::keys::ethereum_address(&sk);
         let peer_id = kp.public().to_peer_id();
 
         if let Some(path) = output {
@@ -550,7 +549,6 @@ pub extern "C" fn _start() {
             println!("{encoded}");
         }
 
-        eprintln!("EVM address:    0x{}", hex::encode(addr));
         eprintln!("Peer ID:        {peer_id}");
         Ok(())
     }
@@ -573,9 +571,7 @@ pub extern "C" fn _start() {
             ww::keys::save(&sk, &key_path)?;
 
             let kp = ww::keys::to_libp2p(&sk)?;
-            let addr = ww::keys::ethereum_address(&sk);
             eprintln!("Generated new identity: {}", key_path.display());
-            eprintln!("  EVM address: 0x{}", hex::encode(addr));
             eprintln!("  Peer ID:     {}", kp.public().to_peer_id());
         } else {
             eprintln!("Using existing identity: {}", key_path.display());

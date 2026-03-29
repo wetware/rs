@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
+use ed25519_dalek::SigningKey;
 use futures::FutureExt;
-use k256::ecdsa::SigningKey;
 use libp2p::StreamProtocol;
 use membrane::Epoch;
 use std::io::IsTerminal;
@@ -174,7 +174,7 @@ impl CellBuilder {
         self
     }
 
-    /// Set the secp256k1 signing key for the node identity.
+    /// Set the Ed25519 signing key for the node identity.
     ///
     /// When set:
     /// - Incoming libp2p streams on `/ww/0.1.0` are served behind a
@@ -531,7 +531,7 @@ async fn accept_terminal_streams(
             return;
         }
     };
-    let vk = *signing_key.verifying_key();
+    let vk = signing_key.verifying_key();
     tracing::info!(protocol = %CAPNP_PROTOCOL, "Accepting Terminal-gated streams");
     use futures::StreamExt;
     while let Some((peer_id, stream)) = incoming.next().await {
@@ -547,7 +547,7 @@ async fn accept_terminal_streams(
 async fn serve_one_terminal_stream(
     stream: libp2p::Stream,
     membrane: GuestMembrane,
-    vk: k256::ecdsa::VerifyingKey,
+    vk: ed25519_dalek::VerifyingKey,
 ) {
     use futures::AsyncReadExt;
     use membrane::stem_capnp;

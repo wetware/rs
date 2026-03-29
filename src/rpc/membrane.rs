@@ -16,7 +16,7 @@ use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
-use k256::ecdsa::SigningKey;
+use ed25519_dalek::SigningKey;
 use libp2p::identity::Keypair;
 use libp2p_core::SignedEnvelope;
 use membrane::{stem_capnp, Epoch, EpochGuard, GraftBuilder, MembraneServer};
@@ -50,7 +50,7 @@ use super::NetworkState;
 /// Incoming domain strings are accepted if non-empty — the guest chooses
 /// the signing context. Empty domains are rejected with an RPC error.
 struct EpochGuardedIdentity {
-    /// Pre-converted libp2p keypair (k256 → Keypair done once at session construction).
+    /// Pre-converted libp2p keypair (Ed25519 → Keypair done once at session construction).
     keypair: Keypair,
     guard: EpochGuard,
 }

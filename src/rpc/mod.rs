@@ -518,7 +518,7 @@ pub struct ExecutorImpl {
     // When present, child processes get a full Membrane bootstrap (not bare Host).
     epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
     content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
-    signing_key: Option<Arc<k256::ecdsa::SigningKey>>,
+    signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
     stream_control: Option<libp2p_stream::Control>,
 }
 
@@ -551,7 +551,7 @@ impl ExecutorImpl {
         guard: Option<EpochGuard>,
         epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
         content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
-        signing_key: Option<Arc<k256::ecdsa::SigningKey>>,
+        signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
         stream_control: Option<libp2p_stream::Control>,
     ) -> Self {
         Self {
@@ -812,7 +812,7 @@ struct BoundConfig {
     guard: Option<EpochGuard>,
     epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
     content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
-    signing_key: Option<Arc<k256::ecdsa::SigningKey>>,
+    signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
     stream_control: Option<libp2p_stream::Control>,
 }
 

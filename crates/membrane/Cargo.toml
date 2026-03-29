@@ -10,9 +10,9 @@ capnpc = "0.23.3"
 [dependencies]
 capnp = "0.23.2"
 capnp-rpc = "0.23.0"
-k256 = { version = "0.13", features = ["ecdsa"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 libp2p-core = "0.43"
-libp2p-identity = { version = "0.2", features = ["secp256k1"] }
+libp2p-identity = { version = "0.2", features = ["ed25519"] }
 rand = "0.8"
 auth = { path = "../guest/auth" }
 tokio = { version = "1", features = ["sync"] }

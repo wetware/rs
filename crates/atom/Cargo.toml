@@ -25,9 +25,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 capnp-rpc = "0.23.0"
 
 [dev-dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 k256 = { version = "0.13", features = ["ecdsa"] }
 libp2p-core = "0.43"
-libp2p-identity = { version = "0.2", features = ["secp256k1"] }
+libp2p-identity = { version = "0.2", features = ["ed25519", "secp256k1"] }
 rlp = "0.5"
 auth = { path = "../guest/auth" }
 tokio-test = "0.4"
