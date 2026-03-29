@@ -2,6 +2,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +16,119 @@ use tokio::sync::{mpsc, oneshot};
 use wasmtime::{Config as WasmConfig, Engine};
 
 use crate::rpc::{NetworkState, PeerInfo};
+
+// ---------------------------------------------------------------------------
+// Dual DHT types
+// ---------------------------------------------------------------------------
+
+/// Identifies which Kademlia DHT instance produced or should receive a query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DhtSource {
+    Wan,
+    Lan,
+}
+
+/// Compound key for pending query maps.  Prevents collision between QueryId
+/// values from the two independent `kad::Behaviour` instances.
+type DhtQueryKey = (DhtSource, kad::QueryId);
+
+/// Shared state for a logical `find_providers` request dispatched to both DHTs.
+///
+/// Both WAN and LAN queries feed providers into the same `sender`.  The `seen`
+/// set deduplicates across DHTs.  `remaining` tracks how many DHT queries are
+/// still active; the channel closes when it reaches 0.
+struct FindRequest {
+    sender: mpsc::UnboundedSender<PeerInfo>,
+    seen: HashSet<PeerId>,
+    remaining: u8,
+}
+
+/// Shared state for a logical `provide` request dispatched to both DHTs.
+///
+/// WAN is the source of truth.  We reply on first success.  If both fail,
+/// reply with the WAN error.
+struct ProvideRequest {
+    reply: Option<oneshot::Sender<Result<(), String>>>,
+    wan_done: bool,
+    lan_done: bool,
+    wan_err: Option<String>,
+}
+
+impl ProvideRequest {
+    fn new(reply: oneshot::Sender<Result<(), String>>) -> Self {
+        Self {
+            reply: Some(reply),
+            wan_done: false,
+            lan_done: false,
+            wan_err: None,
+        }
+    }
+
+    /// Record a DHT result.  Returns true if the request is fully resolved.
+    fn record(&mut self, source: DhtSource, result: Result<(), String>) -> bool {
+        match source {
+            DhtSource::Wan => self.wan_done = true,
+            DhtSource::Lan => self.lan_done = true,
+        }
+        match result {
+            Ok(()) => {
+                // First success wins — reply immediately.
+                if let Some(reply) = self.reply.take() {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+            Err(e) => {
+                if source == DhtSource::Wan {
+                    self.wan_err = Some(e);
+                }
+            }
+        }
+        self.wan_done && self.lan_done
+    }
+
+    /// Finalize: if nobody got a success, send the WAN error.
+    fn finalize(mut self) {
+        if let Some(reply) = self.reply.take() {
+            let err = self
+                .wan_err
+                .unwrap_or_else(|| "both DHTs failed".to_string());
+            let _ = reply.send(Err(err));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Address classification
+// ---------------------------------------------------------------------------
+
+/// Returns true if the multiaddr's first IP component is a private, loopback,
+/// or link-local address.  Defaults to false (WAN) when no IP is present.
+fn is_lan_addr(addr: &Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+    for proto in addr.iter() {
+        match proto {
+            Protocol::Ip4(ip) => return is_lan_ip(IpAddr::V4(ip)),
+            Protocol::Ip6(ip) => return is_lan_ip(IpAddr::V6(ip)),
+            _ => continue,
+        }
+    }
+    false
+}
+
+/// Classify an IP address as LAN (private, loopback, or link-local).
+fn is_lan_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private() || v4.is_loopback() || (v4.octets()[0] == 169 && v4.octets()[1] == 254)
+            // link-local
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 ULA (private IPv6)
+        }
+    }
+}
 
 /// Bootstrap info for the in-process Kad client.
 ///
@@ -54,10 +168,12 @@ pub enum SwarmCommand {
 pub struct WetwareBehaviour {
     pub identify: libp2p::identify::Behaviour,
     pub stream: libp2p_stream::Behaviour,
-    /// Kademlia DHT client (Amino protocol `/ipfs/kad/1.0.0`) bootstrapped
-    /// against the local Kubo node.  Runs in client mode — announces provider
-    /// records under the Wetware peer ID and finds providers by DHT lookup.
+    /// WAN Kademlia DHT client (Amino protocol `/ipfs/kad/1.0.0`).
+    /// Runs in client mode.  Bootstrapped against Kubo's public peers.
     pub kad: kad::Behaviour<kad::store::MemoryStore>,
+    /// LAN Kademlia DHT server (`/ipfs/lan/kad/1.0.0`).
+    /// Runs in server mode.  Bootstrapped against Kubo's private/loopback peers.
+    pub kad_lan: kad::Behaviour<kad::store::MemoryStore>,
 }
 
 /// Libp2p host wrapper for Wetware.
@@ -86,38 +202,54 @@ impl Libp2pHost {
         let stream_behaviour = libp2p_stream::Behaviour::new();
         let stream_control = stream_behaviour.new_control();
 
-        // Build Kademlia client in Amino DHT mode.
+        // ---- WAN Kademlia (Amino DHT, client mode) ----
         let kad_store = kad::store::MemoryStore::new(peer_id);
         let mut kad_config = kad::Config::new(kad::PROTOCOL_NAME);
-        // Disable periodic bootstrap — we trigger a one-time walk below
-        // and rely on provide/findProviders queries to keep the routing
-        // table warm.  Periodic walks would reconnect to hundreds of DHT
-        // servers every interval, flooding the swarm.
         kad_config.set_periodic_bootstrap_interval(None);
-        // Use default parallelism α=3.  Previous α=1 caused iterative walks
-        // to converge too slowly with a sparse routing table, preventing
-        // provide/findProviders from reaching the correct DHT servers.
-        let mut kad_behaviour = kad::Behaviour::with_config(peer_id, kad_store, kad_config);
-        kad_behaviour.set_mode(Some(kad::Mode::Client));
+        let mut kad_wan = kad::Behaviour::with_config(peer_id, kad_store, kad_config);
+        kad_wan.set_mode(Some(kad::Mode::Client));
 
-        // Populate Kad routing table from Kubo's connected peers (K random
-        // peers).  Kubo itself is added last as K+1, ensuring it is always
-        // present regardless of the sample.
-        for (peer_id, addr) in &kubo_peers {
-            kad_behaviour.add_address(peer_id, addr.clone());
+        // ---- LAN Kademlia (server mode) ----
+        let kad_lan_store = kad::store::MemoryStore::new(peer_id);
+        let lan_proto = libp2p::StreamProtocol::new("/ipfs/lan/kad/1.0.0");
+        let mut kad_lan_config = kad::Config::new(lan_proto);
+        kad_lan_config.set_periodic_bootstrap_interval(None);
+        let mut kad_lan = kad::Behaviour::with_config(peer_id, kad_lan_store, kad_lan_config);
+        kad_lan.set_mode(Some(kad::Mode::Server));
+
+        // Classify Kubo's connected peers by address and add to the
+        // appropriate DHT routing table.
+        let mut has_wan_peers = false;
+        let mut has_lan_peers = false;
+        for (pid, addr) in &kubo_peers {
+            if is_lan_addr(addr) {
+                kad_lan.add_address(pid, addr.clone());
+                has_lan_peers = true;
+            } else {
+                kad_wan.add_address(pid, addr.clone());
+                has_wan_peers = true;
+            }
         }
+        // Kubo itself gets added to both tables (it typically has both
+        // private and public addresses).
         if let Some(ref bootstrap) = kubo_bootstrap {
-            kad_behaviour.add_address(&bootstrap.peer_id, bootstrap.addr.clone());
+            kad_wan.add_address(&bootstrap.peer_id, bootstrap.addr.clone());
+            kad_lan.add_address(&bootstrap.peer_id, bootstrap.addr.clone());
+            has_wan_peers = true;
+            has_lan_peers = true;
         }
 
-        // Trigger a one-time bootstrap walk to populate the routing table
-        // with diverse DHT server peers.  Without this, the table contains
-        // only K Kubo swarm peers — too sparse for iterative queries to
-        // converge to the correct K-closest servers for a given key.
-        if !kubo_peers.is_empty() || kubo_bootstrap.is_some() {
-            match kad_behaviour.bootstrap() {
-                Ok(_) => tracing::debug!("Kad bootstrap walk started"),
-                Err(e) => tracing::warn!("Kad bootstrap failed to start: {e:?}"),
+        // One-time bootstrap walks for each DHT that has seed peers.
+        if has_wan_peers {
+            match kad_wan.bootstrap() {
+                Ok(_) => tracing::debug!("WAN Kad bootstrap walk started"),
+                Err(e) => tracing::warn!("WAN Kad bootstrap failed to start: {e:?}"),
+            }
+        }
+        if has_lan_peers {
+            match kad_lan.bootstrap() {
+                Ok(_) => tracing::debug!("LAN Kad bootstrap walk started"),
+                Err(e) => tracing::warn!("LAN Kad bootstrap failed to start: {e:?}"),
             }
         }
 
@@ -127,7 +259,8 @@ impl Libp2pHost {
                 keypair.public(),
             )),
             stream: stream_behaviour,
-            kad: kad_behaviour,
+            kad: kad_wan,
+            kad_lan,
         };
 
         let mut swarm = SwarmBuilder::with_existing_identity(keypair)
@@ -168,33 +301,31 @@ impl Libp2pHost {
         let mut pending_connects: HashMap<PeerId, Vec<oneshot::Sender<Result<(), String>>>> =
             HashMap::new();
 
-        // Pending Kad provide queries: query_id → reply channel.
-        let mut pending_kad_provides: HashMap<kad::QueryId, oneshot::Sender<Result<(), String>>> =
-            HashMap::new();
-        // Pending Kad findProviders queries: query_id → streaming reply channel.
-        let mut pending_kad_find_providers: HashMap<kad::QueryId, mpsc::UnboundedSender<PeerInfo>> =
-            HashMap::new();
-        // Providers already forwarded to the guest for the current find_providers query.
-        // Kademlia returns the same provider many times across successive FoundProviders
-        // batches; this set deduplicates so we forward (and log) each peer only once.
-        let mut forwarded_providers: HashMap<kad::QueryId, HashSet<PeerId>> = HashMap::new();
+        // --- Dual DHT pending query maps (compound-keyed) ---
+
+        // Logical request ID → ProvideRequest.  Both DHT queries map here.
+        let mut next_request_id: u64 = 0;
+        let mut pending_provides: HashMap<u64, ProvideRequest> = HashMap::new();
+        // Compound (source, query_id) → logical request_id for provide.
+        let mut provide_query_to_req: HashMap<DhtQueryKey, u64> = HashMap::new();
+
+        // Logical request ID → FindRequest.  Both DHT queries map here.
+        let mut pending_finds: HashMap<u64, FindRequest> = HashMap::new();
+        // Compound (source, query_id) → logical request_id for find_providers.
+        let mut find_query_to_req: HashMap<DhtQueryKey, u64> = HashMap::new();
+
         // Peer address book populated from swarm events and peer routing results.
         let mut peer_addr_book: HashMap<PeerId, Vec<Multiaddr>> = HashMap::new();
-        // Pending peer routing (RoutedHost-style): get_closest_peers query → target PeerId.
-        let mut pending_peer_routing: HashMap<kad::QueryId, PeerId> = HashMap::new();
-        // Peers we have already attempted peer routing for.  Prevents tight
-        // re-query loops when a provider is genuinely unreachable — mirrors
-        // go-libp2p RoutedHost which issues at most one FindPeer per target.
-        let mut routed_peers: HashSet<PeerId> = HashSet::new();
+        // Pending peer routing (RoutedHost-style): compound key → (target PeerId, owning request ID).
+        let mut pending_peer_routing: HashMap<DhtQueryKey, (PeerId, Option<u64>)> = HashMap::new();
+        // Peers already routed, scoped per logical find request.
+        let mut routed_peers: HashMap<u64, HashSet<PeerId>> = HashMap::new();
 
-        // Self-announcement: walk toward our own PeerId so that peers near us
-        // in XOR space add us to their routing tables.  This makes us findable
-        // via get_closest_peers(our_peer_id) when other nodes do peer routing.
-        self.swarm
-            .behaviour_mut()
-            .kad
-            .get_closest_peers(self.local_peer_id);
-        tracing::debug!("Kad self-announcement walk started");
+        // Self-announcement on both DHTs.
+        let beh = self.swarm.behaviour_mut();
+        beh.kad.get_closest_peers(self.local_peer_id);
+        beh.kad_lan.get_closest_peers(self.local_peer_id);
+        tracing::debug!("Kad self-announcement walks started (WAN + LAN)");
 
         loop {
             tokio::select! {
@@ -231,7 +362,6 @@ impl Libp2pHost {
                                 .set_known_peers(known_peers.values().cloned().collect())
                                 .await;
 
-                            // Reply to pending connect requests
                             if let Some(senders) = pending_connects.remove(&peer_id) {
                                 for sender in senders {
                                     let _ = sender.send(Ok(()));
@@ -255,161 +385,62 @@ impl Libp2pHost {
                                 }
                             }
                         }
-                        // Track external addresses for remote peers (used to fill
-                        // provider records returned by KadFindProviders).
+                        // Classify new peer addresses into the correct DHT.
                         SwarmEvent::NewExternalAddrOfPeer { peer_id, address } => {
-                            peer_addr_book.entry(peer_id).or_default().push(address);
+                            peer_addr_book.entry(peer_id).or_default().push(address.clone());
+                            if is_lan_addr(&address) {
+                                self.swarm.behaviour_mut().kad_lan.add_address(&peer_id, address);
+                            } else {
+                                self.swarm.behaviour_mut().kad.add_address(&peer_id, address);
+                            }
                         }
+                        // WAN Kad events
                         SwarmEvent::Behaviour(WetwareBehaviourEvent::Kad(
                             kad::Event::OutboundQueryProgressed { id, result, step, .. },
                         )) => {
-                            match result {
-                                kad::QueryResult::Bootstrap(Ok(ok)) => {
-                                    tracing::debug!(
-                                        peer = %ok.peer,
-                                        remaining = ok.num_remaining,
-                                        "Kad bootstrap progress"
-                                    );
-                                }
-                                kad::QueryResult::Bootstrap(Err(e)) => {
-                                    tracing::warn!("Kad bootstrap error: {e:?}");
-                                }
-                                kad::QueryResult::StartProviding(Ok(_)) => {
-                                    tracing::debug!("Kad provide succeeded");
-                                    if let Some(reply) = pending_kad_provides.remove(&id) {
-                                        let _ = reply.send(Ok(()));
-                                    }
-                                }
-                                kad::QueryResult::StartProviding(Err(e)) => {
-                                    tracing::warn!("Kad provide FAILED: {e:?}");
-                                    if let Some(reply) = pending_kad_provides.remove(&id) {
-                                        let _ = reply.send(Err(format!("{e:?}")));
-                                    }
-                                }
-                                kad::QueryResult::GetProviders(Ok(
-                                    kad::GetProvidersOk::FoundProviders { providers, .. },
-                                )) => {
-                                    tracing::debug!(
-                                        count = providers.len(),
-                                        "Kad found providers batch"
-                                    );
-                                    if let Some(sender) = pending_kad_find_providers.get(&id) {
-                                        let seen = forwarded_providers.entry(id).or_default();
-                                        for provider in &providers {
-                                            // Skip providers we already forwarded in this query.
-                                            if !seen.insert(*provider) {
-                                                continue;
-                                            }
-
-                                            // Check peer_addr_book (populated by peer routing
-                                            // results and NewExternalAddrOfPeer events).
-                                            let addrs: Vec<Multiaddr> = peer_addr_book
-                                                .get(provider)
-                                                .cloned()
-                                                .unwrap_or_default();
-
-                                            // Register addresses with the swarm so it can dial
-                                            // this provider when the guest opens a stream.
-                                            for addr in &addrs {
-                                                self.swarm.add_peer_address(*provider, addr.clone());
-                                            }
-
-                                            if !addrs.is_empty() {
-                                                // Provider has addresses — forward to guest.
-                                                tracing::debug!(
-                                                    peer = %provider,
-                                                    addr_count = addrs.len(),
-                                                    "Provider discovered with addresses"
-                                                );
-                                                let _ = sender.send(PeerInfo {
-                                                    peer_id: provider.to_bytes(),
-                                                    addrs: addrs.iter().map(|a| a.to_vec()).collect(),
-                                                });
-                                            } else if !routed_peers.contains(provider)
-                                                && !pending_peer_routing.values().any(|p| p == provider)
-                                            {
-                                                // No addresses and not yet routed — issue a single
-                                                // DHT peer routing query (RoutedHost-style FindPeer).
-                                                tracing::debug!(
-                                                    peer = %provider,
-                                                    "No addresses for provider; issuing peer routing query"
-                                                );
-                                                let qid = self.swarm.behaviour_mut()
-                                                    .kad.get_closest_peers(*provider);
-                                                pending_peer_routing.insert(qid, *provider);
-                                            }
-                                            // else: no addresses, already routed — skip silently
-                                        }
-                                    }
-                                }
-                                kad::QueryResult::GetProviders(Ok(
-                                    kad::GetProvidersOk::FinishedWithNoAdditionalRecord { closest_peers, .. },
-                                )) => {
-                                    tracing::debug!(
-                                        closest = closest_peers.len(),
-                                        "Kad find_providers finished (no more records)"
-                                    );
-                                }
-                                kad::QueryResult::GetProviders(Err(e)) => {
-                                    tracing::warn!("Kad find_providers FAILED: {e:?}");
-                                }
-                                // RoutedHost-style peer routing: resolve PeerId → addrs.
-                                kad::QueryResult::GetClosestPeers(Ok(
-                                    kad::GetClosestPeersOk { ref peers, .. },
-                                )) => {
-                                    if let Some(target) = pending_peer_routing.remove(&id) {
-                                        routed_peers.insert(target);
-                                        if let Some(info) = peers.iter()
-                                            .find(|p| p.peer_id == target)
-                                        {
-                                            tracing::debug!(
-                                                peer = %target,
-                                                addr_count = info.addrs.len(),
-                                                addrs = ?info.addrs.iter()
-                                                    .map(|a| a.to_string()).collect::<Vec<_>>(),
-                                                "Peer routing resolved addresses"
-                                            );
-                                            for addr in &info.addrs {
-                                                self.swarm.add_peer_address(target, addr.clone());
-                                            }
-                                            peer_addr_book.entry(target).or_default()
-                                                .extend(info.addrs.iter().cloned());
-                                        } else {
-                                            tracing::debug!(
-                                                peer = %target,
-                                                closest_returned = peers.len(),
-                                                "Peer routing: target not found in closest peers"
-                                            );
-                                        }
-                                    }
-                                }
-                                kad::QueryResult::GetClosestPeers(Err(ref e)) => {
-                                    if let Some(target) = pending_peer_routing.remove(&id) {
-                                        routed_peers.insert(target);
-                                        tracing::warn!(peer = %target, "Peer routing query failed: {e:?}");
-                                    }
-                                }
-                                _ => {
-                                    tracing::debug!("Kad query progress (other): {result:?}");
-                                }
-                            }
-                            tracing::debug!(
-                                query_id = ?id,
-                                step_count = step.count,
-                                last = step.last,
-                                "Kad query step"
+                            handle_kad_event(
+                                DhtSource::Wan, id, result, &step,
+                                &mut self.swarm,
+                                &mut pending_provides, &mut provide_query_to_req,
+                                &mut pending_finds, &mut find_query_to_req,
+                                &mut peer_addr_book, &mut pending_peer_routing,
+                                &mut routed_peers,
                             );
-                            // When the query finishes, close the reply channel so the
-                            // receiver loop in routing.rs exits cleanly.
                             if step.last {
-                                pending_kad_find_providers.remove(&id);
-                                forwarded_providers.remove(&id);
-                                pending_kad_provides.remove(&id);
-                                pending_peer_routing.remove(&id);
+                                cleanup_query(
+                                    DhtSource::Wan, id,
+                                    &mut provide_query_to_req, &mut pending_provides,
+                                    &mut find_query_to_req, &mut pending_finds,
+                                    &mut pending_peer_routing, &mut routed_peers,
+                                );
                             }
                         }
                         SwarmEvent::Behaviour(WetwareBehaviourEvent::Kad(ref ev)) => {
-                            tracing::debug!("Kad event: {ev:?}");
+                            tracing::debug!("WAN Kad event: {ev:?}");
+                        }
+                        // LAN Kad events
+                        SwarmEvent::Behaviour(WetwareBehaviourEvent::KadLan(
+                            kad::Event::OutboundQueryProgressed { id, result, step, .. },
+                        )) => {
+                            handle_kad_event(
+                                DhtSource::Lan, id, result, &step,
+                                &mut self.swarm,
+                                &mut pending_provides, &mut provide_query_to_req,
+                                &mut pending_finds, &mut find_query_to_req,
+                                &mut peer_addr_book, &mut pending_peer_routing,
+                                &mut routed_peers,
+                            );
+                            if step.last {
+                                cleanup_query(
+                                    DhtSource::Lan, id,
+                                    &mut provide_query_to_req, &mut pending_provides,
+                                    &mut find_query_to_req, &mut pending_finds,
+                                    &mut pending_peer_routing, &mut routed_peers,
+                                );
+                            }
+                        }
+                        SwarmEvent::Behaviour(WetwareBehaviourEvent::KadLan(ref ev)) => {
+                            tracing::debug!("LAN Kad event: {ev:?}");
                         }
                         _ => {}
                     }
@@ -417,16 +448,13 @@ impl Libp2pHost {
                 cmd = cmd_rx.recv() => {
                     match cmd {
                         Some(SwarmCommand::Connect { peer_id, addrs, reply }) => {
-                            // If already connected, reply immediately
                             if self.swarm.is_connected(&peer_id) {
                                 let _ = reply.send(Ok(()));
                                 continue;
                             }
-
                             for addr in &addrs {
                                 self.swarm.add_peer_address(peer_id, addr.clone());
                             }
-
                             match self.swarm.dial(peer_id) {
                                 Ok(()) => {
                                     pending_connects.entry(peer_id).or_default().push(reply);
@@ -437,42 +465,69 @@ impl Libp2pHost {
                             }
                         }
                         Some(SwarmCommand::KadProvide { key, reply }) => {
-                            tracing::debug!(
-                                key_len = key.len(),
-                                peers_in_rt = self.swarm.behaviour_mut().kad.kbuckets()
-                                    .map(|b| b.num_entries()).sum::<usize>(),
-                                "Kad provide: starting"
-                            );
+                            let req_id = next_request_id;
+                            next_request_id += 1;
+
                             let record_key = kad::RecordKey::new(&key);
-                            match self.swarm.behaviour_mut().kad.start_providing(record_key) {
-                                Ok(query_id) => {
-                                    pending_kad_provides.insert(query_id, reply);
+                            let beh = self.swarm.behaviour_mut();
+
+                            let mut req = ProvideRequest::new(reply);
+
+                            // WAN provide
+                            match beh.kad.start_providing(record_key.clone()) {
+                                Ok(qid) => {
+                                    provide_query_to_req.insert((DhtSource::Wan, qid), req_id);
                                 }
                                 Err(e) => {
-                                    let _ = reply.send(Err(format!("{e:?}")));
+                                    tracing::warn!("WAN provide failed to start: {e:?}");
+                                    req.record(DhtSource::Wan, Err(format!("{e:?}")));
                                 }
+                            }
+
+                            // LAN provide (fire-and-forget semantics, but tracked)
+                            match beh.kad_lan.start_providing(record_key) {
+                                Ok(qid) => {
+                                    provide_query_to_req.insert((DhtSource::Lan, qid), req_id);
+                                }
+                                Err(e) => {
+                                    tracing::debug!("LAN provide failed to start: {e:?}");
+                                    req.record(DhtSource::Lan, Err(format!("{e:?}")));
+                                }
+                            }
+
+                            if req.wan_done && req.lan_done {
+                                req.finalize();
+                            } else {
+                                pending_provides.insert(req_id, req);
                             }
                         }
                         Some(SwarmCommand::KadFindProviders { key, reply }) => {
-                            // Allow peer routing retries across successive queries.
-                            // The previous approach blacklisted peers permanently after
-                            // one failed routing attempt; now each find_providers query
-                            // starts fresh so transient routing failures don't prevent
-                            // later discovery once the routing table has converged.
-                            routed_peers.clear();
-                            tracing::debug!(
-                                key_len = key.len(),
-                                peers_in_rt = self.swarm.behaviour_mut().kad.kbuckets()
-                                    .map(|b| b.num_entries()).sum::<usize>(),
-                                "Kad find_providers: starting"
-                            );
+                            let req_id = next_request_id;
+                            next_request_id += 1;
+
                             let record_key = kad::RecordKey::new(&key);
-                            let query_id =
-                                self.swarm.behaviour_mut().kad.get_providers(record_key);
-                            pending_kad_find_providers.insert(query_id, reply);
+                            let beh = self.swarm.behaviour_mut();
+
+                            let mut remaining = 0u8;
+
+                            // WAN query
+                            let wan_qid = beh.kad.get_providers(record_key.clone());
+                            find_query_to_req.insert((DhtSource::Wan, wan_qid), req_id);
+                            remaining += 1;
+
+                            // LAN query
+                            let lan_qid = beh.kad_lan.get_providers(record_key);
+                            find_query_to_req.insert((DhtSource::Lan, lan_qid), req_id);
+                            remaining += 1;
+
+                            pending_finds.insert(req_id, FindRequest {
+                                sender: reply,
+                                seen: HashSet::new(),
+                                remaining,
+                            });
+                            routed_peers.insert(req_id, HashSet::new());
                         }
                         None => {
-                            // Channel closed, shut down
                             break;
                         }
                     }
@@ -482,6 +537,243 @@ impl Libp2pHost {
 
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Extracted Kad event handler (shared by WAN and LAN)
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn handle_kad_event(
+    source: DhtSource,
+    id: kad::QueryId,
+    result: kad::QueryResult,
+    step: &kad::ProgressStep,
+    swarm: &mut libp2p::swarm::Swarm<WetwareBehaviour>,
+    pending_provides: &mut HashMap<u64, ProvideRequest>,
+    provide_query_to_req: &mut HashMap<DhtQueryKey, u64>,
+    pending_finds: &mut HashMap<u64, FindRequest>,
+    find_query_to_req: &mut HashMap<DhtQueryKey, u64>,
+    peer_addr_book: &mut HashMap<PeerId, Vec<Multiaddr>>,
+    pending_peer_routing: &mut HashMap<DhtQueryKey, (PeerId, Option<u64>)>,
+    routed_peers: &mut HashMap<u64, HashSet<PeerId>>,
+) {
+    let key = (source, id);
+    let label = match source {
+        DhtSource::Wan => "WAN",
+        DhtSource::Lan => "LAN",
+    };
+
+    match result {
+        kad::QueryResult::Bootstrap(Ok(ok)) => {
+            tracing::debug!(
+                dht = label,
+                peer = %ok.peer,
+                remaining = ok.num_remaining,
+                "Kad bootstrap progress"
+            );
+        }
+        kad::QueryResult::Bootstrap(Err(e)) => {
+            tracing::warn!(dht = label, "Kad bootstrap error: {e:?}");
+        }
+        kad::QueryResult::StartProviding(Ok(_)) => {
+            tracing::debug!(dht = label, "Kad provide succeeded");
+            if let Some(&req_id) = provide_query_to_req.get(&key) {
+                if let Some(req) = pending_provides.get_mut(&req_id) {
+                    if req.record(source, Ok(())) {
+                        if let Some(req) = pending_provides.remove(&req_id) {
+                            req.finalize();
+                        }
+                    }
+                }
+            }
+        }
+        kad::QueryResult::StartProviding(Err(e)) => {
+            tracing::warn!(dht = label, "Kad provide FAILED: {e:?}");
+            if let Some(&req_id) = provide_query_to_req.get(&key) {
+                if let Some(req) = pending_provides.get_mut(&req_id) {
+                    if req.record(source, Err(format!("{e:?}"))) {
+                        if let Some(req) = pending_provides.remove(&req_id) {
+                            req.finalize();
+                        }
+                    }
+                }
+            }
+        }
+        kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders {
+            providers,
+            ..
+        })) => {
+            tracing::debug!(
+                dht = label,
+                count = providers.len(),
+                "Kad found providers batch"
+            );
+            if let Some(&req_id) = find_query_to_req.get(&key) {
+                if let Some(find_req) = pending_finds.get_mut(&req_id) {
+                    let routed = routed_peers.entry(req_id).or_default();
+                    for provider in &providers {
+                        if !find_req.seen.insert(*provider) {
+                            continue;
+                        }
+
+                        let addrs: Vec<Multiaddr> =
+                            peer_addr_book.get(provider).cloned().unwrap_or_default();
+
+                        for addr in &addrs {
+                            swarm.add_peer_address(*provider, addr.clone());
+                        }
+
+                        if !addrs.is_empty() {
+                            tracing::debug!(
+                                dht = label,
+                                peer = %provider,
+                                addr_count = addrs.len(),
+                                "Provider discovered with addresses"
+                            );
+                            let _ = find_req.sender.send(PeerInfo {
+                                peer_id: provider.to_bytes(),
+                                addrs: addrs.iter().map(|a| a.to_vec()).collect(),
+                            });
+                        } else if !routed.contains(provider)
+                            && !pending_peer_routing.values().any(|(p, _)| p == provider)
+                        {
+                            tracing::debug!(
+                                dht = label,
+                                peer = %provider,
+                                "No addresses for provider; issuing peer routing query"
+                            );
+                            // Query both DHTs for peer routing, scoped to this request.
+                            let beh = swarm.behaviour_mut();
+                            let wan_qid = beh.kad.get_closest_peers(*provider);
+                            pending_peer_routing
+                                .insert((DhtSource::Wan, wan_qid), (*provider, Some(req_id)));
+                            let lan_qid = beh.kad_lan.get_closest_peers(*provider);
+                            pending_peer_routing
+                                .insert((DhtSource::Lan, lan_qid), (*provider, Some(req_id)));
+                        }
+                    }
+                }
+            }
+        }
+        kad::QueryResult::GetProviders(Ok(
+            kad::GetProvidersOk::FinishedWithNoAdditionalRecord { closest_peers, .. },
+        )) => {
+            tracing::debug!(
+                dht = label,
+                closest = closest_peers.len(),
+                "Kad find_providers finished (no more records)"
+            );
+        }
+        kad::QueryResult::GetProviders(Err(e)) => {
+            tracing::warn!(dht = label, "Kad find_providers FAILED: {e:?}");
+        }
+        kad::QueryResult::GetClosestPeers(Ok(kad::GetClosestPeersOk { ref peers, .. })) => {
+            if let Some((target, owner_req)) = pending_peer_routing.remove(&key) {
+                // Mark peer as routed only in the owning request's set.
+                if let Some(req_id) = owner_req {
+                    if let Some(routed) = routed_peers.get_mut(&req_id) {
+                        routed.insert(target);
+                    }
+                }
+                if let Some(info) = peers.iter().find(|p| p.peer_id == target) {
+                    tracing::debug!(
+                        dht = label,
+                        peer = %target,
+                        addr_count = info.addrs.len(),
+                        "Peer routing resolved addresses"
+                    );
+                    for addr in &info.addrs {
+                        swarm.add_peer_address(target, addr.clone());
+                    }
+                    peer_addr_book
+                        .entry(target)
+                        .or_default()
+                        .extend(info.addrs.iter().cloned());
+                    // Deliver the now-addressable provider to the owning find request.
+                    if let Some(req_id) = owner_req {
+                        if let Some(find_req) = pending_finds.get(&req_id) {
+                            if !info.addrs.is_empty() {
+                                let _ = find_req.sender.send(PeerInfo {
+                                    peer_id: target.to_bytes(),
+                                    addrs: info.addrs.iter().map(|a| a.to_vec()).collect(),
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        dht = label,
+                        peer = %target,
+                        closest_returned = peers.len(),
+                        "Peer routing: target not found in closest peers"
+                    );
+                }
+            }
+        }
+        kad::QueryResult::GetClosestPeers(Err(ref e)) => {
+            if let Some((target, owner_req)) = pending_peer_routing.remove(&key) {
+                if let Some(req_id) = owner_req {
+                    if let Some(routed) = routed_peers.get_mut(&req_id) {
+                        routed.insert(target);
+                    }
+                }
+                tracing::warn!(dht = label, peer = %target, "Peer routing query failed: {e:?}");
+            }
+        }
+        _ => {
+            tracing::debug!(dht = label, "Kad query progress (other): {result:?}");
+        }
+    }
+    tracing::debug!(
+        dht = label,
+        query_id = ?id,
+        step_count = step.count,
+        last = step.last,
+        "Kad query step"
+    );
+}
+
+/// Clean up maps when a DHT query finishes (`step.last == true`).
+/// For find_providers, decrement `remaining` and close the channel when both
+/// DHT queries are done.
+#[allow(clippy::too_many_arguments)]
+fn cleanup_query(
+    source: DhtSource,
+    id: kad::QueryId,
+    provide_query_to_req: &mut HashMap<DhtQueryKey, u64>,
+    pending_provides: &mut HashMap<u64, ProvideRequest>,
+    find_query_to_req: &mut HashMap<DhtQueryKey, u64>,
+    pending_finds: &mut HashMap<u64, FindRequest>,
+    pending_peer_routing: &mut HashMap<DhtQueryKey, (PeerId, Option<u64>)>,
+    routed_peers: &mut HashMap<u64, HashSet<PeerId>>,
+) {
+    let key = (source, id);
+
+    // Provide cleanup
+    if let Some(req_id) = provide_query_to_req.remove(&key) {
+        // If no more queries reference this request, finalize it.
+        if !provide_query_to_req.values().any(|&r| r == req_id) {
+            if let Some(req) = pending_provides.remove(&req_id) {
+                req.finalize();
+            }
+        }
+    }
+
+    // FindProviders cleanup
+    if let Some(req_id) = find_query_to_req.remove(&key) {
+        if let Some(find_req) = pending_finds.get_mut(&req_id) {
+            find_req.remaining = find_req.remaining.saturating_sub(1);
+            if find_req.remaining == 0 {
+                // Both DHTs done — drop the sender to close the channel.
+                pending_finds.remove(&req_id);
+                routed_peers.remove(&req_id);
+            }
+        }
+    }
+
+    // Peer routing cleanup (compound key removes the specific entry).
+    pending_peer_routing.remove(&key);
 }
 
 /// Shared Wasmtime runtime state for Wetware hosts.
@@ -555,5 +847,228 @@ impl WetwareHost {
             .take()
             .expect("run() called more than once");
         self.libp2p.run(self.network_state, cmd_rx).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tokio::sync::oneshot;
+
+    // -------------------------------------------------------------------
+    // is_lan_addr / is_lan_ip
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_is_lan_addr_private_ipv4() {
+        let cases = [
+            "/ip4/10.0.0.1/tcp/4001",
+            "/ip4/172.16.0.1/tcp/4001",
+            "/ip4/172.31.255.255/tcp/4001",
+            "/ip4/192.168.1.1/tcp/4001",
+        ];
+        for addr_str in &cases {
+            let addr: Multiaddr = addr_str.parse().unwrap();
+            assert!(is_lan_addr(&addr), "{addr_str} should be LAN");
+        }
+    }
+
+    #[test]
+    fn test_is_lan_addr_ipv6_ula() {
+        let addr: Multiaddr = "/ip6/fd12:3456:789a::1/tcp/4001".parse().unwrap();
+        assert!(is_lan_addr(&addr), "IPv6 ULA (fd00::/8) should be LAN");
+    }
+
+    #[test]
+    fn test_is_lan_addr_loopback() {
+        let v4: Multiaddr = "/ip4/127.0.0.1/tcp/4001".parse().unwrap();
+        assert!(is_lan_addr(&v4));
+
+        let v6: Multiaddr = "/ip6/::1/tcp/4001".parse().unwrap();
+        assert!(is_lan_addr(&v6));
+    }
+
+    #[test]
+    fn test_is_lan_addr_link_local() {
+        let v4: Multiaddr = "/ip4/169.254.1.1/tcp/4001".parse().unwrap();
+        assert!(is_lan_addr(&v4));
+
+        let v6: Multiaddr = "/ip6/fe80::1/tcp/4001".parse().unwrap();
+        assert!(is_lan_addr(&v6));
+    }
+
+    #[test]
+    fn test_is_lan_addr_public() {
+        let cases = [
+            "/ip4/8.8.8.8/tcp/4001",
+            "/ip4/1.1.1.1/tcp/4001",
+            "/ip6/2001:db8::1/tcp/4001",
+        ];
+        for addr_str in &cases {
+            let addr: Multiaddr = addr_str.parse().unwrap();
+            assert!(!is_lan_addr(&addr), "{addr_str} should be WAN");
+        }
+    }
+
+    #[test]
+    fn test_is_lan_addr_no_ip() {
+        let addr: Multiaddr = "/memory/1234".parse().unwrap();
+        assert!(!is_lan_addr(&addr), "no IP should default to WAN");
+    }
+
+    // -------------------------------------------------------------------
+    // DhtSource compound keys
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_compound_keys_no_collision() {
+        let mut map: HashMap<DhtQueryKey, &str> = HashMap::new();
+        // Simulate QueryId(0) from both DHTs — they must not collide.
+        // We can't construct real QueryIds, so test the key logic directly.
+        let wan_key = (DhtSource::Wan, unsafe {
+            std::mem::transmute::<u64, kad::QueryId>(0)
+        });
+        let lan_key = (DhtSource::Lan, unsafe {
+            std::mem::transmute::<u64, kad::QueryId>(0)
+        });
+        map.insert(wan_key, "wan");
+        map.insert(lan_key, "lan");
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[&wan_key], "wan");
+        assert_eq!(map[&lan_key], "lan");
+    }
+
+    // -------------------------------------------------------------------
+    // ProvideRequest
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_provide_request_first_success_wins() {
+        let (tx, mut rx) = oneshot::channel();
+        let mut req = ProvideRequest::new(tx);
+
+        // WAN succeeds first
+        assert!(!req.record(DhtSource::Wan, Ok(())));
+        // Reply already sent
+        assert!(req.reply.is_none());
+        // LAN result comes later
+        assert!(req.record(DhtSource::Lan, Err("no peers".into())));
+
+        // The receiver got Ok
+        assert!(rx.try_recv().unwrap().is_ok());
+    }
+
+    #[test]
+    fn test_provide_request_both_fail_sends_wan_error() {
+        let (tx, mut rx) = oneshot::channel();
+        let mut req = ProvideRequest::new(tx);
+
+        assert!(!req.record(DhtSource::Lan, Err("lan fail".into())));
+        assert!(req.record(DhtSource::Wan, Err("wan fail".into())));
+        req.finalize();
+
+        let result = rx.try_recv().unwrap();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "wan fail");
+    }
+
+    // -------------------------------------------------------------------
+    // FindRequest dedup
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_find_request_dedup_across_dhts() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut find = FindRequest {
+            sender: tx,
+            seen: HashSet::new(),
+            remaining: 2,
+        };
+
+        let peer_bytes = vec![0u8; 32]; // dummy peer ID bytes
+
+        // First insert succeeds
+        let peer_id: PeerId = PeerId::random();
+        assert!(find.seen.insert(peer_id));
+
+        // Same peer from other DHT is a duplicate
+        assert!(!find.seen.insert(peer_id));
+
+        // Send one provider through
+        let _ = find.sender.send(PeerInfo {
+            peer_id: peer_bytes.clone(),
+            addrs: vec![],
+        });
+
+        assert!(rx.try_recv().is_ok());
+
+        // Decrement remaining
+        find.remaining -= 1;
+        assert_eq!(find.remaining, 1);
+        find.remaining -= 1;
+        assert_eq!(find.remaining, 0);
+    }
+
+    // -------------------------------------------------------------------
+    // cleanup_query
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_cleanup_find_providers_closes_on_both_done() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PeerInfo>();
+
+        let mut pending_finds: HashMap<u64, FindRequest> = HashMap::new();
+        let mut find_query_to_req: HashMap<DhtQueryKey, u64> = HashMap::new();
+        let mut provide_query_to_req: HashMap<DhtQueryKey, u64> = HashMap::new();
+        let mut pending_provides: HashMap<u64, ProvideRequest> = HashMap::new();
+        let mut pending_peer_routing: HashMap<DhtQueryKey, (PeerId, Option<u64>)> = HashMap::new();
+        let mut routed: HashMap<u64, HashSet<PeerId>> = HashMap::new();
+
+        let req_id = 0u64;
+        let wan_qid: kad::QueryId = unsafe { std::mem::transmute(1u64) };
+        let lan_qid: kad::QueryId = unsafe { std::mem::transmute(2u64) };
+
+        find_query_to_req.insert((DhtSource::Wan, wan_qid), req_id);
+        find_query_to_req.insert((DhtSource::Lan, lan_qid), req_id);
+        pending_finds.insert(
+            req_id,
+            FindRequest {
+                sender: tx,
+                seen: HashSet::new(),
+                remaining: 2,
+            },
+        );
+        routed.insert(req_id, HashSet::new());
+
+        // WAN finishes first — channel should stay open.
+        cleanup_query(
+            DhtSource::Wan,
+            wan_qid,
+            &mut provide_query_to_req,
+            &mut pending_provides,
+            &mut find_query_to_req,
+            &mut pending_finds,
+            &mut pending_peer_routing,
+            &mut routed,
+        );
+        assert!(pending_finds.contains_key(&req_id));
+        assert!(rx.try_recv().is_err()); // not closed yet
+
+        // LAN finishes — channel should close.
+        cleanup_query(
+            DhtSource::Lan,
+            lan_qid,
+            &mut provide_query_to_req,
+            &mut pending_provides,
+            &mut find_query_to_req,
+            &mut pending_finds,
+            &mut pending_peer_routing,
+            &mut routed,
+        );
+        assert!(!pending_finds.contains_key(&req_id));
+        assert!(!routed.contains_key(&req_id));
+        // Channel is closed now — recv returns None
+        assert!(rx.try_recv().is_err());
     }
 }

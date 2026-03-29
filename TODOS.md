@@ -79,20 +79,8 @@
 **Effort:** S
 **Priority:** P1
 
-## Dual DHT — LAN + WAN content routing
-**What:** Add a second `kad::Behaviour` (`kad_lan`) to `WetwareBehaviour` running the LAN DHT protocol (`/ipfs/lan/kad/1.0.0`) in server mode. Dual-dispatch provide/findProviders to both DHTs. Bootstrap LAN table from Kubo's private-address peers (address classification via `is_private()`/`is_loopback()`).
-**Why:** Same-network Wetware nodes should discover each other without polluting the public Amino table. Enables faster local discovery and prevents local-only provider records from leaking to the internet. Common deployment: all nodes connect to a shared Kubo node; mDNS may or may not be available.
-**Context:** Design doc at `~/.gstack/projects/wetware-ww/lthibault-feat-local-routing-design-20260329-131709.md`. Changes isolated to `src/host.rs`. `routing.rs`, `routing.capnp`, and guest-facing APIs are unchanged.
-**Resolved design decisions (eng review 2026-03-29):**
-1. **LAN provide is fire-and-forget.** Only WAN provide is tracked for reply. LAN is best-effort.
-2. **Request ID + shared FindRequest struct** for findProviders. `FindRequest { seen: HashSet<PeerId>, routed: HashSet<PeerId>, sender: UnboundedSender, remaining: u8 }`. Both DHT queries map to the same request ID. Cross-DHT PeerId dedup via shared `seen` set. `remaining` counter decremented on `step.last`; channel closed when 0.
-3. **Compound `(DhtSource, QueryId)` keys** in all pending maps. `DhtSource` enum `{ Wan, Lan }`. Prevents collision between QueryId(0) from both behaviours.
-4. **Extract `handle_kad_query(source, id, result, step, &mut state)` helper** to avoid duplicating 140 lines of match arms for Kad vs KadLan events.
-5. **Extract `is_lan_addr(addr: &Multiaddr) -> bool`** as a testable pure function. Covers private, loopback, link-local IPv4/IPv6.
-6. **~8 unit tests** for extracted helpers (is_lan_addr, compound keys, FindRequest dedup, completion counter).
-**Effort:** M (CC: ~2-3 hours)
-**Priority:** P0 (unblocks chess demo — two local nodes can't discover each other via Amino DHT)
-**Depends on:** effects-as-capabilities (sequencing, not technical blocker)
+## ~~Dual DHT — LAN + WAN content routing~~ ✅
+**RESOLVED:** `kad_lan` field added to `WetwareBehaviour` running `/ipfs/lan/kad/1.0.0` in server mode. Dual-dispatch provide/findProviders with cross-DHT PeerId dedup via `FindRequest`. Kubo peers classified by `is_lan_addr()` into WAN/LAN routing tables. 10 unit tests for extracted helpers. Design doc at `~/.gstack/projects/wetware-ww/lthibault-feat-local-routing-design-20260329-131709.md`.
 
 ## mDNS for Kubo-less LAN peer discovery
 **What:** Add `libp2p::mdns::tokio::Behaviour` to `WetwareBehaviour` to discover LAN peers without Kubo. mDNS is a **peer discovery source** that feeds the LAN DHT routing table — not a routing primitive. It does not touch Cap'n Proto or the guest API.
