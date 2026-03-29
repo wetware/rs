@@ -1286,6 +1286,44 @@ mod tests {
         );
     }
 
+    // --- load ---
+
+    #[test]
+    fn eval_load_missing_file_returns_error() {
+        let result = eval_load(&[Val::Str("/nonexistent/path.wasm".into())]);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("No such file"), "got: {msg}");
+    }
+
+    #[test]
+    fn eval_load_missing_arg_returns_error() {
+        assert!(eval_load(&[]).is_err());
+        assert!(eval_load(&[Val::Int(42)]).is_err());
+    }
+
+    // --- wrap_with_default_effects ---
+
+    #[test]
+    fn wrap_with_default_effects_produces_with_effect_handler() {
+        let form = Val::List(vec![Val::Sym("host".into()), Val::Sym("id".into())]);
+        let wrapped = wrap_with_default_effects(&form);
+        // Should be (with-effect-handler {:load <fn>} <form>)
+        if let Val::List(items) = &wrapped {
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0], Val::Sym("with-effect-handler".into()));
+            if let Val::Map(pairs) = &items[1] {
+                assert_eq!(pairs.len(), 1);
+                assert_eq!(pairs[0].0, Val::Keyword("load".into()));
+            } else {
+                panic!("expected Map, got {:?}", items[1]);
+            }
+            assert_eq!(items[2], form);
+        } else {
+            panic!("expected List");
+        }
+    }
+
     // --- dispatch table ---
 
     #[test]
