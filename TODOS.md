@@ -91,7 +91,7 @@
 5. **Extract `is_lan_addr(addr: &Multiaddr) -> bool`** as a testable pure function. Covers private, loopback, link-local IPv4/IPv6.
 6. **~8 unit tests** for extracted helpers (is_lan_addr, compound keys, FindRequest dedup, completion counter).
 **Effort:** M (CC: ~2-3 hours)
-**Priority:** P2
+**Priority:** P0 (unblocks chess demo — two local nodes can't discover each other via Amino DHT)
 **Depends on:** effects-as-capabilities (sequencing, not technical blocker)
 
 ## mDNS for Kubo-less LAN peer discovery
