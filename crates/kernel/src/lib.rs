@@ -127,14 +127,22 @@ fn build_dispatch() -> HashMap<&'static str, HandlerFn> {
     t
 }
 
-/// (load "path") — read bytes from the virtual filesystem.
-/// Works for local paths and /ipfs/ paths (via WASI interceptor).
+/// (load "path") — read bytes from the WASI virtual filesystem.
+///
+/// Relative paths like `"bin/chess-demo.wasm"` are resolved against the WASI
+/// root (`/`), which the host preopens to the merged FHS image directory.
+/// Absolute paths are used as-is.
 fn eval_load(args: &[Val]) -> Result<Val, Val> {
     let path = match args.first() {
         Some(Val::Str(s)) => s.clone(),
         _ => return Err("(load \"<path>\")".into()),
     };
-    let resolved = resolve_ipfs_path(&path);
+    // Resolve relative to WASI root — the host mounts the merged image at `/`.
+    let resolved = if path.starts_with('/') {
+        path.clone()
+    } else {
+        format!("/{path}")
+    };
     std::fs::read(&resolved)
         .map(Val::Bytes)
         .map_err(|e| Val::from(format!("load: {resolved}: {e}")))
