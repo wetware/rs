@@ -61,16 +61,26 @@ pub enum Expr {
     /// `(defmacro name [params] body...)` — macro bodies stay as raw Val.
     DefMacro { name: String, raw_args: Vec<Val> },
 
-    /// `(perform :effect-type data)` — signal an effect.
-    Perform {
-        effect_type: Box<Expr>,
-        data: Box<Expr>,
-    },
+    /// `(perform target args...)` — signal an effect.
+    ///
+    /// Two forms:
+    /// - `(perform :keyword data)` — keyword effect (environmental/global)
+    /// - `(perform cap :method args...)` — cap-targeted effect (object-scoped)
+    Perform { target: Box<Expr>, args: Vec<Expr> },
 
-    /// `(with-effect-handler {handlers} body...)` — install effect handlers.
+    /// `(with-effect-handler {handlers} body...)` — install keyword effect handlers.
     /// Internal form — users write `match` with `(effect ...)` clauses instead.
     WithEffectHandler {
         handlers: Box<Expr>,
+        body: Vec<Expr>,
+    },
+
+    /// `(with-cap-handler cap handler-fn body...)` — install a cap-targeted handler.
+    /// The handler-fn receives `(method args resume)` when code inside body
+    /// performs on the given cap.
+    WithCapHandler {
+        cap: Box<Expr>,
+        handler: Box<Expr>,
         body: Vec<Expr>,
     },
 
@@ -175,6 +185,7 @@ pub fn analyze(val: &Val) -> Result<Expr, String> {
         | Val::Recur(_)
         | Val::Effect { .. }
         | Val::NativeFn { .. }
+        | Val::AsyncNativeFn { .. }
         | Val::Resume(_)
         | Val::Cap { .. } => Ok(Expr::Const(val.clone())),
     }
@@ -204,6 +215,7 @@ fn analyze_list(items: &[Val]) -> Result<Expr, String> {
         "defmacro" => analyze_defmacro(raw_args),
         "perform" => analyze_perform(raw_args),
         "with-effect-handler" => analyze_with_effect_handler(raw_args),
+        "with-cap-handler" => analyze_with_cap_handler(raw_args),
         "match" => analyze_match(raw_args),
         "unquote" => Err("unquote (~) not inside syntax-quote".into()),
         "splice-unquote" => Err("splice-unquote (~@) not inside syntax-quote".into()),
@@ -445,18 +457,24 @@ fn analyze_defmacro(args: &[Val]) -> Result<Expr, String> {
     })
 }
 
-/// `(perform :effect-type data)`
+/// `(perform target args...)`
+///
+/// Two forms:
+/// - `(perform :keyword data)` — 2 args, keyword effect
+/// - `(perform cap :method args...)` — 2+ args, cap-targeted effect
 fn analyze_perform(args: &[Val]) -> Result<Expr, String> {
-    if args.len() != 2 {
+    if args.len() < 2 {
         return Err(format!(
-            "perform: expected 2 args (effect-type data), got {}",
+            "perform: expected at least 2 args, got {}",
             args.len()
         ));
     }
-    Ok(Expr::Perform {
-        effect_type: Box::new(analyze(&args[0])?),
-        data: Box::new(analyze(&args[1])?),
-    })
+    let target = Box::new(analyze(&args[0])?);
+    let rest = args[1..]
+        .iter()
+        .map(analyze)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Expr::Perform { target, args: rest })
 }
 
 /// `(with-handler {handlers-map} body...)`
@@ -472,6 +490,20 @@ fn analyze_with_effect_handler(args: &[Val]) -> Result<Expr, String> {
         .map(analyze)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Expr::WithEffectHandler { handlers, body })
+}
+
+/// `(with-cap-handler cap handler-fn body...)`
+fn analyze_with_cap_handler(args: &[Val]) -> Result<Expr, String> {
+    if args.len() < 3 {
+        return Err("with-cap-handler: expected (with-cap-handler cap handler-fn body...)".into());
+    }
+    let cap = Box::new(analyze(&args[0])?);
+    let handler = Box::new(analyze(&args[1])?);
+    let body = args[2..]
+        .iter()
+        .map(analyze)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Expr::WithCapHandler { cap, handler, body })
 }
 
 /// Analyze a `(match expr clause1 clause2 ...)` form.
@@ -832,8 +864,12 @@ mod tests {
     }
 
     #[test]
-    fn analyze_perform_three_args() {
-        assert!(analyze_str("(perform :a :b :c)").is_err());
+    fn analyze_perform_variadic() {
+        // Cap-targeted: (perform cap :method arg1 arg2)
+        match analyze_str("(perform cap :method :a :b)").unwrap() {
+            Expr::Perform { args, .. } => assert_eq!(args.len(), 3),
+            other => panic!("expected Perform, got {other:?}"),
+        }
     }
 
     #[test]

@@ -906,6 +906,7 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
                 Val::Macro { .. } => "macro",
                 Val::Effect { .. } => "effect",
                 Val::NativeFn { .. } => "native-fn",
+                Val::AsyncNativeFn { .. } => "async-native-fn",
                 Val::Cap { .. } => "cap",
                 Val::Resume(_) => "resume",
             };
@@ -1526,37 +1527,49 @@ pub fn eval_expr<'a, D: Dispatch>(
                 Ok(Val::Recur(evaled))
             }
 
-            Expr::Perform { effect_type, data } => {
-                let etype = eval_expr(effect_type, env, dispatch).await?;
-                let etype_str = match &etype {
-                    Val::Keyword(s) => s.clone(),
+            Expr::Perform { target, args } => {
+                let target_val = eval_expr(target, env, dispatch).await?;
+                let mut evaled_args = Vec::with_capacity(args.len());
+                for a in args {
+                    evaled_args.push(eval_expr(a, env, dispatch).await?);
+                }
+
+                // Build EffectTarget + data payload from the two perform forms.
+                let (effect_target, data_val) = match &target_val {
+                    // (perform :keyword data) — keyword/environmental effect
+                    Val::Keyword(s) => {
+                        if evaled_args.len() != 1 {
+                            return Err(eval_err!(
+                                "perform: keyword effect expects 1 data arg, got {}",
+                                evaled_args.len()
+                            ));
+                        }
+                        (
+                            effect::EffectTarget::Keyword(s.clone()),
+                            evaled_args.into_iter().next().unwrap(),
+                        )
+                    }
+                    // (perform cap :method args...) — cap-targeted effect
+                    Val::Cap { name, inner } => {
+                        // Pack (:method args...) into a list as the data payload.
+                        let data = Val::List(evaled_args);
+                        (
+                            effect::EffectTarget::Cap {
+                                name: name.clone(),
+                                inner: inner.clone(),
+                            },
+                            data,
+                        )
+                    }
                     other => {
                         return Err(eval_err!(
-                            "perform: effect type must be a keyword, got {other}"
+                            "perform: target must be a keyword or cap, got {other}"
                         ))
                     }
                 };
-                let data_val = eval_expr(data, env, dispatch).await?;
 
-                // Check for a handler context (with-effect-handler installed one)
-                let ctx = env.handler_stack.borrow().last().cloned();
-                match ctx {
-                    Some(ctx) => {
-                        // Suspend: create oneshot, write to effect slot, await resume.
-                        let (tx, rx) = oneshot::channel();
-                        ctx.borrow_mut().slot.borrow_mut().pending =
-                            Some((etype_str.clone(), data_val, tx));
-                        // Await resume value — Pending until handler sends or drops
-                        rx.await
-                    }
-                    None => {
-                        // No handler context — propagate as error (backward compat)
-                        Err(Val::Effect {
-                            effect_type: etype_str,
-                            data: Box::new(data_val),
-                        })
-                    }
-                }
+                // Stack walk: find the matching handler frame.
+                perform_dispatch(&env.handler_stack, effect_target, data_val).await
             }
 
             Expr::Match { expr, clauses } => {
@@ -1594,12 +1607,21 @@ pub fn eval_expr<'a, D: Dispatch>(
                     }
                 };
 
+                // Depth check.
+                let hs = env.handler_stack.clone();
+                if hs.borrow().len() >= effect::MAX_HANDLER_DEPTH {
+                    return Err(eval_err!(
+                        "with-effect-handler: handler stack depth limit ({}) exceeded",
+                        effect::MAX_HANDLER_DEPTH
+                    ));
+                }
+
                 // Create handler context and push onto the shared dynamic stack.
+                // Keyword handlers have target=None; the poll loop matches by keyword map lookup.
                 let ctx = Rc::new(RefCell::new(effect::HandlerContext {
                     slot: Rc::new(RefCell::new(effect::EffectSlot::new())),
+                    target: None,
                 }));
-                // Clone the handler stack Rc BEFORE body future moves env.
-                let hs = env.handler_stack.clone();
                 hs.borrow_mut().push(ctx.clone());
 
                 // Create body future — captures env and dispatch.
@@ -1632,7 +1654,21 @@ pub fn eval_expr<'a, D: Dispatch>(
                                         let pending =
                                             ctx.borrow().slot.borrow_mut().pending.take();
                                         match pending {
-                                            Some((etype, data, resume_tx)) => {
+                                            Some((effect_target, data, resume_tx)) => {
+                                                // Extract keyword for handler map lookup
+                                                let etype = match &effect_target {
+                                                    effect::EffectTarget::Keyword(s) => s.clone(),
+                                                    // Cap effects shouldn't arrive here (they go to
+                                                    // with-cap-handler frames), but handle gracefully.
+                                                    effect::EffectTarget::Cap { name, .. } => {
+                                                        drop(resume_tx);
+                                                        hs.borrow_mut().pop();
+                                                        return Poll::Ready(Err(Val::Effect {
+                                                            effect_type: format!("cap:{name}"),
+                                                            data: Box::new(data),
+                                                        }));
+                                                    }
+                                                };
                                                 // Find matching handler
                                                 let handler_fn =
                                                     handler_pairs.iter().find_map(|(k, v)| {
@@ -1781,6 +1817,229 @@ pub fn eval_expr<'a, D: Dispatch>(
                 }
             }
 
+            Expr::WithCapHandler { cap, handler, body } => {
+                // Evaluate cap and handler BEFORE pushing context.
+                let cap_val = eval_expr(cap, env, dispatch).await?;
+                let handler_val = eval_expr(handler, env, dispatch).await?;
+
+                let cap_target = match &cap_val {
+                    Val::Cap { name, inner } => effect::EffectTarget::Cap {
+                        name: name.clone(),
+                        inner: inner.clone(),
+                    },
+                    other => {
+                        return Err(eval_err!(
+                            "with-cap-handler: first arg must be a cap, got {other}"
+                        ))
+                    }
+                };
+
+                // Depth check.
+                let hs = env.handler_stack.clone();
+                if hs.borrow().len() >= effect::MAX_HANDLER_DEPTH {
+                    return Err(eval_err!(
+                        "with-cap-handler: handler stack depth limit ({}) exceeded",
+                        effect::MAX_HANDLER_DEPTH
+                    ));
+                }
+
+                // Create handler context with the cap target.
+                let ctx = Rc::new(RefCell::new(effect::HandlerContext {
+                    slot: Rc::new(RefCell::new(effect::EffectSlot::new())),
+                    target: Some(cap_target),
+                }));
+                hs.borrow_mut().push(ctx.clone());
+
+                // Create body future.
+                let mut body_fut = {
+                    let body = body.clone();
+                    Box::pin(async move {
+                        let mut result = Val::Nil;
+                        for e in &body {
+                            result = eval_expr(e, env, dispatch).await?;
+                        }
+                        Ok::<Val, Val>(result)
+                    })
+                };
+
+                // State machine — same pattern as WithEffectHandler.
+                enum CapHandlerState<'b> {
+                    Polling,
+                    Handling(Pin<Box<dyn Future<Output = Result<Val, Val>> + 'b>>),
+                }
+                let mut state = CapHandlerState::Polling;
+
+                let result: Result<Val, Val> = std::future::poll_fn(|cx| {
+                    loop {
+                        match &mut state {
+                            CapHandlerState::Polling => {
+                                match body_fut.as_mut().poll(cx) {
+                                    Poll::Ready(result) => return Poll::Ready(result),
+                                    Poll::Pending => {
+                                        let pending =
+                                            ctx.borrow().slot.borrow_mut().pending.take();
+                                        match pending {
+                                            Some((_target, data, resume_tx)) => {
+                                                // Cap handler receives (data, resume)
+                                                // where data = (:method args...) list.
+                                                match &handler_val {
+                                                    Val::Fn {
+                                                        arities,
+                                                        env: captured_env,
+                                                    } => {
+                                                        // Pop before handle (same discipline as keyword handlers).
+                                                        hs.borrow_mut().pop();
+
+                                                        let has_2_arity =
+                                                            arities.iter().any(|a| {
+                                                                (a.variadic.is_none()
+                                                                    && a.params.len() == 2)
+                                                                    || (a.variadic.is_some()
+                                                                        && a.params.len() <= 2)
+                                                            });
+                                                        let owned_arities = arities.clone();
+                                                        let owned_env = captured_env.clone();
+
+                                                        let handler_fut: Pin<
+                                                            Box<
+                                                                dyn Future<
+                                                                        Output = Result<Val, Val>,
+                                                                    > + '_,
+                                                            >,
+                                                        > = if has_2_arity {
+                                                            let resume_fn =
+                                                                effect::make_resume_fn(resume_tx);
+                                                            let args = vec![data, resume_fn];
+                                                            Box::pin(async move {
+                                                                invoke_fn(
+                                                                    &owned_arities,
+                                                                    &owned_env,
+                                                                    &args,
+                                                                    dispatch,
+                                                                )
+                                                                .await
+                                                            })
+                                                        } else {
+                                                            drop(resume_tx);
+                                                            let args = vec![data];
+                                                            Box::pin(async move {
+                                                                invoke_fn(
+                                                                    &owned_arities,
+                                                                    &owned_env,
+                                                                    &args,
+                                                                    dispatch,
+                                                                )
+                                                                .await
+                                                            })
+                                                        };
+
+                                                        state = CapHandlerState::Handling(
+                                                            handler_fut,
+                                                        );
+                                                        continue;
+                                                    }
+                                                    Val::NativeFn { func, .. } => {
+                                                        hs.borrow_mut().pop();
+                                                        let resume_fn =
+                                                            effect::make_resume_fn(resume_tx);
+                                                        let result =
+                                                            func(&[data, resume_fn]);
+                                                        match result {
+                                                            Err(Val::Resume(_)) => {
+                                                                // Handler called resume — value sent via oneshot.
+                                                                // Re-push context, resume body.
+                                                                hs.borrow_mut()
+                                                                    .push(ctx.clone());
+                                                                state =
+                                                                    CapHandlerState::Polling;
+                                                                cx.waker().wake_by_ref();
+                                                                return Poll::Pending;
+                                                            }
+                                                            other => {
+                                                                hs.borrow_mut()
+                                                                    .push(ctx.clone());
+                                                                return Poll::Ready(other);
+                                                            }
+                                                        }
+                                                    }
+                                                    Val::AsyncNativeFn { func, .. } => {
+                                                        hs.borrow_mut().pop();
+                                                        let resume_fn =
+                                                            effect::make_resume_fn(resume_tx);
+                                                        let func = func.clone();
+                                                        let handler_fut: Pin<
+                                                            Box<
+                                                                dyn Future<
+                                                                        Output = Result<Val, Val>,
+                                                                    > + '_,
+                                                            >,
+                                                        > = Box::pin(
+                                                            func(vec![data, resume_fn]),
+                                                        );
+                                                        state = CapHandlerState::Handling(
+                                                            handler_fut,
+                                                        );
+                                                        continue;
+                                                    }
+                                                    other => {
+                                                        drop(resume_tx);
+                                                        return Poll::Ready(Err(eval_err!(
+                                                            "with-cap-handler: handler must be a function, got {other}"
+                                                        )));
+                                                    }
+                                                }
+                                            }
+                                            None => return Poll::Pending,
+                                        }
+                                    }
+                                }
+                            }
+                            CapHandlerState::Handling(handler_fut) => {
+                                match handler_fut.as_mut().poll(cx) {
+                                    Poll::Ready(Ok(val)) => {
+                                        hs.borrow_mut().push(ctx.clone());
+                                        return Poll::Ready(Ok(val));
+                                    }
+                                    Poll::Ready(Err(Val::Resume(_))) => {
+                                        hs.borrow_mut().push(ctx.clone());
+                                        state = CapHandlerState::Polling;
+                                        cx.waker().wake_by_ref();
+                                        return Poll::Pending;
+                                    }
+                                    Poll::Ready(Err(Val::Effect { effect_type, data })) => {
+                                        hs.borrow_mut().push(ctx.clone());
+                                        return Poll::Ready(Err(Val::Effect {
+                                            effect_type,
+                                            data,
+                                        }));
+                                    }
+                                    Poll::Ready(Err(other)) => {
+                                        hs.borrow_mut().push(ctx.clone());
+                                        return Poll::Ready(Err(other));
+                                    }
+                                    Poll::Pending => return Poll::Pending,
+                                }
+                            }
+                        }
+                    }
+                })
+                .await;
+
+                // Pop our handler context (if still on the stack).
+                let mut stack = hs.borrow_mut();
+                if let Some(last) = stack.last() {
+                    if Rc::ptr_eq(last, &ctx) {
+                        stack.pop();
+                    }
+                }
+                drop(stack);
+
+                match &result {
+                    Err(Val::Resume(_)) => result,
+                    _ => result,
+                }
+            }
+
             Expr::DefMacro { name, raw_args } => {
                 // raw_args contains [params, body...] — no name (already extracted).
                 let arities = parse_macro_arities(raw_args)?;
@@ -1827,6 +2086,11 @@ pub fn eval_expr<'a, D: Dispatch>(
                     let func = func.clone();
                     let evaled_args = eval_expr_args(args, env, dispatch).await?;
                     return func(&evaled_args);
+                }
+                if let Some(Val::AsyncNativeFn { func, .. }) = env.get(head) {
+                    let func = func.clone();
+                    let evaled_args = eval_expr_args(args, env, dispatch).await?;
+                    return func(evaled_args).await;
                 }
 
                 // 3. Evaluate args for remaining paths
@@ -1881,6 +2145,9 @@ pub fn eval_expr<'a, D: Dispatch>(
                         if let Some(Val::NativeFn { func, .. }) = env.get(fname) {
                             return func.clone()(&spread);
                         }
+                        if let Some(Val::AsyncNativeFn { func, .. }) = env.get(fname) {
+                            return func.clone()(spread).await;
+                        }
                         if let Some(result) = eval_builtin(fname, &spread) {
                             return result;
                         }
@@ -1895,6 +2162,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                         invoke_fn(&arities, &captured_env, &spread, dispatch).await
                     }
                     Val::NativeFn { func, .. } => func(&spread),
+                    Val::AsyncNativeFn { func, .. } => func(spread).await,
                     other => Err(eval_err!(
                         "apply: first arg must be a symbol or fn, got {other}"
                     )),
@@ -2147,6 +2415,70 @@ pub fn eval<'a, D: Dispatch>(
             other => Ok(other.clone()),
         }
     })
+}
+
+// ---------------------------------------------------------------------------
+// Shared perform dispatch — stack walk
+// ---------------------------------------------------------------------------
+
+/// Walk the handler stack (newest → oldest) looking for a frame whose target
+/// matches `effect_target`. Write to that frame's slot and await the oneshot.
+///
+/// Used by both `Expr::Perform` and (in future) `Val::List` fallback dispatch.
+async fn perform_dispatch(
+    handler_stack: &effect::HandlerStack,
+    effect_target: effect::EffectTarget,
+    data: Val,
+) -> Result<Val, Val> {
+    // Walk stack in reverse (newest first) to find a matching handler.
+    // Scoped borrow — released before any .await.
+    let matching_ctx = {
+        let stack = handler_stack.borrow();
+        match &effect_target {
+            effect::EffectTarget::Keyword(_) => {
+                // Keyword effects skip cap handler frames (target: Some(Cap{..}))
+                // and land on the nearest keyword handler frame (target: None).
+                stack
+                    .iter()
+                    .rev()
+                    .find(|ctx| ctx.borrow().target.is_none())
+                    .cloned()
+            }
+            effect::EffectTarget::Cap { .. } => {
+                // Cap effects walk the stack looking for a frame whose target
+                // matches by Rc::ptr_eq (identity).
+                stack
+                    .iter()
+                    .rev()
+                    .find(|ctx| {
+                        ctx.borrow()
+                            .target
+                            .as_ref()
+                            .is_some_and(|t| t.matches(&effect_target))
+                    })
+                    .cloned()
+            }
+        }
+    };
+
+    match matching_ctx {
+        Some(ctx) => {
+            let (tx, rx) = oneshot::channel();
+            ctx.borrow_mut().slot.borrow_mut().pending = Some((effect_target, data, tx));
+            rx.await
+        }
+        None => {
+            // No matching handler — propagate as unhandled effect.
+            let effect_type = match &effect_target {
+                effect::EffectTarget::Keyword(s) => s.clone(),
+                effect::EffectTarget::Cap { name, .. } => format!("cap:{name}"),
+            };
+            Err(Val::Effect {
+                effect_type,
+                data: Box::new(data),
+            })
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5375,5 +5707,317 @@ mod tests {
         let d = RecordingDispatch::new();
         let result = eval_str("(loop [i 0] (if (= i 5) i (recur (+ i 1))))", &mut env, &d);
         assert_eq!(result, Ok(Val::Int(5)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Cap-as-effects tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a Val::Cap with a given name, wrapping an i32 marker.
+    fn make_test_cap(name: &str, marker: i32) -> Val {
+        Val::Cap {
+            name: name.into(),
+            inner: Rc::new(marker),
+        }
+    }
+
+    #[test]
+    fn perform_cap_basic() {
+        // Cap-targeted perform dispatches to the correct handler.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let cap = make_test_cap("executor", 1);
+        env.set("my-cap".into(), cap);
+        // Handler receives data (a list of [:method args...]) and returns it.
+        let result = eval_str(
+            "(with-cap-handler my-cap (fn [data resume] (resume data)) (perform my-cap :run 42))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(
+            result,
+            Ok(Val::List(vec![Val::Keyword("run".into()), Val::Int(42)]))
+        );
+    }
+
+    #[test]
+    fn perform_cap_wrong_identity() {
+        // Different Rc, same name — does NOT match (identity semantics).
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let cap1 = make_test_cap("executor", 1);
+        let cap2 = make_test_cap("executor", 2);
+        env.set("cap1".into(), cap1);
+        env.set("cap2".into(), cap2);
+        // Handler installed for cap1, perform on cap2 — no match.
+        let result = eval_str(
+            "(with-cap-handler cap1 (fn [data] :handled) (perform cap2 :run 0))",
+            &mut env,
+            &d,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn perform_cap_no_handler() {
+        // No handler installed for cap → unhandled effect error.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let cap = make_test_cap("ipfs", 1);
+        env.set("my-cap".into(), cap);
+        let result = eval_str("(perform my-cap :cat \"/foo\")", &mut env, &d);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn perform_keyword_still_works() {
+        // Existing keyword performs are unchanged.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str(
+            "(with-effect-handler {:fail (fn [data] (+ data 1))} (perform :fail 42))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(43)));
+    }
+
+    #[test]
+    fn with_cap_handler_non_cap_target_errors() {
+        // Non-Cap first arg → error.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(with-cap-handler 42 (fn [data] data) :body)", &mut env, &d);
+        assert!(result.is_err());
+        if let Err(err) = &result {
+            assert!(err_contains(err, "cap"));
+        }
+    }
+
+    #[test]
+    fn with_cap_handler_non_fn_handler_errors() {
+        // Non-Fn second arg → error at perform time (handler is still a value).
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let cap = make_test_cap("x", 1);
+        env.set("my-cap".into(), cap);
+        let result = eval_str(
+            "(with-cap-handler my-cap 42 (perform my-cap :m 0))",
+            &mut env,
+            &d,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cap_handler_shadows_outer() {
+        // Inner handler for same cap wins.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let cap = make_test_cap("exec", 1);
+        env.set("my-cap".into(), cap);
+        let result = eval_str(
+            "(with-cap-handler my-cap (fn [data] :outer) (with-cap-handler my-cap (fn [data] :inner) (perform my-cap :m 0)))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Keyword("inner".into())));
+    }
+
+    #[test]
+    fn cap_handler_attenuation_forward() {
+        // Inner handler delegates to outer via perform on same cap.
+        // Pop-before-handle makes this work: inner is popped, perform hits outer.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let cap = make_test_cap("exec", 1);
+        env.set("my-cap".into(), cap);
+        let result = eval_str(
+            "(with-cap-handler my-cap (fn [data resume] (resume :forwarded)) (with-cap-handler my-cap (fn [data resume] (perform my-cap :delegated 0)) (perform my-cap :m 0)))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Keyword("forwarded".into())));
+    }
+
+    #[test]
+    fn cap_handler_attenuation_block() {
+        // Inner handler blocks disallowed method — returns error without forwarding.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let cap = make_test_cap("exec", 1);
+        env.set("my-cap".into(), cap);
+        let result = eval_str(
+            "(with-cap-handler my-cap (fn [data resume] (resume :full-authority)) (with-cap-handler my-cap (fn [data] :blocked) (perform my-cap :m 0)))",
+            &mut env,
+            &d,
+        );
+        // Inner handler aborts (1-arg, no resume) → returns :blocked, body is abandoned.
+        assert_eq!(result, Ok(Val::Keyword("blocked".into())));
+    }
+
+    #[test]
+    fn mixed_stack_walk() {
+        // Keyword handler + cap handler on same stack, correct dispatch.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let cap = make_test_cap("exec", 1);
+        env.set("my-cap".into(), cap);
+        // Install keyword handler for :fail, then cap handler for my-cap.
+        // Keyword perform should hit keyword handler; cap perform should hit cap handler.
+        let result = eval_str(
+            "(with-effect-handler {:fail (fn [data] :keyword-handled)} (with-cap-handler my-cap (fn [data] :cap-handled) (perform my-cap :m 0)))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Keyword("cap-handled".into())));
+    }
+
+    #[test]
+    fn mixed_stack_keyword_through_cap() {
+        // Cap handler is on the stack but keyword perform goes to keyword handler.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let cap = make_test_cap("exec", 1);
+        env.set("my-cap".into(), cap);
+        let result = eval_str(
+            "(with-effect-handler {:fail (fn [data] :keyword-handled)} (with-cap-handler my-cap (fn [data] :cap-handled) (perform :fail 0)))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Keyword("keyword-handled".into())));
+    }
+
+    #[test]
+    fn perform_cap_resume_value() {
+        // Cap handler resumes with a transformed value.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let cap = make_test_cap("math", 1);
+        env.set("my-cap".into(), cap);
+        let result = eval_str(
+            "(with-cap-handler my-cap (fn [data resume] (resume 100)) (+ 1 (perform my-cap :compute 0)))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(101)));
+    }
+
+    #[test]
+    fn perform_target_must_be_keyword_or_cap() {
+        // Passing a string as target should error.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let result = eval_str("(perform \"not-valid\" 42)", &mut env, &d);
+        assert!(result.is_err());
+        if let Err(err) = &result {
+            assert!(err_contains(err, "keyword or cap"));
+        }
+    }
+
+    #[test]
+    fn async_native_fn_basic() {
+        // AsyncNativeFn should be callable and its result awaited.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        env.set(
+            "afn".into(),
+            Val::AsyncNativeFn {
+                name: "afn".into(),
+                func: Rc::new(|args: Vec<Val>| {
+                    Box::pin(core::future::ready(Ok(Val::Int(
+                        if let Val::Int(n) = &args[0] {
+                            n + 100
+                        } else {
+                            -1
+                        },
+                    ))))
+                }),
+            },
+        );
+        let result = eval_str("(afn 5)", &mut env, &d);
+        assert_eq!(result, Ok(Val::Int(105)));
+    }
+
+    #[test]
+    fn async_native_fn_error() {
+        // AsyncNativeFn returning Err should propagate as an error.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        env.set(
+            "fail-async".into(),
+            Val::AsyncNativeFn {
+                name: "fail-async".into(),
+                func: Rc::new(|_args: Vec<Val>| {
+                    Box::pin(core::future::ready(Err(Val::from(
+                        "async boom".to_string(),
+                    ))))
+                }),
+            },
+        );
+        let result = eval_str("(fail-async 1)", &mut env, &d);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn async_native_fn_in_cap_handler() {
+        // AsyncNativeFn used as a cap handler should work correctly.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let cap = make_test_cap("svc", 1);
+        env.set("my-cap".into(), cap.clone());
+        env.set(
+            "async-handler".into(),
+            Val::AsyncNativeFn {
+                name: "async-handler".into(),
+                func: Rc::new(|_args: Vec<Val>| {
+                    // Handler returns 999 directly.
+                    Box::pin(core::future::ready(Ok(Val::Int(999))))
+                }),
+            },
+        );
+        let result = eval_str(
+            "(with-cap-handler my-cap async-handler (perform my-cap :ping 1))",
+            &mut env,
+            &d,
+        );
+        assert_eq!(result, Ok(Val::Int(999)));
+    }
+
+    #[test]
+    fn handler_depth_limit() {
+        // Exceeding MAX_HANDLER_DEPTH should error.
+        // We pre-fill the handler stack to near the limit, then one more push should fail.
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let cap = make_test_cap("x", 1);
+        env.set("my-cap".into(), cap.clone());
+
+        // Pre-fill handler stack to the limit.
+        let cap_target = match &cap {
+            Val::Cap { name, inner } => effect::EffectTarget::Cap {
+                name: name.clone(),
+                inner: inner.clone(),
+            },
+            _ => unreachable!(),
+        };
+        for _ in 0..effect::MAX_HANDLER_DEPTH {
+            let ctx = Rc::new(RefCell::new(effect::HandlerContext {
+                slot: Rc::new(RefCell::new(effect::EffectSlot::new())),
+                target: Some(cap_target.clone()),
+            }));
+            env.handler_stack.borrow_mut().push(ctx);
+        }
+
+        // One more with-cap-handler should hit the depth limit.
+        let result = eval_str(
+            "(with-cap-handler my-cap (fn [data] data) :body)",
+            &mut env,
+            &d,
+        );
+        assert!(result.is_err());
+        if let Err(err) = &result {
+            assert!(err_contains(err, "depth limit"));
+        }
     }
 }

@@ -92,6 +92,13 @@ pub struct FnArity {
 /// Shared pointer to a native (Rust-side) function callable from Glia.
 pub type NativeFnImpl = std::rc::Rc<dyn Fn(&[Val]) -> Result<Val, Val>>;
 
+/// Shared pointer to an async native function callable from Glia.
+/// Returns a boxed future that resolves to `Result<Val, Val>`.
+/// The future is `'static` (no borrows from args — clone what you need).
+pub type AsyncNativeFnImpl = std::rc::Rc<
+    dyn Fn(Vec<Val>) -> core::pin::Pin<Box<dyn core::future::Future<Output = Result<Val, Val>>>>,
+>;
+
 /// A Clojure-like value.
 #[derive(Clone)]
 pub enum Val {
@@ -134,6 +141,13 @@ pub enum Val {
         name: String,
         func: NativeFnImpl,
     },
+    /// An async Rust-side function callable from Glia. Used for cap handlers
+    /// that make async RPC calls. Takes owned args (Vec<Val>) so the future
+    /// can be `'static`.
+    AsyncNativeFn {
+        name: String,
+        func: AsyncNativeFnImpl,
+    },
     /// Internal sentinel returned by `resume` — short-circuits the handler's
     /// eval chain. Propagates via Err like Effect and Recur. Must NOT be caught
     /// by nested `with-handler` — always re-propagated.
@@ -174,6 +188,7 @@ impl core::fmt::Debug for Val {
                 .field("data", data)
                 .finish(),
             Val::NativeFn { name, .. } => write!(f, "NativeFn({name})"),
+            Val::AsyncNativeFn { name, .. } => write!(f, "AsyncNativeFn({name})"),
             Val::Resume(v) => f.debug_tuple("Resume").field(v).finish(),
             Val::Cap { name, .. } => write!(f, "Cap({name})"),
         }
@@ -222,6 +237,9 @@ impl PartialEq for Val {
             (Val::Macro { .. }, Val::Macro { .. }) => false,
             // Closures, native fns, and macros are never equal (identity semantics).
             (Val::NativeFn { func: a, .. }, Val::NativeFn { func: b, .. }) => {
+                std::rc::Rc::ptr_eq(a, b)
+            }
+            (Val::AsyncNativeFn { func: a, .. }, Val::AsyncNativeFn { func: b, .. }) => {
                 std::rc::Rc::ptr_eq(a, b)
             }
             // Caps use identity semantics (same Rc = same cap).
@@ -277,6 +295,7 @@ impl core::fmt::Display for Val {
                 write!(f, "#<effect :{effect_type} {data}>")
             }
             Val::NativeFn { name, .. } => write!(f, "#<native-fn {name}>"),
+            Val::AsyncNativeFn { name, .. } => write!(f, "#<async-native-fn {name}>"),
             Val::Cap { name, .. } => write!(f, "#<cap {name}>"),
             Val::Resume(val) => write!(f, "#<resume {val}>"),
         }

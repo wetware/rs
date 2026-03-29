@@ -1,10 +1,7 @@
 # TODOs
 
-## Async NativeFn variant
-**What:** Add `Val::AsyncNativeFn` — a Rust-side closure returning a Future.
-**Why:** Current NativeFn is sync-only. Future stdlib (http, file I/O) needs async native fns.
-**Context:** Resume function is sync (channel send is instant), so not needed for #247. But NativeFn will be used beyond resume. The async gap surfaces when Glia stdlib expands.
-**Depends on:** #247 (NativeFn ships there)
+## ~~Async NativeFn variant~~ ✅
+**RESOLVED:** `Val::AsyncNativeFn` added in PR #281. Takes `Vec<Val>` (owned) → `Pin<Box<dyn Future<Output = Result<Val, Val>>>>`. Wired into all eval.rs invocation sites + cap handler dispatch.
 
 ## Glia-level finally / resource cleanup via effects
 **What:** `with-resource` or `finally` pattern — cleanup handlers that run on scope exit.
