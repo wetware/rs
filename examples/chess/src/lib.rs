@@ -4,14 +4,14 @@
 //! init.d script (`etc/init.d/chess.glia`):
 //!
 //! **Cell mode** (`WW_CELL=1`): An RPC capability cell spawned
-//! by RpcListener. Creates a ChessEngine and exports it via
+//! by VatListener. Creates a ChessEngine and exports it via
 //! `system::serve()`. The host bridges the capability to the connecting
 //! peer via Cap'n Proto RPC bootstrapping.
 //!
 //! **Service mode** (default): Spawned by an init.d script after the
 //! RPC cell is registered. Provides the schema CID on the DHT,
 //! discovers peers via `routing.find_providers()`, dials them via
-//! `RpcDialer` to get typed ChessEngine capabilities, and plays random
+//! `VatClient` to get typed ChessEngine capabilities, and plays random
 //! games logging replays to IPFS.
 
 use std::cell::RefCell;
@@ -228,7 +228,7 @@ impl chess_capnp::chess_engine::Server for ChessEngineImpl {
 // Cell mode — RPC capability export via system::serve()
 // ---------------------------------------------------------------------------
 
-/// RPC cell for RpcListener-spawned processes.
+/// RPC cell for VatListener-spawned processes.
 ///
 /// Creates a ChessEngine and exports it as the bootstrap capability.
 /// The host bridges this cap to the connecting peer. The process stays
@@ -245,11 +245,11 @@ fn run_cell() {
 }
 
 // ---------------------------------------------------------------------------
-// RpcDialingSink — discovers peers and dials them via RpcDialer
+// RpcDialingSink — discovers peers and dials them via VatClient
 // ---------------------------------------------------------------------------
 
 struct RpcDialingSink {
-    rpc_dialer: system_capnp::rpc_dialer::Client,
+    vat_client: system_capnp::vat_client::Client,
     unixfs: ipfs_capnp::unix_f_s::Client,
     self_id: Vec<u8>,
     seen: Rc<RefCell<HashSet<Vec<u8>>>>,
@@ -268,13 +268,13 @@ impl routing_capnp::provider_sink::Server for RpcDialingSink {
             return Promise::ok(());
         }
 
-        let rpc_dialer = self.rpc_dialer.clone();
+        let vat_client = self.vat_client.clone();
         let unixfs = self.unixfs.clone();
         let self_id = self.self_id.clone();
         let peer = peer_id.clone();
 
         Promise::from_future(async move {
-            if let Err(e) = play_rpc_against_peer(&rpc_dialer, &unixfs, &self_id, &peer).await {
+            if let Err(e) = play_rpc_against_peer(&vat_client, &unixfs, &self_id, &peer).await {
                 log::error!("game vs {} failed: {e}", short_id(&peer));
             }
             // Pause between games so the output is readable.
@@ -297,7 +297,7 @@ impl routing_capnp::provider_sink::Server for RpcDialingSink {
 }
 
 // ---------------------------------------------------------------------------
-// play_rpc_against_peer — dial via RpcDialer and play a typed RPC game
+// play_rpc_against_peer — dial via VatClient and play a typed RPC game
 // ---------------------------------------------------------------------------
 
 /// Publish a JSON node to IPFS and return its CID, or None on failure.
@@ -326,7 +326,7 @@ async fn publish_node(unixfs: &ipfs_capnp::unix_f_s::Client, json: &str) -> Opti
 }
 
 async fn play_rpc_against_peer(
-    rpc_dialer: &system_capnp::rpc_dialer::Client,
+    vat_client: &system_capnp::vat_client::Client,
     unixfs: &ipfs_capnp::unix_f_s::Client,
     self_id: &[u8],
     peer_id: &[u8],
@@ -334,8 +334,8 @@ async fn play_rpc_against_peer(
     let us = short_id(self_id);
     let them = short_id(peer_id);
 
-    // Dial peer via RpcDialer — returns a typed ChessEngine capability.
-    let mut req = rpc_dialer.dial_request();
+    // Dial peer via VatClient — returns a typed ChessEngine capability.
+    let mut req = vat_client.dial_request();
     req.get().set_peer(peer_id);
     req.get().set_schema(CHESS_ENGINE_SCHEMA);
     let resp = req.send().promise.await?;
@@ -481,7 +481,7 @@ async fn play_rpc_game(
 }
 
 // ---------------------------------------------------------------------------
-// Service mode — discovery loop with RpcDialer
+// Service mode — discovery loop with VatClient
 // ---------------------------------------------------------------------------
 
 async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
@@ -491,10 +491,10 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
     let ipfs = results.get_ipfs()?;
     let routing = results.get_routing()?;
 
-    // Get network capabilities — rpc_dialer for typed capability dialing.
+    // Get network capabilities — vat_client for typed capability dialing.
     let network_resp = host.network_request().send().promise.await?;
     let network = network_resp.get()?;
-    let rpc_dialer = network.get_rpc_dialer()?;
+    let vat_client = network.get_vat_client()?;
 
     // Get UnixFS for replay publishing.
     let unixfs_resp = ipfs.unixfs_request().send().promise.await?;
@@ -524,7 +524,7 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
 
         // Search for peers; RpcDialingSink dials new ones via RPC.
         let sink: routing_capnp::provider_sink::Client = capnp_rpc::new_client(RpcDialingSink {
-            rpc_dialer: rpc_dialer.clone(),
+            vat_client: vat_client.clone(),
             unixfs: unixfs.clone(),
             self_id: self_id.clone(),
             seen: seen.clone(),
@@ -567,7 +567,7 @@ impl Guest for ChessGuest {
             // Cell mode: export ChessEngine via RPC.
             run_cell();
         } else {
-            // Service mode: discovery loop with RpcDialer.
+            // Service mode: discovery loop with VatClient.
             log::info!("chess guest starting (service mode)");
             system::run(|membrane: Membrane| async move { run_service(membrane).await });
         }

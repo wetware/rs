@@ -2204,8 +2204,7 @@ mod tests {
                     Side::Server,
                     Default::default(),
                 );
-                let cell_rpc =
-                    RpcSystem::new(Box::new(cell_network), Some(executor_cap.client));
+                let cell_rpc = RpcSystem::new(Box::new(cell_network), Some(executor_cap.client));
                 let cell_task = tokio::task::spawn_local(async move {
                     let _ = cell_rpc.await;
                 });
@@ -2217,8 +2216,7 @@ mod tests {
                     Default::default(),
                 );
                 let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
-                let cell_cap: system_capnp::executor::Client =
-                    client_rpc.bootstrap(Side::Server);
+                let cell_cap: system_capnp::executor::Client = client_rpc.bootstrap(Side::Server);
                 let cell_cap = cell_cap.client;
                 tokio::task::spawn_local(async move {
                     let _ = client_rpc.await;
@@ -2265,10 +2263,7 @@ mod tests {
                         resp.get().is_err()
                     }
                 };
-                assert!(
-                    is_dead,
-                    "call through bridge should fail after cell dies"
-                );
+                assert!(is_dead, "call through bridge should fail after cell dies");
             })
             .await;
     }

@@ -2,7 +2,7 @@
 
 Two-node cross-network chess over libp2p RPC capabilities.
 
-Each node registers an `RpcListener` for the ChessEngine schema,
+Each node registers an `VatListener` for the ChessEngine schema,
 announces the schema CID on the Kademlia DHT, discovers peers, and
 plays random UCI moves via typed Cap'n Proto RPC. Every completed game
 publishes a content-addressed replay log to IPFS (see
@@ -15,7 +15,7 @@ publishes a content-addressed replay log to IPFS (see
                   │
           chess.glia evaluated
              ┌────┴────┐
-   (host rpcListen)  (executor run)
+   (host listen)     (executor run)
           │              │
       cell mode      service mode
     (per-connection) (discovery loop)
@@ -24,12 +24,12 @@ publishes a content-addressed replay log to IPFS (see
 Two execution modes, selected by the init.d script:
 
 - **Cell** (`WW_CELL`): per-connection RPC cell spawned by
-  `RpcListener`. Creates a `ChessEngineImpl` and exports it via
+  `VatListener`. Creates a `ChessEngineImpl` and exports it via
   `system::serve()`. The host bridges the capability to the connecting
   peer via Cap'n Proto RPC bootstrapping.
 - **Service** (default): long-running discovery loop. Provides the
   schema CID on the DHT, discovers peers via `routing.find_providers()`,
-  dials them with `RpcDialer` to get typed `ChessEngine` capabilities,
+  dials them with `VatClient` to get typed `ChessEngine` capabilities,
   and plays random games. Exponential backoff (2 s to 15 min).
 
 ## Schema CID
@@ -49,16 +49,17 @@ is a capability invocation — inner expressions resolve first.
 
 ```clojure
 ; Register RPC cell — schema extracted from WASM custom section.
-(host rpcListen (ipfs cat "bin/chess-demo.wasm"))
+(host listen (perform :load "bin/chess-demo.wasm"))
 
 ; Run the chess demo in service mode — blocks until exit.
-(executor run (ipfs cat "bin/chess-demo.wasm"))
+(executor run (perform :load "bin/chess-demo.wasm"))
 ```
 
-`(ipfs cat "bin/chess-demo.wasm")` is resolved relative to `$WW_ROOT`
-(the merged IPFS image root set by the host at kernel spawn time).
-`rpcListen` takes a single argument: the cell WASM binary. The host
-inspects the `schema.capnp` custom section to determine the protocol.
+`(perform :load "bin/chess-demo.wasm")` loads bytes via the `:load` effect
+handler, resolved relative to `$WW_ROOT` (the merged IPFS image root set
+by the host at kernel spawn time). `(host listen <wasm>)` takes a single
+argument: the cell WASM binary. The host inspects the `schema.capnp`
+custom section to determine the protocol.
 
 ## Prerequisites
 

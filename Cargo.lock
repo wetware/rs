@@ -3422,6 +3422,7 @@ dependencies = [
  "log",
  "multiaddr 0.18.2",
  "system",
+ "tempfile",
  "tokio",
  "wasip2",
 ]

@@ -1406,9 +1406,14 @@ mod tests {
         fn network(
             self: capnp::capability::Rc<Self>,
             _params: system_capnp::host::NetworkParams,
-            _results: system_capnp::host::NetworkResults,
+            mut results: system_capnp::host::NetworkResults,
         ) -> Promise<(), capnp::Error> {
-            Promise::err(capnp::Error::unimplemented("stub".into()))
+            let mut r = results.get();
+            r.set_stream_listener(capnp_rpc::new_client(TestStreamListener));
+            r.set_stream_dialer(capnp_rpc::new_client(TestStreamDialer));
+            r.set_vat_listener(capnp_rpc::new_client(TestVatListener));
+            r.set_vat_client(capnp_rpc::new_client(TestVatClient));
+            Promise::ok(())
         }
     }
 
@@ -1488,6 +1493,61 @@ mod tests {
             })
         }
     }
+
+    // --- Stub VatListener: asserts executor is present ---
+
+    struct TestVatListener;
+
+    #[allow(refining_impl_trait)]
+    impl system_capnp::vat_listener::Server for TestVatListener {
+        fn listen(
+            self: capnp::capability::Rc<Self>,
+            params: system_capnp::vat_listener::ListenParams,
+            _results: system_capnp::vat_listener::ListenResults,
+        ) -> Promise<(), capnp::Error> {
+            let params = capnp_rpc::pry!(params.get());
+            if !params.has_executor() {
+                return Promise::err(capnp::Error::failed("executor not set".into()));
+            }
+            if !params.has_wasm() {
+                return Promise::err(capnp::Error::failed("wasm not set".into()));
+            }
+            Promise::ok(())
+        }
+    }
+
+    // --- Stub StreamListener: asserts executor is present ---
+
+    struct TestStreamListener;
+
+    #[allow(refining_impl_trait)]
+    impl system_capnp::stream_listener::Server for TestStreamListener {
+        fn listen(
+            self: capnp::capability::Rc<Self>,
+            params: system_capnp::stream_listener::ListenParams,
+            _results: system_capnp::stream_listener::ListenResults,
+        ) -> Promise<(), capnp::Error> {
+            let params = capnp_rpc::pry!(params.get());
+            if !params.has_executor() {
+                return Promise::err(capnp::Error::failed("executor not set".into()));
+            }
+            if !params.has_protocol() {
+                return Promise::err(capnp::Error::failed("protocol not set".into()));
+            }
+            if !params.has_wasm() {
+                return Promise::err(capnp::Error::failed("wasm not set".into()));
+            }
+            Promise::ok(())
+        }
+    }
+
+    // --- Stub StreamDialer + VatClient (unused, just satisfy network result) ---
+
+    struct TestStreamDialer;
+    impl system_capnp::stream_dialer::Server for TestStreamDialer {}
+
+    struct TestVatClient;
+    impl system_capnp::vat_client::Server for TestVatClient {}
 
     // --- Stub IPFS + Identity (unimplemented — not under test) ---
 
@@ -1686,6 +1746,63 @@ mod tests {
         .await;
     }
 
+    // --- host listen tests ---
+
+    #[tokio::test]
+    async fn test_host_listen_vat_passes_executor() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            // (host listen <wasm-bytes>) — VatListener mode
+            let args = vec![Val::Sym("listen".into()), Val::Bytes(b"fake-wasm".to_vec())];
+            let result = eval_host(&args, &ctx).await;
+            assert!(
+                result.is_ok(),
+                "VatListener listen failed: {:?}",
+                result.unwrap_err()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_host_listen_stream_passes_executor() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            // (host listen "my-protocol" <wasm-bytes>) — StreamListener mode
+            let args = vec![
+                Val::Sym("listen".into()),
+                Val::Str("my-protocol".into()),
+                Val::Bytes(b"fake-wasm".to_vec()),
+            ];
+            let result = eval_host(&args, &ctx).await;
+            assert!(
+                result.is_ok(),
+                "StreamListener listen failed: {:?}",
+                result.unwrap_err()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_host_listen_wrong_arity_returns_error() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            // 0 args after "listen" — should error
+            let args = vec![Val::Sym("listen".into())];
+            assert!(eval_host(&args, &ctx).await.is_err());
+            // 3 args after "listen" — should error
+            let args = vec![
+                Val::Sym("listen".into()),
+                Val::Str("a".into()),
+                Val::Bytes(b"b".to_vec()),
+                Val::Str("extra".into()),
+            ];
+            assert!(eval_host(&args, &ctx).await.is_err());
+        })
+        .await;
+    }
+
     // --- executor tests ---
 
     #[tokio::test]
@@ -1826,6 +1943,180 @@ mod tests {
             let err = eval_routing(&args, &ctx).await.unwrap_err();
             let msg = format!("{err}");
             assert!(msg.contains("unknown routing method"), "got: {msg}");
+        })
+        .await;
+    }
+
+    // --- perform :load effect round-trip ---
+
+    /// Verify that (perform :load "path") inside wrap_with_default_effects
+    /// actually resolves through the effect handler → eval_load → filesystem.
+    #[tokio::test]
+    async fn test_perform_load_resolves_through_effect_handler() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            let dispatch = build_dispatch();
+            let mut env = Env::new();
+
+            // Write a temp file so eval_load can read it.
+            let dir = tempfile::tempdir().unwrap();
+            let file_path = dir.path().join("test.bin");
+            std::fs::write(&file_path, b"hello-bytes").unwrap();
+
+            // Clear WW_ROOT so resolve_ipfs_path doesn't mangle the absolute path.
+            std::env::remove_var("WW_ROOT");
+
+            // (perform :load "/absolute/path/test.bin")
+            let form = Val::List(vec![
+                Val::Sym("perform".into()),
+                Val::Keyword("load".into()),
+                Val::Str(file_path.to_str().unwrap().to_string()),
+            ]);
+            let wrapped = wrap_with_default_effects(&form);
+            let result = eval(&wrapped, &mut env, &ctx, &dispatch).await;
+            assert_eq!(result.unwrap(), Val::Bytes(b"hello-bytes".to_vec()));
+        })
+        .await;
+    }
+
+    /// Verify that (perform :load "missing") fails with a clear error.
+    #[tokio::test]
+    async fn test_perform_load_missing_file_returns_error() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            let dispatch = build_dispatch();
+            let mut env = Env::new();
+
+            std::env::remove_var("WW_ROOT");
+
+            let form = Val::List(vec![
+                Val::Sym("perform".into()),
+                Val::Keyword("load".into()),
+                Val::Str("/nonexistent/path/missing.wasm".to_string()),
+            ]);
+            let wrapped = wrap_with_default_effects(&form);
+            let result = eval(&wrapped, &mut env, &ctx, &dispatch).await;
+            assert!(result.is_err(), "expected error for missing file");
+        })
+        .await;
+    }
+
+    // --- init script eval integration ---
+
+    /// Eval (host listen (perform :load "path")) end-to-end: the effect handler
+    /// resolves :load to file bytes, then the kernel dispatches (host listen <bytes>)
+    /// to the VatListener stub.
+    #[tokio::test]
+    async fn test_chess_glia_listen_form_evals_end_to_end() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            let dispatch = build_dispatch();
+            let mut env = Env::new();
+
+            // Write fake WASM so (perform :load ...) has something to read.
+            let dir = tempfile::tempdir().unwrap();
+            let wasm_path = dir.path().join("chess-demo.wasm");
+            std::fs::write(&wasm_path, b"fake-wasm-bytes").unwrap();
+
+            // Clear WW_ROOT so resolve_ipfs_path doesn't mangle the path.
+            std::env::remove_var("WW_ROOT");
+
+            // Parse the actual chess.glia form syntax:
+            // (host listen (perform :load "/path/to/chess-demo.wasm"))
+            let script = format!(
+                r#"(host listen (perform :load "{}"))"#,
+                wasm_path.to_str().unwrap()
+            );
+            let form = read(&script).unwrap();
+            let wrapped = wrap_with_default_effects(&form);
+            let result = eval(&wrapped, &mut env, &ctx, &dispatch).await;
+            assert!(
+                result.is_ok(),
+                "chess.glia listen form failed: {:?}",
+                result.unwrap_err()
+            );
+        })
+        .await;
+    }
+
+    /// Eval the full chess.glia script through the kernel eval pipeline.
+    /// Both forms should succeed: (host listen ...) and (executor run ...).
+    /// executor.run_bytes is stubbed to return an error (no real WASM runtime),
+    /// so we only test that the first form (host listen) evaluates cleanly.
+    #[tokio::test]
+    async fn test_chess_glia_full_script_parses_and_first_form_evals() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            let dispatch = build_dispatch();
+            let mut env = Env::new();
+
+            // Write fake WASM.
+            let dir = tempfile::tempdir().unwrap();
+            let wasm_path = dir.path().join("chess-demo.wasm");
+            std::fs::write(&wasm_path, b"fake-wasm-bytes").unwrap();
+
+            // Clear WW_ROOT so resolve_ipfs_path doesn't mangle the path.
+            std::env::remove_var("WW_ROOT");
+
+            // Simulate chess.glia with absolute paths (since we don't have
+            // the IPFS virtual filesystem in test mode).
+            let script = format!(
+                r#"(host listen (perform :load "{}"))
+                   (executor run (perform :load "{}"))"#,
+                wasm_path.to_str().unwrap(),
+                wasm_path.to_str().unwrap()
+            );
+
+            let forms = read_many(&script).unwrap();
+            assert_eq!(forms.len(), 2, "chess.glia should have 2 forms");
+
+            // First form: (host listen ...) — should succeed via VatListener stub.
+            let wrapped = wrap_with_default_effects(&forms[0]);
+            let result = eval(&wrapped, &mut env, &ctx, &dispatch).await;
+            assert!(
+                result.is_ok(),
+                "first form (host listen) failed: {:?}",
+                result.unwrap_err()
+            );
+
+            // Second form: (executor run ...) — will fail because TestExecutor
+            // returns "unimplemented" for run_bytes. That's expected.
+            let wrapped = wrap_with_default_effects(&forms[1]);
+            let result = eval(&wrapped, &mut env, &ctx, &dispatch).await;
+            assert!(
+                result.is_err(),
+                "executor run should fail against stub (no real WASM runtime)"
+            );
+        })
+        .await;
+    }
+
+    // --- run_initd integration ---
+
+    /// run_initd with no WW_ROOT set returns false (no scripts to run).
+    #[tokio::test]
+    async fn test_run_initd_no_ww_root_skips() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            let dispatch = build_dispatch();
+            let mut env = Env::new();
+            std::env::remove_var("WW_ROOT");
+            let blocked = run_initd(&mut env, &ctx, &dispatch).await.unwrap();
+            assert!(!blocked, "should not block when WW_ROOT is unset");
+        })
+        .await;
+    }
+
+    /// run_initd with empty WW_ROOT skips gracefully.
+    #[tokio::test]
+    async fn test_run_initd_empty_ww_root_skips() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            let dispatch = build_dispatch();
+            let mut env = Env::new();
+            std::env::set_var("WW_ROOT", "");
+            let blocked = run_initd(&mut env, &ctx, &dispatch).await.unwrap();
+            assert!(!blocked, "should not block when WW_ROOT is empty");
         })
         .await;
     }
