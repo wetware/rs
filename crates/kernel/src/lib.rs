@@ -1873,6 +1873,116 @@ mod tests {
         .await;
     }
 
+    /// Adversarial: a Cap named "executor" wrapping the wrong inner type.
+    /// This simulates a forgery attempt — correct name tag, wrong payload.
+    /// Must hit the downcast_ref failure path, not the name mismatch path.
+    #[tokio::test]
+    async fn test_host_listen_forged_executor_cap_wrong_inner_type() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            // Right name, wrong guts: wraps an i32 instead of executor::Client.
+            let forged_cap = Val::Cap {
+                name: "executor".into(),
+                inner: Rc::new(42i32),
+            };
+            let args = vec![
+                Val::Sym("listen".into()),
+                forged_cap,
+                Val::Bytes(b"wasm".to_vec()),
+            ];
+            let err = eval_host(&args, &ctx).await;
+            assert!(err.is_err(), "forged cap should be rejected");
+            let msg = format!("{}", err.unwrap_err());
+            assert!(
+                msg.contains("wrong inner type"),
+                "should report inner type mismatch, got: {msg}"
+            );
+        })
+        .await;
+    }
+
+    /// Adversarial: pass a plain string where executor Cap is expected.
+    /// Simulates `(def executor "hacked")` then `(host listen executor ...)`.
+    #[tokio::test]
+    async fn test_host_listen_string_instead_of_cap_errors() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            let args = vec![
+                Val::Sym("listen".into()),
+                Val::Str("executor".into()),
+                Val::Bytes(b"wasm".to_vec()),
+            ];
+            let err = eval_host(&args, &ctx).await;
+            assert!(err.is_err(), "string should not pass as executor cap");
+            let msg = format!("{}", err.unwrap_err());
+            assert!(
+                msg.contains("executor capability required"),
+                "should demand a Cap, got: {msg}"
+            );
+        })
+        .await;
+    }
+
+    /// Adversarial: pass nil where executor Cap is expected.
+    #[tokio::test]
+    async fn test_host_listen_nil_instead_of_cap_errors() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            let args = vec![
+                Val::Sym("listen".into()),
+                Val::Nil,
+                Val::Bytes(b"wasm".to_vec()),
+            ];
+            let err = eval_host(&args, &ctx).await;
+            assert!(err.is_err(), "nil should not pass as executor cap");
+        })
+        .await;
+    }
+
+    /// Adversarial: StreamListener mode with wrong cap name.
+    /// Ensures the executor gate applies to both listen modes, not just Vat.
+    #[tokio::test]
+    async fn test_host_listen_stream_wrong_cap_type_errors() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            let bad_cap = Val::Cap {
+                name: "imposter".into(),
+                inner: Rc::new(42i32),
+            };
+            let args = vec![
+                Val::Sym("listen".into()),
+                bad_cap,
+                Val::Str("my-protocol".into()),
+                Val::Bytes(b"wasm".to_vec()),
+            ];
+            let err = eval_host(&args, &ctx).await;
+            assert!(err.is_err(), "wrong cap should be rejected in stream mode");
+            let msg = format!("{}", err.unwrap_err());
+            assert!(
+                msg.contains("imposter"),
+                "error should name the wrong cap: {msg}"
+            );
+        })
+        .await;
+    }
+
+    /// Adversarial: StreamListener mode with no executor at all.
+    #[tokio::test]
+    async fn test_host_listen_stream_missing_executor_errors() {
+        run_local(async {
+            let ctx = RefCell::new(test_session());
+            // Old-style call without executor: (host listen "proto" <wasm>)
+            let args = vec![
+                Val::Sym("listen".into()),
+                Val::Str("my-protocol".into()),
+                Val::Bytes(b"wasm".to_vec()),
+            ];
+            let err = eval_host(&args, &ctx).await;
+            assert!(err.is_err(), "stream listen without executor should error");
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn test_host_listen_wrong_arity_returns_error() {
         run_local(async {

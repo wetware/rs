@@ -9,7 +9,7 @@ Each layer is a directory that gets merged into a single FHS root, left to
 right. The kernel (PID 0) sees this merged root as its virtual filesystem.
 
 ```sh
-cargo run --bin ww -- run --port=2025 crates/kernel examples/chess
+ww run --port=2025 crates/kernel examples/chess
 ```
 
 Here, `crates/kernel` is the base layer (the kernel WASM binary) and
@@ -121,10 +121,10 @@ Stack the chess layer on top of the kernel:
 
 ```sh
 # Terminal 1
-cargo run --bin ww -- run --port=2025 crates/kernel examples/chess
+ww run --port=2025 crates/kernel examples/chess
 
 # Terminal 2
-cargo run --bin ww -- run --port=2026 crates/kernel examples/chess
+ww run --port=2026 crates/kernel examples/chess
 ```
 
 Both nodes bootstrap into the DHT, exchange provider records, discover
