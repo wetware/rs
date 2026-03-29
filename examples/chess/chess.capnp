@@ -1,6 +1,9 @@
 # Chess engine capability.
 #
 # One instance = one game.  Spawn a new guest to start a new game.
+#
+# PR 3 (MCP bridge):   calls getLegalMoves + applyMove
+# PR 5 (P2P session):  wraps applyMove / getStatus in submitMove / waitForTurn
 
 @0xe3c2dfb1868218d1;
 

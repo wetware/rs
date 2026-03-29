@@ -1,12 +1,11 @@
 # Chess Example
 
-Two-node cross-network chess over libp2p RPC capabilities.
+Two-node cross-network chess over libp2p ByteStreams.
 
-Each node registers an `RpcListener` for the ChessEngine schema,
-announces the schema CID on the Kademlia DHT, discovers peers, and
-plays random UCI moves via typed Cap'n Proto RPC. Every completed game
-publishes a content-addressed replay log to IPFS (see
-[doc/replay.md](doc/replay.md)).
+Each node registers a `/ww/0.1.0/chess` listener, announces itself on
+the Kademlia DHT, discovers peers, and plays random UCI moves over a
+bidirectional stream. Every completed game publishes a content-addressed
+replay log to IPFS (see [doc/replay.md](doc/replay.md)).
 
 ## Architecture
 
@@ -15,7 +14,7 @@ publishes a content-addressed replay log to IPFS (see
                   │
           chess.glia evaluated
              ┌────┴────┐
-   (host rpcListen)  (executor run)
+     (host listen)  (executor run)
           │              │
      handler mode    service mode
     (per-connection) (discovery loop)
@@ -23,24 +22,11 @@ publishes a content-addressed replay log to IPFS (see
 
 Two execution modes, selected by the init.d script:
 
-- **Handler** (`WW_HANDLER`): per-connection RPC handler spawned by
-  `RpcListener`. Creates a `ChessEngineImpl` and exports it via
-  `system::serve()`. The host bridges the capability to the connecting
-  peer via Cap'n Proto RPC bootstrapping.
-- **Service** (default): long-running discovery loop. Provides the
-  schema CID on the DHT, discovers peers via `routing.find_providers()`,
-  dials them with `RpcDialer` to get typed `ChessEngine` capabilities,
-  and plays random games. Exponential backoff (2 s to 15 min).
-
-## Schema CID
-
-The protocol address is derived at build time from the ChessEngine
-Cap'n Proto schema: `CIDv1(raw, BLAKE3(canonical(schema.Node)))`.
-This CID serves as both the DHT key and the subprotocol address
-(`/ww/0.1.0/<cid>`). The canonical schema bytes are embedded in the
-WASM binary as a custom section named `schema.capnp`. The host
-extracts the section and derives the CID at runtime. See `build.rs`,
-the `schema-id` crate, and `make chess` for the injection step.
+- **Handler** (`WW_HANDLER`): per-connection bytestream handler spawned
+  by the Listener. Reads/writes newline-delimited UCI moves on
+  stdin/stdout.
+- **Service** (default): long-running discovery loop. DHT
+  provide/findProviders with exponential backoff (2 s → 15 min).
 
 ## Init.d Script
 
@@ -48,17 +34,16 @@ the `schema-id` crate, and `make chess` for the injection step.
 is a capability invocation — inner expressions resolve first.
 
 ```clojure
-; Register RPC handler — schema extracted from WASM custom section.
-(host rpcListen (ipfs cat "bin/chess-demo.wasm"))
+; Register handler on chess protocol.
+(host listen "chess" (ipfs cat "bin/chess-demo.wasm"))
 
 ; Run the chess demo in service mode — blocks until exit.
-(executor run (ipfs cat "bin/chess-demo.wasm"))
+(executor run (ipfs cat "bin/chess-demo.wasm")
+  :env {"WW_NS" "ww.chess.v1"})
 ```
 
 `(ipfs cat "bin/chess-demo.wasm")` is resolved relative to `$WW_ROOT`
 (the merged IPFS image root set by the host at kernel spawn time).
-`rpcListen` takes a single argument: the handler WASM binary. The host
-inspects the `schema.capnp` custom section to determine the protocol.
 
 ## Prerequisites
 
@@ -77,7 +62,7 @@ make chess
 ## Running
 
 Stack the chess layer on top of the kernel. The kernel reads
-`etc/init.d/chess.glia` and handles RPC handler registration, DHT
+`etc/init.d/chess.glia` and handles listener registration, DHT
 announcement, and peer discovery automatically.
 
 ```sh
@@ -89,7 +74,7 @@ cargo run --bin ww -- run --port=2026 crates/kernel examples/chess
 ```
 
 Both nodes bootstrap into the DHT, exchange provider records, discover
-each other, and play a game of random chess via typed RPC.
+each other, and play a game of random chess over the stream.
 
 ## Tests
 

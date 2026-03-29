@@ -24,4 +24,3 @@ tokio-util = { version = "0.7", features = ["compat"] }
 
 [build-dependencies]
 capnpc = "0.23.3"
-schema-id = { path = "../../crates/schema-id" }

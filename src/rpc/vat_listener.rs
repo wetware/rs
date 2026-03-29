@@ -49,8 +49,7 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
         let wasm: Arc<[u8]> = pry!(params.get_wasm()).into();
 
         // Extract schema from the WASM binary's "schema.capnp" custom section.
-        let schema_bytes = match pry!(super::extract_wasm_custom_section(&wasm, "schema.capnp"))
-        {
+        let schema_bytes = match pry!(super::extract_wasm_custom_section(&wasm, "schema.capnp")) {
             Some(bytes) if !bytes.is_empty() => bytes.to_vec(),
             Some(_) => {
                 return Promise::err(capnp::Error::failed(

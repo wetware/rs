@@ -1,11 +1,11 @@
-//! RpcDialer capability: open outgoing subprotocol streams and bootstrap RPC.
+//! VatClient capability: open outgoing Cap'n Proto RPC connections to remote peers.
 //!
-//! The `RpcDialer` capability lets a guest dial a remote peer on a named
+//! The `VatClient` capability lets a guest dial a remote peer on a named
 //! subprotocol and receive the remote's bootstrap capability directly. The
-//! host opens the libp2p stream, bootstraps Cap'n Proto RPC over it, and
+//! host opens the libp2p stream, bootstraps a Cap'n Proto vat over it, and
 //! returns the remote's exported capability to the guest.
 //!
-//! This is the capability-mode counterpart of `Dialer` (byte-stream mode).
+//! This is the capability-mode counterpart of `StreamDialer` (byte-stream mode).
 
 use std::time::Duration;
 
@@ -23,12 +23,12 @@ use crate::system_capnp;
 /// Timeout for establishing the libp2p stream to a remote peer.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub struct RpcDialerImpl {
+pub struct VatClientImpl {
     stream_control: libp2p_stream::Control,
     guard: EpochGuard,
 }
 
-impl RpcDialerImpl {
+impl VatClientImpl {
     pub fn new(stream_control: libp2p_stream::Control, guard: EpochGuard) -> Self {
         Self {
             stream_control,
@@ -38,11 +38,11 @@ impl RpcDialerImpl {
 }
 
 #[allow(refining_impl_trait)]
-impl system_capnp::rpc_dialer::Server for RpcDialerImpl {
+impl system_capnp::vat_client::Server for VatClientImpl {
     fn dial(
         self: capnp::capability::Rc<Self>,
-        params: system_capnp::rpc_dialer::DialParams,
-        mut results: system_capnp::rpc_dialer::DialResults,
+        params: system_capnp::vat_client::DialParams,
+        mut results: system_capnp::vat_client::DialResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
 
@@ -66,7 +66,7 @@ impl system_capnp::rpc_dialer::Server for RpcDialerImpl {
             tracing::debug!(
                 peer = %peer_id,
                 protocol = %stream_protocol,
-                "Dialing RPC subprotocol"
+                "Dialing vat subprotocol"
             );
 
             // Open stream with timeout to avoid hanging on unreachable peers.
@@ -100,12 +100,12 @@ impl system_capnp::rpc_dialer::Server for RpcDialerImpl {
                     Ok(()) => tracing::debug!(
                         peer = %peer_id,
                         protocol = %stream_protocol,
-                        "RPC dial session ended cleanly"
+                        "Vat dial session ended cleanly"
                     ),
                     Err(e) => tracing::warn!(
                         peer = %peer_id,
                         protocol = %stream_protocol,
-                        "RPC dial session ended with error: {e}"
+                        "Vat dial session ended with error: {e}"
                     ),
                 }
             });

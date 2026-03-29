@@ -1,18 +1,16 @@
-//! Chess guest: cross-node play via RPC capability handlers.
+//! Chess guest: cross-node play via subprotocol handlers.
 //!
 //! This binary serves two roles, selected by env vars set in the
 //! init.d script (`etc/init.d/chess.glia`):
 //!
-//! **Handler mode** (`WW_HANDLER=1`): An RPC capability handler spawned
-//! by RpcListener. Creates a ChessEngine and exports it via
-//! `system::serve()`. The host bridges the capability to the connecting
-//! peer via Cap'n Proto RPC bootstrapping.
+//! **Handler mode** (`WW_HANDLER=1`): A pure bytestream handler spawned
+//! by the Listener. Reads newline-delimited UCI moves from stdin, applies
+//! them, picks a random legal response, writes it to stdout.
 //!
 //! **Service mode** (default): Spawned by an init.d script after the
-//! RPC handler is registered. Provides the schema CID on the DHT,
-//! discovers peers via `routing.find_providers()`, dials them via
-//! `RpcDialer` to get typed ChessEngine capabilities, and plays random
-//! games logging replays to IPFS.
+//! listener is already registered. Runs the discovery loop (provide +
+//! findProviders + dial) reading config from env vars. This is the
+//! foreground process that keeps the node alive.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -54,9 +52,6 @@ mod routing_capnp {
 mod chess_capnp {
     include!(concat!(env!("OUT_DIR"), "/chess_capnp.rs"));
 }
-
-// Build-time schema constants: CHESS_ENGINE_SCHEMA (&[u8]) and CHESS_ENGINE_CID (&str).
-include!(concat!(env!("OUT_DIR"), "/schema_ids.rs"));
 
 /// Bootstrap capability: the concrete Membrane defined in stem.capnp.
 type Membrane = stem_capnp::membrane::Client;
@@ -109,8 +104,8 @@ fn init_logging() {
 
 /// Chess engine backed by shakmaty.
 ///
-/// Implements `chess_capnp::chess_engine::Server`. Exported via
-/// `system::serve` in handler mode; used directly in unit tests.
+/// Implements `chess_capnp::chess_engine::Server`. In PR 2 this is used
+/// locally for unit testing; PR 3 exports it via `system::serve`.
 pub struct ChessEngineImpl {
     pos: RefCell<Chess>,
 }
@@ -225,38 +220,119 @@ impl chess_capnp::chess_engine::Server for ChessEngineImpl {
 }
 
 // ---------------------------------------------------------------------------
-// Handler mode — RPC capability export via system::serve()
+// Handler mode — pure bytestream chess engine over stdin/stdout
 // ---------------------------------------------------------------------------
 
-/// RPC handler for RpcListener-spawned processes.
+/// Text-based chess handler for Listener-spawned processes.
 ///
-/// Creates a ChessEngine and exports it as the bootstrap capability.
-/// The host bridges this cap to the connecting peer. The process stays
-/// alive until the host drops the RPC connection.
-fn run_handler() {
+/// Protocol: newline-delimited UCI moves over stdin/stdout.
+///
+/// **Responder mode** (default — incoming connections via Listener):
+/// reads a UCI move, applies it, picks a random response, writes it.
+///
+/// **Initiator mode** (`WW_INITIATOR=1` — outgoing connections via kernel
+/// init.d dial): picks a random opening move and writes it first, then
+/// enters the normal read→respond loop.
+fn handle_chess_stream() {
     let engine = ChessEngineImpl::new();
-    let client: chess_capnp::chess_engine::Client = capnp_rpc::new_client(engine);
-    log::info!("handler: exporting ChessEngine via RPC");
-    system::serve(client.client, |_membrane: Membrane| async move {
-        // Keep alive until the host drops the RPC connection.
-        // drive_rpc_with_future exits when rpc_done becomes true.
-        std::future::pending().await
-    });
+    let stdin = wasip2::cli::stdin::get_stdin();
+    let stdout = wasip2::cli::stdout::get_stdout();
+    let mut buf = Vec::new();
+
+    let is_initiator = std::env::var("WW_INITIATOR").is_ok();
+    log::info!(
+        "handler started ({}), waiting for moves",
+        if is_initiator {
+            "initiator"
+        } else {
+            "responder"
+        }
+    );
+
+    // Initiator mode: make the first move before entering the read loop.
+    if is_initiator {
+        let moves = engine.legal_moves_uci();
+        if moves.is_empty() {
+            log::info!("no legal moves at start (impossible but handled)");
+            return;
+        }
+        let opening = &moves[rand::random_range(0..moves.len())];
+        engine.apply(opening).unwrap();
+        log::info!("opening: {opening}");
+        let _ = stdout.blocking_write_and_flush(format!("{opening}\n").as_bytes());
+
+        if engine.legal_moves_uci().is_empty() {
+            log::info!("game over after opening ({})", engine.fen());
+            return;
+        }
+    }
+
+    loop {
+        // Accumulate data — blocking_read returns arbitrary chunks, not lines.
+        let data = match stdin.blocking_read(4096) {
+            Ok(d) if d.is_empty() => break,
+            Ok(d) => d,
+            Err(_) => break,
+        };
+        buf.extend_from_slice(&data);
+
+        // Process complete lines.
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+            let uci = match std::str::from_utf8(&line_bytes) {
+                Ok(s) => s.trim().to_string(),
+                Err(_) => continue,
+            };
+            if uci.is_empty() {
+                continue;
+            }
+
+            // Apply opponent's move.
+            if let Err(e) = engine.apply(&uci) {
+                log::error!("invalid move from peer '{uci}': {e}");
+                return;
+            }
+            log::info!("opponent: {uci}");
+
+            // Check if game over after opponent's move.
+            if engine.legal_moves_uci().is_empty() {
+                log::info!("game over after opponent's move ({})", engine.fen());
+                return;
+            }
+
+            // Pick a random response.
+            let moves = engine.legal_moves_uci();
+            let response = &moves[rand::random_range(0..moves.len())];
+            engine.apply(response).unwrap();
+            log::info!("response: {response}");
+
+            // Send response.
+            let _ = stdout.blocking_write_and_flush(format!("{response}\n").as_bytes());
+
+            // Check if game over after our move.
+            if engine.legal_moves_uci().is_empty() {
+                log::info!("game over after our move ({})", engine.fen());
+                return;
+            }
+        }
+    }
+
+    log::info!("handler: stdin closed");
 }
 
 // ---------------------------------------------------------------------------
-// RpcDialingSink — discovers peers and dials them via RpcDialer
+// DialingSink — discovers peers and dials them on the chess subprotocol
 // ---------------------------------------------------------------------------
 
-struct RpcDialingSink {
-    rpc_dialer: system_capnp::rpc_dialer::Client,
+struct DialingSink {
+    dialer: system_capnp::dialer::Client,
     unixfs: ipfs_capnp::unix_f_s::Client,
     self_id: Vec<u8>,
     seen: Rc<RefCell<HashSet<Vec<u8>>>>,
 }
 
 #[allow(refining_impl_trait)]
-impl routing_capnp::provider_sink::Server for RpcDialingSink {
+impl routing_capnp::provider_sink::Server for DialingSink {
     fn provider(
         self: Rc<Self>,
         params: routing_capnp::provider_sink::ProviderParams,
@@ -268,13 +344,13 @@ impl routing_capnp::provider_sink::Server for RpcDialingSink {
             return Promise::ok(());
         }
 
-        let rpc_dialer = self.rpc_dialer.clone();
+        let dialer = self.dialer.clone();
         let unixfs = self.unixfs.clone();
         let self_id = self.self_id.clone();
         let peer = peer_id.clone();
 
         Promise::from_future(async move {
-            if let Err(e) = play_rpc_against_peer(&rpc_dialer, &unixfs, &self_id, &peer).await {
+            if let Err(e) = play_against_peer(&dialer, &unixfs, &self_id, &peer).await {
                 log::error!("game vs {} failed: {e}", short_id(&peer));
             }
             // Pause between games so the output is readable.
@@ -297,13 +373,13 @@ impl routing_capnp::provider_sink::Server for RpcDialingSink {
 }
 
 // ---------------------------------------------------------------------------
-// play_rpc_against_peer — dial via RpcDialer and play a typed RPC game
+// play_against_peer — dial and play a text-based chess game
 // ---------------------------------------------------------------------------
 
 /// Publish a JSON node to IPFS and return its CID, or None on failure.
 ///
 /// Each node forms one link in a content-addressed linked list:
-/// `{"n":1,"w":"e2e4","b":"e7e5","prev":null}` -> CID.
+/// `{"n":1,"w":"e2e4","b":"e7e5","prev":null}` → CID.
 ///
 /// Returns `None` (with a warning log) if IPFS is unreachable or the add
 /// fails — the game continues without replay logging.
@@ -325,8 +401,8 @@ async fn publish_node(unixfs: &ipfs_capnp::unix_f_s::Client, json: &str) -> Opti
     }
 }
 
-async fn play_rpc_against_peer(
-    rpc_dialer: &system_capnp::rpc_dialer::Client,
+async fn play_against_peer(
+    dialer: &system_capnp::dialer::Client,
     unixfs: &ipfs_capnp::unix_f_s::Client,
     self_id: &[u8],
     peer_id: &[u8],
@@ -334,30 +410,33 @@ async fn play_rpc_against_peer(
     let us = short_id(self_id);
     let them = short_id(peer_id);
 
-    // Dial peer via RpcDialer — returns a typed ChessEngine capability.
-    let mut req = rpc_dialer.dial_request();
+    // Dial peer → get bidirectional ByteStream.
+    let mut req = dialer.dial_request();
     req.get().set_peer(peer_id);
-    req.get().set_schema(CHESS_ENGINE_SCHEMA);
+    req.get().set_protocol("chess");
     let resp = req.send().promise.await?;
-    let engine: chess_capnp::chess_engine::Client = resp.get()?.get_cap().get_as_capability()?;
+    let stream = resp.get()?.get_stream()?;
 
-    log::info!("game {us} vs {them}: started (RPC)");
-    play_rpc_game(&engine, unixfs, &us, &them).await
+    log::info!("game {us} vs {them}: started");
+
+    // Play the game, then always close the stream — even if the game
+    // errors out.  Without this, the remote handler blocks on stdin forever.
+    let result = play_game(&stream, unixfs, &us, &them).await;
+    let _ = stream.close_request().send().promise.await;
+    result
 }
 
-/// Drive a game using typed ChessEngine RPC calls.
-///
-/// The service orchestrates both sides: picks random moves for white (us)
-/// and black (them) and applies them to the remote engine. Each move pair
-/// is published to IPFS as a replay node.
-async fn play_rpc_game(
-    engine: &chess_capnp::chess_engine::Client,
+/// Inner game loop, factored out so the caller can always close the stream.
+async fn play_game(
+    stream: &system_capnp::byte_stream::Client,
     unixfs: &ipfs_capnp::unix_f_s::Client,
     us: &str,
     them: &str,
 ) -> Result<(), capnp::Error> {
-    use chess_capnp::chess_engine::GameStatus;
-
+    // Play game: send UCI moves, read responses via the single Stream capability.
+    // Each move pair is published to IPFS as a JSON node linking to the previous,
+    // forming a content-addressed linked list (see doc/replay.md).
+    let engine = ChessEngineImpl::new();
     let mut move_num = 0u32;
     let mut prev_cid: Option<String> = None;
 
@@ -370,105 +449,74 @@ async fn play_rpc_game(
     }
 
     loop {
-        // --- White's turn (us) ---
-        let moves_resp = engine.get_legal_moves_request().send().promise.await?;
-        let moves = moves_resp.get()?.get_moves()?;
-        if moves.len() == 0 {
-            // No legal moves for white — black wins.
+        // Pick a random move.
+        let moves = engine.legal_moves_uci();
+        if moves.is_empty() {
+            // We have no legal moves — opponent wins.
             let node = format!(r#"{{"result":"0-1",{}}}"#, prev_field(&prev_cid));
             prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
             log::info!("game {us} vs {them}: {them} wins after {move_num} moves");
             break;
         }
-
-        let white_move = moves
-            .get(rand::random_range(0..moves.len()))?
-            .to_str()
-            .map_err(|e| capnp::Error::failed(format!("invalid move UTF-8: {e}")))?
-            .to_string();
-
-        let mut apply_req = engine.apply_move_request();
-        apply_req.get().set_uci(&white_move);
-        let apply_resp = apply_req.send().promise.await?;
-        let apply_result = apply_resp.get()?;
-        if !apply_result.get_ok() {
-            let reason = apply_result.get_reason()?.to_str().unwrap_or("unknown");
-            return Err(capnp::Error::failed(format!(
-                "white move {white_move} rejected: {reason}"
-            )));
-        }
+        let our_move = &moves[rand::random_range(0..moves.len())];
+        engine.apply(our_move).unwrap();
         move_num += 1;
 
-        // Check status after white's move.
-        let status_resp = engine.get_status_request().send().promise.await?;
-        let status = status_resp.get()?.get_status()?;
-        if status != GameStatus::Ongoing {
-            let result_str = match status {
-                GameStatus::Checkmate => "1-0",
-                _ => "1/2-1/2",
-            };
+        // Send move via stream.write().
+        let mut wreq = stream.write_request();
+        wreq.get().set_data(format!("{our_move}\n").as_bytes());
+        wreq.send().promise.await?;
+
+        // Check if game over after our move (no legal moves for opponent).
+        if engine.legal_moves_uci().is_empty() {
             let node = format!(
-                r#"{{"n":{move_num},"w":"{white_move}","result":"{result_str}",{}}}"#,
+                r#"{{"n":{move_num},"w":"{our_move}","result":"1-0",{}}}"#,
                 prev_field(&prev_cid)
             );
             prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
-            log::info!("game {us} vs {them}: {us} wins after {move_num} moves ({white_move})");
+            log::info!("game {us} vs {them}: {us} wins after {move_num} moves ({our_move})");
             break;
         }
 
-        // --- Black's turn (them) ---
-        let moves_resp = engine.get_legal_moves_request().send().promise.await?;
-        let moves = moves_resp.get()?.get_moves()?;
-        if moves.len() == 0 {
-            // No legal moves for black after white moved — shouldn't happen
-            // if status was Ongoing, but handle gracefully.
+        // Read response via stream.read().
+        let mut rreq = stream.read_request();
+        rreq.get().set_max_bytes(4096);
+        let rresp = rreq.send().promise.await?;
+        let data = rresp.get()?.get_data()?;
+        if data.is_empty() {
             let node = format!(
-                r#"{{"n":{move_num},"w":"{white_move}","result":"1-0",{}}}"#,
+                r#"{{"n":{move_num},"w":"{our_move}","result":"*",{}}}"#,
                 prev_field(&prev_cid)
             );
             prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
-            log::info!("game {us} vs {them}: {us} wins after {move_num} moves");
+            log::info!("game {us} vs {them}: stream closed after {move_num} moves");
             break;
         }
-
-        let black_move = moves
-            .get(rand::random_range(0..moves.len()))?
-            .to_str()
-            .map_err(|e| capnp::Error::failed(format!("invalid move UTF-8: {e}")))?
+        let response = std::str::from_utf8(data)
+            .map_err(|e| capnp::Error::failed(format!("invalid UTF-8: {e}")))?
+            .trim()
             .to_string();
-
-        let mut apply_req = engine.apply_move_request();
-        apply_req.get().set_uci(&black_move);
-        let apply_resp = apply_req.send().promise.await?;
-        let apply_result = apply_resp.get()?;
-        if !apply_result.get_ok() {
-            let reason = apply_result.get_reason()?.to_str().unwrap_or("unknown");
-            return Err(capnp::Error::failed(format!(
-                "black move {black_move} rejected: {reason}"
-            )));
+        if response.is_empty() {
+            let node = format!(
+                r#"{{"n":{move_num},"w":"{our_move}","result":"*",{}}}"#,
+                prev_field(&prev_cid)
+            );
+            prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
+            log::info!("game {us} vs {them}: empty response after {move_num} moves");
+            break;
         }
+
+        engine
+            .apply(&response)
+            .map_err(|e| capnp::Error::failed(format!("invalid response move: {e}")))?;
 
         // Publish this move pair as a node in the replay linked list.
         let node = format!(
-            r#"{{"n":{move_num},"w":"{white_move}","b":"{black_move}",{}}}"#,
+            r#"{{"n":{move_num},"w":"{our_move}","b":"{response}",{}}}"#,
             prev_field(&prev_cid)
         );
         prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
-        log::info!("  {move_num}. {white_move} {black_move}");
-
-        // Check status after black's move.
-        let status_resp = engine.get_status_request().send().promise.await?;
-        let status = status_resp.get()?.get_status()?;
-        if status != GameStatus::Ongoing {
-            let result_str = match status {
-                GameStatus::Checkmate => "0-1",
-                _ => "1/2-1/2",
-            };
-            let node = format!(r#"{{"result":"{result_str}",{}}}"#, prev_field(&prev_cid));
-            prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
-            log::info!("game {us} vs {them}: {them} wins");
-            break;
-        }
+        log::info!("  {move_num}. {our_move} {response}");
     }
 
     // Log the root CID — the tip of the replay linked list.
@@ -481,7 +529,7 @@ async fn play_rpc_game(
 }
 
 // ---------------------------------------------------------------------------
-// Service mode — discovery loop with RpcDialer
+// Service mode — discovery loop only (listener registered by init.d)
 // ---------------------------------------------------------------------------
 
 async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
@@ -491,10 +539,14 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
     let ipfs = results.get_ipfs()?;
     let routing = results.get_routing()?;
 
-    // Get network capabilities — rpc_dialer for typed capability dialing.
+    // Read config from env vars (set by init.d script).
+    let namespace =
+        std::env::var("WW_NS").map_err(|_| capnp::Error::failed("WW_NS not set".into()))?;
+
+    // Get network dialer.
     let network_resp = host.network_request().send().promise.await?;
     let network = network_resp.get()?;
-    let rpc_dialer = network.get_rpc_dialer()?;
+    let dialer = network.get_dialer()?;
 
     // Get UnixFS for replay publishing.
     let unixfs_resp = ipfs.unixfs_request().send().promise.await?;
@@ -504,11 +556,17 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
     let id_resp = host.id_request().send().promise.await?;
     let self_id = id_resp.get()?.get_peer_id()?.to_vec();
     log::info!("service: peer {}", short_id(&self_id));
-    log::info!("service: schema CID {CHESS_ENGINE_CID}");
+
+    // Hash namespace → deterministic CID.
+    let mut hash_req = routing.hash_request();
+    hash_req.get().set_data(namespace.as_bytes());
+    let hash_resp = hash_req.send().promise.await?;
+    let ns_cid = hash_resp.get()?.get_key()?.to_str()?.to_string();
+    log::debug!("service: namespace CID: {ns_cid}");
 
     log::info!("service: looking for opponent...");
 
-    // Discovery loop with exponential backoff + jitter.
+    // Discovery loop: same backoff logic as run_game.
     let seen = Rc::new(RefCell::new(HashSet::<Vec<u8>>::new()));
     let mut cooldown_ms: u64 = 2_000;
     const BASE_MS: u64 = 2_000;
@@ -519,12 +577,12 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
 
         // Re-provide (DHT records expire).
         let mut provide_req = routing.provide_request();
-        provide_req.get().set_key(CHESS_ENGINE_CID);
+        provide_req.get().set_key(&ns_cid);
         provide_req.send().promise.await?;
 
-        // Search for peers; RpcDialingSink dials new ones via RPC.
-        let sink: routing_capnp::provider_sink::Client = capnp_rpc::new_client(RpcDialingSink {
-            rpc_dialer: rpc_dialer.clone(),
+        // Search for peers; DialingSink dials new ones automatically.
+        let sink: routing_capnp::provider_sink::Client = capnp_rpc::new_client(DialingSink {
+            dialer: dialer.clone(),
             unixfs: unixfs.clone(),
             self_id: self_id.clone(),
             seen: seen.clone(),
@@ -532,7 +590,7 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
         let mut fp_req = routing.find_providers_request();
         {
             let mut b = fp_req.get();
-            b.set_key(CHESS_ENGINE_CID);
+            b.set_key(&ns_cid);
             b.set_count(5);
             b.set_sink(sink);
         }
@@ -548,7 +606,7 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
 
         let delay_ms = cooldown_ms / 2 + rand::random_range(0..=cooldown_ms / 2);
         let pause = wasip2::clocks::monotonic_clock::subscribe_duration(
-            delay_ms * 1_000_000, // ms -> ns
+            delay_ms * 1_000_000, // ms → ns
         );
         pause.block();
     }
@@ -564,10 +622,10 @@ impl Guest for ChessGuest {
     fn run() -> Result<(), ()> {
         init_logging();
         if std::env::var("WW_HANDLER").is_ok() {
-            // Handler mode: export ChessEngine via RPC.
-            run_handler();
+            // Handler mode: text-based chess engine over stdin/stdout.
+            handle_chess_stream();
         } else {
-            // Service mode: discovery loop with RpcDialer.
+            // Service mode: discovery loop (listener already registered by init.d).
             log::info!("chess guest starting (service mode)");
             system::run(|membrane: Membrane| async move { run_service(membrane).await });
         }
@@ -635,45 +693,61 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Two-engine game simulation (mirrors RPC game loop logic)
+    // Text protocol simulation (main-mode ↔ handler-mode game loop)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_two_engine_game_simulation() {
-        // Simulate the game flow: one engine, both sides pick random moves.
-        // This mirrors what play_rpc_game does over RPC.
-        let engine = ChessEngineImpl::new();
+    fn test_text_protocol_game_simulation() {
+        // Simulate main-mode ↔ handler-mode text protocol exchange.
+        // Main engine = the dialer side (play_against_peer logic).
+        // Handler engine = the listener side (handle_chess_stream logic).
+        let main_engine = ChessEngineImpl::new();
+        let handler_engine = ChessEngineImpl::new();
         let mut move_num = 0u32;
-        let max_moves = 300;
+        let max_moves = 300; // Cap to avoid infinite random play.
 
         loop {
-            // White's turn.
-            let moves = engine.legal_moves_uci();
+            // Main side: pick a random move.
+            let moves = main_engine.legal_moves_uci();
             if moves.is_empty() {
                 break;
             }
-            let white_move = &moves[rand::random_range(0..moves.len())];
-            engine.apply(white_move).unwrap();
+            let our_move = &moves[rand::random_range(0..moves.len())];
+            main_engine.apply(our_move).unwrap();
             move_num += 1;
 
-            if engine.status() != GameStatus::Ongoing {
+            // Simulate: main sends "{our_move}\n" over the wire.
+            // Handler side: receive move, apply it.
+            handler_engine.apply(our_move).unwrap();
+
+            // Handler: check if game over after opponent's move.
+            let handler_moves = handler_engine.legal_moves_uci();
+            if handler_moves.is_empty() {
                 break;
             }
 
-            // Black's turn.
-            let moves = engine.legal_moves_uci();
-            if moves.is_empty() {
-                break;
-            }
-            let black_move = &moves[rand::random_range(0..moves.len())];
-            engine.apply(black_move).unwrap();
+            // Handler: pick a random response.
+            let response = &handler_moves[rand::random_range(0..handler_moves.len())];
+            handler_engine.apply(response).unwrap();
 
-            if engine.status() != GameStatus::Ongoing || move_num >= max_moves {
+            // Simulate: handler sends "{response}\n" back.
+            // Main side: receive and apply response.
+            main_engine.apply(response).unwrap();
+
+            // Both engines should agree on position.
+            assert_eq!(
+                main_engine.fen(),
+                handler_engine.fen(),
+                "position mismatch after move {move_num}"
+            );
+
+            if move_num >= max_moves {
                 break;
             }
         }
 
         assert!(move_num > 0, "game should have played at least one move");
+        assert_eq!(main_engine.fen(), handler_engine.fen());
     }
 
     // -----------------------------------------------------------------------
@@ -812,80 +886,6 @@ mod tests {
                 let resp = client.get_status_request().send().promise.await.unwrap();
                 let status = resp.get().unwrap().get_status().unwrap();
                 assert_eq!(status, GameStatus::Checkmate);
-            })
-            .await;
-    }
-
-    // -----------------------------------------------------------------------
-    // RPC full game — mirrors play_rpc_game() without IPFS
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn test_rpc_full_game() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let client = setup_engine();
-                let mut move_count = 0u32;
-
-                loop {
-                    // White's turn.
-                    let moves_resp = client
-                        .get_legal_moves_request()
-                        .send()
-                        .promise
-                        .await
-                        .unwrap();
-                    let moves = moves_resp.get().unwrap().get_moves().unwrap();
-                    if moves.len() == 0 {
-                        break;
-                    }
-
-                    let m = moves
-                        .get(rand::random_range(0..moves.len()))
-                        .unwrap()
-                        .to_str()
-                        .unwrap();
-                    let mut req = client.apply_move_request();
-                    req.get().set_uci(m);
-                    let resp = req.send().promise.await.unwrap();
-                    assert!(resp.get().unwrap().get_ok(), "move {m} rejected");
-                    move_count += 1;
-
-                    let status_resp = client.get_status_request().send().promise.await.unwrap();
-                    if status_resp.get().unwrap().get_status().unwrap() != GameStatus::Ongoing {
-                        break;
-                    }
-
-                    // Black's turn.
-                    let moves_resp = client
-                        .get_legal_moves_request()
-                        .send()
-                        .promise
-                        .await
-                        .unwrap();
-                    let moves = moves_resp.get().unwrap().get_moves().unwrap();
-                    if moves.len() == 0 {
-                        break;
-                    }
-
-                    let m = moves
-                        .get(rand::random_range(0..moves.len()))
-                        .unwrap()
-                        .to_str()
-                        .unwrap();
-                    let mut req = client.apply_move_request();
-                    req.get().set_uci(m);
-                    let resp = req.send().promise.await.unwrap();
-                    assert!(resp.get().unwrap().get_ok(), "move {m} rejected");
-
-                    let status_resp = client.get_status_request().send().promise.await.unwrap();
-                    if status_resp.get().unwrap().get_status().unwrap() != GameStatus::Ongoing {
-                        break;
-                    }
-                }
-
-                assert!(move_count > 0, "game should play at least one move");
             })
             .await;
     }
