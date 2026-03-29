@@ -160,8 +160,8 @@ fn eval_load(args: &[Val]) -> Result<Val, Val> {
         return Ok(Val::Bytes(bytes));
     }
 
-    let bytes = std::fs::read(&resolved)
-        .map_err(|e| Val::from(format!("load: {resolved}: {e}")))?;
+    let bytes =
+        std::fs::read(&resolved).map_err(|e| Val::from(format!("load: {resolved}: {e}")))?;
     CACHE.with(|c| c.borrow_mut().insert(resolved, bytes.clone()));
     Ok(Val::Bytes(bytes))
 }
