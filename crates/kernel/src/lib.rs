@@ -127,17 +127,43 @@ fn build_dispatch() -> HashMap<&'static str, HandlerFn> {
     t
 }
 
-/// (load "path") — read bytes from the virtual filesystem.
-/// Works for local paths and /ipfs/ paths (via WASI interceptor).
+/// (load "path") — read bytes from the WASI virtual filesystem.
+///
+/// Relative paths like `"bin/chess-demo.wasm"` are resolved against the WASI
+/// root (`/`), which the host preopens to the merged FHS image directory.
+/// Absolute paths are used as-is.
+///
+/// Loaded files are cached in a thread-local map so repeated loads of the
+/// same path (e.g. chess.glia loading the WASM for both :listen and :run)
+/// return a cheap clone.  This also works around an ESPIPE (os error 29)
+/// that occurs on the second `std::fs::read` in WASI P2 when the RPC
+/// connection streams have been created between reads.
 fn eval_load(args: &[Val]) -> Result<Val, Val> {
+    thread_local! {
+        static CACHE: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
+    }
+
     let path = match args.first() {
         Some(Val::Str(s)) => s.clone(),
         _ => return Err("(load \"<path>\")".into()),
     };
-    let resolved = resolve_ipfs_path(&path);
-    std::fs::read(&resolved)
-        .map(Val::Bytes)
-        .map_err(|e| Val::from(format!("load: {resolved}: {e}")))
+    // Resolve relative to WASI root — the host mounts the merged image at `/`.
+    let resolved = if path.starts_with('/') {
+        path.clone()
+    } else {
+        format!("/{path}")
+    };
+
+    // Return cached bytes if already loaded.
+    let cached = CACHE.with(|c| c.borrow().get(&resolved).cloned());
+    if let Some(bytes) = cached {
+        return Ok(Val::Bytes(bytes));
+    }
+
+    let bytes =
+        std::fs::read(&resolved).map_err(|e| Val::from(format!("load: {resolved}: {e}")))?;
+    CACHE.with(|c| c.borrow_mut().insert(resolved, bytes.clone()));
+    Ok(Val::Bytes(bytes))
 }
 
 fn eval_cd(args: &[Val], ctx: &RefCell<Session>) -> Result<Val, Val> {
@@ -1420,6 +1446,34 @@ mod tests {
     fn eval_load_missing_arg_returns_error() {
         assert!(eval_load(&[]).is_err());
         assert!(eval_load(&[Val::Int(42)]).is_err());
+    }
+
+    #[test]
+    fn eval_load_relative_path_prepends_slash() {
+        // A relative path like "bin/foo.wasm" should resolve to "/bin/foo.wasm".
+        let result = eval_load(&[Val::Str("nonexistent/relative.wasm".into())]);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("/nonexistent/relative.wasm"),
+            "expected resolved path with leading /, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn eval_load_caches_repeated_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("cached.bin");
+        std::fs::write(&file_path, b"cached-bytes").unwrap();
+
+        let abs = file_path.to_str().unwrap().to_string();
+        let first = eval_load(&[Val::Str(abs.clone())]);
+        assert_eq!(first.unwrap(), Val::Bytes(b"cached-bytes".to_vec()));
+
+        // Mutate the file on disk — cached result should still return old bytes.
+        std::fs::write(&file_path, b"new-bytes").unwrap();
+        let second = eval_load(&[Val::Str(abs)]);
+        assert_eq!(second.unwrap(), Val::Bytes(b"cached-bytes".to_vec()));
     }
 
     // --- wrap_with_handlers ---
