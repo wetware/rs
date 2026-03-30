@@ -323,4 +323,43 @@ mod tests {
         assert_eq!(parsed.version(), cid::Version::V1);
         assert_eq!(parsed.codec(), 0x55); // raw
     }
+
+    /// Roundtrip: push schema bytes to IPFS and verify CID + content match.
+    /// Requires a running Kubo daemon with BLAKE3 support.
+    #[test]
+    #[ignore]
+    fn test_ipfs_roundtrip() {
+        use std::io::Write;
+        use std::process::Command;
+
+        let data = b"test schema bytes for IPFS roundtrip";
+        let expected_cid = compute_cid(data);
+
+        // Push
+        let mut child = Command::new("ipfs")
+            .args(["block", "put", "--mhtype=blake3", "--cid-codec=raw"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("ipfs must be on PATH");
+
+        child.stdin.as_mut().unwrap().write_all(data).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "ipfs block put failed");
+
+        let ipfs_cid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_eq!(ipfs_cid, expected_cid, "CID mismatch");
+
+        // Fetch back
+        let get = Command::new("ipfs")
+            .args(["block", "get", &expected_cid])
+            .output()
+            .expect("ipfs block get failed");
+        assert!(get.status.success());
+        assert_eq!(
+            &get.stdout,
+            data.as_slice(),
+            "bytes mismatch after roundtrip"
+        );
+    }
 }
