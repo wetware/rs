@@ -44,12 +44,12 @@ fn seed_initd_store(root: &str) -> Arc<MemoryStore> {
     let initd = format!("{root}/etc/init.d");
 
     // Scripts that the kernel will `cat` via IPFS.
-    store.insert(&format!("{initd}/01-good.glia"), b"(help)".to_vec());
+    store.insert(format!("{initd}/01-good.glia"), b"(help)".to_vec());
     store.insert(
-        &format!("{initd}/02-bad.glia"),
+        format!("{initd}/02-bad.glia"),
         b"(broken".to_vec(), // unclosed paren — parse error
     );
-    store.insert(&format!("{initd}/03-good.glia"), b"(help)".to_vec());
+    store.insert(format!("{initd}/03-good.glia"), b"(help)".to_vec());
 
     Arc::new(store)
 }
@@ -150,8 +150,8 @@ async fn initd_all_valid_scripts_execute() {
     let root = "/ipfs/QmAllGood";
     let store = MemoryStore::new();
     let initd = format!("{root}/etc/init.d");
-    store.insert(&format!("{initd}/01-cd.glia"), b"(cd \"/tmp\")".to_vec());
-    store.insert(&format!("{initd}/02-help.glia"), b"(help)".to_vec());
+    store.insert(format!("{initd}/01-cd.glia"), b"(cd \"/tmp\")".to_vec());
+    store.insert(format!("{initd}/02-help.glia"), b"(help)".to_vec());
     let store = Arc::new(store);
 
     let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmCommand>(1);

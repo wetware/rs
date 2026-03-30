@@ -108,7 +108,7 @@ fn print_usage(program: &str) {
 ///
 /// Never fails the build. All errors are printed as diagnostics.
 fn try_ipfs_push(data: &[u8], expected_cid: &str) {
-    // Fast PATH check: is `ipfs` even installed?
+    // Fast path check: is `ipfs` even installed?
     let which = Command::new("which").arg("ipfs").output();
     if which.is_err() || !which.unwrap().status.success() {
         eprintln!("Kubo not detected on PATH. Schema available locally only.");

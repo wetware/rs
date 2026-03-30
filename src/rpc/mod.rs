@@ -74,6 +74,9 @@ pub(crate) fn extract_wasm_custom_section<'a>(
 }
 
 /// Decoded Cell type from a WASM custom section.
+///
+/// All variants are used at decode time; `Http` host-side handling
+/// is not yet implemented (see TODOS.md: FastCGI / HttpListener).
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) enum CellType {
@@ -1502,7 +1505,7 @@ mod tests {
                     capnp_rpc::new_future_client(async move {
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         let resp = host_clone.executor_request().send().promise.await?;
-                        Ok(resp.get()?.get_executor()?)
+                        resp.get()?.get_executor()
                     });
 
                 // Store the delayed cap in ProcessImpl.
