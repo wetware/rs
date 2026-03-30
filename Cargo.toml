@@ -11,6 +11,7 @@ members = [
     "crates/kernel",
     "std/shell",
     "examples/chess",
+    "examples/discovery",
 ]
 exclude = [
     "examples/echo",     # WASI guest — targets wasm32-wasip2, not host
