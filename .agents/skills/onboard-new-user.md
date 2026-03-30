@@ -47,8 +47,8 @@ fine.
 
 ## For local clones
 
-Three steps.  Tell them up front: "Three quick steps, then you'll
-have a running node.  ~5 minutes total."
+Tell them up front: "⚗️ Three quick steps, then you'll have a
+running node.  ~5 minutes total."
 
 ### Step 1 of 3: Prerequisites (~30 seconds)
 
@@ -83,7 +83,7 @@ one at a time:
    If this works, the whole stack is live."
 4. `(exit)` — done.
 
-**Name the win**: "You just booted a p2p capability-secured OS.
+**Name the win**: "⚗️ You just booted a p2p capability-secured OS.
 That's the whole runtime — host, kernel, Membrane, shell."
 
 ### Optional: what just happened?

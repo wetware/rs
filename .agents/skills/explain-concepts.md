@@ -34,12 +34,19 @@ Key files: `capnp/cell.capnp`, `doc/architecture.md` section
 "Cell types"
 
 A Cell is a WASM binary with a type tag.  The tag tells the host
-what plumbing to wire up.  Four variants:
+what plumbing to wire up.
 
-- **`raw`** — raw libp2p stream bytes.  Think: custom binary protocols.
-- **`http`** — FastCGI.  Think: REST APIs with familiar tooling.
-- **`capnp`** — Cap'n Proto RPC.  Think: typed, schema-addressed capabilities.
-- **absent** — pid0 mode.  The kernel itself.
+Read `capnp/cell.capnp` and show the actual schema.  Then walk
+through the four variants **one at a time**, checking in between
+each:
+
+1. **`raw`** — raw libp2p stream bytes.  Think: custom binary
+   protocols.  "Make sense?  Next one's more familiar."
+2. **`http`** — FastCGI.  Think: REST APIs with familiar tooling.
+3. **`capnp`** — Cap'n Proto RPC.  Think: typed, schema-addressed
+   capabilities.
+4. **absent** — pid0 mode.  The kernel itself.  "This one's rare —
+   it's only for when you ARE the kernel."
 
 Emphasize: the cell type determines how a process talks to the
 *network*, not what it can do internally.

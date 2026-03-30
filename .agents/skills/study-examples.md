@@ -11,11 +11,11 @@ Don't just present a list — ask what they're after:
 > sounds most useful to you?
 >
 > 1. **Echo** — simplest possible cell.  Good if you want to see
->    the bare minimum.  *(~5 min read)*
+>    the bare minimum.  *(~5 min walkthrough)*
 > 2. **Counter** — HTTP cell with FastCGI.  Good if you're building
->    a web service.  *(~10 min read)*
+>    a web service.  *(~10 min walkthrough)*
 > 3. **Chess** — full Cap'n Proto RPC over libp2p.  Good if you want
->    to see a real multi-node app.  *(~15 min read)*
+>    to see a real multi-node app.  *(~15 min walkthrough)*
 >
 > Or tell me what you're trying to build and I'll pick the most
 > relevant one.
@@ -37,15 +37,16 @@ Walk through together:
 1. **What it does**: reads stdin, writes it back to stdout.  That's it.
 2. **Why it matters**: this is the stdin/stdout convention that *all*
    cell types share.  Everything else builds on this.
-3. **Build it**: `make -C examples/echo` → `examples/echo/bin/echo.wasm`.
-   No `schema-inject` needed (no custom section).
+3. **Build it**: run `make -C examples/echo` yourself and show the
+   output.  No `schema-inject` needed (no custom section).
 4. **See it tested**: `examples/echo_handler_e2e.rs` shows how the
    host spawns and exercises it.
 
-**Name the win**: "That's a complete cell.  Everything else is
+⚗️ **Name the win**: "That's a complete cell.  Everything else is
 just fancier plumbing on top of this pattern."
 
-Check in before moving on.
+Check in: "Make sense?  Want to see it run, or move on to something
+with more moving parts?"
 
 ---
 
@@ -63,20 +64,22 @@ Walk through together:
 
 1. **What it does**: serves `GET /counter` (returns count) and
    `POST /counter` (increments).  405 for everything else.
-2. **The key difference**: this cell has a *type tag*.  Show the
-   Makefile's `schema-inject bin/counter.wasm --http /counter` step.
-   "This is what tells the host to route HTTP traffic here."
+2. **The key difference**: this cell has a *type tag*.  Run
+   `make -C examples/counter` yourself and show the output — the
+   user should see the two-step pipeline (compile, then inject).
+   Point out the `schema-inject bin/counter.wasm --http /counter`
+   step: "This is what tells the host to route HTTP traffic here."
 3. **FastCGI protocol**: the cell speaks binary FastCGI over stdio.
    The host translates HTTP ↔ FastCGI.  Simpler than parsing HTTP/1.1.
 4. **Per-request spawn**: each request gets a fresh instance.  Counter
    resets — that's expected for the demo.
-5. **Build it**: `make -C examples/counter` — note the two-step
-   pipeline (compile, then inject).
 
-**Name the win**: "You've seen the full build pipeline: compile WASM,
-inject cell type, host routes traffic.  That's how HTTP cells work."
+⚗️ **Name the win**: "You've seen the full build pipeline: compile
+WASM, inject cell type, host routes traffic.  That's how HTTP cells
+work."
 
-Check in before moving on.
+Check in: "Ready for the big one (Chess), or want to dig into
+something here first?"
 
 ---
 
@@ -106,12 +109,15 @@ everything at once:
 4. **The image layout** (~2 min): FHS structure with `bin/` and
    `etc/init.d/`.  "This is how it'd be deployed."
 
-**Name the win**: "That's a full peer-to-peer application: typed RPC,
-DHT discovery, IPFS publishing, image packaging."
+⚗️ **Name the win**: "That's a full peer-to-peer application: typed
+RPC, DHT discovery, IPFS publishing, image packaging."
 
 ---
 
 ## After each example
+
+Summarize what they just learned in one line, then offer the next
+step:
 
 > Want to dig into a specific pattern?  Try another example?
 > Or move on to building something of your own?

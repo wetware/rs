@@ -35,12 +35,12 @@ When walking through a `.capnp` file:
 - Then show the schema definition
 - One interface at a time — don't dump the whole file
 
-For `schema-inject`, show all three modes:
-```
-schema-inject wasm.wasm --raw bitswap
-schema-inject wasm.wasm --http /api/v1
-schema-inject wasm.wasm --capnp schema.bytes [--no-ipfs]
-```
+For `schema-inject`, run `cargo run -p schema-id --bin schema-inject -- --help`
+yourself and show the user the actual CLI output.  Then walk through
+the three modes with examples:
+- `--raw bitswap` — raw libp2p streams
+- `--http /api/v1` — HTTP/FastCGI routing
+- `--capnp schema.bytes [--no-ipfs]` — typed Cap'n Proto RPC
 
 Note: `--no-ipfs` (capnp only) skips pushing canonical schema bytes
 to IPFS via Kubo.  Useful offline or when Kubo isn't running.

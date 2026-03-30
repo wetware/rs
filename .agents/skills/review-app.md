@@ -90,5 +90,5 @@ it first.  Momentum matters.
 
 When done:
 
-> That's the review.  Want to dig into any of these findings?
+> ⚗️ That's the review.  Want to dig into any of these findings?
 > Or head back to the main menu?

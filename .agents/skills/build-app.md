@@ -63,7 +63,9 @@ Based on discovery, produce a concrete design.  Cover:
 - **Coordination model**: standalone, multi-node, or epoch-managed?
 
 Present the architecture as a structured outline or diagram.
-Then ask:
+
+⚗️ Milestone: "Design phase done — we've mapped out agents, cell
+types, capabilities, and coordination."  Then ask:
 
 > Does this match what you had in mind?  Anything to change before
 > we write it up?
@@ -87,7 +89,7 @@ an implementation.
 
 When done:
 
-> Design's ready.  Want to review it for security issues?  Or
+> ⚗️ Design's ready.  Want to review it for security issues?  Or
 > head back to the main menu?
 
 Offer **Review an app** or the main menu from `.agents/prompt.md`.
