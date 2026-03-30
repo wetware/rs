@@ -29,7 +29,7 @@ shell.
 ```clojure
 (host id)              ;; your peer identity
 (host peers)           ;; connected peers
-(executor echo "hello") ;; round-trip RPC — if this works, the stack is live
+(executor echo "hello") ;; round-trip RPC — this is an effect crossing the process boundary
 (exit)                 ;; done
 ```
 

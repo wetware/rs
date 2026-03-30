@@ -36,6 +36,10 @@ become relevant.  One at a time.
   identity, custom protocols?
 - **What are the trust boundaries?**  What should agents NOT be
   able to do?
+- **What crosses the process boundary?**  Anything that affects
+  state beyond the local process needs to be an effect.  Help them
+  identify which operations are local computation vs. which need
+  to reach the network/swarm.  This shapes the handler design.
 - **How do they coordinate?**  Single node?  Multi-node?  On-chain?
 
 After each question, confirm you understood before moving on.

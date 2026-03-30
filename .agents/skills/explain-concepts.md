@@ -13,8 +13,9 @@ Don't follow a fixed order.  Ask:
 > 2. **Capabilities** — why no ambient authority, and what replaces it
 > 3. **Architecture** — the three layers (host, kernel, children)
 > 4. **The Membrane** — how capabilities flow and get attenuated
-> 5. **Epochs** — on-chain coordination and capability lifecycle
-> 6. **Images** — how code is packaged and layered
+> 5. **Effects** — the boundary between local and global
+> 6. **Epochs** — on-chain coordination and capability lifecycle
+> 7. **Images** — how code is packaged and layered
 >
 > Or just ask a question and I'll find the right thread.
 
@@ -33,8 +34,12 @@ Wetware addresses it.  One concept at a time.
 Key files: `capnp/cell.capnp`, `doc/architecture.md` section
 "Cell types"
 
-A Cell is a WASM binary with a type tag.  The tag tells the host
-what plumbing to wire up.
+A Cell is a WASM binary with a type tag stored in a **WASM custom
+section** named `"cell.capnp"`.  The tag is a Cap'n Proto union
+injected post-build by `schema-inject` — the WASM itself doesn't
+know about it.  When the host loads a Cell, it reads the custom
+section to decide what plumbing to wire up (network listeners,
+protocol bridges, etc.).  No section = pid0.
 
 Read `capnp/cell.capnp` and show the actual schema.  Then walk
 through the four variants **one at a time**, checking in between
@@ -75,6 +80,43 @@ Key files: `doc/architecture.md` (section "The Membrane pattern")
 
 How pid0 receives capabilities, wraps/attenuates them, and exports
 them.  This is the key mechanism for security composition.
+
+### Effects
+
+Key files: `crates/glia/src/effect.rs`, `crates/glia/src/eval.rs`
+
+**Lead with the why:** anything that isn't wrapped in an effect is
+process-local.  It can't reach the network, can't mutate shared
+state, can't affect anything "out there" in the swarm.  Effects
+are the boundary between local computation and global action.
+
+This is the flip side of "no ambient authority."  In a normal OS,
+any code can call any syscall.  In Wetware, the only way to cross
+the process boundary is to `perform` an effect — and an effect
+only does something if a handler is installed for it.  No handler,
+no action.
+
+Walk through the two flavors:
+
+1. **Keyword effects** — environmental, matched by name.
+   `(perform :log "msg")`.  Think: "I want something from the
+   environment."  The handler decides what `:log` means.
+2. **Capability effects** — object-scoped, matched by identity.
+   `(perform my-cap :method arg)`.  Think: "I want this specific
+   capability to do something."  Only the handler holding that
+   exact cap object responds.
+
+Then show the handler side:
+
+- `with-handler` installs keyword handlers (a map).
+- `with-cap-handler` installs a handler for one specific cap.
+- Handlers receive `(data, resume)`.  `resume` is a one-shot
+  continuation — call it to send a value back to the performer.
+
+**The key insight:** because effects propagate up the handler
+stack, pid0 can intercept, wrap, attenuate, or deny any effect
+a child performs.  This is how the Membrane composes — it's
+handlers all the way up.
 
 ### Epochs
 

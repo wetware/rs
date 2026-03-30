@@ -45,6 +45,12 @@ Walk through together:
 ⚗️ **Name the win**: "That's a complete cell.  Everything else is
 just fancier plumbing on top of this pattern."
 
+5. **The effects angle**: point out that echo's stdin/stdout I/O
+   is the simplest possible effect boundary — data comes in from
+   the network (effect), gets processed locally (pure), goes back
+   out (effect).  The cell itself has no way to reach the network
+   except through this boundary.
+
 Check in: "Make sense?  Want to see it run, or move on to something
 with more moving parts?"
 
@@ -108,6 +114,13 @@ everything at once:
    Don't read every line — hit the interesting parts.
 4. **The image layout** (~2 min): FHS structure with `bin/` and
    `etc/init.d/`.  "This is how it'd be deployed."
+
+5. **Local vs. global** (~3 min): This is the payoff.  Walk through
+   which operations are local (validating a move, updating the board)
+   vs. which cross the process boundary as effects (sending a move
+   to the opponent, publishing replay to IPFS, discovering peers via
+   DHT).  "Anything that can't affect the swarm isn't an effect.
+   Anything that can, must be."
 
 ⚗️ **Name the win**: "That's a full peer-to-peer application: typed
 RPC, DHT discovery, IPFS publishing, image packaging."

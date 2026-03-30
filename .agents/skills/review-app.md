@@ -16,10 +16,10 @@ rest.
 
 If they want a full sweep, tell them what to expect:
 
-> I'll check six things: cell type correctness, least authority,
-> trust boundaries, image layout, protocol correctness, and epoch
-> safety.  I'll flag anything I find as critical / warning /
-> suggestion.  Should take a few minutes.
+> I'll check seven things: cell type correctness, least authority,
+> trust boundaries, image layout, protocol correctness, effect
+> hygiene, and epoch safety.  I'll flag anything I find as
+> critical / warning / suggestion.  Should take a few minutes.
 
 ## What to check
 
@@ -67,7 +67,23 @@ pattern section).
 - RPC bidirectionality used appropriately?
 - HTTP cells handle all expected methods?  Error codes correct?
 
-### 6. Epoch safety
+### 6. Effect hygiene
+
+Read the app's source and trace every operation that reaches
+beyond the process.  Do this yourself — don't ask the user.
+
+- **Trace boundary crossings**: grep for `perform`, handler
+  installations, and any direct I/O.  Every network/swarm
+  interaction MUST go through an effect.  If something crosses
+  the boundary without `perform`, flag it as critical.
+- **Check handler scope**: are handlers installed too high
+  (over-privileged) or too low (effects propagate unhandled)?
+- **Blast radius**: could any handler be narrowed?  A handler
+  that handles more effect types than needed is a risk.
+- **Unhandled effects**: trace which effects propagate to the
+  top without being caught.  Flag any that should be handled.
+
+### 7. Epoch safety
 
 - Agents handle re-grafting correctly?
 - Stale capabilities caught and retried?
