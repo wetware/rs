@@ -4,7 +4,19 @@ use std::path::Path;
 
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-    let target_dir = Path::new(&manifest_dir).join("target");
+    let manifest_path = Path::new(&manifest_dir);
+    let target_dir = manifest_path.join("target");
+
+    // Compile example schemas so integration tests get typed access.
+    let greeter_schema = manifest_path.join("examples/discovery/greeter.capnp");
+    if greeter_schema.exists() {
+        capnpc::CompilerCommand::new()
+            .src_prefix(manifest_path.join("examples/discovery"))
+            .file(&greeter_schema)
+            .run()
+            .expect("failed to compile greeter.capnp");
+        println!("cargo:rerun-if-changed={}", greeter_schema.display());
+    }
     let cid_file = target_dir.join("default-config.cid");
 
     // Read CID from the generated .cid file in target directory
