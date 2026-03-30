@@ -32,6 +32,8 @@ pub mod rpc;
 // Re-export capnp schema modules from the membrane crate so host code can
 // use `crate::system_capnp`, `crate::ipfs_capnp`, `crate::routing_capnp`, `crate::stem_capnp`.
 #[cfg(not(target_arch = "wasm32"))]
+pub use membrane::cell_capnp;
+#[cfg(not(target_arch = "wasm32"))]
 pub use membrane::ipfs_capnp;
 #[cfg(not(target_arch = "wasm32"))]
 pub use membrane::routing_capnp;
@@ -39,8 +41,6 @@ pub use membrane::routing_capnp;
 pub use membrane::stem_capnp;
 #[cfg(not(target_arch = "wasm32"))]
 pub use membrane::system_capnp;
-#[cfg(not(target_arch = "wasm32"))]
-pub use membrane::cell_capnp;
 
 // Modules available for both host and guest
 pub mod config;

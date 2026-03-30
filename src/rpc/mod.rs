@@ -110,10 +110,9 @@ pub(crate) fn decode_cell_section(wasm_bytes: &[u8]) -> Result<Option<CellType>,
     )
     .map_err(|e| capnp::Error::failed(format!("failed to decode cell.capnp section: {e}")))?;
 
-    let cell: crate::cell_capnp::cell::Reader =
-        message.get_root().map_err(|e| {
-            capnp::Error::failed(format!("failed to read Cell root: {e}"))
-        })?;
+    let cell: crate::cell_capnp::cell::Reader = message
+        .get_root()
+        .map_err(|e| capnp::Error::failed(format!("failed to read Cell root: {e}")))?;
 
     use crate::cell_capnp::cell::Which;
     match cell.which() {
