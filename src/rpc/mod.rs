@@ -2503,6 +2503,48 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_cell_capnp_cid_stable_with_complex_node() {
+        // Exercises CID stability with a more realistic Schema.Node:
+        // multiple fields populated, display_name_prefix_length, scope_id,
+        // and nested nodes (struct list). This covers more Cap'n Proto
+        // canonicalization paths than the simple id+display_name test.
+        let mut node_msg = capnp::message::Builder::new_default();
+        {
+            let mut node = node_msg.init_root::<capnp::schema_capnp::node::Builder>();
+            node.set_id(0xe3c2dfb1868218d1);
+            node.set_display_name("chess.capnp:ChessEngine");
+            node.set_display_name_prefix_length(12); // "chess.capnp:".len()
+            node.set_scope_id(0);
+
+            // Add nested nodes (like the GameStatus enum would create)
+            let nested = node.init_nested_nodes(1);
+            let mut entry = nested.get(0);
+            entry.set_name("GameStatus");
+            entry.set_id(0xabcdef0123456789);
+        }
+        let node_reader: capnp::schema_capnp::node::Reader = node_msg.get_root_as_reader().unwrap();
+        let mut canonical_msg = capnp::message::Builder::new_default();
+        canonical_msg.set_root_canonical(node_reader).unwrap();
+        let canonical_bytes = canonical_msg.get_segments_for_output()[0].to_vec();
+        let build_time_cid = schema_id::compute_cid(&canonical_bytes);
+
+        // Full roundtrip: build Cell message → inject → decode → re-derive CID
+        let cell_data = schema_id::build_cell_capnp_message(&canonical_bytes);
+        let wasm = inject_cell_section(&cell_data);
+
+        let decoded = decode_cell_section(&wasm).unwrap().unwrap();
+        let runtime_cid = match decoded {
+            CellType::Capnp(bytes) => schema_cid(&bytes),
+            other => panic!("expected CellType::Capnp, got: {:?}", other),
+        };
+
+        assert_eq!(
+            build_time_cid, runtime_cid,
+            "CID must be stable across build-time → Cell embed → runtime decode"
+        );
+    }
+
+    #[test]
     fn test_schema_inject_raw_produces_valid_cell() {
         // Verify schema-inject's build_cell_raw_message produces
         // a Cell that decode_cell_section can read.
@@ -2528,5 +2570,142 @@ mod tests {
                 other => panic!("expected Http({path}), got: {:?}", other),
             }
         }
+    }
+
+    // =========================================================================
+    // Listener Cell type validation tests
+    // =========================================================================
+
+    /// Build a WASM binary with a Cell::raw section for the given protocol.
+    fn wasm_with_cell_raw_section(protocol: &str) -> Vec<u8> {
+        let cell_data = schema_id::build_cell_raw_message(protocol);
+        schema_id::inject_custom_section(
+            &wasm_without_custom_section(),
+            schema_id::CELL_SECTION_NAME,
+            &cell_data,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_vat_listener_rejects_raw_variant() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let listener_impl =
+                    vat_listener::VatListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::vat_listener::Client =
+                    capnp_rpc::new_client(listener_impl);
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                // Cell::raw WASM passed to VatListener (expects Cell::capnp)
+                let cell = wasm_with_cell_raw_section("echo");
+
+                let mut req = listener.listen_request();
+                req.get().set_executor(executor);
+                req.get().set_wasm(&cell);
+
+                let result = req.send().promise.await;
+                assert!(
+                    result.is_err(),
+                    "VatListener should reject Cell::raw variant"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_stream_listener_rejects_capnp_variant() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let listener_impl =
+                    stream_listener::StreamListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::stream_listener::Client =
+                    capnp_rpc::new_client(listener_impl);
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                // Cell::capnp WASM passed to StreamListener (expects Cell::raw)
+                let cell = wasm_with_cell_capnp_section(0xdeadbeef12345678);
+
+                let mut req = listener.listen_request();
+                req.get().set_executor(executor);
+                req.get().set_protocol("echo");
+                req.get().set_wasm(&cell);
+
+                let result = req.send().promise.await;
+                assert!(
+                    result.is_err(),
+                    "StreamListener should reject Cell::capnp variant"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_stream_listener_rejects_absent_section() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let listener_impl =
+                    stream_listener::StreamListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::stream_listener::Client =
+                    capnp_rpc::new_client(listener_impl);
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                // WASM without cell.capnp section
+                let cell = wasm_without_custom_section();
+
+                let mut req = listener.listen_request();
+                req.get().set_executor(executor);
+                req.get().set_protocol("echo");
+                req.get().set_wasm(&cell);
+
+                let result = req.send().promise.await;
+                assert!(
+                    result.is_err(),
+                    "StreamListener should reject WASM without cell.capnp section"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_stream_listener_rejects_protocol_mismatch() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (_tx, guard) = test_epoch_guard(1);
+                let listener_impl =
+                    stream_listener::StreamListenerImpl::new(dummy_stream_control(), guard);
+                let listener: system_capnp::stream_listener::Client =
+                    capnp_rpc::new_client(listener_impl);
+
+                let (host, _server, _rx) = setup_rpc();
+                let executor = host.executor_request().send().pipeline.get_executor();
+
+                // Cell::raw("echo") but listen protocol is "bitswap"
+                let cell = wasm_with_cell_raw_section("echo");
+
+                let mut req = listener.listen_request();
+                req.get().set_executor(executor);
+                req.get().set_protocol("bitswap");
+                req.get().set_wasm(&cell);
+
+                let result = req.send().promise.await;
+                assert!(
+                    result.is_err(),
+                    "StreamListener should reject protocol mismatch"
+                );
+            })
+            .await;
     }
 }

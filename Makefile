@@ -5,7 +5,7 @@
 
 WASM_TARGET := wasm32-wasip2
 
-.PHONY: all host std kernel shell examples chess schema-inject clean run-kernel
+.PHONY: all host std kernel shell examples chess echo counter schema-inject clean run-kernel
 .PHONY: container-build container-run container-dev container-clean
 
 all: std examples host
@@ -31,21 +31,16 @@ shell:
 
 # --- Examples ----------------------------------------------------------------
 
-examples: chess
+examples: chess echo counter
 
-chess: schema-inject
-	cargo build -p chess --target $(WASM_TARGET) --release
-	@mkdir -p examples/chess/bin
-	cp target/$(WASM_TARGET)/release/chess.wasm examples/chess/bin/chess-demo.wasm
-	@# Inject cell.capnp custom section into the WASM binary.
-	@# The schema bytes were written by build.rs during compilation.
-	@CHESS_OUT=$$(find target/$(WASM_TARGET)/release/build -path '*/chess-*/out/chess_engine_schema.bin' | head -1) && \
-		if [ -n "$$CHESS_OUT" ]; then \
-			cargo run --bin schema-inject -p schema-id --features inject -- \
-				examples/chess/bin/chess-demo.wasm --capnp "$$CHESS_OUT"; \
-		else \
-			echo "WARNING: chess_engine_schema.bin not found; skipping schema injection"; \
-		fi
+chess:
+	$(MAKE) -C examples/chess
+
+echo:
+	$(MAKE) -C examples/echo
+
+counter:
+	$(MAKE) -C examples/counter
 
 schema-inject:
 	cargo build --bin schema-inject -p schema-id --features inject
@@ -61,8 +56,9 @@ clean:
 	cargo clean
 	rm -f crates/kernel/bin/main.wasm
 	rm -f std/shell/boot/main.wasm
-	rm -f examples/chess/bin/chess-demo.wasm
-	rm -f examples/chess/bin/main.wasm
+	$(MAKE) -C examples/chess clean
+	$(MAKE) -C examples/echo clean
+	$(MAKE) -C examples/counter clean
 
 # --- Container ---------------------------------------------------------------
 

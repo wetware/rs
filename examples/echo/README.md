@@ -23,12 +23,16 @@ full spawn-pipe-collect pipeline without protocol-specific logic.
 ## Building
 
 ```sh
-cargo build -p echo-cell --target wasm32-wasip2 --release
-cp target/wasm32-wasip2/release/echo_handler.wasm examples/echo-cell/bin/echo_cell.wasm
+make -C examples/echo
 ```
 
-Or, if the pre-built binary in `bin/` is current, the e2e test uses it
-directly via `include_bytes!`.
+Or manually:
+
+```sh
+cargo build -p echo --target wasm32-wasip2 --release
+mkdir -p examples/echo/bin
+cp target/wasm32-wasip2/release/echo.wasm examples/echo/bin/echo.wasm
+```
 
 ## Running the e2e test
 

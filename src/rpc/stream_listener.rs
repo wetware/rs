@@ -44,9 +44,16 @@ impl system_capnp::stream_listener::Server for StreamListenerImpl {
             .map_err(|e| capnp::Error::failed(e.to_string())));
         let wasm = pry!(params.get_wasm()).to_vec();
 
-        // Verify the Cell type tag matches this listener.
+        // Verify the Cell type tag matches this listener and protocol.
         match pry!(super::decode_cell_section(&wasm)) {
-            Some(super::CellType::Raw(_)) => {} // ok
+            Some(super::CellType::Raw(ref embedded_protocol))
+                if embedded_protocol == protocol_str => {} // ok
+            Some(super::CellType::Raw(ref embedded_protocol)) => {
+                return Promise::err(capnp::Error::failed(format!(
+                    "Cell::raw protocol '{}' does not match listen protocol '{}'",
+                    embedded_protocol, protocol_str
+                )));
+            }
             Some(other) => {
                 return Promise::err(capnp::Error::failed(format!(
                     "StreamListener requires Cell::raw variant, got {:?}",

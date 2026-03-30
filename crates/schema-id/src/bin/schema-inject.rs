@@ -108,17 +108,17 @@ fn print_usage(program: &str) {
 ///
 /// Never fails the build. All errors are printed as diagnostics.
 fn try_ipfs_push(data: &[u8], expected_cid: &str) {
-    // Fast path check: is `ipfs` even installed?
-    let which = Command::new("which").arg("ipfs").output();
-    if which.is_err() || !which.unwrap().status.success() {
-        eprintln!("Kubo not detected on PATH. Schema available locally only.");
-        return;
-    }
-
-    // Version check (no daemon needed)
-    if let Ok(out) = Command::new("ipfs").arg("version").output() {
-        let version = String::from_utf8_lossy(&out.stdout);
-        eprintln!("IPFS: {}", version.trim());
+    // Detect Kubo via `ipfs version` (no daemon needed, works on all platforms).
+    let version_out = Command::new("ipfs").arg("version").output();
+    match &version_out {
+        Ok(out) if out.status.success() => {
+            let version = String::from_utf8_lossy(&out.stdout);
+            eprintln!("IPFS: {}", version.trim());
+        }
+        _ => {
+            eprintln!("Kubo not detected on PATH. Schema available locally only.");
+            return;
+        }
     }
 
     // Push: ipfs block put --mhtype=blake3 --cid-codec=raw

@@ -1,7 +1,7 @@
 //! End-to-end integration test: HttpServer + BoundExecutor + echo cell.
 //!
 //! Validates the full pipeline:
-//!   1. Load echo-cell WASM binary
+//!   1. Load echo WASM binary
 //!   2. Set up Cap'n Proto RPC (in-memory, no network)
 //!   3. Get Executor from Host
 //!   4. Executor.bind(wasm) → BoundExecutor
@@ -24,7 +24,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use ww::rpc::{build_peer_rpc, NetworkState};
 use ww::system_capnp;
 
-const ECHO_WASM: &[u8] = include_bytes!("echo-cell/bin/echo_cell.wasm");
+const ECHO_WASM: &[u8] = include_bytes!("echo/bin/echo.wasm");
 
 /// Set up an in-memory RPC system (same pattern as rpc::tests::setup_rpc)
 fn setup_rpc() -> (

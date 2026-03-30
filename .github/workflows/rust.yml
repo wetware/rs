@@ -80,7 +80,7 @@ jobs:
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
-        targets: x86_64-unknown-linux-gnu
+        targets: x86_64-unknown-linux-gnu, wasm32-wasip2
 
     - name: Cache Cap'n Proto
       id: capnp-cache
@@ -125,6 +125,9 @@ jobs:
         IPFS_PEER_ADDR: ${{ secrets.IPFS_PEER_ADDR }}
 
     - uses: Swatinem/rust-cache@v2
+
+    - name: Build WASI example binaries
+      run: make -C examples/echo
 
     - name: Run tests
       run: cargo test
