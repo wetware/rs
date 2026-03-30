@@ -38,6 +38,11 @@
 //! // Now available: CHESS_ENGINE_SCHEMA, CHESS_ENGINE_CID
 //! ```
 
+#[allow(unused_parens, clippy::match_single_binding)]
+pub mod cell_capnp {
+    include!(concat!(env!("OUT_DIR"), "/capnp/cell_capnp.rs"));
+}
+
 use std::path::Path;
 
 /// A named schema with its canonical bytes and derived CID.
@@ -196,6 +201,67 @@ pub fn emit_schema_consts(output_path: &Path, schemas: &[SchemaEntry]) -> std::i
 /// custom section.
 pub fn write_schema_bytes(output_path: &Path, entry: &SchemaEntry) -> std::io::Result<()> {
     std::fs::write(output_path, &entry.canonical_bytes)
+}
+
+/// The well-known custom section name for Cell type tags.
+pub const CELL_SECTION_NAME: &str = "cell.capnp";
+
+/// Build a serialized Cell::capnp message from canonical schema bytes.
+///
+/// The schema bytes are the canonical encoding of a `schema.Node` as produced
+/// by `extract_schemas()`. They are embedded directly into the `capnp` variant
+/// of the Cell union.
+pub fn build_cell_capnp_message(schema_bytes: &[u8]) -> Vec<u8> {
+    use capnp::serialize;
+
+    let schema_reader = serialize::read_message_from_flat_slice(
+        &mut &*schema_bytes,
+        capnp::message::ReaderOptions::default(),
+    )
+    .expect("valid canonical schema bytes");
+
+    let schema_node: capnp::schema_capnp::node::Reader =
+        schema_reader.get_root().expect("valid schema.Node root");
+
+    let mut message = capnp::message::Builder::new_default();
+    {
+        let mut cell = message.init_root::<cell_capnp::cell::Builder>();
+        cell.set_capnp(schema_node).expect("set schema node");
+    }
+
+    let mut buf = Vec::new();
+    serialize::write_message(&mut buf, &message).expect("serialize Cell message");
+    buf
+}
+
+/// Build a serialized Cell::raw message from a protocol ID string.
+pub fn build_cell_raw_message(protocol_id: &str) -> Vec<u8> {
+    use capnp::serialize;
+
+    let mut message = capnp::message::Builder::new_default();
+    {
+        let mut cell = message.init_root::<cell_capnp::cell::Builder>();
+        cell.set_raw(protocol_id);
+    }
+
+    let mut buf = Vec::new();
+    serialize::write_message(&mut buf, &message).expect("serialize Cell message");
+    buf
+}
+
+/// Build a serialized Cell::http message from a path prefix.
+pub fn build_cell_http_message(path_prefix: &str) -> Vec<u8> {
+    use capnp::serialize;
+
+    let mut message = capnp::message::Builder::new_default();
+    {
+        let mut cell = message.init_root::<cell_capnp::cell::Builder>();
+        cell.set_http(path_prefix);
+    }
+
+    let mut buf = Vec::new();
+    serialize::write_message(&mut buf, &message).expect("serialize Cell message");
+    buf
 }
 
 /// Inject a custom section into a WASM binary.
