@@ -135,11 +135,12 @@ pub(crate) fn decode_cell_section(wasm_bytes: &[u8]) -> Result<Option<CellType>,
                 .set_root_canonical(node)
                 .map_err(|e| capnp::Error::failed(format!("failed to canonicalize schema: {e}")))?;
             let segments = canonical_msg.get_segments_for_output();
-            assert_eq!(
-                segments.len(),
-                1,
-                "canonical message should be single-segment"
-            );
+            if segments.len() != 1 {
+                return Err(capnp::Error::failed(format!(
+                    "canonical message produced {} segments, expected 1",
+                    segments.len()
+                )));
+            }
             Ok(Some(CellType::Capnp(segments[0].to_vec())))
         }
         Err(capnp::NotInSchema(n)) => Err(capnp::Error::failed(format!(
