@@ -18,21 +18,22 @@ pub enum EffectTarget {
     /// `(perform :keyword data)` — global/environmental effect.
     Keyword(String),
     /// `(perform cap :method args...)` — object-scoped capability effect.
+    /// Matched by schema CID (same capnp interface = same type).
     Cap {
         name: String,
-        inner: Rc<dyn std::any::Any>,
+        schema_cid: String,
     },
 }
 
 impl EffectTarget {
     /// Does this target match the given handler's target?
     ///
-    /// Keywords match by string equality. Caps match by `Rc::ptr_eq` (identity).
+    /// Keywords match by string equality. Caps match by schema CID (same interface type).
     pub fn matches(&self, other: &EffectTarget) -> bool {
         match (self, other) {
             (EffectTarget::Keyword(a), EffectTarget::Keyword(b)) => a == b,
-            (EffectTarget::Cap { inner: a, .. }, EffectTarget::Cap { inner: b, .. }) => {
-                Rc::ptr_eq(a, b)
+            (EffectTarget::Cap { schema_cid: a, .. }, EffectTarget::Cap { schema_cid: b, .. }) => {
+                a == b
             }
             _ => false,
         }
@@ -69,13 +70,11 @@ impl EffectSlot {
     }
 }
 
-/// One frame on the handler stack. Each `with-handler` or `with-cap-handler` pushes one.
+/// One frame on the handler stack. Each `with-effect-handler` pushes one.
 pub struct HandlerContext {
     pub slot: Rc<RefCell<EffectSlot>>,
-    /// What this handler handles. `None` for keyword handlers (they match
-    /// by inspecting the handler map inside the poll loop). `Some(Cap{..})`
-    /// for cap handlers (matched by identity during stack walk).
-    pub target: Option<EffectTarget>,
+    /// What this handler handles — keyword or cap target.
+    pub target: EffectTarget,
 }
 
 /// The dynamic handler stack — shared across all eval calls in a session.
@@ -172,7 +171,7 @@ mod tests {
 
         let ctx = Rc::new(RefCell::new(HandlerContext {
             slot: Rc::new(RefCell::new(EffectSlot::new())),
-            target: None,
+            target: EffectTarget::Keyword("test".into()),
         }));
         hs.borrow_mut().push(ctx.clone());
         assert_eq!(hs.borrow().len(), 1);

@@ -156,10 +156,12 @@ pub enum Val {
     /// not inspect. The kernel creates these (e.g. executor, host) and dispatch
     /// handlers downcast them back to typed Cap'n Proto clients.
     ///
-    /// `name` is the display/identity label (e.g. "executor").
+    /// `name` is the display label (e.g. "executor").
+    /// `schema_cid` is the content-addressed type identity: CIDv1(raw, BLAKE3(canonical schema)).
     /// `inner` is the type-erased capability, downcasted by the kernel.
     Cap {
         name: String,
+        schema_cid: String,
         inner: std::rc::Rc<dyn std::any::Any>,
     },
 }
@@ -242,8 +244,8 @@ impl PartialEq for Val {
             (Val::AsyncNativeFn { func: a, .. }, Val::AsyncNativeFn { func: b, .. }) => {
                 std::rc::Rc::ptr_eq(a, b)
             }
-            // Caps use identity semantics (same Rc = same cap).
-            (Val::Cap { inner: a, .. }, Val::Cap { inner: b, .. }) => std::rc::Rc::ptr_eq(a, b),
+            // Caps match by schema CID (same capnp interface = same type).
+            (Val::Cap { schema_cid: a, .. }, Val::Cap { schema_cid: b, .. }) => a == b,
             // Recur, Effect, and Resume are internal sentinels — never equal.
             (Val::Recur(_), _) | (_, Val::Recur(_)) => false,
             (Val::Effect { .. }, _) | (_, Val::Effect { .. }) => false,
