@@ -26,3 +26,12 @@ tmp/
 wit/cell.wit
 .DS_Store
 .gstack/
+
+# Claude Code local state — never committed
+.claude/
+
+# AI vendor symlinks — set up locally via `make ai-setup`
+CLAUDE.md
+AGENTS.md
+.cursorrules
+.github/copilot-instructions.md

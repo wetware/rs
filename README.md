@@ -4,6 +4,8 @@
 
 The peer-to-peer agentic OS.
 
+## What is this?
+
 Agentic frameworks give you a platform for running agents. Wetware
 gives your agents an **operating system**. It provides primitives
 (processes, networking, storage, identity) and gets out of the way.
@@ -18,26 +20,16 @@ a capability to do.
 ## Quick start
 
 ```bash
-rustup target add wasm32-wasip2   # one-time setup
-make                              # build host + kernel + shell
-cargo run -- run crates/kernel    # drops into a Glia shell
+git clone https://github.com/wetware/ww.git && cd ww
+make ai-setup      # link config for your AI coding tool
 ```
 
-```clojure
-/ ❯ (host id)
-"12D3KooWAbcDef..."
+Then ask your AI agent:
 
-/ ❯ (host peers)
-[{:peer-id "..." :addrs [...]} ...]
+> Read .agents/prompt.md and get me started with Wetware.
 
-/ ❯ (ipfs cat "/ipfs/QmFoo...")
-"hello world"
-
-/ ❯ (routing find "my-service")
-[{:peer-id "..." :addrs [...]} ...]
-
-/ ❯ (exit)
-```
+Or browse [`.agents/prompt.md`](.agents/prompt.md) on GitHub — it
+works there too.
 
 ## How it works
 
@@ -67,10 +59,9 @@ first-class values. The design blends three traditions:
 ## Building & testing
 
 ```bash
-make                           # build everything (host + std + examples)
-make host                      # host binary only
-make kernel                    # kernel agent only
-cargo test                     # run tests
+rustup target add wasm32-wasip2   # one-time
+make                              # build everything (host + std + examples)
+cargo test                        # run tests
 ```
 
 Requires Rust with `wasm32-wasip2` target. Optional:
@@ -82,29 +73,7 @@ Requires Rust with `wasm32-wasip2` target. Optional:
 make container-build                          # build with podman (default)
 CONTAINER_ENGINE=docker make container-build  # or with docker
 podman run --rm wetware:latest                # boots kernel + shell
-podman run --rm wetware:latest --help         # CLI help
 ```
-
-The image ships kernel and shell WASM blobs, so `podman run wetware:latest`
-works out of the box. Pass additional layers as arguments to stack on top of
-the default kernel.
-
-## Interactive tour
-
-```
-Read PROMPT.md and give me a guided tour of Wetware.
-```
-
-Or without cloning:
-
-```
-Read https://raw.githubusercontent.com/wetware/ww/master/PROMPT.md and give me a guided tour of Wetware.
-```
-
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code) ·
-[Cursor](https://cursor.com) ·
-[Windsurf](https://windsurf.com) ·
-[PROMPT.md](PROMPT.md)
 
 ## Learn more
 
