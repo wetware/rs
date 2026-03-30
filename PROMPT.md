@@ -90,8 +90,28 @@ source files to be useful.
 
 **Wetware** is a peer-to-peer operating system for autonomous agents.
 It replaces ambient authority with capability-based security.  Agents
-run as WASM processes with zero ambient authority — they can only do
-what they've been explicitly granted capabilities to do.
+run as WASM processes called **Cells** with zero ambient authority —
+they can only do what they've been explicitly granted capabilities
+to do.
+
+**Cells** are the unit of computation.  Each Cell is a WASM binary
+with an optional type tag — a Cap'n Proto union stored in a WASM
+custom section named `"cell.capnp"`.  The tag tells the host what
+plumbing to wire up:
+
+| Cell type | stdio carries | Host wires up |
+|-----------|--------------|---------------|
+| `raw(protocol)` | raw libp2p stream bytes | `/ww/0.1.0/stream/{protocol}` listener |
+| `http(prefix)` | FastCGI records | HTTP route -> FastCGI bridge |
+| `capnp(Schema.Node)` | Cap'n Proto RPC | `/ww/0.1.0/rpc/{cid}` listener |
+| absent (no section) | Cap'n Proto RPC (WIT) | pid0 mode — full Membrane graft |
+
+Cell types are injected post-build with `schema-inject`:
+```
+schema-inject wasm.wasm --raw /protocol/id
+schema-inject wasm.wasm --http /api/v1
+schema-inject wasm.wasm --capnp schema.bytes
+```
 
 Architecture (three layers):
 - **Host** (`ww` binary): boots a libp2p swarm, loads the kernel
@@ -102,6 +122,8 @@ Architecture (three layers):
 - **Children**: spawned by pid0 with attenuated capabilities.
 
 Key abstractions:
+- **Cell type system**: `capnp/cell.capnp` — determines how a
+  process talks to the network (raw streams, HTTP, or typed RPC).
 - **Membrane**: the capability hub.  `graft()` returns epoch-scoped
   capabilities.  pid0 can wrap/filter capabilities and export an
   attenuated Membrane to the network.
@@ -118,7 +140,7 @@ Key abstractions:
 The problem Wetware solves:
 
 ```
-Traditional process:        Wetware guest:
+Traditional process:        Wetware Cell:
   env vars     -> yes         env vars     -> only if explicitly passed
   filesystem   -> yes         filesystem   -> none; content via IPFS capability
   network      -> yes         network      -> no
@@ -136,21 +158,25 @@ Capabilities after grafting:
 | IPFS | Content-addressed storage (cat, ls, add) |
 | Routing | Kademlia DHT (provide, findProviders) |
 | Identity | Host-side signing (private key never enters WASM) |
-| Listener/Dialer | P2P streams for custom subprotocols |
+| StreamListener / StreamDialer | P2P byte streams for raw cells |
+| VatListener / VatClient | Cap'n Proto RPC for capnp cells |
 
 Quick start:
 ```
 rustup target add wasm32-wasip2
-make                             # builds everything (host + kernel + shell + chess)
+make                             # builds everything (host + kernel + shell + examples)
 cargo run -- run crates/kernel   # drops into Glia shell
 ```
 
 Rebuilding after changes:
 ```
-make kernel    # rebuild kernel WASM (crates/kernel → crates/kernel/bin/main.wasm)
-make chess     # rebuild chess example (examples/chess → examples/chess/bin/chess-demo.wasm)
-make shell     # rebuild shell WASM (std/shell → std/shell/boot/main.wasm)
-make host      # rebuild host binary only (cargo build --release)
+make kernel    # kernel WASM
+make shell     # Glia shell WASM
+make host      # host binary only
+make examples  # all examples (chess + echo + counter)
+make echo      # echo example (raw cell)
+make counter   # counter example (HTTP/FastCGI cell)
+make chess     # chess example (Cap'n Proto RPC cell)
 make           # rebuild everything
 ```
 
