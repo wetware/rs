@@ -42,6 +42,13 @@ pub use membrane::stem_capnp;
 #[cfg(not(target_arch = "wasm32"))]
 pub use membrane::system_capnp;
 
+// Example schemas compiled by build.rs for integration tests.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+pub mod greeter_capnp {
+    include!(concat!(env!("OUT_DIR"), "/greeter_capnp.rs"));
+}
+
 // Modules available for both host and guest
 pub mod config;
 pub mod default_kernel;
