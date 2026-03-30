@@ -137,7 +137,19 @@ async fn handle_vat_connection(
     let process = response.get()?.get_process()?;
 
     // 2. Get the cell's exported bootstrap capability.
-    let bootstrap_resp = process.bootstrap_request().send().promise.await?;
+    //    Timeout guards against cells that never call system::serve().
+    let bootstrap_resp = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        process.bootstrap_request().send().promise,
+    )
+    .await
+    .map_err(|_| {
+        capnp::Error::failed(
+            "cell did not export bootstrap capability within 10s \
+             (did the guest call system::serve()?)"
+                .into(),
+        )
+    })??;
     let bootstrap_cap: capnp::capability::Client =
         bootstrap_resp.get()?.get_cap().get_as_capability()?;
 
