@@ -214,8 +214,21 @@ pub const CELL_SECTION_NAME: &str = "cell.capnp";
 pub fn build_cell_capnp_message(schema_bytes: &[u8]) -> Vec<u8> {
     use capnp::serialize;
 
+    // The canonical bytes from extract_schemas/canonicalize_node are a raw
+    // single segment (no framing header). Wrap them with Cap'n Proto framing
+    // so read_message can parse them.
+    let word_count = (schema_bytes.len() + 7) / 8; // round up to words
+    let mut framed = Vec::with_capacity(8 + schema_bytes.len());
+    // Segment table: 1 segment, length in words
+    framed.extend_from_slice(&0u32.to_le_bytes()); // segment count - 1 = 0
+    framed.extend_from_slice(&(word_count as u32).to_le_bytes());
+    framed.extend_from_slice(schema_bytes);
+    // Pad to word boundary
+    let padding = (8 - (schema_bytes.len() % 8)) % 8;
+    framed.extend(std::iter::repeat(0u8).take(padding));
+
     let schema_reader = serialize::read_message_from_flat_slice(
-        &mut &*schema_bytes,
+        &mut framed.as_slice(),
         capnp::message::ReaderOptions::default(),
     )
     .expect("valid canonical schema bytes");

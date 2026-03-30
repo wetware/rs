@@ -2418,15 +2418,19 @@ mod tests {
 
     #[test]
     fn test_decode_cell_capnp_roundtrip() {
-        // Build a synthetic Schema.Node message to use as schema bytes.
+        // Build a synthetic Schema.Node and canonicalize it the same way
+        // the real build pipeline does (set_root_canonical → raw segment).
         let mut node_msg = capnp::message::Builder::new_default();
         {
             let mut node = node_msg.init_root::<capnp::schema_capnp::node::Builder>();
             node.set_id(0xdeadbeefcafebabe);
             node.set_display_name("TestInterface");
         }
-        let mut schema_bytes = Vec::new();
-        capnp::serialize::write_message(&mut schema_bytes, &node_msg).unwrap();
+        let node_reader: capnp::schema_capnp::node::Reader = node_msg.get_root_as_reader().unwrap();
+        let mut canonical_msg = capnp::message::Builder::new_default();
+        canonical_msg.set_root_canonical(node_reader).unwrap();
+        // Raw canonical segment bytes, no framing — matches write_schema_bytes output.
+        let schema_bytes = canonical_msg.get_segments_for_output()[0].to_vec();
 
         let cell_data = schema_id::build_cell_capnp_message(&schema_bytes);
         let wasm = inject_cell_section(&cell_data);
@@ -2474,10 +2478,9 @@ mod tests {
         let legacy_cid = schema_id::compute_cid(&canonical_bytes);
 
         // Now wrap in Cell::capnp, inject, decode, and compute CID from decoded bytes.
-        // build_cell_capnp_message expects framed schema bytes (write_message output).
-        let mut framed_schema = Vec::new();
-        capnp::serialize::write_message(&mut framed_schema, &canonical_msg).unwrap();
-        let cell_data = schema_id::build_cell_capnp_message(&framed_schema);
+        // build_cell_capnp_message expects raw canonical bytes (no framing),
+        // matching what write_schema_bytes produces in the real build pipeline.
+        let cell_data = schema_id::build_cell_capnp_message(&canonical_bytes);
         let wasm = inject_cell_section(&cell_data);
 
         let decoded = decode_cell_section(&wasm).unwrap().unwrap();
