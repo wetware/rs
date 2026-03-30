@@ -16,12 +16,9 @@ setup.  Remember it — you'll use it at the end.
 
 ## Detect environment
 
-Figure out where the user is:
-
-- **Local clone**: they can run commands, build things, and you can
-  read files directly.
-- **Browsing on GitHub**: no terminal, no local files.  Adapt —
-  link to raw files, skip build steps until they clone.
+Check whether you have shell access (try running a command) and
+whether the repo files are local (try reading a file).  Use the
+result to pick the right path below — don't ask the user.
 
 ---
 
@@ -55,25 +52,20 @@ have a running node.  ~5 minutes total."
 
 ### Step 1 of 3: Prerequisites (~30 seconds)
 
-Check (or tell the user to check):
-- Rust toolchain installed
-- `wasm32-wasip2` target: `rustup target add wasm32-wasip2`
-- Optional: [Kubo](https://docs.ipfs.tech/install/) for IPFS
+Run these checks yourself — don't ask the user to do it:
+- `rustc --version` — Rust toolchain installed?
+- `rustup target list --installed | grep wasm32-wasip2` — target present?
+- Optional: `ipfs --version` for [Kubo](https://docs.ipfs.tech/install/)
 
-If something's missing, help them fix it before moving on.
-Don't just list requirements and hope for the best.
+If something's missing, fix it (e.g. `rustup target add wasm32-wasip2`)
+or tell the user exactly what to run.  Never just list requirements
+and ask them to confirm.
 
 ### Step 2 of 3: Build (~2 minutes)
 
-```
-make
-```
-
-Builds host binary, kernel, shell, and examples.  First build is
-slower — tell them it's normal.
-
-**While it builds**, you can preview what comes next: "Once this
-finishes, we'll boot a node and you'll have a live p2p shell."
+Run `make` yourself.  First build is slower — tell the user it's
+normal and preview what comes next: "Once this finishes, we'll
+boot a node and you'll have a live p2p shell."
 
 ### Step 3 of 3: Quick tour (~1 minute)
 
