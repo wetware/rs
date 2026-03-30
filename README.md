@@ -22,7 +22,7 @@ a capability to do.
 Clone the repo, then ask your AI coding agent:
 
 > If you are in a local clone of github.com/wetware/ww, read
-> .agents/prompt.md, else browse [`.agents/prompt.md`](.agents/prompt.md) 
+> [`.agents/prompt.md`](.agents/prompt.md), else read it on
 > on GitHub, and finally, get me started with Wetware.
 
 ## How it works
