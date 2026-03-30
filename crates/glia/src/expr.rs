@@ -481,9 +481,7 @@ fn analyze_perform(args: &[Val]) -> Result<Expr, String> {
 /// - Cap:     `(with-effect-handler cap handler-fn body...)` — single cap target.
 fn analyze_with_effect_handler(args: &[Val]) -> Result<Expr, String> {
     if args.len() < 3 {
-        return Err(
-            "with-effect-handler: need at least target, handler, body".into(),
-        );
+        return Err("with-effect-handler: need at least target, handler, body".into());
     }
 
     if let Val::Keyword(_) = &args[0] {
@@ -499,9 +497,7 @@ fn analyze_with_effect_handler(args: &[Val]) -> Result<Expr, String> {
             }
         }
         if pairs.is_empty() || i >= args.len() {
-            return Err(
-                "with-effect-handler: need at least one handler and a body".into(),
-            );
+            return Err("with-effect-handler: need at least one handler and a body".into());
         }
         let body: Vec<Expr> = args[i..]
             .iter()
@@ -526,7 +522,11 @@ fn analyze_with_effect_handler(args: &[Val]) -> Result<Expr, String> {
             .iter()
             .map(analyze)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Expr::WithEffectHandler { target, handler, body })
+        Ok(Expr::WithEffectHandler {
+            target,
+            handler,
+            body,
+        })
     }
 }
 
@@ -922,7 +922,11 @@ mod tests {
     fn analyze_with_effect_handler_cap_target() {
         // Cap target: (with-effect-handler cap handler body)
         match analyze_str("(with-effect-handler my-cap handler body)").unwrap() {
-            Expr::WithEffectHandler { target, handler, body } => {
+            Expr::WithEffectHandler {
+                target,
+                handler,
+                body,
+            } => {
                 assert!(matches!(*target, Expr::Sym(ref s) if s == "my-cap"));
                 assert!(matches!(*handler, Expr::Sym(ref s) if s == "handler"));
                 assert_eq!(body.len(), 1);

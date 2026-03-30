@@ -19,10 +19,7 @@ pub enum EffectTarget {
     Keyword(String),
     /// `(perform cap :method args...)` — object-scoped capability effect.
     /// Matched by schema CID (same capnp interface = same type).
-    Cap {
-        name: String,
-        schema_cid: String,
-    },
+    Cap { name: String, schema_cid: String },
 }
 
 impl EffectTarget {

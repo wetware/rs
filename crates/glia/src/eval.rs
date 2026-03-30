@@ -1550,7 +1550,9 @@ pub fn eval_expr<'a, D: Dispatch>(
                         )
                     }
                     // (perform cap :method args...) — cap-targeted effect
-                    Val::Cap { name, schema_cid, .. } => {
+                    Val::Cap {
+                        name, schema_cid, ..
+                    } => {
                         // Pack (:method args...) into a list as the data payload.
                         let data = Val::List(evaled_args);
                         (
@@ -1594,14 +1596,20 @@ pub fn eval_expr<'a, D: Dispatch>(
                 Err(eval_err!("match: no clause matched value {value}"))
             }
 
-            Expr::WithEffectHandler { target, handler, body } => {
+            Expr::WithEffectHandler {
+                target,
+                handler,
+                body,
+            } => {
                 // Evaluate target and handler BEFORE pushing context.
                 let target_val = eval_expr(target, env, dispatch).await?;
                 let handler_val = eval_expr(handler, env, dispatch).await?;
 
                 let effect_target = match &target_val {
                     Val::Keyword(s) => effect::EffectTarget::Keyword(s.clone()),
-                    Val::Cap { name, schema_cid, .. } => effect::EffectTarget::Cap {
+                    Val::Cap {
+                        name, schema_cid, ..
+                    } => effect::EffectTarget::Cap {
                         name: name.clone(),
                         schema_cid: schema_cid.clone(),
                     },
@@ -4797,11 +4805,7 @@ mod tests {
         // with-effect-handler requires a keyword or cap target
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
-        let result = eval_str(
-            "(with-effect-handler (perform :test 42))",
-            &mut env,
-            &mut d,
-        );
+        let result = eval_str("(with-effect-handler (perform :test 42))", &mut env, &mut d);
         assert!(result.is_err());
     }
 
@@ -5560,7 +5564,11 @@ mod tests {
         // Non-Cap first arg → error.
         let mut env = Env::new();
         let d = RecordingDispatch::new();
-        let result = eval_str("(with-effect-handler 42 (fn [data] data) :body)", &mut env, &d);
+        let result = eval_str(
+            "(with-effect-handler 42 (fn [data] data) :body)",
+            &mut env,
+            &d,
+        );
         assert!(result.is_err());
         if let Err(err) = &result {
             assert!(err_contains(err, "cap"));
@@ -5768,7 +5776,9 @@ mod tests {
 
         // Pre-fill handler stack to the limit.
         let cap_target = match &cap {
-            Val::Cap { name, schema_cid, .. } => effect::EffectTarget::Cap {
+            Val::Cap {
+                name, schema_cid, ..
+            } => effect::EffectTarget::Cap {
                 name: name.clone(),
                 schema_cid: schema_cid.clone(),
             },
