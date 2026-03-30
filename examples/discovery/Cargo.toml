@@ -1,0 +1,26 @@
+[package]
+name = "discovery"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+capnp     = "0.23.2"
+capnp-rpc = "0.23.0"
+futures   = "0.3"
+log       = "0.4"
+wasip2    = "1.0.2"
+hex       = "0.4"
+rand      = "0.9"
+system    = { path = "../../std/system" }
+
+[lib]
+crate-type = ["cdylib"]
+
+[dev-dependencies]
+tokio      = { version = "1", features = ["rt", "macros", "io-util"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+
+[build-dependencies]
+capnpc = "0.23.3"
+capnp  = "0.23.2"
+schema-id = { path = "../../crates/schema-id" }

@@ -2084,6 +2084,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "discovery"
+version = "0.1.0"
+dependencies = [
+ "capnp",
+ "capnp-rpc",
+ "capnpc",
+ "futures",
+ "hex",
+ "log",
+ "rand 0.9.2",
+ "schema-id",
+ "system",
+ "tokio",
+ "tokio-util",
+ "wasip2",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
