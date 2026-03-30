@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Build-time helper: extract canonical schema bytes and CIDs from Cap'n Proto schemas"
 
+[build-dependencies]
+capnpc = "0.23.3"
+
 [dependencies]
 capnp = "0.23.2"
 capnpc = "0.23.3"

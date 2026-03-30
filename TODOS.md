@@ -82,6 +82,22 @@
 ## ~~Dual DHT — LAN + WAN content routing~~ ✅
 **RESOLVED:** `kad_lan` field added to `WetwareBehaviour` running `/ipfs/lan/kad/1.0.0` in server mode. Dual-dispatch provide/findProviders with cross-DHT PeerId dedup via `FindRequest`. Kubo peers classified by `is_lan_addr()` into WAN/LAN routing tables. 10 unit tests for extracted helpers. Design doc at `~/.gstack/projects/wetware-ww/lthibault-feat-local-routing-design-20260329-131709.md`.
 
+## FastCGI host-side implementation (HttpListener)
+**What:** Implement `HttpListener` that handles `Cell::http` WASM binaries. The host spawns a cell process per HTTP request, piping FastCGI records over stdin/stdout. The host HTTP server demuxes incoming requests by path prefix and forwards them to the appropriate cell.
+**Why:** `Cell::http` variant exists in the type system but the host-side handler is not implemented. Guests can declare HTTP cells but the host can't serve them yet.
+**Context:** The Cell type system (cell.capnp) already defines `http @1 :Text` (path prefix). `decode_cell_section()` already decodes `CellType::Http`. The host needs: (1) an HTTP server (hyper or axum) listening on a configurable port, (2) route table mapping path prefixes to BoundExecutors, (3) FastCGI framing for stdin/stdout, (4) `HttpListener` capability that registers cells in the route table. FastCGI is the agreed wire format for stdio. Start simple: one cell process per request (Mode A), pool/keepalive later.
+**Effort:** M
+**Priority:** P2
+**Depends on:** Cell type system (done)
+
+## HTTP-to-capnp bridge module
+**What:** A capnp cell that translates HTTP requests into capability invocations. This is an application-level module, not a runtime feature. An HTTP cell (Cell::http) that accepts FastCGI on stdio, parses the HTTP request, dials a capnp service via VatClient, invokes a method, and returns the result as an HTTP response.
+**Why:** Enables HTTP clients to interact with typed capabilities without speaking capnp-rpc. The bridge is a regular cell, not special runtime machinery.
+**Context:** This is intentionally application-level. The bridge cell would be a WASM binary with `Cell::http` that uses the guest Membrane to dial capnp services. It translates REST-style routes to capability method calls. Could be generic (schema-driven routing) or hand-written per service.
+**Effort:** M
+**Priority:** P3
+**Depends on:** FastCGI host implementation, VatClient guest-side
+
 ## mDNS for Kubo-less LAN peer discovery
 **What:** Add `libp2p::mdns::tokio::Behaviour` to `WetwareBehaviour` to discover LAN peers without Kubo. mDNS is a **peer discovery source** that feeds the LAN DHT routing table — not a routing primitive. It does not touch Cap'n Proto or the guest API.
 **Why:** The dual DHT bootstraps the LAN routing table from Kubo's swarm peers. Without Kubo (or in environments where Kubo has no private-address peers), the LAN DHT starts empty. mDNS enables zero-config LAN discovery. Note: mDNS does NOT work in cloud/container environments (no multicast). Kubo bootstrap is the fallback/primary for those environments. Dual DHT and mDNS are orthogonal — can be built and merged independently.

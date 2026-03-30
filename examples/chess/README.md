@@ -88,7 +88,7 @@ functions that need spawn authority.
 `(perform :load "bin/chess-demo.wasm")` loads bytes via the `:load` effect
 handler, resolved relative to `$WW_ROOT` (the merged image root). The
 executor capability is the spawn authority that `VatListener` needs to
-create cell processes. The host inspects the WASM binary's `schema.capnp`
+create cell processes. The host inspects the WASM binary's `cell.capnp`
 custom section to derive the protocol CID.
 
 ## Schema CID
@@ -97,7 +97,7 @@ The protocol address is derived at build time from the ChessEngine
 Cap'n Proto schema: `CIDv1(raw, BLAKE3(canonical(schema.Node)))`.
 This CID serves as both the DHT key and the subprotocol address
 (`/ww/0.1.0/<cid>`). The canonical schema bytes are embedded in the
-WASM binary as a custom section named `schema.capnp`. The host
+WASM binary as a custom section named `cell.capnp`. The host
 extracts the section and derives the CID at runtime. See `build.rs`,
 the `schema-id` crate, and `make chess` for the injection step.
 

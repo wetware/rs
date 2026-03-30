@@ -48,17 +48,20 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
         let executor: system_capnp::executor::Client = pry!(params.get_executor());
         let wasm: Arc<[u8]> = pry!(params.get_wasm()).into();
 
-        // Extract schema from the WASM binary's "schema.capnp" custom section.
-        let schema_bytes = match pry!(super::extract_wasm_custom_section(&wasm, "schema.capnp")) {
-            Some(bytes) if !bytes.is_empty() => bytes.to_vec(),
-            Some(_) => {
-                return Promise::err(capnp::Error::failed(
-                    "schema.capnp custom section is empty".into(),
-                ));
+        // Decode the Cell type tag from the "cell.capnp" custom section.
+        let schema_bytes = match pry!(super::decode_cell_section(&wasm)) {
+            Some(super::CellType::Capnp(bytes)) => bytes,
+            Some(other) => {
+                return Promise::err(capnp::Error::failed(format!(
+                    "VatListener requires Cell::capnp variant, got {:?}",
+                    std::mem::discriminant(&other)
+                )));
             }
             None => {
                 return Promise::err(capnp::Error::failed(
-                    "WASM binary does not contain a 'schema.capnp' custom section".into(),
+                    "WASM binary does not contain a 'cell.capnp' custom section \
+                     (VatListener requires Cell::capnp)"
+                        .into(),
                 ));
             }
         };

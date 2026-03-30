@@ -44,6 +44,24 @@ impl system_capnp::stream_listener::Server for StreamListenerImpl {
             .map_err(|e| capnp::Error::failed(e.to_string())));
         let wasm = pry!(params.get_wasm()).to_vec();
 
+        // Verify the Cell type tag matches this listener.
+        match pry!(super::decode_cell_section(&wasm)) {
+            Some(super::CellType::Raw(_)) => {} // ok
+            Some(other) => {
+                return Promise::err(capnp::Error::failed(format!(
+                    "StreamListener requires Cell::raw variant, got {:?}",
+                    std::mem::discriminant(&other)
+                )));
+            }
+            None => {
+                return Promise::err(capnp::Error::failed(
+                    "WASM binary does not contain a 'cell.capnp' custom section \
+                     (StreamListener requires Cell::raw)"
+                        .into(),
+                ));
+            }
+        }
+
         if protocol_str.is_empty() {
             return Promise::err(capnp::Error::failed(
                 "protocol name must not be empty".into(),

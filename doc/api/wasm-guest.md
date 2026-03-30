@@ -223,7 +223,7 @@ Full interface reference for the capabilities available to guests.
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `listen` | `(executor: Executor, wasm: Data) -> ()` | Accept connections on `/ww/0.1.0/rpc/{cid}`. Schema extracted from WASM binary's `schema.capnp` custom section. Per-connection: spawn handler, bridge bootstrap cap to peer. |
+| `listen` | `(executor: Executor, wasm: Data) -> ()` | Accept connections on `/ww/0.1.0/rpc/{cid}`. Cell type extracted from WASM binary's `cell.capnp` custom section (Cell::capnp variant). Per-connection: spawn handler, bridge bootstrap cap to peer. |
 
 ### VatClient (capability mode)
 
@@ -238,14 +238,15 @@ inspects before instantiation.
 
 | Section Name | Contents | Purpose |
 |--------------|----------|---------|
-| `schema.capnp` | Canonical Cap'n Proto encoding of a `schema.Node` | Identifies the binary as an RPC handler. Host extracts schema, derives CID for protocol addressing. |
+| `cell.capnp` | Cap'n Proto `Cell` union message | Identifies the binary as a service cell. Variant determines plumbing: `raw` (libp2p stream), `http` (FastCGI), `capnp` (typed RPC). |
 
-**Schema CID derivation**: `CIDv1(raw, BLAKE3(section_bytes))` → protocol
-`/ww/0.1.0/{cid}`. The host re-derives the CID from the section bytes;
-it never trusts a guest-supplied CID.
+**Cell variants:**
+- `Cell::raw(Text)` — registers a libp2p stream protocol at `/ww/0.1.0/stream/{name}`. stdin/stdout carry raw bytes.
+- `Cell::http(Text)` — registers at HTTP path prefix. stdin/stdout carry FastCGI records.
+- `Cell::capnp(Schema.Node)` — registers RPC protocol at `/ww/0.1.0/rpc/{cid}`. CID = `CIDv1(raw, BLAKE3(canonical schema bytes))`.
 
-**Absence**: If `schema.capnp` is not present or is empty, the binary is
-not an RPC handler. Passing it to `rpcListen` is an error.
+**Absence**: If `cell.capnp` is not present, the binary is a pid0 process (kernel/WIT mode).
+It is not a service cell and cannot be passed to any listener.
 
 ## Implementation Constraints
 

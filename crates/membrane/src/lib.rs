@@ -29,6 +29,11 @@ pub mod stem_capnp {
     include!(concat!(env!("OUT_DIR"), "/capnp/stem_capnp.rs"));
 }
 
+#[allow(unused_parens, clippy::match_single_binding)]
+pub mod cell_capnp {
+    include!(concat!(env!("OUT_DIR"), "/capnp/cell_capnp.rs"));
+}
+
 pub mod epoch;
 pub mod membrane;
 pub mod terminal;

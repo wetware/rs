@@ -73,6 +73,81 @@ pub(crate) fn extract_wasm_custom_section<'a>(
     Ok(None)
 }
 
+/// Decoded Cell type from a WASM custom section.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) enum CellType {
+    /// Raw libp2p stream with protocol ID.
+    Raw(String),
+    /// HTTP/FastCGI cell with path prefix.
+    Http(String),
+    /// Cap'n Proto RPC cell with canonical schema bytes.
+    Capnp(Vec<u8>),
+}
+
+/// Decode the Cell type tag from a WASM binary's "cell.capnp" custom section.
+///
+/// Returns `Ok(Some(CellType))` if the section is present and valid,
+/// `Ok(None)` if the section is absent (pid0 mode), or `Err` if the
+/// section data is malformed.
+pub(crate) fn decode_cell_section(wasm_bytes: &[u8]) -> Result<Option<CellType>, capnp::Error> {
+    let section_data = match extract_wasm_custom_section(wasm_bytes, "cell.capnp")? {
+        Some(data) if !data.is_empty() => data,
+        Some(_) => {
+            return Err(capnp::Error::failed(
+                "cell.capnp custom section is empty".into(),
+            ));
+        }
+        None => return Ok(None),
+    };
+
+    // Copy section data to ensure 8-byte alignment (WASM custom sections
+    // are not guaranteed to be aligned within the binary).
+    let aligned_data = section_data.to_vec();
+    let message = capnp::serialize::read_message_from_flat_slice(
+        &mut aligned_data.as_slice(),
+        capnp::message::ReaderOptions::default(),
+    )
+    .map_err(|e| capnp::Error::failed(format!("failed to decode cell.capnp section: {e}")))?;
+
+    let cell: crate::cell_capnp::cell::Reader = message
+        .get_root()
+        .map_err(|e| capnp::Error::failed(format!("failed to read Cell root: {e}")))?;
+
+    use crate::cell_capnp::cell::Which;
+    match cell.which() {
+        Ok(Which::Raw(text)) => {
+            let protocol_id = text?.to_string()?;
+            Ok(Some(CellType::Raw(protocol_id)))
+        }
+        Ok(Which::Http(text)) => {
+            let path_prefix = text?.to_string()?;
+            Ok(Some(CellType::Http(path_prefix)))
+        }
+        Ok(Which::Capnp(node)) => {
+            let node = node?;
+            // Re-canonicalize the schema node to get raw segment bytes for CID derivation.
+            // Uses get_segments_for_output (no framing) to match the build-time path
+            // in schema_id::canonicalize_node, ensuring CID stability.
+            let mut canonical_msg = capnp::message::Builder::new_default();
+            canonical_msg
+                .set_root_canonical(node)
+                .map_err(|e| capnp::Error::failed(format!("failed to canonicalize schema: {e}")))?;
+            let segments = canonical_msg.get_segments_for_output();
+            if segments.len() != 1 {
+                return Err(capnp::Error::failed(format!(
+                    "canonical message produced {} segments, expected 1",
+                    segments.len()
+                )));
+            }
+            Ok(Some(CellType::Capnp(segments[0].to_vec())))
+        }
+        Err(capnp::NotInSchema(n)) => Err(capnp::Error::failed(format!(
+            "unknown Cell variant discriminant: {n}"
+        ))),
+    }
+}
+
 /// Maximum bytes a single ByteStream read may allocate.
 ///
 /// Guards against OOM from callers requesting u32::MAX bytes.
@@ -1824,6 +1899,25 @@ mod tests {
         ]
     }
 
+    /// Build a WASM binary with a valid Cell::capnp section containing a
+    /// Schema.Node with the given type ID.
+    fn wasm_with_cell_capnp_section(type_id: u64) -> Vec<u8> {
+        let mut node_msg = capnp::message::Builder::new_default();
+        {
+            let mut node = node_msg.init_root::<capnp::schema_capnp::node::Builder>();
+            node.set_id(type_id);
+            node.set_display_name("TestInterface");
+        }
+        let mut schema_bytes = Vec::new();
+        capnp::serialize::write_message(&mut schema_bytes, &node_msg).unwrap();
+        let cell_data = schema_id::build_cell_capnp_message(&schema_bytes);
+        schema_id::inject_custom_section(
+            &wasm_without_custom_section(),
+            schema_id::CELL_SECTION_NAME,
+            &cell_data,
+        )
+    }
+
     #[tokio::test]
     async fn test_vat_listener_missing_schema_section_errors() {
         let local = tokio::task::LocalSet::new();
@@ -2002,9 +2096,8 @@ mod tests {
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
 
-                let schema = b"same schema bytes";
-                // Both cells have the same schema section → same protocol CID.
-                let cell = wasm_with_custom_section("schema.capnp", schema);
+                // Both cells have the same schema → same protocol CID.
+                let cell = wasm_with_cell_capnp_section(0xdeadbeef12345678);
 
                 // First registration should succeed.
                 let mut req1 = client1.listen_request();
@@ -2148,12 +2241,8 @@ mod tests {
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
 
-                // Build a WASM with a valid schema section via the inject path.
-                let cell = schema_id::inject_custom_section(
-                    &wasm_without_custom_section(),
-                    "schema.capnp",
-                    b"valid schema bytes for ChessEngine",
-                );
+                // Build a WASM with a valid Cell::capnp section.
+                let cell = wasm_with_cell_capnp_section(0xe3c2dfb1868218d1);
 
                 let mut req = listener.listen_request();
                 req.get().set_executor(executor);
@@ -2266,5 +2355,172 @@ mod tests {
                 assert!(is_dead, "call through bridge should fail after cell dies");
             })
             .await;
+    }
+
+    // =========================================================================
+    // Cell type decode tests
+    // =========================================================================
+
+    /// Minimal valid WASM module (just the 8-byte header).
+    const MINIMAL_WASM: &[u8] = b"\x00asm\x01\x00\x00\x00";
+
+    /// Helper: inject a custom section into the minimal WASM module.
+    fn inject_cell_section(data: &[u8]) -> Vec<u8> {
+        schema_id::inject_custom_section(MINIMAL_WASM, schema_id::CELL_SECTION_NAME, data)
+    }
+
+    #[test]
+    fn test_decode_cell_absent_section_returns_none() {
+        // No custom section → pid0 mode.
+        let result = decode_cell_section(MINIMAL_WASM).unwrap();
+        assert!(result.is_none(), "absent section should return None (pid0)");
+    }
+
+    #[test]
+    fn test_decode_cell_empty_section_errors() {
+        let wasm = inject_cell_section(b"");
+        let result = decode_cell_section(&wasm);
+        assert!(result.is_err(), "empty section should be an error");
+    }
+
+    #[test]
+    fn test_decode_cell_malformed_section_errors() {
+        let wasm = inject_cell_section(b"not valid capnp data at all!!!");
+        let result = decode_cell_section(&wasm);
+        assert!(result.is_err(), "malformed section should be an error");
+    }
+
+    #[test]
+    fn test_decode_cell_raw_roundtrip() {
+        let cell_data = schema_id::build_cell_raw_message("echo");
+        let wasm = inject_cell_section(&cell_data);
+
+        match decode_cell_section(&wasm).unwrap() {
+            Some(CellType::Raw(protocol_id)) => {
+                assert_eq!(protocol_id, "echo");
+            }
+            other => panic!("expected CellType::Raw, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_decode_cell_http_roundtrip() {
+        let cell_data = schema_id::build_cell_http_message("/api/v1");
+        let wasm = inject_cell_section(&cell_data);
+
+        match decode_cell_section(&wasm).unwrap() {
+            Some(CellType::Http(path_prefix)) => {
+                assert_eq!(path_prefix, "/api/v1");
+            }
+            other => panic!("expected CellType::Http, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_decode_cell_capnp_roundtrip() {
+        // Build a synthetic Schema.Node message to use as schema bytes.
+        let mut node_msg = capnp::message::Builder::new_default();
+        {
+            let mut node = node_msg.init_root::<capnp::schema_capnp::node::Builder>();
+            node.set_id(0xdeadbeefcafebabe);
+            node.set_display_name("TestInterface");
+        }
+        let mut schema_bytes = Vec::new();
+        capnp::serialize::write_message(&mut schema_bytes, &node_msg).unwrap();
+
+        let cell_data = schema_id::build_cell_capnp_message(&schema_bytes);
+        let wasm = inject_cell_section(&cell_data);
+
+        match decode_cell_section(&wasm).unwrap() {
+            Some(CellType::Capnp(bytes)) => {
+                assert!(!bytes.is_empty(), "capnp bytes should not be empty");
+                // CellType::Capnp returns raw segment bytes (no framing).
+                // Wrap back into a framed message to read it.
+                let mut framed = Vec::new();
+                // Single-segment message: 1 segment, then size in words, then data.
+                framed.extend_from_slice(&0u32.to_le_bytes()); // segment count - 1
+                framed.extend_from_slice(&((bytes.len() / 8) as u32).to_le_bytes());
+                framed.extend_from_slice(&bytes);
+                let reader = capnp::serialize::read_message_from_flat_slice(
+                    &mut framed.as_slice(),
+                    Default::default(),
+                )
+                .unwrap();
+                let node: capnp::schema_capnp::node::Reader = reader.get_root().unwrap();
+                assert_eq!(node.get_id(), 0xdeadbeefcafebabe);
+            }
+            other => panic!("expected CellType::Capnp, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_decode_cell_capnp_cid_matches_inner_bytes() {
+        // CID regression test: the CID must be derived from the inner schema
+        // bytes, not from the Cell wrapper. This ensures backward compatibility
+        // with existing DHT providers.
+
+        // Build a Schema.Node and canonicalize it the same way schema_id does
+        // at build time (set_root_canonical → get_segments_for_output).
+        let mut node_msg = capnp::message::Builder::new_default();
+        {
+            let mut node = node_msg.init_root::<capnp::schema_capnp::node::Builder>();
+            node.set_id(0xe3c2dfb1868218d1); // chess engine type ID
+            node.set_display_name("ChessEngine");
+        }
+        let node_reader: capnp::schema_capnp::node::Reader = node_msg.get_root_as_reader().unwrap();
+        let mut canonical_msg = capnp::message::Builder::new_default();
+        canonical_msg.set_root_canonical(node_reader).unwrap();
+        let canonical_bytes = canonical_msg.get_segments_for_output()[0].to_vec();
+        let legacy_cid = schema_id::compute_cid(&canonical_bytes);
+
+        // Now wrap in Cell::capnp, inject, decode, and compute CID from decoded bytes.
+        // build_cell_capnp_message expects framed schema bytes (write_message output).
+        let mut framed_schema = Vec::new();
+        capnp::serialize::write_message(&mut framed_schema, &canonical_msg).unwrap();
+        let cell_data = schema_id::build_cell_capnp_message(&framed_schema);
+        let wasm = inject_cell_section(&cell_data);
+
+        let decoded = decode_cell_section(&wasm).unwrap().unwrap();
+        let new_cid = match decoded {
+            CellType::Capnp(bytes) => {
+                // decode_cell_section returns raw canonical segment bytes (no framing),
+                // matching what schema_id::canonicalize_node produces.
+                schema_cid(&bytes)
+            }
+            other => panic!("expected CellType::Capnp, got: {:?}", other),
+        };
+
+        assert_eq!(
+            legacy_cid, new_cid,
+            "CID from Cell::capnp must match legacy direct-schema CID"
+        );
+    }
+
+    #[test]
+    fn test_schema_inject_raw_produces_valid_cell() {
+        // Verify schema-inject's build_cell_raw_message produces
+        // a Cell that decode_cell_section can read.
+        let protocols = ["echo", "bitswap", "my-protocol-v2"];
+        for proto in &protocols {
+            let cell_data = schema_id::build_cell_raw_message(proto);
+            let wasm = inject_cell_section(&cell_data);
+            match decode_cell_section(&wasm).unwrap() {
+                Some(CellType::Raw(id)) => assert_eq!(&id, proto),
+                other => panic!("expected Raw({proto}), got: {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_schema_inject_http_produces_valid_cell() {
+        let paths = ["/api/v1", "/health", "/"];
+        for path in &paths {
+            let cell_data = schema_id::build_cell_http_message(path);
+            let wasm = inject_cell_section(&cell_data);
+            match decode_cell_section(&wasm).unwrap() {
+                Some(CellType::Http(p)) => assert_eq!(&p, path),
+                other => panic!("expected Http({path}), got: {:?}", other),
+            }
+        }
     }
 }

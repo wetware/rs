@@ -37,12 +37,12 @@ chess: schema-inject
 	cargo build -p chess --target $(WASM_TARGET) --release
 	@mkdir -p examples/chess/bin
 	cp target/$(WASM_TARGET)/release/chess.wasm examples/chess/bin/chess-demo.wasm
-	@# Inject schema.capnp custom section into the WASM binary.
+	@# Inject cell.capnp custom section into the WASM binary.
 	@# The schema bytes were written by build.rs during compilation.
 	@CHESS_OUT=$$(find target/$(WASM_TARGET)/release/build -path '*/chess-*/out/chess_engine_schema.bin' | head -1) && \
 		if [ -n "$$CHESS_OUT" ]; then \
 			cargo run --bin schema-inject -p schema-id --features inject -- \
-				examples/chess/bin/chess-demo.wasm schema.capnp "$$CHESS_OUT"; \
+				examples/chess/bin/chess-demo.wasm --capnp "$$CHESS_OUT"; \
 		else \
 			echo "WARNING: chess_engine_schema.bin not found; skipping schema injection"; \
 		fi
