@@ -3441,6 +3441,7 @@ dependencies = [
  "hex",
  "log",
  "multiaddr 0.18.2",
+ "schema-id",
  "system",
  "tempfile",
  "tokio",
