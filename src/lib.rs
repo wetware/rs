@@ -39,6 +39,8 @@ pub use membrane::routing_capnp;
 pub use membrane::stem_capnp;
 #[cfg(not(target_arch = "wasm32"))]
 pub use membrane::system_capnp;
+#[cfg(not(target_arch = "wasm32"))]
+pub use membrane::cell_capnp;
 
 // Modules available for both host and guest
 pub mod config;
