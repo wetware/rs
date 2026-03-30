@@ -1,8 +1,5 @@
 # TODOs
 
-## ~~Async NativeFn variant~~ ✅
-**RESOLVED:** `Val::AsyncNativeFn` added in PR #281. Takes `Vec<Val>` (owned) → `Pin<Box<dyn Future<Output = Result<Val, Val>>>>`. Wired into all eval.rs invocation sites + cap handler dispatch.
-
 ## Glia-level finally / resource cleanup via effects
 **What:** `with-resource` or `finally` pattern — cleanup handlers that run on scope exit.
 **Why:** Rust Drop handles Rust-side cleanup, but Glia code can't hook into scope exit.
@@ -72,12 +69,8 @@
 **Effort:** S
 **Priority:** P2
 
-## Bootstrap timeout in handle_vat_connection
-**What:** `handle_vat_connection()` awaits `process.bootstrap_request()` without a timeout. If the cell WASM fails to call `system::serve()`, the host blocks indefinitely. The peer on the libp2p stream is also stuck waiting for the RPC bootstrap.
-**Why:** Silent deadlock. Both sides hang until TCP timeout (minutes). No error, no log.
-**Context:** Wrap `bootstrap_request().send().promise` in `tokio::time::timeout(Duration::from_secs(10), ...)`. Same pattern as the RPC handshake timeout TODO above.
-**Effort:** S
-**Priority:** P1
+## ~~Bootstrap timeout in handle_vat_connection~~ ✅
+**RESOLVED:** `handle_vat_connection()` now wraps `bootstrap_request()` in a 10s `tokio::time::timeout`. Produces a clear error referencing `system::serve()`.
 
 ## ~~Dual DHT — LAN + WAN content routing~~ ✅
 **RESOLVED:** `kad_lan` field added to `WetwareBehaviour` running `/ipfs/lan/kad/1.0.0` in server mode. Dual-dispatch provide/findProviders with cross-DHT PeerId dedup via `FindRequest`. Kubo peers classified by `is_lan_addr()` into WAN/LAN routing tables. 10 unit tests for extracted helpers. Design doc at `~/.gstack/projects/wetware-ww/lthibault-feat-local-routing-design-20260329-131709.md`.

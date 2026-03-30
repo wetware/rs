@@ -9,7 +9,7 @@ capnpc = "0.23.3"
 
 [dependencies]
 capnp = "0.23.2"
-capnpc = "0.23.3"
+capnpc = "0.23.3" # runtime dep: build_cell_*_message uses capnpc for canonical encoding
 blake3 = "1"
 cid = "0.11"
 wasmparser = { version = "0.243", optional = true }

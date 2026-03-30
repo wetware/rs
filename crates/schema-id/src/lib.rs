@@ -214,8 +214,21 @@ pub const CELL_SECTION_NAME: &str = "cell.capnp";
 pub fn build_cell_capnp_message(schema_bytes: &[u8]) -> Vec<u8> {
     use capnp::serialize;
 
+    // The canonical bytes from extract_schemas/canonicalize_node are a raw
+    // single segment (no framing header). Wrap them with Cap'n Proto framing
+    // so read_message can parse them.
+    let word_count = schema_bytes.len().div_ceil(8);
+    let mut framed = Vec::with_capacity(8 + schema_bytes.len());
+    // Segment table: 1 segment, length in words
+    framed.extend_from_slice(&0u32.to_le_bytes()); // segment count - 1 = 0
+    framed.extend_from_slice(&(word_count as u32).to_le_bytes());
+    framed.extend_from_slice(schema_bytes);
+    // Pad to word boundary
+    let padding = (8 - (schema_bytes.len() % 8)) % 8;
+    framed.extend(std::iter::repeat_n(0u8, padding));
+
     let schema_reader = serialize::read_message_from_flat_slice(
-        &mut &*schema_bytes,
+        &mut framed.as_slice(),
         capnp::message::ReaderOptions::default(),
     )
     .expect("valid canonical schema bytes");
@@ -309,5 +322,44 @@ mod tests {
         let parsed: cid::Cid = cid_str.parse().expect("should parse as CID");
         assert_eq!(parsed.version(), cid::Version::V1);
         assert_eq!(parsed.codec(), 0x55); // raw
+    }
+
+    /// Roundtrip: push schema bytes to IPFS and verify CID + content match.
+    /// Requires a running Kubo daemon with BLAKE3 support.
+    #[test]
+    #[ignore]
+    fn test_ipfs_roundtrip() {
+        use std::io::Write;
+        use std::process::Command;
+
+        let data = b"test schema bytes for IPFS roundtrip";
+        let expected_cid = compute_cid(data);
+
+        // Push
+        let mut child = Command::new("ipfs")
+            .args(["block", "put", "--mhtype=blake3", "--cid-codec=raw"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("ipfs must be on PATH");
+
+        child.stdin.as_mut().unwrap().write_all(data).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "ipfs block put failed");
+
+        let ipfs_cid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_eq!(ipfs_cid, expected_cid, "CID mismatch");
+
+        // Fetch back
+        let get = Command::new("ipfs")
+            .args(["block", "get", &expected_cid])
+            .output()
+            .expect("ipfs block get failed");
+        assert!(get.status.success());
+        assert_eq!(
+            &get.stdout,
+            data.as_slice(),
+            "bytes mismatch after roundtrip"
+        );
     }
 }

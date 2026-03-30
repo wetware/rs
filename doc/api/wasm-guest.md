@@ -286,8 +286,10 @@ must re-graft to obtain fresh capabilities.
 
 | Buffer | Size | Location |
 |--------|------|----------|
-| stdio (stdout, stderr) | 1024 bytes | `proc.rs:BUFFER_SIZE` |
-| data stream (RPC transport) | 64 KiB | `proc.rs:PIPE_BUFFER_SIZE` |
+| stdio (stdout, stderr) | 1024 bytes | `crates/cell/src/proc.rs` (`BUFFER_SIZE`) |
+| data stream (RPC transport) | 64 KiB | `crates/cell/src/proc.rs` (`PIPE_BUFFER_SIZE`) |
+
+> **Note:** See the source constants for authoritative values; sizes listed here may lag behind changes.
 
 ### Idle poll timeout
 
