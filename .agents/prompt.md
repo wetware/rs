@@ -191,6 +191,15 @@ Key abstractions:
 - **Cap'n Proto RPC**: bidirectional — both host and guest can serve
   and consume capabilities.
 
+AI integration — drivetrain, not engine:
+Wetware doesn't embed an LLM.  The LLM (Claude, Ollama, etc.)
+connects *to* a Wetware node over MCP and gets a Glia shell.
+Wetware is the drivetrain; the LLM is the driver.  "Agent" means
+any autonomous process — AI, human, script.  Wetware controls
+what they're *allowed to do*, not what they *are*.  The MCP
+endpoint itself is a Cell — a sandboxed WASM process with scoped
+capabilities, not special host code.  *(MCP Cell is TODO.)*
+
 The problem Wetware solves:
 
 ```
@@ -243,6 +252,25 @@ Once in the shell:
 / > (help)              ;; available capabilities
 / > (exit)              ;; quit
 ```
+
+Concurrency model (E-ordering):
+Method calls on a single Cap'n Proto object are serialized — no
+races within an object.  Calls across objects are independent and
+concurrent.  Pipelining lets you chain calls on promises:
+`ipfs.unixfs().cat(path)` resolves in one round-trip, not three.
+No locks, no semaphores — the object IS the synchronization
+boundary.
+
+For blockchain people:
+EVM is the on-chain OS.  Wetware is the off-chain OS.  The
+Membrane is like precompiles — a constrained interface to kernel
+services.  But there's no block builder because there's no global
+state to sequence.  Each Cap'n Proto object serializes its own
+calls (like a contract serializing its state transitions), while
+calls across objects are concurrent.  DHT is for discovery, not
+consensus.  On-chain coordination happens through Epochs: the
+stem contract tracks a CID head, and when it advances, all
+capabilities are revoked and agents re-graft.
 
 Platform vision (from `doc/designs/economic-agent-platform.md`):
 Wetware is the economic coordination layer for autonomous agents.

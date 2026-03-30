@@ -14,8 +14,10 @@ Don't follow a fixed order.  Ask:
 > 3. **Architecture** — the three layers (host, kernel, children)
 > 4. **The Membrane** — how capabilities flow and get attenuated
 > 5. **Effects** — the boundary between local and global
-> 6. **Epochs** — on-chain coordination and capability lifecycle
-> 7. **Images** — how code is packaged and layered
+> 6. **AI integration** — drivetrain, not engine (MCP, Glia, who decides)
+> 7. **Concurrency** — how race conditions disappear (E-ordering)
+> 8. **Epochs** — on-chain coordination and capability lifecycle
+> 9. **Images** — how code is packaged and layered
 >
 > Or just ask a question and I'll find the right thread.
 
@@ -65,6 +67,69 @@ Start with the problem: agentic frameworks give agents ambient
 authority — any code can call any API, read any secret.  Then
 show the comparison table and explain ocap: having a reference
 IS authorization.
+
+**OS analogy** (use this if the user has systems background):
+draw the parallel to Unix, then show how Wetware differs.
+Present one row at a time, explain each, check in.
+
+| Unix | Wetware | Key difference |
+|------|---------|---------------|
+| process | Cell | Cell = WASM binary in a sandbox.  No ambient env, no fs, no sockets.  A process can do anything the OS allows; a Cell can only do what its capabilities permit. |
+| fork/exec | `executor.runBytes(wasm)` | Parent explicitly passes capabilities to child.  No inheritance of open fds, env vars, or fs access — you grant exactly what the child needs. |
+| file descriptor | Cap'n Proto client | Both are opaque handles.  But Unix fds live in a global namespace (paths) — any process can `open("/etc/passwd")`.  A capnp client is unforgeable and can only be obtained by explicit handoff. |
+| syscall table | Membrane → `graft()` | Both are the interface to kernel services.  But the syscall table is fixed and ambient — every process gets all of them.  `graft()` returns *only* the capabilities you were granted, and they can differ per Cell. |
+| `ioctl(fd, ...)` | method call on cap | Both operate on a handle.  But capnp calls are typed, async, and pipelined — not a bag-of-bytes command code.  `ipfs.unixfs().cat(path)` resolves in one round-trip via pipelining. |
+| filesystem | IPFS + `$WW_ROOT` | No local fs in the sandbox.  Content is loaded via IPFS capability: `ipfs.unixfs().cat("$WW_ROOT/bin/foo.wasm")`.  Content-addressed, not path-addressed. |
+| `open()` returns fd | `graft()` returns Session | `open()` grants access to anything the path resolves to.  `graft()` returns a Session with specific named capabilities: Host, Executor, IPFS, Routing, Identity — each of which can be null (withheld). |
+| signals | epoch lifecycle | Unix signals are fire-and-forget.  Epoch advances revoke *all* capabilities and force re-graft — the Cell picks up new state automatically.  It's like SIGHUP but for security policy. |
+| pipe | `ByteStream` (`capnp/system.capnp`) | Both connect two processes via read/write.  But ByteStream is a capability — it can be passed to third parties, attenuated, or revoked. |
+| `bind()`/`listen()` | `StreamListener.listen()` / `VatListener.listen()` | Unix: any process can bind any port.  Wetware: listening requires the StreamListener or VatListener capability, scoped to a specific protocol.  No ambient network access. |
+| semaphore / mutex | E-ordering (capnp objects) | No explicit locks.  Each capnp object serializes its own method calls — the object IS the lock.  Cross-object calls are concurrent; use pipelining to express ordering. |
+| ring 0 / ring 3 boundary | Membrane | The Membrane is the ring transition.  In x86 the `syscall` instruction crosses from ring 3 to ring 0.  In Wetware, `graft()` crosses from Cell to host.  The Membrane controls what's on the other side — like the IDT controls which kernel handlers userspace can invoke. |
+| init (pid 1) | pid0 (kernel Cell) | Both are the first process that sets up everything else.  pid0 receives the Membrane, decides policy, spawns children with attenuated caps.  The kernel IS a Cell. |
+
+**The punchline:** the fd analogy is the closest match —
+Cap'n Proto clients really are like userspace file descriptors.
+But the critical difference is there's no filesystem namespace
+that lets any process open any path.  You can only get a client
+if someone hands it to you.  That's the whole security model.
+
+**"Can't we just do this with file descriptors?"**  If the user
+has this instinct, validate it hard — they're exactly right.
+Cap'n Proto clients basically ARE userspace file descriptors
+with async pipelining and a really nice typed API.
+
+Walk through the similarities first — build on what they know:
+
+- **Opaque, unforgeable handles** — you can't forge an fd, you
+  can't forge a capnp client.  Having the reference IS the
+  authorization.
+- **Passable between processes** — Unix has `sendmsg` /
+  `SCM_RIGHTS`.  Cap'n Proto passes capability references as
+  method arguments — same idea, better ergonomics.
+- **Revocable** — close an fd, it's gone.  Revoke a capnp
+  client (epoch advance), it's gone.
+
+Then show what capnp adds on top:
+
+1. **No ambient namespace.**  The one thing Unix gets wrong:
+   any process can `open("/etc/shadow")`.  The path namespace
+   is a global back-channel for minting new fds.  Capnp clients
+   have no equivalent — you can't conjure one from a string.
+2. **Typed + composable.**  Fds are bags of bytes with `ioctl`.
+   Capnp clients have typed methods — you can wrap a Host cap
+   to remove `network()` and hand the restricted version to a
+   child.  Same interface, fewer methods.
+3. **Async pipelining.**  Every fd `read()`/`write()` is a
+   blocking round-trip.  Capnp lets you chain calls on promises:
+   `ipfs.unixfs().cat(path)` — one round-trip, not three.
+4. **Network-transparent.**  A capnp client can point at a local
+   object or a remote peer.  Same API, same types.  Passing an
+   fd across machines requires bespoke plumbing.
+
+**Punchline:** "capnp is basically fds in userspace, plus async
+pipelines, plus a typed API, minus the filesystem escape hatch.
+That's the whole upgrade."
 
 ### Architecture (three layers)
 
@@ -117,6 +182,78 @@ Then show the handler side:
 stack, pid0 can intercept, wrap, attenuate, or deny any effect
 a child performs.  This is how the Membrane composes — it's
 handlers all the way up.
+
+### AI integration
+
+Key files: `src/dispatcher/mod.rs`, `src/cli/main.rs` (MCP flag),
+`doc/designs/economic-agent-platform.md`
+
+**Lead with the confusion this clears up:** "agent" in Wetware
+means *any autonomous process* — an AI, a human at a REPL, a
+cron job, a script.  Wetware doesn't care who's driving.  It
+cares what they're *allowed to do*.
+
+**The inversion:** most AI agent frameworks embed the LLM inside
+the runtime.  Wetware inverts this.  The LLM (Claude, Ollama,
+whatever) connects *to* a Wetware node over MCP and gets a Glia
+shell — a capability-scoped REPL.  Wetware is the drivetrain;
+the LLM is the driver.
+
+Walk through the stack:
+
+1. **Wetware node** runs.  MCP is served by a **Cell** — a WASM
+   process running inside the sandbox, with its own scoped
+   capabilities.  It's not special host code; it's just another
+   Cell that happens to speak MCP over stdio.  *(TODO: this Cell
+   is being built now.)*
+2. **LLM** connects as an MCP client.  It sees Glia as a tool.
+3. **Glia** is the language the LLM speaks — Clojure-inspired,
+   capability-aware, designed for agents to consume.
+4. **Membrane** scopes what the LLM can do.  Different LLMs or
+   users can get different capability sets — because the MCP Cell
+   itself was granted a specific set of capabilities at spawn.
+
+**Why this matters:** the AI never touches raw sockets, never
+reads secrets, never has ambient authority.  It can only
+`perform` effects through capabilities it was granted.  You can
+audit, attenuate, or revoke its access at any time.
+
+If the user asks "where's the Anthropic API call?": it's not
+here.  The LLM calls *in* to Wetware, not the other way around.
+The WASM processes don't know or care that an AI is driving.
+
+### Concurrency
+
+Key files: `doc/rpc-transport.md`, `doc/architecture.md`
+
+**Lead with the question:** "How do you prevent race conditions
+in a distributed system without locks?"
+
+**E-ordering** (from the E programming language, Cap'n Proto's
+intellectual ancestor):
+
+- Method calls on a **single** Cap'n Proto object are serialized.
+  One at a time, in order.  No races within an object.
+- Method calls **across** objects are independent and concurrent.
+  This is where you *could* have races — but pipelining usually
+  eliminates the need for coordination.
+
+Draw the analogy: this is like goroutines communicating over
+channels, or Erlang actors with mailboxes.  Each object IS the
+lock.  You don't need semaphores because the concurrency boundary
+is the object boundary.
+
+**Pipelining** is the key trick: instead of waiting for a result
+before making the next call, you can chain calls on *promises*.
+`ipfs.unixfs().cat(path)` resolves in a single round-trip, not
+three.  This lets you express ordering constraints declaratively
+rather than with locks.
+
+If the user has blockchain background: "This is like how each
+smart contract serializes its own state transitions, but without
+a global block ordering.  There's no block builder because
+there's no global state to sequence — just objects with local
+ordering."
 
 ### Epochs
 
