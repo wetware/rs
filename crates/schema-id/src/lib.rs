@@ -419,6 +419,9 @@ mod tests {
         let once = inject_custom_section(wasm, "test.section", data);
         let twice = inject_custom_section(&once, "test.section", data);
 
-        assert_eq!(once, twice, "double injection should produce identical output");
+        assert_eq!(
+            once, twice,
+            "double injection should produce identical output"
+        );
     }
 }

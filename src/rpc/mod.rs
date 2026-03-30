@@ -2522,8 +2522,7 @@ mod tests {
             entry.set_name("GameStatus");
             entry.set_id(0xabcdef0123456789);
         }
-        let node_reader: capnp::schema_capnp::node::Reader =
-            node_msg.get_root_as_reader().unwrap();
+        let node_reader: capnp::schema_capnp::node::Reader = node_msg.get_root_as_reader().unwrap();
         let mut canonical_msg = capnp::message::Builder::new_default();
         canonical_msg.set_root_canonical(node_reader).unwrap();
         let canonical_bytes = canonical_msg.get_segments_for_output()[0].to_vec();
