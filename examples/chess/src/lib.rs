@@ -909,9 +909,8 @@ mod tests {
 
     #[test]
     fn test_backoff_resets_on_new_peer() {
-        let mut cooldown = MAX_MS; // fully backed off
-                                   // Simulate new peer found.
-        cooldown = BASE_MS;
+        // Simulate: fully backed off, then new peer found resets to BASE.
+        let mut cooldown = BASE_MS;
         assert_eq!(cooldown, BASE_MS);
         // Next idle pass doubles.
         cooldown = (cooldown * 2).min(MAX_MS);
