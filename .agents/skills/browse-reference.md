@@ -28,7 +28,7 @@ If they want to browse, show the menu:
 > 8. **RPC transport** — duplex streams, scheduling (`doc/rpc-transport.md`)
 > 9. **schema-inject** — post-build cell type injection
 >    (`crates/schema-id/src/bin/schema-inject.rs`)
-> 10. **Effects** — `perform`, `with-handler`, `with-cap-handler`,
+> 10. **Effects** — `perform`, `with-effect-handler`,
 >     `resume` (`crates/glia/src/effect.rs`)
 > 11. **Signing & keys** — Signer interface, key derivation
 >     (`doc/keys.md`)
@@ -58,13 +58,12 @@ to IPFS via Kubo.  Useful offline or when Kubo isn't running.
 Protocol IDs for raw cells must not contain `/` (host prefixes
 `/ww/0.1.0/stream/` automatically).
 
-For effects, walk through the four forms:
+For effects, walk through the three forms:
 - `(perform :keyword data)` — raise a keyword effect
 - `(perform cap :method args...)` — raise a cap-scoped effect
-- `(with-handler {:keyword (fn [data resume] ...)} body)` — install
-  keyword handlers
-- `(with-cap-handler cap (fn [data resume] ...) body)` — install a
-  cap handler
+- `(with-effect-handler target handler body)` — install a handler
+  (keyword or cap target; use inline kwargs for multiple keyword
+  handlers: `(with-effect-handler :k1 fn1 :k2 fn2 body...)`)
 
 Explain the handler stack (dynamic scope, newest-first matching)
 and one-shot `resume`.  Read `crates/glia/src/effect.rs` for the

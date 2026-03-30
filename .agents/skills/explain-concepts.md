@@ -166,17 +166,36 @@ Walk through the two flavors:
 1. **Keyword effects** — environmental, matched by name.
    `(perform :log "msg")`.  Think: "I want something from the
    environment."  The handler decides what `:log` means.
-2. **Capability effects** — object-scoped, matched by identity.
-   `(perform my-cap :method arg)`.  Think: "I want this specific
-   capability to do something."  Only the handler holding that
-   exact cap object responds.
+2. **Capability effects** — object-scoped, matched by schema CID
+   (same interface type).
+   `(perform my-cap :method arg)`.  Think: "I want any capability
+   of this type to do something."  Any handler installed for a cap
+   with the same schema CID responds.
 
-Then show the handler side:
+Then show the handler side — one unified form:
 
-- `with-handler` installs keyword handlers (a map).
-- `with-cap-handler` installs a handler for one specific cap.
+- `(with-effect-handler :keyword handler-fn body...)` — keyword handler.
+- `(with-effect-handler my-cap handler-fn body...)` — cap handler.
+- Multiple keyword handlers via inline kwargs (Clojure-style):
+  `(with-effect-handler :log log-fn :fail fail-fn body...)`
 - Handlers receive `(data, resume)`.  `resume` is a one-shot
   continuation — call it to send a value back to the performer.
+
+Show the **threaded effects pattern** — `->` makes boundary
+crossings visually scannable:
+
+```clojure
+(with-effect-handler :store db-handler :emit bus-handler
+  (-> input
+      validate          ;; pure
+      (perform :store)  ;; effect — crosses boundary
+      transform         ;; pure
+      (perform :emit))) ;; effect — crosses boundary
+```
+
+The pipeline says *what* happens. The handler says *how*. You can
+swap handlers (test doubles, attenuated caps) without touching the
+pipeline. And every boundary crossing is trivially auditable.
 
 **The key insight:** because effects propagate up the handler
 stack, pid0 can intercept, wrap, attenuate, or deny any effect

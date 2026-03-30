@@ -76,6 +76,10 @@ beyond the process.  Do this yourself — don't ask the user.
   installations, and any direct I/O.  Every network/swarm
   interaction MUST go through an effect.  If something crosses
   the boundary without `perform`, flag it as critical.
+- **Prefer `->` threading for effectful pipelines**: pure steps
+  are bare names, `perform` steps are boundary crossings.  This
+  makes audit trivial — scan the pipeline for `perform` and you
+  see every boundary crossing at a glance.
 - **Check handler scope**: are handlers installed too high
   (over-privileged) or too low (effects propagate unhandled)?
 - **Blast radius**: could any handler be narrowed?  A handler
