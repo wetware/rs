@@ -33,6 +33,12 @@ mod routing_capnp {
     include!(concat!(env!("OUT_DIR"), "/routing_capnp.rs"));
 }
 
+// Content-addressed schema CIDs for built-in capability interfaces.
+#[allow(dead_code)]
+mod schema_ids {
+    include!(concat!(env!("OUT_DIR"), "/schema_ids.rs"));
+}
+
 /// Bootstrap capability: the concrete Membrane defined in stem.capnp.
 type Membrane = stem_capnp::membrane::Client;
 
@@ -109,7 +115,7 @@ type HandlerFn = for<'a> fn(
 ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>>;
 
 /// Build the dispatch table for builtins only. Capability verbs (host, executor,
-/// ipfs, routing) are handled via cap-targeted perform + with-cap-handler.
+/// ipfs, routing) are handled via cap-targeted perform + with-effect-handler.
 fn build_dispatch() -> HashMap<&'static str, HandlerFn> {
     let mut t: HashMap<&'static str, HandlerFn> = HashMap::new();
     t.insert("load", |a, _| Box::pin(std::future::ready(eval_load(a))));
@@ -347,7 +353,7 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                         // (perform host :listen executor <wasm>)         → VatListener
                         // (perform host :listen executor "proto" <wasm>) → StreamListener
                         let executor = match rest.first() {
-                            Some(Val::Cap { name, inner }) if name == "executor" => inner
+                            Some(Val::Cap { name, inner, .. }) if name == "executor" => inner
                                 .downcast_ref::<system_capnp::executor::Client>()
                                 .cloned()
                                 .ok_or_else(|| {
@@ -968,11 +974,11 @@ fn parse_initd_script(name: &str, data: &[u8]) -> Option<Vec<Val>> {
 ///
 /// Produces:
 /// ```glia
-/// (with-cap-handler host host-handler
-///   (with-cap-handler executor executor-handler
-///     (with-cap-handler ipfs ipfs-handler
-///       (with-cap-handler routing routing-handler
-///         (with-effect-handler {:load (fn [path resume] (resume (load path)))}
+/// (with-effect-handler host host-handler
+///   (with-effect-handler executor executor-handler
+///     (with-effect-handler ipfs ipfs-handler
+///       (with-effect-handler routing routing-handler
+///         (with-effect-handler :load (fn [path resume] (resume (load path)))
 ///           <form>)))))
 /// ```
 ///
@@ -982,17 +988,15 @@ fn wrap_with_handlers(form: &Val) -> Val {
     // Innermost: keyword effect handler for :load.
     let with_load = Val::List(vec![
         Val::Sym("with-effect-handler".into()),
-        Val::Map(vec![(
-            Val::Keyword("load".into()),
+        Val::Keyword("load".into()),
+        Val::List(vec![
+            Val::Sym("fn".into()),
+            Val::Vector(vec![Val::Sym("path".into()), Val::Sym("resume".into())]),
             Val::List(vec![
-                Val::Sym("fn".into()),
-                Val::Vector(vec![Val::Sym("path".into()), Val::Sym("resume".into())]),
-                Val::List(vec![
-                    Val::Sym("resume".into()),
-                    Val::List(vec![Val::Sym("load".into()), Val::Sym("path".into())]),
-                ]),
+                Val::Sym("resume".into()),
+                Val::List(vec![Val::Sym("load".into()), Val::Sym("path".into())]),
             ]),
-        )]),
+        ]),
         form.clone(),
     ]);
 
@@ -1002,7 +1006,7 @@ fn wrap_with_handlers(form: &Val) -> Val {
     for cap_name in &caps {
         let handler_name = format!("{cap_name}-handler");
         wrapped = Val::List(vec![
-            Val::Sym("with-cap-handler".into()),
+            Val::Sym("with-effect-handler".into()),
             Val::Sym(cap_name.to_string()),
             Val::Sym(handler_name),
             wrapped,
@@ -1245,37 +1249,42 @@ fn run_impl() {
 
         // Bind capability values + their effect handlers in the environment.
         // Scripts use (perform cap :method args...) to invoke capabilities.
-        // The with-cap-handler wrapping (in wrap_with_handlers) routes
+        // The with-effect-handler wrapping (in wrap_with_handlers) routes
         // performs to these handlers via the effect system.
         {
             let s = ctx.borrow();
-            let caps: [(&str, Rc<dyn std::any::Any>, Val); 4] = [
+            let caps: [(&str, &str, Rc<dyn std::any::Any>, Val); 4] = [
                 (
                     "host",
+                    schema_ids::HOST_CID,
                     Rc::new(s.host.clone()),
                     make_host_handler(s.host.clone()),
                 ),
                 (
                     "executor",
+                    schema_ids::EXECUTOR_CID,
                     Rc::new(s.executor.clone()),
                     make_executor_handler(s.executor.clone()),
                 ),
                 (
                     "ipfs",
+                    schema_ids::IPFS_CID,
                     Rc::new(s.ipfs.clone()),
                     make_ipfs_handler(s.ipfs.clone()),
                 ),
                 (
                     "routing",
+                    schema_ids::ROUTING_CID,
                     Rc::new(s.routing.clone()),
                     make_routing_handler(s.routing.clone()),
                 ),
             ];
-            for (name, inner, handler) in caps {
+            for (name, cid, inner, handler) in caps {
                 env.set(
                     name.to_string(),
                     Val::Cap {
                         name: name.into(),
+                        schema_cid: cid.to_string(),
                         inner,
                     },
                 );
@@ -1479,19 +1488,20 @@ mod tests {
     // --- wrap_with_handlers ---
 
     #[test]
-    fn wrap_with_handlers_nests_cap_and_effect_handlers() {
+    fn wrap_with_handlers_nests_effect_handlers() {
         let form = Val::Sym("body".into());
         let wrapped = wrap_with_handlers(&form);
-        // Outermost should be (with-cap-handler host host-handler ...)
+        // Outermost should be (with-effect-handler host host-handler ...)
         if let Val::List(items) = &wrapped {
-            assert_eq!(items[0], Val::Sym("with-cap-handler".into()));
+            assert_eq!(items[0], Val::Sym("with-effect-handler".into()));
             assert_eq!(items[1], Val::Sym("host".into()));
             assert_eq!(items[2], Val::Sym("host-handler".into()));
-            // items[3] is (with-cap-handler executor ...)
+            // items[3] is (with-effect-handler executor ...)
             if let Val::List(inner) = &items[3] {
+                assert_eq!(inner[0], Val::Sym("with-effect-handler".into()));
                 assert_eq!(inner[1], Val::Sym("executor".into()));
             } else {
-                panic!("expected nested cap handler");
+                panic!("expected nested effect handler");
             }
         } else {
             panic!("expected List");
@@ -1958,6 +1968,7 @@ mod tests {
             let handler = make_host_handler(s.host.clone());
             let executor_cap = Val::Cap {
                 name: "executor".into(),
+                schema_cid: "test-executor-cid".into(),
                 inner: Rc::new(s.executor.clone()),
             };
             let result = call_handler(
@@ -1982,6 +1993,7 @@ mod tests {
             let handler = make_host_handler(s.host.clone());
             let executor_cap = Val::Cap {
                 name: "executor".into(),
+                schema_cid: "test-executor-cid".into(),
                 inner: Rc::new(s.executor.clone()),
             };
             let result = call_handler(
@@ -2021,6 +2033,7 @@ mod tests {
             let handler = make_host_handler(s.host.clone());
             let bad_cap = Val::Cap {
                 name: "not-executor".into(),
+                schema_cid: "test-not-executor-cid".into(),
                 inner: Rc::new(42i32),
             };
             let err =
@@ -2042,6 +2055,7 @@ mod tests {
             let handler = make_host_handler(s.host.clone());
             let forged_cap = Val::Cap {
                 name: "executor".into(),
+                schema_cid: "test-executor-cid".into(),
                 inner: Rc::new(42i32),
             };
             let err = call_handler(
@@ -2098,6 +2112,7 @@ mod tests {
             let handler = make_host_handler(s.host.clone());
             let bad_cap = Val::Cap {
                 name: "imposter".into(),
+                schema_cid: "test-imposter-cid".into(),
                 inner: Rc::new(42i32),
             };
             let err = call_handler(
@@ -2146,6 +2161,7 @@ mod tests {
             // 4 args after :listen — should error
             let executor_cap = Val::Cap {
                 name: "executor".into(),
+                schema_cid: "test-executor-cid".into(),
                 inner: Rc::new(s.executor.clone()),
             };
             assert!(call_handler(
@@ -2323,33 +2339,38 @@ mod tests {
 
     /// Helper: bind all caps + handlers in env (same as kernel boot).
     fn bind_caps_in_env(env: &mut Env, session: &Session) {
-        let caps: [(&str, Rc<dyn std::any::Any>, Val); 4] = [
+        let caps: [(&str, &str, Rc<dyn std::any::Any>, Val); 4] = [
             (
                 "host",
+                "test-host-cid",
                 Rc::new(session.host.clone()),
                 make_host_handler(session.host.clone()),
             ),
             (
                 "executor",
+                "test-executor-cid",
                 Rc::new(session.executor.clone()),
                 make_executor_handler(session.executor.clone()),
             ),
             (
                 "ipfs",
+                "test-ipfs-cid",
                 Rc::new(session.ipfs.clone()),
                 make_ipfs_handler(session.ipfs.clone()),
             ),
             (
                 "routing",
+                "test-routing-cid",
                 Rc::new(session.routing.clone()),
                 make_routing_handler(session.routing.clone()),
             ),
         ];
-        for (name, inner, handler) in caps {
+        for (name, cid, inner, handler) in caps {
             env.set(
                 name.to_string(),
                 Val::Cap {
                     name: name.into(),
+                    schema_cid: cid.into(),
                     inner,
                 },
             );

@@ -1550,13 +1550,15 @@ pub fn eval_expr<'a, D: Dispatch>(
                         )
                     }
                     // (perform cap :method args...) — cap-targeted effect
-                    Val::Cap { name, inner } => {
+                    Val::Cap {
+                        name, schema_cid, ..
+                    } => {
                         // Pack (:method args...) into a list as the data payload.
                         let data = Val::List(evaled_args);
                         (
                             effect::EffectTarget::Cap {
                                 name: name.clone(),
-                                inner: inner.clone(),
+                                schema_cid: schema_cid.clone(),
                             },
                             data,
                         )
@@ -1594,15 +1596,26 @@ pub fn eval_expr<'a, D: Dispatch>(
                 Err(eval_err!("match: no clause matched value {value}"))
             }
 
-            Expr::WithEffectHandler { handlers, body } => {
-                // Evaluate the handler map BEFORE pushing context — ensures handler
-                // closures don't capture the current handler frame.
-                let handler_map = eval_expr(handlers, env, dispatch).await?;
-                let handler_pairs = match &handler_map {
-                    Val::Map(pairs) => pairs.clone(),
+            Expr::WithEffectHandler {
+                target,
+                handler,
+                body,
+            } => {
+                // Evaluate target and handler BEFORE pushing context.
+                let target_val = eval_expr(target, env, dispatch).await?;
+                let handler_val = eval_expr(handler, env, dispatch).await?;
+
+                let effect_target = match &target_val {
+                    Val::Keyword(s) => effect::EffectTarget::Keyword(s.clone()),
+                    Val::Cap {
+                        name, schema_cid, ..
+                    } => effect::EffectTarget::Cap {
+                        name: name.clone(),
+                        schema_cid: schema_cid.clone(),
+                    },
                     other => {
                         return Err(eval_err!(
-                            "with-effect-handler: expected map of handlers, got {other}"
+                            "with-effect-handler: target must be a keyword or cap, got {other}"
                         ))
                     }
                 };
@@ -1616,237 +1629,10 @@ pub fn eval_expr<'a, D: Dispatch>(
                     ));
                 }
 
-                // Create handler context and push onto the shared dynamic stack.
-                // Keyword handlers have target=None; the poll loop matches by keyword map lookup.
+                // Create handler context with the target.
                 let ctx = Rc::new(RefCell::new(effect::HandlerContext {
                     slot: Rc::new(RefCell::new(effect::EffectSlot::new())),
-                    target: None,
-                }));
-                hs.borrow_mut().push(ctx.clone());
-
-                // Create body future — captures env and dispatch.
-                let mut body_fut = {
-                    let body = body.clone(); // clone Expr vec for the future
-                    Box::pin(async move {
-                        let mut result = Val::Nil;
-                        for e in &body {
-                            result = eval_expr(e, env, dispatch).await?;
-                        }
-                        Ok::<Val, Val>(result)
-                    })
-                };
-
-                // State machine: alternate between polling body and handling effects.
-                enum EffectHandlerState<'b> {
-                    Polling,
-                    Handling(Pin<Box<dyn Future<Output = Result<Val, Val>> + 'b>>),
-                }
-                let mut state = EffectHandlerState::Polling;
-
-                let result: Result<Val, Val> = std::future::poll_fn(|cx| {
-                    loop {
-                        match &mut state {
-                            EffectHandlerState::Polling => {
-                                match body_fut.as_mut().poll(cx) {
-                                    Poll::Ready(result) => return Poll::Ready(result),
-                                    Poll::Pending => {
-                                        // Did body suspend on a perform?
-                                        let pending =
-                                            ctx.borrow().slot.borrow_mut().pending.take();
-                                        match pending {
-                                            Some((effect_target, data, resume_tx)) => {
-                                                // Extract keyword for handler map lookup
-                                                let etype = match &effect_target {
-                                                    effect::EffectTarget::Keyword(s) => s.clone(),
-                                                    // Cap effects shouldn't arrive here (they go to
-                                                    // with-cap-handler frames), but handle gracefully.
-                                                    effect::EffectTarget::Cap { name, .. } => {
-                                                        drop(resume_tx);
-                                                        hs.borrow_mut().pop();
-                                                        return Poll::Ready(Err(Val::Effect {
-                                                            effect_type: format!("cap:{name}"),
-                                                            data: Box::new(data),
-                                                        }));
-                                                    }
-                                                };
-                                                // Find matching handler
-                                                let handler_fn =
-                                                    handler_pairs.iter().find_map(|(k, v)| {
-                                                        if let Val::Keyword(kw) = k {
-                                                            if *kw == etype {
-                                                                return Some(v.clone());
-                                                            }
-                                                        }
-                                                        None
-                                                    });
-
-                                                match handler_fn {
-                                                    Some(Val::Fn {
-                                                        arities,
-                                                        env: captured_env,
-                                                    }) => {
-                                                        // HANDLER STACK DISCIPLINE:
-                                                        // Pop our context before running handler.
-                                                        // If handler calls perform, it dispatches
-                                                        // to the NEXT OUTER handler, not us.
-                                                        hs.borrow_mut().pop();
-
-                                                        // Arity dispatch: 2-arg gets resume, 1-arg aborts.
-                                                        // Clone data so the future owns it (no borrows from poll_fn).
-                                                        let has_2_arity = arities.iter().any(|a| {
-                                                            (a.variadic.is_none()
-                                                                && a.params.len() == 2)
-                                                                || (a.variadic.is_some()
-                                                                    && a.params.len() <= 2)
-                                                        });
-                                                        let owned_arities = arities.clone();
-                                                        let owned_env = captured_env.clone();
-
-                                                        let handler_fut: Pin<
-                                                            Box<
-                                                                dyn Future<
-                                                                        Output = Result<Val, Val>,
-                                                                    > + '_,
-                                                            >,
-                                                        > = if has_2_arity {
-                                                            let resume_fn =
-                                                                effect::make_resume_fn(resume_tx);
-                                                            let args = vec![data, resume_fn];
-                                                            Box::pin(async move {
-                                                                invoke_fn(
-                                                                    &owned_arities,
-                                                                    &owned_env,
-                                                                    &args,
-                                                                    dispatch,
-                                                                ).await
-                                                            })
-                                                        } else {
-                                                            // 1-arg: drop resume_tx → body abandoned
-                                                            drop(resume_tx);
-                                                            let args = vec![data];
-                                                            Box::pin(async move {
-                                                                invoke_fn(
-                                                                    &owned_arities,
-                                                                    &owned_env,
-                                                                    &args,
-                                                                    dispatch,
-                                                                ).await
-                                                            })
-                                                        };
-
-                                                        state =
-                                                            EffectHandlerState::Handling(handler_fut);
-                                                        continue; // immediately poll handler
-                                                    }
-                                                    Some(other) => {
-                                                        drop(resume_tx);
-                                                        return Poll::Ready(Err(eval_err!(
-                                                            "with-effect-handler: handler for :{etype} must be a function, got {other}"
-                                                        )));
-                                                    }
-                                                    None => {
-                                                        // No match — propagate effect upward.
-                                                        // Pop our context (we're done).
-                                                        hs.borrow_mut().pop();
-                                                        drop(resume_tx);
-                                                        return Poll::Ready(Err(Val::Effect {
-                                                            effect_type: etype,
-                                                            data: Box::new(data),
-                                                        }));
-                                                    }
-                                                }
-                                            }
-                                            None => {
-                                                // Genuine async (dispatch call) — yield
-                                                return Poll::Pending;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            EffectHandlerState::Handling(handler_fut) => {
-                                match handler_fut.as_mut().poll(cx) {
-                                    Poll::Ready(Ok(val)) => {
-                                        // Handler returned normally (abort).
-                                        // Re-push context, body future will be dropped.
-                                        hs.borrow_mut().push(ctx.clone());
-                                        return Poll::Ready(Ok(val));
-                                    }
-                                    Poll::Ready(Err(Val::Resume(_))) => {
-                                        // Handler called resume — value already sent via oneshot.
-                                        // Re-push context for resumed body execution.
-                                        hs.borrow_mut().push(ctx.clone());
-                                        state = EffectHandlerState::Polling;
-                                        cx.waker().wake_by_ref();
-                                        return Poll::Pending;
-                                    }
-                                    Poll::Ready(Err(Val::Effect { effect_type, data })) => {
-                                        // Handler performed an unhandled effect — propagate.
-                                        hs.borrow_mut().push(ctx.clone());
-                                        return Poll::Ready(Err(Val::Effect {
-                                            effect_type,
-                                            data,
-                                        }));
-                                    }
-                                    Poll::Ready(Err(other)) => {
-                                        // Handler errored — propagate.
-                                        hs.borrow_mut().push(ctx.clone());
-                                        return Poll::Ready(Err(other));
-                                    }
-                                    Poll::Pending => return Poll::Pending,
-                                }
-                            }
-                        }
-                    }
-                })
-                .await;
-
-                // Pop our handler context (if still on the stack — it should be).
-                let mut stack = hs.borrow_mut();
-                if let Some(last) = stack.last() {
-                    if Rc::ptr_eq(last, &ctx) {
-                        stack.pop();
-                    }
-                }
-                drop(stack);
-
-                // Guard: Val::Resume must not escape with-handler.
-                match &result {
-                    Err(Val::Resume(_)) => result, // re-propagate to owning with-handler
-                    _ => result,
-                }
-            }
-
-            Expr::WithCapHandler { cap, handler, body } => {
-                // Evaluate cap and handler BEFORE pushing context.
-                let cap_val = eval_expr(cap, env, dispatch).await?;
-                let handler_val = eval_expr(handler, env, dispatch).await?;
-
-                let cap_target = match &cap_val {
-                    Val::Cap { name, inner } => effect::EffectTarget::Cap {
-                        name: name.clone(),
-                        inner: inner.clone(),
-                    },
-                    other => {
-                        return Err(eval_err!(
-                            "with-cap-handler: first arg must be a cap, got {other}"
-                        ))
-                    }
-                };
-
-                // Depth check.
-                let hs = env.handler_stack.clone();
-                if hs.borrow().len() >= effect::MAX_HANDLER_DEPTH {
-                    return Err(eval_err!(
-                        "with-cap-handler: handler stack depth limit ({}) exceeded",
-                        effect::MAX_HANDLER_DEPTH
-                    ));
-                }
-
-                // Create handler context with the cap target.
-                let ctx = Rc::new(RefCell::new(effect::HandlerContext {
-                    slot: Rc::new(RefCell::new(effect::EffectSlot::new())),
-                    target: Some(cap_target),
+                    target: effect_target,
                 }));
                 hs.borrow_mut().push(ctx.clone());
 
@@ -1862,17 +1648,17 @@ pub fn eval_expr<'a, D: Dispatch>(
                     })
                 };
 
-                // State machine — same pattern as WithEffectHandler.
-                enum CapHandlerState<'b> {
+                // State machine: alternate between polling body and handling effects.
+                enum HandlerState<'b> {
                     Polling,
                     Handling(Pin<Box<dyn Future<Output = Result<Val, Val>> + 'b>>),
                 }
-                let mut state = CapHandlerState::Polling;
+                let mut state = HandlerState::Polling;
 
                 let result: Result<Val, Val> = std::future::poll_fn(|cx| {
                     loop {
                         match &mut state {
-                            CapHandlerState::Polling => {
+                            HandlerState::Polling => {
                                 match body_fut.as_mut().poll(cx) {
                                     Poll::Ready(result) => return Poll::Ready(result),
                                     Poll::Pending => {
@@ -1880,14 +1666,13 @@ pub fn eval_expr<'a, D: Dispatch>(
                                             ctx.borrow().slot.borrow_mut().pending.take();
                                         match pending {
                                             Some((_target, data, resume_tx)) => {
-                                                // Cap handler receives (data, resume)
-                                                // where data = (:method args...) list.
+                                                // Dispatch to handler based on its type.
                                                 match &handler_val {
                                                     Val::Fn {
                                                         arities,
                                                         env: captured_env,
                                                     } => {
-                                                        // Pop before handle (same discipline as keyword handlers).
+                                                        // Pop before handle (handler's performs go to outer handlers).
                                                         hs.borrow_mut().pop();
 
                                                         let has_2_arity =
@@ -1933,9 +1718,8 @@ pub fn eval_expr<'a, D: Dispatch>(
                                                             })
                                                         };
 
-                                                        state = CapHandlerState::Handling(
-                                                            handler_fut,
-                                                        );
+                                                        state =
+                                                            HandlerState::Handling(handler_fut);
                                                         continue;
                                                     }
                                                     Val::NativeFn { func, .. } => {
@@ -1946,12 +1730,10 @@ pub fn eval_expr<'a, D: Dispatch>(
                                                             func(&[data, resume_fn]);
                                                         match result {
                                                             Err(Val::Resume(_)) => {
-                                                                // Handler called resume — value sent via oneshot.
-                                                                // Re-push context, resume body.
                                                                 hs.borrow_mut()
                                                                     .push(ctx.clone());
                                                                 state =
-                                                                    CapHandlerState::Polling;
+                                                                    HandlerState::Polling;
                                                                 cx.waker().wake_by_ref();
                                                                 return Poll::Pending;
                                                             }
@@ -1976,15 +1758,14 @@ pub fn eval_expr<'a, D: Dispatch>(
                                                         > = Box::pin(
                                                             func(vec![data, resume_fn]),
                                                         );
-                                                        state = CapHandlerState::Handling(
-                                                            handler_fut,
-                                                        );
+                                                        state =
+                                                            HandlerState::Handling(handler_fut);
                                                         continue;
                                                     }
                                                     other => {
                                                         drop(resume_tx);
                                                         return Poll::Ready(Err(eval_err!(
-                                                            "with-cap-handler: handler must be a function, got {other}"
+                                                            "with-effect-handler: handler must be a function, got {other}"
                                                         )));
                                                     }
                                                 }
@@ -1994,7 +1775,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                                     }
                                 }
                             }
-                            CapHandlerState::Handling(handler_fut) => {
+                            HandlerState::Handling(handler_fut) => {
                                 match handler_fut.as_mut().poll(cx) {
                                     Poll::Ready(Ok(val)) => {
                                         hs.borrow_mut().push(ctx.clone());
@@ -2002,7 +1783,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                                     }
                                     Poll::Ready(Err(Val::Resume(_))) => {
                                         hs.borrow_mut().push(ctx.clone());
-                                        state = CapHandlerState::Polling;
+                                        state = HandlerState::Polling;
                                         cx.waker().wake_by_ref();
                                         return Poll::Pending;
                                     }
@@ -2431,34 +2212,14 @@ async fn perform_dispatch(
     data: Val,
 ) -> Result<Val, Val> {
     // Walk stack in reverse (newest first) to find a matching handler.
-    // Scoped borrow — released before any .await.
+    // Unified: both keyword and cap effects use EffectTarget::matches().
     let matching_ctx = {
         let stack = handler_stack.borrow();
-        match &effect_target {
-            effect::EffectTarget::Keyword(_) => {
-                // Keyword effects skip cap handler frames (target: Some(Cap{..}))
-                // and land on the nearest keyword handler frame (target: None).
-                stack
-                    .iter()
-                    .rev()
-                    .find(|ctx| ctx.borrow().target.is_none())
-                    .cloned()
-            }
-            effect::EffectTarget::Cap { .. } => {
-                // Cap effects walk the stack looking for a frame whose target
-                // matches by Rc::ptr_eq (identity).
-                stack
-                    .iter()
-                    .rev()
-                    .find(|ctx| {
-                        ctx.borrow()
-                            .target
-                            .as_ref()
-                            .is_some_and(|t| t.matches(&effect_target))
-                    })
-                    .cloned()
-            }
-        }
+        stack
+            .iter()
+            .rev()
+            .find(|ctx| ctx.borrow().target.matches(&effect_target))
+            .cloned()
     };
 
     match matching_ctx {
@@ -4829,7 +4590,7 @@ mod tests {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:fail (fn [error] (+ error 1))} (perform :fail 42))",
+            "(with-effect-handler :fail (fn [error] (+ error 1)) (perform :fail 42))",
             &mut env,
             &mut d,
         );
@@ -4842,7 +4603,7 @@ mod tests {
         let mut d = RecordingDispatch::new();
         assert_eq!(
             eval_str(
-                "(with-effect-handler {:fail (fn [error] 0)} (+ 1 2))",
+                "(with-effect-handler :fail (fn [error] 0) (+ 1 2))",
                 &mut env,
                 &mut d
             ),
@@ -4855,7 +4616,7 @@ mod tests {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:other (fn [error] 0)} (perform :fail 42))",
+            "(with-effect-handler :other (fn [error] 0) (perform :fail 42))",
             &mut env,
             &mut d,
         );
@@ -4869,7 +4630,7 @@ mod tests {
         // Inner handler catches :fail, outer catches :other
         assert_eq!(
             eval_str(
-                "(with-effect-handler {:other (fn [error] 99)} (with-effect-handler {:fail (fn [error] (+ error 10))} (perform :fail 5)))",
+                "(with-effect-handler :other (fn [error] 99) (with-effect-handler :fail (fn [error] (+ error 10)) (perform :fail 5)))",
                 &mut env,
                 &mut d
             ),
@@ -5020,7 +4781,7 @@ mod tests {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:test (fn [data] data)} (perform :test nil))",
+            "(with-effect-handler :test (fn [data] data) (perform :test nil))",
             &mut env,
             &mut d,
         );
@@ -5032,7 +4793,7 @@ mod tests {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:done (fn [data] data)} (loop [i 0] (if (= i 3) (perform :done i) (recur (+ i 1)))))",
+            "(with-effect-handler :done (fn [data] data) (loop [i 0] (if (= i 3) (perform :done i) (recur (+ i 1)))))",
             &mut env,
             &mut d,
         );
@@ -5040,14 +4801,11 @@ mod tests {
     }
 
     #[test]
-    fn handler_empty_map() {
+    fn handler_missing_key() {
+        // with-effect-handler requires a keyword or cap target
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
-        let result = eval_str(
-            "(with-effect-handler {} (perform :test 42))",
-            &mut env,
-            &mut d,
-        );
+        let result = eval_str("(with-effect-handler (perform :test 42))", &mut env, &mut d);
         assert!(result.is_err());
     }
 
@@ -5056,7 +4814,7 @@ mod tests {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         let result = eval_str(
-            r#"(with-effect-handler {:test 42} (perform :test "data"))"#,
+            r#"(with-effect-handler :test 42 (perform :test "data"))"#,
             &mut env,
             &mut d,
         );
@@ -5069,7 +4827,7 @@ mod tests {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:test (fn [data] data)} (def x 1) (perform :test (+ x 1)))",
+            "(with-effect-handler :test (fn [data] data) (def x 1) (perform :test (+ x 1)))",
             &mut env,
             &mut d,
         );
@@ -5081,7 +4839,7 @@ mod tests {
         let mut env = Env::new();
         let mut d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:outer (fn [error] (+ error 100))} (with-effect-handler {:fail (fn [error] (perform :outer error))} (perform :fail 5)))",
+            "(with-effect-handler :outer (fn [error] (+ error 100)) (with-effect-handler :fail (fn [error] (perform :outer error)) (perform :fail 5)))",
             &mut env,
             &mut d,
         );
@@ -5222,7 +4980,7 @@ mod tests {
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:foo (fn [data resume] (resume 42))} (+ 10 (perform :foo 0)))",
+            "(with-effect-handler :foo (fn [data resume] (resume 42)) (+ 10 (perform :foo 0)))",
             &mut env,
             &d,
         );
@@ -5235,7 +4993,7 @@ mod tests {
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:inc (fn [data resume] (resume (+ data 1)))} (perform :inc 41))",
+            "(with-effect-handler :inc (fn [data resume] (resume (+ data 1))) (perform :inc 41))",
             &mut env,
             &d,
         );
@@ -5248,7 +5006,7 @@ mod tests {
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:foo (fn [data] 99)} (+ 10 (perform :foo 0)))",
+            "(with-effect-handler :foo (fn [data] 99) (+ 10 (perform :foo 0)))",
             &mut env,
             &d,
         );
@@ -5261,7 +5019,7 @@ mod tests {
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:foo (fn [data resume] 99)} (+ 10 (perform :foo 0)))",
+            "(with-effect-handler :foo (fn [data resume] 99) (+ 10 (perform :foo 0)))",
             &mut env,
             &d,
         );
@@ -5274,7 +5032,7 @@ mod tests {
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:foo (fn [data resume] (resume 1) (resume 2))} (perform :foo 0))",
+            "(with-effect-handler :foo (fn [data resume] (resume 1) (resume 2)) (perform :foo 0))",
             &mut env,
             &d,
         );
@@ -5291,7 +5049,7 @@ mod tests {
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:outer (fn [data] 0)} (with-effect-handler {:inner (fn [data resume] (resume 42))} (+ 10 (perform :inner 0))))",
+            "(with-effect-handler :outer (fn [data] 0) (with-effect-handler :inner (fn [data resume] (resume 42)) (+ 10 (perform :inner 0))))",
             &mut env,
             &d,
         );
@@ -5305,7 +5063,7 @@ mod tests {
         // Resume with nil
         assert_eq!(
             eval_str(
-                "(with-effect-handler {:foo (fn [data resume] (resume nil))} (perform :foo 0))",
+                "(with-effect-handler :foo (fn [data resume] (resume nil)) (perform :foo 0))",
                 &mut env,
                 &d,
             ),
@@ -5313,7 +5071,7 @@ mod tests {
         );
         // Resume with string
         let result = eval_str(
-            r#"(with-effect-handler {:foo (fn [data resume] (resume "hello"))} (perform :foo 0))"#,
+            r#"(with-effect-handler :foo (fn [data resume] (resume "hello")) (perform :foo 0))"#,
             &mut env,
             &d,
         );
@@ -5341,7 +5099,7 @@ mod tests {
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:step (fn [data resume] (resume (+ data 1)))} (loop [i 0] (if (= i 3) i (recur (perform :step i)))))",
+            "(with-effect-handler :step (fn [data resume] (resume (+ data 1))) (loop [i 0] (if (= i 3) i (recur (perform :step i)))))",
             &mut env,
             &d,
         );
@@ -5354,7 +5112,7 @@ mod tests {
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:inc (fn [data resume] (resume (+ data 10)))} (+ (perform :inc 1) (perform :inc 2)))",
+            "(with-effect-handler :inc (fn [data resume] (resume (+ data 10))) (+ (perform :inc 1) (perform :inc 2)))",
             &mut env,
             &d,
         );
@@ -5377,7 +5135,7 @@ mod tests {
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:bar (fn [data resume] (resume 0))} (perform :foo 42))",
+            "(with-effect-handler :bar (fn [data resume] (resume 0)) (perform :foo 42))",
             &mut env,
             &d,
         );
@@ -5390,7 +5148,7 @@ mod tests {
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:foo (fn [data resume] (resume 0))} (+ 1 2))",
+            "(with-effect-handler :foo (fn [data resume] (resume 0)) (+ 1 2))",
             &mut env,
             &d,
         );
@@ -5406,7 +5164,7 @@ mod tests {
         // This test just verifies the handler works — the ordering guarantee
         // is architectural (tested in the spike).
         let result = eval_str(
-            "(with-effect-handler {:foo (fn [data resume] (resume 100))} (perform :foo 0))",
+            "(with-effect-handler :foo (fn [data resume] (resume 100)) (perform :foo 0))",
             &mut env,
             &d,
         );
@@ -5710,13 +5468,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Cap-as-effects tests
+    // Cap-targeted effect handler tests
     // -----------------------------------------------------------------------
 
-    /// Helper: create a Val::Cap with a given name, wrapping an i32 marker.
+    /// Helper: create a Val::Cap with a given name and CID, wrapping an i32 marker.
     fn make_test_cap(name: &str, marker: i32) -> Val {
         Val::Cap {
             name: name.into(),
+            schema_cid: format!("test-cid-{name}"),
             inner: Rc::new(marker),
         }
     }
@@ -5730,7 +5489,7 @@ mod tests {
         env.set("my-cap".into(), cap);
         // Handler receives data (a list of [:method args...]) and returns it.
         let result = eval_str(
-            "(with-cap-handler my-cap (fn [data resume] (resume data)) (perform my-cap :run 42))",
+            "(with-effect-handler my-cap (fn [data resume] (resume data)) (perform my-cap :run 42))",
             &mut env,
             &d,
         );
@@ -5741,21 +5500,39 @@ mod tests {
     }
 
     #[test]
-    fn perform_cap_wrong_identity() {
-        // Different Rc, same name — does NOT match (identity semantics).
+    fn perform_cap_different_cid_no_match() {
+        // Different schema CIDs — does NOT match (type semantics).
+        let mut env = Env::new();
+        let d = RecordingDispatch::new();
+        let cap1 = make_test_cap("executor", 1);
+        let cap2 = make_test_cap("ipfs", 2);
+        env.set("cap1".into(), cap1);
+        env.set("cap2".into(), cap2);
+        // Handler installed for cap1 (executor CID), perform on cap2 (ipfs CID) — no match.
+        let result = eval_str(
+            "(with-effect-handler cap1 (fn [data] :handled) (perform cap2 :run 0))",
+            &mut env,
+            &d,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn perform_cap_same_cid_matches() {
+        // Same schema CID, different Rc — matches (type semantics, not identity).
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let cap1 = make_test_cap("executor", 1);
         let cap2 = make_test_cap("executor", 2);
         env.set("cap1".into(), cap1);
         env.set("cap2".into(), cap2);
-        // Handler installed for cap1, perform on cap2 — no match.
+        // Handler installed for cap1, perform on cap2 — matches because same CID.
         let result = eval_str(
-            "(with-cap-handler cap1 (fn [data] :handled) (perform cap2 :run 0))",
+            "(with-effect-handler cap1 (fn [data] :handled) (perform cap2 :run 0))",
             &mut env,
             &d,
         );
-        assert!(result.is_err());
+        assert_eq!(result, Ok(Val::Keyword("handled".into())));
     }
 
     #[test]
@@ -5775,7 +5552,7 @@ mod tests {
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let result = eval_str(
-            "(with-effect-handler {:fail (fn [data] (+ data 1))} (perform :fail 42))",
+            "(with-effect-handler :fail (fn [data] (+ data 1)) (perform :fail 42))",
             &mut env,
             &d,
         );
@@ -5783,11 +5560,15 @@ mod tests {
     }
 
     #[test]
-    fn with_cap_handler_non_cap_target_errors() {
+    fn with_effect_handler_non_cap_target_errors() {
         // Non-Cap first arg → error.
         let mut env = Env::new();
         let d = RecordingDispatch::new();
-        let result = eval_str("(with-cap-handler 42 (fn [data] data) :body)", &mut env, &d);
+        let result = eval_str(
+            "(with-effect-handler 42 (fn [data] data) :body)",
+            &mut env,
+            &d,
+        );
         assert!(result.is_err());
         if let Err(err) = &result {
             assert!(err_contains(err, "cap"));
@@ -5795,14 +5576,14 @@ mod tests {
     }
 
     #[test]
-    fn with_cap_handler_non_fn_handler_errors() {
+    fn with_effect_handler_non_fn_handler_errors() {
         // Non-Fn second arg → error at perform time (handler is still a value).
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let cap = make_test_cap("x", 1);
         env.set("my-cap".into(), cap);
         let result = eval_str(
-            "(with-cap-handler my-cap 42 (perform my-cap :m 0))",
+            "(with-effect-handler my-cap 42 (perform my-cap :m 0))",
             &mut env,
             &d,
         );
@@ -5810,14 +5591,14 @@ mod tests {
     }
 
     #[test]
-    fn cap_handler_shadows_outer() {
+    fn effect_handler_cap_shadows_outer() {
         // Inner handler for same cap wins.
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let cap = make_test_cap("exec", 1);
         env.set("my-cap".into(), cap);
         let result = eval_str(
-            "(with-cap-handler my-cap (fn [data] :outer) (with-cap-handler my-cap (fn [data] :inner) (perform my-cap :m 0)))",
+            "(with-effect-handler my-cap (fn [data] :outer) (with-effect-handler my-cap (fn [data] :inner) (perform my-cap :m 0)))",
             &mut env,
             &d,
         );
@@ -5825,7 +5606,7 @@ mod tests {
     }
 
     #[test]
-    fn cap_handler_attenuation_forward() {
+    fn effect_handler_cap_attenuation_forward() {
         // Inner handler delegates to outer via perform on same cap.
         // Pop-before-handle makes this work: inner is popped, perform hits outer.
         let mut env = Env::new();
@@ -5833,7 +5614,7 @@ mod tests {
         let cap = make_test_cap("exec", 1);
         env.set("my-cap".into(), cap);
         let result = eval_str(
-            "(with-cap-handler my-cap (fn [data resume] (resume :forwarded)) (with-cap-handler my-cap (fn [data resume] (perform my-cap :delegated 0)) (perform my-cap :m 0)))",
+            "(with-effect-handler my-cap (fn [data resume] (resume :forwarded)) (with-effect-handler my-cap (fn [data resume] (perform my-cap :delegated 0)) (perform my-cap :m 0)))",
             &mut env,
             &d,
         );
@@ -5841,14 +5622,14 @@ mod tests {
     }
 
     #[test]
-    fn cap_handler_attenuation_block() {
+    fn effect_handler_cap_attenuation_block() {
         // Inner handler blocks disallowed method — returns error without forwarding.
         let mut env = Env::new();
         let d = RecordingDispatch::new();
         let cap = make_test_cap("exec", 1);
         env.set("my-cap".into(), cap);
         let result = eval_str(
-            "(with-cap-handler my-cap (fn [data resume] (resume :full-authority)) (with-cap-handler my-cap (fn [data] :blocked) (perform my-cap :m 0)))",
+            "(with-effect-handler my-cap (fn [data resume] (resume :full-authority)) (with-effect-handler my-cap (fn [data] :blocked) (perform my-cap :m 0)))",
             &mut env,
             &d,
         );
@@ -5866,7 +5647,7 @@ mod tests {
         // Install keyword handler for :fail, then cap handler for my-cap.
         // Keyword perform should hit keyword handler; cap perform should hit cap handler.
         let result = eval_str(
-            "(with-effect-handler {:fail (fn [data] :keyword-handled)} (with-cap-handler my-cap (fn [data] :cap-handled) (perform my-cap :m 0)))",
+            "(with-effect-handler :fail (fn [data] :keyword-handled) (with-effect-handler my-cap (fn [data] :cap-handled) (perform my-cap :m 0)))",
             &mut env,
             &d,
         );
@@ -5881,7 +5662,7 @@ mod tests {
         let cap = make_test_cap("exec", 1);
         env.set("my-cap".into(), cap);
         let result = eval_str(
-            "(with-effect-handler {:fail (fn [data] :keyword-handled)} (with-cap-handler my-cap (fn [data] :cap-handled) (perform :fail 0)))",
+            "(with-effect-handler :fail (fn [data] :keyword-handled) (with-effect-handler my-cap (fn [data] :cap-handled) (perform :fail 0)))",
             &mut env,
             &d,
         );
@@ -5896,7 +5677,7 @@ mod tests {
         let cap = make_test_cap("math", 1);
         env.set("my-cap".into(), cap);
         let result = eval_str(
-            "(with-cap-handler my-cap (fn [data resume] (resume 100)) (+ 1 (perform my-cap :compute 0)))",
+            "(with-effect-handler my-cap (fn [data resume] (resume 100)) (+ 1 (perform my-cap :compute 0)))",
             &mut env,
             &d,
         );
@@ -5960,7 +5741,7 @@ mod tests {
     }
 
     #[test]
-    fn async_native_fn_in_cap_handler() {
+    fn async_native_fn_in_effect_handler() {
         // AsyncNativeFn used as a cap handler should work correctly.
         let mut env = Env::new();
         let d = RecordingDispatch::new();
@@ -5977,7 +5758,7 @@ mod tests {
             },
         );
         let result = eval_str(
-            "(with-cap-handler my-cap async-handler (perform my-cap :ping 1))",
+            "(with-effect-handler my-cap async-handler (perform my-cap :ping 1))",
             &mut env,
             &d,
         );
@@ -5995,23 +5776,25 @@ mod tests {
 
         // Pre-fill handler stack to the limit.
         let cap_target = match &cap {
-            Val::Cap { name, inner } => effect::EffectTarget::Cap {
+            Val::Cap {
+                name, schema_cid, ..
+            } => effect::EffectTarget::Cap {
                 name: name.clone(),
-                inner: inner.clone(),
+                schema_cid: schema_cid.clone(),
             },
             _ => unreachable!(),
         };
         for _ in 0..effect::MAX_HANDLER_DEPTH {
             let ctx = Rc::new(RefCell::new(effect::HandlerContext {
                 slot: Rc::new(RefCell::new(effect::EffectSlot::new())),
-                target: Some(cap_target.clone()),
+                target: cap_target.clone(),
             }));
             env.handler_stack.borrow_mut().push(ctx);
         }
 
-        // One more with-cap-handler should hit the depth limit.
+        // One more with-effect-handler should hit the depth limit.
         let result = eval_str(
-            "(with-cap-handler my-cap (fn [data] data) :body)",
+            "(with-effect-handler my-cap (fn [data] data) :body)",
             &mut env,
             &d,
         );

@@ -68,18 +68,16 @@ pub enum Expr {
     /// - `(perform cap :method args...)` — cap-targeted effect (object-scoped)
     Perform { target: Box<Expr>, args: Vec<Expr> },
 
-    /// `(with-effect-handler {handlers} body...)` — install keyword effect handlers.
-    /// Internal form — users write `match` with `(effect ...)` clauses instead.
+    /// `(with-effect-handler target handler body...)` — install a single effect handler.
+    ///
+    /// Two forms:
+    /// - `(with-effect-handler :keyword handler-fn body...)` — keyword handler
+    /// - `(with-effect-handler cap handler-fn body...)` — cap handler
+    ///
+    /// Multiple keyword handlers use inline kwargs (Clojure-style):
+    /// `(with-effect-handler :k1 fn1 :k2 fn2 body...)` — nests into single handlers.
     WithEffectHandler {
-        handlers: Box<Expr>,
-        body: Vec<Expr>,
-    },
-
-    /// `(with-cap-handler cap handler-fn body...)` — install a cap-targeted handler.
-    /// The handler-fn receives `(method args resume)` when code inside body
-    /// performs on the given cap.
-    WithCapHandler {
-        cap: Box<Expr>,
+        target: Box<Expr>,
         handler: Box<Expr>,
         body: Vec<Expr>,
     },
@@ -215,7 +213,6 @@ fn analyze_list(items: &[Val]) -> Result<Expr, String> {
         "defmacro" => analyze_defmacro(raw_args),
         "perform" => analyze_perform(raw_args),
         "with-effect-handler" => analyze_with_effect_handler(raw_args),
-        "with-cap-handler" => analyze_with_cap_handler(raw_args),
         "match" => analyze_match(raw_args),
         "unquote" => Err("unquote (~) not inside syntax-quote".into()),
         "splice-unquote" => Err("splice-unquote (~@) not inside syntax-quote".into()),
@@ -477,33 +474,60 @@ fn analyze_perform(args: &[Val]) -> Result<Expr, String> {
     Ok(Expr::Perform { target, args: rest })
 }
 
-/// `(with-handler {handlers-map} body...)`
+/// `(with-effect-handler target handler body...)` — unified effect handler.
+///
+/// Two forms:
+/// - Keyword: `(with-effect-handler :k1 fn1 :k2 fn2 body...)` — inline kwargs, nested.
+/// - Cap:     `(with-effect-handler cap handler-fn body...)` — single cap target.
 fn analyze_with_effect_handler(args: &[Val]) -> Result<Expr, String> {
-    if args.is_empty() {
-        return Err(
-            "with-effect-handler: expected (with-effect-handler {handlers} body...)".into(),
-        );
-    }
-    let handlers = Box::new(analyze(&args[0])?);
-    let body = args[1..]
-        .iter()
-        .map(analyze)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Expr::WithEffectHandler { handlers, body })
-}
-
-/// `(with-cap-handler cap handler-fn body...)`
-fn analyze_with_cap_handler(args: &[Val]) -> Result<Expr, String> {
     if args.len() < 3 {
-        return Err("with-cap-handler: expected (with-cap-handler cap handler-fn body...)".into());
+        return Err("with-effect-handler: need at least target, handler, body".into());
     }
-    let cap = Box::new(analyze(&args[0])?);
-    let handler = Box::new(analyze(&args[1])?);
-    let body = args[2..]
-        .iter()
-        .map(analyze)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Expr::WithCapHandler { cap, handler, body })
+
+    if let Val::Keyword(_) = &args[0] {
+        // Inline kwargs: consume keyword/handler pairs, rest is body.
+        let mut pairs = Vec::new();
+        let mut i = 0;
+        while i + 1 < args.len() {
+            if let Val::Keyword(_) = &args[i] {
+                pairs.push((&args[i], &args[i + 1]));
+                i += 2;
+            } else {
+                break;
+            }
+        }
+        if pairs.is_empty() || i >= args.len() {
+            return Err("with-effect-handler: need at least one handler and a body".into());
+        }
+        let body: Vec<Expr> = args[i..]
+            .iter()
+            .map(analyze)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Nest: innermost pair wraps body, each outer wraps the next.
+        let mut result_body = body;
+        for (k, v) in pairs.into_iter().rev() {
+            result_body = vec![Expr::WithEffectHandler {
+                target: Box::new(analyze(k)?),
+                handler: Box::new(analyze(v)?),
+                body: result_body,
+            }];
+        }
+        Ok(result_body.into_iter().next().unwrap())
+    } else {
+        // Cap target: (with-effect-handler cap handler body...)
+        let target = Box::new(analyze(&args[0])?);
+        let handler = Box::new(analyze(&args[1])?);
+        let body = args[2..]
+            .iter()
+            .map(analyze)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Expr::WithEffectHandler {
+            target,
+            handler,
+            body,
+        })
+    }
 }
 
 /// Analyze a `(match expr clause1 clause2 ...)` form.
@@ -589,28 +613,20 @@ fn analyze_match(args: &[Val]) -> Result<Expr, String> {
         // Pure match — no handler installation
         Ok(match_expr)
     } else {
-        // Compile effect clauses into WithEffectHandler wrapper.
-        // Handler fn arity is determined here at analysis time (not guessed at runtime).
-        // Build: (with-effect-handler {:etype (fn [bindings...] body) ...} (match ...))
-        let mut handler_map_vals = Vec::new();
-        for (effect_type, bindings, body_val) in effect_clauses {
+        // Compile effect clauses into nested WithEffectHandler wrappers.
+        // Each effect clause becomes a single-target handler wrapping the match.
+        let mut result: Expr = match_expr;
+        for (effect_type, bindings, body_val) in effect_clauses.into_iter().rev() {
             let params: Vec<Val> = bindings.iter().map(|b| Val::Sym(b.clone())).collect();
-            // Build (fn [params] body) as raw Val — will be analyzed by the fn analyzer
             let handler_fn_val =
                 Val::List(vec![Val::Sym("fn".into()), Val::Vector(params), body_val]);
-            handler_map_vals.push((Val::Keyword(effect_type), handler_fn_val));
+            result = Expr::WithEffectHandler {
+                target: Box::new(analyze(&Val::Keyword(effect_type))?),
+                handler: Box::new(analyze(&handler_fn_val)?),
+                body: vec![result],
+            };
         }
-
-        // Analyze the handler map
-        let handler_map_exprs: Vec<(Expr, Expr)> = handler_map_vals
-            .into_iter()
-            .map(|(k, v)| -> Result<(Expr, Expr), String> { Ok((analyze(&k)?, analyze(&v)?)) })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(Expr::WithEffectHandler {
-            handlers: Box::new(Expr::Map(handler_map_exprs)),
-            body: vec![match_expr],
-        })
+        Ok(result)
     }
 }
 
@@ -873,9 +889,11 @@ mod tests {
     }
 
     #[test]
-    fn analyze_with_effect_handler_basic() {
-        match analyze_str("(with-effect-handler {} body)").unwrap() {
-            Expr::WithEffectHandler { .. } => {}
+    fn analyze_with_effect_handler_keyword() {
+        match analyze_str("(with-effect-handler :fail handler body)").unwrap() {
+            Expr::WithEffectHandler { target, .. } => {
+                assert!(matches!(*target, Expr::Const(Val::Keyword(ref k)) if k == "fail"));
+            }
             other => panic!("expected WithEffectHandler, got {other:?}"),
         }
     }
@@ -883,11 +901,43 @@ mod tests {
     #[test]
     fn analyze_with_effect_handler_no_args() {
         assert!(analyze_str("(with-effect-handler)").is_err());
+        assert!(analyze_str("(with-effect-handler :fail)").is_err());
+        assert!(analyze_str("(with-effect-handler :fail handler)").is_err());
+    }
+
+    #[test]
+    fn analyze_with_effect_handler_multi_kwargs() {
+        // Two keyword handlers should nest into two WithEffectHandler nodes.
+        match analyze_str("(with-effect-handler :a f1 :b f2 body)").unwrap() {
+            Expr::WithEffectHandler { target, body, .. } => {
+                assert!(matches!(*target, Expr::Const(Val::Keyword(ref k)) if k == "a"));
+                assert_eq!(body.len(), 1);
+                assert!(matches!(&body[0], Expr::WithEffectHandler { .. }));
+            }
+            other => panic!("expected nested WithEffectHandler, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn analyze_with_effect_handler_cap_target() {
+        // Cap target: (with-effect-handler cap handler body)
+        match analyze_str("(with-effect-handler my-cap handler body)").unwrap() {
+            Expr::WithEffectHandler {
+                target,
+                handler,
+                body,
+            } => {
+                assert!(matches!(*target, Expr::Sym(ref s) if s == "my-cap"));
+                assert!(matches!(*handler, Expr::Sym(ref s) if s == "handler"));
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("expected WithEffectHandler, got {other:?}"),
+        }
     }
 
     #[test]
     fn analyze_with_effect_handler_multi_body() {
-        match analyze_str("(with-effect-handler {} a b c)").unwrap() {
+        match analyze_str("(with-effect-handler :fail handler a b c)").unwrap() {
             Expr::WithEffectHandler { body, .. } => {
                 assert_eq!(body.len(), 3);
             }

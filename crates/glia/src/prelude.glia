@@ -60,7 +60,7 @@
 ;; try — attempt expr, return {:ok val} or {:err data}
 (defmacro try [& body]
   (let [error (gensym)]
-    `(with-effect-handler {:fail (fn [~error] {:err ~error})}
+    `(with-effect-handler :fail (fn [~error] {:err ~error})
        {:ok (do ~@body)})))
 
 ;; or-else — default on failure
@@ -79,5 +79,5 @@
 ;; recover-fn is called with the error and a resume function.
 ;; Call (resume value) to continue the computation, or return a value to abort.
 (defmacro try-resume [recover-fn & body]
-  `(with-effect-handler {:fail (fn [err resume] (apply ~recover-fn (list err resume)))}
+  `(with-effect-handler :fail (fn [err resume] (apply ~recover-fn (list err resume)))
      (do ~@body)))
