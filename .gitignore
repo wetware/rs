@@ -15,6 +15,7 @@ target/
 
 # Example-specific build artifacts
 examples/*/target/
+examples/*/bin/
 examples/*/*.cid
 # Temporary local work area
 tmp/

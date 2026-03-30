@@ -217,6 +217,9 @@ pub fn build_cell_capnp_message(schema_bytes: &[u8]) -> Vec<u8> {
     // The canonical bytes from extract_schemas/canonicalize_node are a raw
     // single segment (no framing header). Wrap them with Cap'n Proto framing
     // so read_message can parse them.
+    // TODO: consider using capnp::message::Reader::new() with a segment slice
+    // instead of hand-rolling the segment table, if the capnp crate exposes
+    // a cleaner API for constructing a Reader from raw segment bytes.
     let word_count = schema_bytes.len().div_ceil(8);
     let mut framed = Vec::with_capacity(8 + schema_bytes.len());
     // Segment table: 1 segment, length in words
@@ -277,24 +280,67 @@ pub fn build_cell_http_message(path_prefix: &str) -> Vec<u8> {
     buf
 }
 
-/// Inject a custom section into a WASM binary.
+/// Inject a custom section into a WASM binary (idempotent).
 ///
-/// Parses the input WASM (component or module), appends a custom section
-/// with the given name and data, and returns the modified bytes.
+/// Strips any existing custom section with the same name, then appends a
+/// new custom section with the given name and data. This makes repeated
+/// invocations safe (no duplicate sections).
 ///
 /// Requires the `inject` feature.
 #[cfg(feature = "inject")]
 pub fn inject_custom_section(wasm_bytes: &[u8], section_name: &str, data: &[u8]) -> Vec<u8> {
     use wasm_encoder::ComponentSection;
 
+    let stripped = strip_custom_section(wasm_bytes, section_name);
+
     let custom = wasm_encoder::CustomSection {
         name: std::borrow::Cow::Borrowed(section_name),
         data: std::borrow::Cow::Borrowed(data),
     };
 
-    let mut output = wasm_bytes.to_vec();
+    let mut output = stripped;
     custom.append_to_component(&mut output);
     output
+}
+
+/// Remove all custom sections with the given name from a WASM binary.
+///
+/// Rebuilds the binary via `wasm_encoder::Module`, copying every section
+/// except those matching `section_name`. Returns the input unchanged if
+/// no matching section exists.
+#[cfg(feature = "inject")]
+fn strip_custom_section(wasm_bytes: &[u8], section_name: &str) -> Vec<u8> {
+    use wasmparser::{Parser, Payload};
+
+    // Quick check: if no matching section exists, return input as-is.
+    let has_match = Parser::new(0).parse_all(wasm_bytes).any(|payload| {
+        matches!(
+            payload,
+            Ok(Payload::CustomSection(ref reader)) if reader.name() == section_name
+        )
+    });
+    if !has_match {
+        return wasm_bytes.to_vec();
+    }
+
+    // Rebuild: copy every section except matching custom sections.
+    let mut module = wasm_encoder::Module::new();
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        let payload = payload.expect("already validated WASM");
+        match &payload {
+            Payload::Version { .. } => {} // handled by Module::new()
+            Payload::CustomSection(reader) if reader.name() == section_name => {}
+            _ => {
+                if let Some((id, range)) = payload.as_section() {
+                    module.section(&wasm_encoder::RawSection {
+                        id,
+                        data: &wasm_bytes[range],
+                    });
+                }
+            }
+        }
+    }
+    module.finish()
 }
 
 #[cfg(test)]
@@ -361,5 +407,18 @@ mod tests {
             data.as_slice(),
             "bytes mismatch after roundtrip"
         );
+    }
+
+    /// Injecting the same section twice produces identical output to injecting once.
+    #[test]
+    #[cfg(feature = "inject")]
+    fn test_inject_custom_section_is_idempotent() {
+        let wasm = b"\x00asm\x01\x00\x00\x00";
+        let data = b"test payload";
+
+        let once = inject_custom_section(wasm, "test.section", data);
+        let twice = inject_custom_section(&once, "test.section", data);
+
+        assert_eq!(once, twice, "double injection should produce identical output");
     }
 }
