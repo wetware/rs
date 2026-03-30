@@ -28,10 +28,15 @@ method in plain language, then show the schema definition.
 
 For `schema-inject`, show all three modes:
 ```
-schema-inject wasm.wasm --raw /protocol/id
+schema-inject wasm.wasm --raw bitswap
 schema-inject wasm.wasm --http /api/v1
 schema-inject wasm.wasm --capnp schema.bytes [--no-ipfs]
 ```
+
+Note: `--no-ipfs` (capnp only) skips pushing the canonical schema
+bytes to IPFS via Kubo after injection.  Useful when Kubo is not
+running or when building offline.  Protocol IDs for raw cells must
+not contain `/` (the host prefixes `/ww/0.1.0/stream/` automatically).
 
 When the user finishes exploring a subsystem, re-present this
 sub-menu or offer to return to the main menu from PROMPT.md.

@@ -108,7 +108,7 @@ plumbing to wire up:
 
 Cell types are injected post-build with `schema-inject`:
 ```
-schema-inject wasm.wasm --raw /protocol/id
+schema-inject wasm.wasm --raw bitswap
 schema-inject wasm.wasm --http /api/v1
 schema-inject wasm.wasm --capnp schema.bytes
 ```
