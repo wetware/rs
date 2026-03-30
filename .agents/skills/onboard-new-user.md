@@ -36,7 +36,6 @@ If the user hasn't cloned yet:
 3. Invite them to clone when they're ready:
    ```
    git clone https://github.com/wetware/ww.git && cd ww
-   make ai-setup
    ```
 4. Tell them once they've cloned, they can ask their AI coding tool:
    > Read .agents/prompt.md and get me started with Wetware.
@@ -51,10 +50,10 @@ fine.
 
 ## For local clones
 
-Four steps.  Tell them up front: "Four quick steps, then you'll
+Three steps.  Tell them up front: "Three quick steps, then you'll
 have a running node.  ~5 minutes total."
 
-### Step 1 of 4: Prerequisites (~30 seconds)
+### Step 1 of 3: Prerequisites (~30 seconds)
 
 Check (or tell the user to check):
 - Rust toolchain installed
@@ -64,19 +63,7 @@ Check (or tell the user to check):
 If something's missing, help them fix it before moving on.
 Don't just list requirements and hope for the best.
 
-### Step 2 of 4: AI tool setup (~30 seconds)
-
-```
-make ai-setup
-```
-
-This links `.agents/prompt.md` to wherever their AI tool expects
-its config.  Only needs to run once.
-
-**If they already ran it**, skip ahead — say "Already done, moving
-on" and don't belabor it.
-
-### Step 3 of 4: Build (~2 minutes)
+### Step 2 of 3: Build (~2 minutes)
 
 ```
 make
@@ -88,7 +75,7 @@ slower — tell them it's normal.
 **While it builds**, you can preview what comes next: "Once this
 finishes, we'll boot a node and you'll have a live p2p shell."
 
-### Step 4 of 4: Quick tour (~1 minute)
+### Step 3 of 3: Quick tour (~1 minute)
 
 ```
 cargo run -- run crates/kernel

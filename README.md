@@ -19,17 +19,11 @@ a capability to do.
 
 ## Quick start
 
-```bash
-git clone https://github.com/wetware/ww.git && cd ww
-make ai-setup      # link config for your AI coding tool
-```
+Clone the repo, then ask your AI coding agent:
 
-Then ask your AI agent:
-
-> Read .agents/prompt.md and get me started with Wetware.
-
-Or browse [`.agents/prompt.md`](.agents/prompt.md) on GitHub — it
-works there too.
+> If you are in a local clone of github.com/wetware/ww, read
+> .agents/prompt.md, else browse [`.agents/prompt.md`](.agents/prompt.md) 
+> on GitHub, and finally, get me started with Wetware.
 
 ## How it works
 
