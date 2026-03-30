@@ -4,7 +4,7 @@
 
 The peer-to-peer agentic OS.
 
-## What is this?
+## Why?
 
 Agentic frameworks give you a platform for running agents. Wetware
 gives your agents an **operating system**. It provides primitives
