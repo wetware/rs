@@ -13,6 +13,8 @@ what they can do once inside.
    rustup target add wasm32-wasip2
    make
    ```
+   This builds the host binary, kernel, shell, and all examples
+   (chess, echo, counter).
 3. Run:
    ```
    cargo run -- run crates/kernel
@@ -28,6 +30,25 @@ what they can do once inside.
 5. Explain what just happened: `ww run` booted a libp2p swarm,
    loaded the kernel WASM, served a Membrane, and the kernel
    grafted onto it to get capabilities.
+
+## Building individual targets
+
+```
+make host       # host binary only
+make kernel     # kernel agent (wasm32-wasip2)
+make shell      # Glia shell (wasm32-wasip2)
+make examples   # all examples (chess + echo + counter)
+make echo       # echo example only
+make counter    # counter example only
+make chess      # chess example only
+```
+
+## Container
+
+```
+make container-build              # build with podman
+podman run --rm wetware:latest    # boots kernel + shell
+```
 
 If something fails, check `README.md` for the current build
 instructions — paths may have changed since this was written.
