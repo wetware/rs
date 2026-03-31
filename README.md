@@ -19,11 +19,8 @@ a capability to do.
 
 ## Quick start
 
-Clone the repo, then ask your AI coding agent:
-
-> If you are in a local clone of github.com/wetware/ww, read
-> [`.agents/prompt.md`](.agents/prompt.md), else read it on
-> on GitHub, and finally, get me started with Wetware.
+> Read github.com/wetware/ww/.agents/prompt.md, check if we're in a
+> wetware environment, and help me get started.
 
 ## How it works
 

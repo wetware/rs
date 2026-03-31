@@ -56,7 +56,7 @@ tar = "0.4"
 clap = { version = "4.5.51", features = ["derive", "env"] }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 nix = { version = "0.30.1", features = ["socket"] }
-wasmtime = "40.0.0"
+wasmtime = { version = "40.0.0", features = ["call-hook"] }
 wasmtime-wasi = "40.0.0"
 wasmtime-wasi-io = "40.0.0"
 capnp = "0.23.2"
