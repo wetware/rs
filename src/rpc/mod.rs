@@ -1067,32 +1067,25 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
                 let signing_key = config.signing_key.clone();
                 let stream_control = config.stream_control.clone();
 
-                let child_rpc_system =
-                    if let (Some(erx), Some(ic), Some(sc)) =
-                        (epoch_rx, content_store, stream_control)
-                    {
-                        let (rpc, guest) = membrane::build_membrane_rpc(
-                            reader,
-                            writer,
-                            network_state,
-                            swarm_cmd_tx,
-                            wasm_debug,
-                            erx,
-                            ic,
-                            signing_key,
-                            sc,
-                        );
-                        bootstrap_cap = Some(guest.client);
-                        rpc
-                    } else {
-                        build_peer_rpc(
-                            reader,
-                            writer,
-                            network_state,
-                            swarm_cmd_tx,
-                            wasm_debug,
-                        )
-                    };
+                let child_rpc_system = if let (Some(erx), Some(ic), Some(sc)) =
+                    (epoch_rx, content_store, stream_control)
+                {
+                    let (rpc, guest) = membrane::build_membrane_rpc(
+                        reader,
+                        writer,
+                        network_state,
+                        swarm_cmd_tx,
+                        wasm_debug,
+                        erx,
+                        ic,
+                        signing_key,
+                        sc,
+                    );
+                    bootstrap_cap = Some(guest.client);
+                    rpc
+                } else {
+                    build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug)
+                };
 
                 let mut kill_rx = kill_rx;
                 tokio::task::spawn_local(async move {
