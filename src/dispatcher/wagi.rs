@@ -99,12 +99,11 @@ pub fn parse_cgi_response(stdout: &[u8]) -> Result<WagiResponse, WagiError> {
     }
 
     // Find the header/body separator: \r\n\r\n or \n\n
-    let (header_end, body_start) = find_header_boundary(stdout)
-        .ok_or_else(|| {
-            // No blank line found. Treat entire output as body with defaults.
-            // This is valid CGI: a response with no headers at all.
-            WagiError::MalformedHeaders("no header/body separator found".into())
-        })?;
+    let (header_end, body_start) = find_header_boundary(stdout).ok_or_else(|| {
+        // No blank line found. Treat entire output as body with defaults.
+        // This is valid CGI: a response with no headers at all.
+        WagiError::MalformedHeaders("no header/body separator found".into())
+    })?;
 
     let header_bytes = &stdout[..header_end];
     let body = stdout[body_start..].to_vec();
@@ -181,9 +180,7 @@ fn find_header_boundary(data: &[u8]) -> Option<(usize, usize)> {
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 #[cfg(test)]
@@ -288,7 +285,8 @@ mod tests {
 
     #[test]
     fn parse_405_response() {
-        let stdout = b"Status: 405 Method Not Allowed\r\nContent-Type: text/plain\r\n\r\nMethod Not Allowed";
+        let stdout =
+            b"Status: 405 Method Not Allowed\r\nContent-Type: text/plain\r\n\r\nMethod Not Allowed";
         let resp = parse_cgi_response(stdout).unwrap();
         assert_eq!(resp.status_code, 405);
         assert_eq!(resp.reason, "Method Not Allowed");
@@ -312,7 +310,8 @@ mod tests {
 
     #[test]
     fn parse_binary_body() {
-        let mut stdout = b"Status: 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n".to_vec();
+        let mut stdout =
+            b"Status: 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n".to_vec();
         stdout.extend_from_slice(&[0x00, 0x01, 0xff, 0xfe]);
         let resp = parse_cgi_response(&stdout).unwrap();
         assert_eq!(resp.body, &[0x00, 0x01, 0xff, 0xfe]);
