@@ -67,21 +67,29 @@
 ## ~~Dual DHT — LAN + WAN content routing~~ ✅
 **RESOLVED:** `kad_lan` field added to `WetwareBehaviour` running `/ipfs/lan/kad/1.0.0` in server mode. Dual-dispatch provide/findProviders with cross-DHT PeerId dedup via `FindRequest`. Kubo peers classified by `is_lan_addr()` into WAN/LAN routing tables. 10 unit tests for extracted helpers. Design doc at `~/.gstack/projects/wetware-ww/lthibault-feat-local-routing-design-20260329-131709.md`.
 
-## FastCGI host-side implementation (HttpListener)
-**What:** Implement `HttpListener` that handles `Cell::http` WASM binaries. The host spawns a cell process per HTTP request, piping FastCGI records over stdin/stdout. The host HTTP server demuxes incoming requests by path prefix and forwards them to the appropriate cell.
-**Why:** `Cell::http` variant exists in the type system but the host-side handler is not implemented. Guests can declare HTTP cells but the host can't serve them yet.
-**Context:** The Cell type system (cell.capnp) already defines `http @1 :Text` (path prefix). `decode_cell_section()` already decodes `CellType::Http`. The host needs: (1) an HTTP server (hyper or axum) listening on a configurable port, (2) route table mapping path prefixes to BoundExecutors, (3) FastCGI framing for stdin/stdout, (4) `HttpListener` capability that registers cells in the route table. FastCGI is the agreed wire format for stdio. Start simple: one cell process per request (Mode A), pool/keepalive later.
+## Thread-per-subsystem runtime (Pingora-inspired) (#302)
+**What:** Replace the single shared multi-threaded tokio runtime with a thread-per-subsystem topology. Each subsystem (libp2p swarm, HTTP/WAGI, executor, epoch) gets its own OS thread with its own `current_thread` tokio runtime. The executor gets N worker threads for M:N cell scheduling via fuel-based cooperative yielding.
+**Why:** Isolation (cells can't starve the swarm), predictable latency (no cross-subsystem task stealing), foundation for hot restart and per-cell resource accounting.
+**Context:** Inspired by Cloudflare Pingora's threading model, but without the Pingora dependency. `wasmtime::Store` is `!Send`, so executor threads must use `current_thread` + `LocalSet`. AIMD fuel scheduler yields every 10K instructions, enabling cooperative M:N scheduling within each thread. Cross-thread communication stays as tokio channels. Design doc at `~/.gstack/projects/wetware-ww/lthibault-master-design-20260331-182015.md`.
+**Effort:** M-L
+**Priority:** P1
+**Depends on:** AIMD fuel scheduler (done)
+
+## WAGI host-side implementation (axum + route table, Phase 2)
+**What:** Implement `--with-http host:port` flag that spawns an axum router. Routes by path prefix from `Cell::http(prefix)` custom section. Each request dispatches a cell spawn to the `ExecutorPool` via `SpawnRequest` channel, pipes CGI env vars + body to stdin, reads CGI response from stdout.
+**Why:** `Cell::http` variant exists in the type system. Phase 1 delivers WAGI adapter, lightweight spawn, and `ww test http` CLI. Phase 2 adds the production HTTP server.
+**Context:** WagiAdapter (`src/dispatcher/wagi.rs`) provides `build_cgi_env()` and `parse_cgi_response()`. Lightweight spawn path in `BoundExecutorImpl::spawn()` skips membrane/RPC. axum runs on the dedicated WagiService thread (`current_thread` runtime). WASM execution happens on executor threads. ~100-150 lines for the server + route table.
 **Effort:** M
 **Priority:** P2
-**Depends on:** Cell type system (done)
+**Depends on:** WAGI adapter (done), lightweight spawn (done), AIMD fuel scheduler (done), thread-per-subsystem runtime (#302)
 
 ## HTTP-to-capnp bridge module
-**What:** A capnp cell that translates HTTP requests into capability invocations. This is an application-level module, not a runtime feature. An HTTP cell (Cell::http) that accepts FastCGI on stdio, parses the HTTP request, dials a capnp service via VatClient, invokes a method, and returns the result as an HTTP response.
+**What:** A capnp cell that translates HTTP requests into capability invocations. This is an application-level module, not a runtime feature. An HTTP/WAGI cell (Cell::http) that reads CGI env vars from the host, dials a capnp service via VatClient, invokes a method, and returns the result as a CGI response on stdout.
 **Why:** Enables HTTP clients to interact with typed capabilities without speaking capnp-rpc. The bridge is a regular cell, not special runtime machinery.
-**Context:** This is intentionally application-level. The bridge cell would be a WASM binary with `Cell::http` that uses the guest Membrane to dial capnp services. It translates REST-style routes to capability method calls. Could be generic (schema-driven routing) or hand-written per service.
+**Context:** This is intentionally application-level. The bridge cell would be a WASM binary with `Cell::http` that uses the guest Membrane to dial capnp services. It translates REST-style routes to capability method calls. Could be generic (schema-driven routing) or hand-written per service. Uses wagi-guest crate for CGI env var reading and response formatting.
 **Effort:** M
 **Priority:** P3
-**Depends on:** FastCGI host implementation, VatClient guest-side
+**Depends on:** WAGI host implementation (Phase 2), VatClient guest-side
 
 ## mDNS for Kubo-less LAN peer discovery
 **What:** Add `libp2p::mdns::tokio::Behaviour` to `WetwareBehaviour` to discover LAN peers without Kubo. mDNS is a **peer discovery source** that feeds the LAN DHT routing table — not a routing primitive. It does not touch Cap'n Proto or the guest API.
@@ -90,3 +98,11 @@
 **Effort:** S (CC: ~30 min)
 **Priority:** P3
 **Depends on:** Dual DHT (architecturally orthogonal but LAN DHT should exist first so mDNS has a routing table to feed)
+
+## Multi-language WAGI examples (Go, Python)
+**What:** WAGI cell examples in Go (via TinyGo) and Python (via componentize-py). Proves that any language compiling to wasm32-wasip2 can serve HTTP through Wetware.
+**Why:** The WAGI model's main selling point is language-agnostic HTTP cells. Rust-only examples don't demonstrate this.
+**Context:** TinyGo targets wasm32-wasip2 natively. componentize-py wraps CPython into a WASI component. Both toolchains are maturing but have sharp edges. Defer until toolchains stabilize and the Rust WAGI path is proven in production.
+**Effort:** M
+**Priority:** P3
+**Depends on:** WAGI host implementation (Phase 2)
