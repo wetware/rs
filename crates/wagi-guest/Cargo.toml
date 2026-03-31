@@ -1,0 +1,11 @@
+[package]
+name = "wagi-guest"
+version = "0.1.0"
+edition = "2021"
+description = "Thin helper for writing WAGI (CGI-over-WASI) guest cells"
+
+[workspace]  # standalone — not part of the host workspace (targets wasm32-wasip2)
+
+[dependencies]
+# No runtime dependencies beyond std. Relies on WASI preview 2
+# environment variable support (wasi:cli/environment).

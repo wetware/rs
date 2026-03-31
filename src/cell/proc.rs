@@ -7,7 +7,7 @@ use wasmtime::component::{
     types::ComponentItem, Component, Linker, Resource, ResourceTable, ResourceType,
 };
 use wasmtime::StoreContextMut;
-use wasmtime::{Config as WasmConfig, Engine, Store};
+use wasmtime::{CallHook, Config as WasmConfig, Engine, Store};
 use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
 use wasmtime_wasi::p2::add_to_linker_async;
 use wasmtime_wasi::p2::bindings::{Command as WasiCliCommand, CommandPre as WasiCliCommandPre};
@@ -35,6 +35,55 @@ use exports::wetware::streams::streams::Connection;
 pub const BUFFER_SIZE: usize = 1024;
 const PIPE_BUFFER_SIZE: usize = 64 * 1024;
 
+// Fuel metering constants (AIMD scheduler)
+const INITIAL_FUEL: u64 = 1_000_000; // ~1ms at 1GHz
+const MAX_FUEL: u64 = 10_000_000; // hard ceiling
+const MIN_FUEL: u64 = 10_000; // floor (prevent starvation)
+const ADDITIVE_INCREMENT: u64 = 100_000; // reward for efficient I/O
+const DECREASE_FACTOR_NUM: u64 = 3; // multiplicative penalty: 3/4 = 0.75
+const DECREASE_FACTOR_DEN: u64 = 4;
+const YIELD_INTERVAL: u64 = 10_000; // yield to tokio every 10K instructions
+
+/// AIMD fuel scheduler for WASM cells.
+///
+/// Tracks the current fuel budget and adjusts it at host call boundaries:
+/// - Additive increase when the guest is I/O-efficient (used < 50% of budget)
+/// - Multiplicative decrease when the guest is compute-heavy (used >= 50%)
+///
+/// This creates natural backpressure: well-behaved guests stay near MAX_FUEL,
+/// while compute-heavy guests converge toward MIN_FUEL.
+pub struct FuelScheduler {
+    budget: u64,
+}
+
+impl FuelScheduler {
+    pub fn new(initial: u64) -> Self {
+        Self { budget: initial }
+    }
+
+    /// Called on `ReturningFromHost`. Returns the new fuel budget to set.
+    pub fn on_host_return(&mut self, remaining: u64) -> u64 {
+        let consumed = self.budget.saturating_sub(remaining);
+        let threshold = self.budget / 2; // 50%
+
+        let new_budget = if consumed <= threshold {
+            // Guest is I/O-efficient: additive increase
+            (self.budget + ADDITIVE_INCREMENT).min(MAX_FUEL)
+        } else {
+            // Guest burned most of its budget: multiplicative decrease
+            (consumed * DECREASE_FACTOR_NUM / DECREASE_FACTOR_DEN).max(MIN_FUEL)
+        };
+
+        self.budget = new_budget;
+        new_budget
+    }
+
+    /// Returns the current budget.
+    pub fn budget(&self) -> u64 {
+        self.budget
+    }
+}
+
 type BoxAsyncRead = Box<dyn AsyncRead + Send + Sync + Unpin + 'static>;
 type BoxAsyncWrite = Box<dyn AsyncWrite + Send + Sync + Unpin + 'static>;
 
@@ -50,6 +99,8 @@ pub struct ComponentRunStates {
     /// The staging directory for IPFS content is owned by the cache mode itself:
     /// host-wide shared dir for `Shared`, per-process dir for `Isolated`.
     pub cache_mode: Option<cache::CacheMode>,
+    /// AIMD fuel scheduler, refuels at host call boundaries.
+    pub fuel_scheduler: FuelScheduler,
 }
 
 // Required for WASI IO to work.
@@ -325,6 +376,7 @@ impl Proc {
         } else {
             let mut wasm_config = WasmConfig::new();
             wasm_config.async_support(true);
+            wasm_config.consume_fuel(true);
             Arc::new(Engine::new(&wasm_config)?)
         };
         let mut linker = Linker::new(&engine);
@@ -376,9 +428,28 @@ impl Proc {
             loader,
             data_stream,
             cache_mode,
+            fuel_scheduler: FuelScheduler::new(INITIAL_FUEL),
         };
 
         let mut store = Store::new(&engine, state);
+
+        // Fuel metering: set initial budget and cooperative yield interval
+        store.set_fuel(INITIAL_FUEL)?;
+        store.fuel_async_yield_interval(Some(YIELD_INTERVAL))?;
+        tracing::trace!(budget = INITIAL_FUEL, "fuel.initial");
+
+        // AIMD refueling at host call boundaries
+        store.call_hook(|mut ctx, hook| {
+            if matches!(hook, CallHook::ReturningFromHost) {
+                let remaining = ctx.get_fuel().unwrap_or(0);
+                let prev_budget = ctx.data().fuel_scheduler.budget();
+                let consumed = prev_budget.saturating_sub(remaining);
+                let new_budget = ctx.data_mut().fuel_scheduler.on_host_return(remaining);
+                ctx.set_fuel(new_budget)?;
+                tracing::debug!(prev_budget, new_budget, remaining, consumed, "fuel.refuel");
+            }
+            Ok(())
+        });
 
         // Instantiate it as a normal component
         let start = std::time::Instant::now();
@@ -701,5 +772,100 @@ mod tests {
         assert!(builder.bytecode.is_none());
         assert!(builder.engine.is_none());
         assert!(builder.loader.is_none());
+    }
+
+    // =========================================================================
+    // FuelScheduler AIMD tests
+    // =========================================================================
+
+    #[test]
+    fn fuel_scheduler_additive_increase_when_efficient() {
+        let mut sched = FuelScheduler::new(1_000_000);
+        // Guest used 400K of 1M budget (40% < 50% threshold) → efficient
+        let new = sched.on_host_return(600_000);
+        assert_eq!(new, 1_000_000 + ADDITIVE_INCREMENT);
+        assert_eq!(sched.budget(), new);
+    }
+
+    #[test]
+    fn fuel_scheduler_multiplicative_decrease_when_expensive() {
+        let mut sched = FuelScheduler::new(1_000_000);
+        // Guest used 900K of 1M budget (90% > 50% threshold) → expensive
+        let new = sched.on_host_return(100_000);
+        // consumed = 900K, new = 900K * 3/4 = 675K
+        assert_eq!(new, 675_000);
+        assert_eq!(sched.budget(), new);
+    }
+
+    #[test]
+    fn fuel_scheduler_clamps_to_max() {
+        let mut sched = FuelScheduler::new(MAX_FUEL - 1);
+        // Efficient: would push above MAX_FUEL
+        let new = sched.on_host_return(MAX_FUEL - 1); // consumed = 0
+        assert_eq!(new, MAX_FUEL);
+    }
+
+    #[test]
+    fn fuel_scheduler_clamps_to_min() {
+        let mut sched = FuelScheduler::new(MIN_FUEL);
+        // Guest used all fuel
+        let new = sched.on_host_return(0);
+        // consumed = MIN_FUEL, new = MIN_FUEL * 3/4 = 7500, but clamped to MIN_FUEL
+        assert_eq!(new, MIN_FUEL);
+    }
+
+    #[test]
+    fn fuel_scheduler_zero_consumed_increases() {
+        let mut sched = FuelScheduler::new(500_000);
+        // Pure I/O: guest used 0 fuel
+        let new = sched.on_host_return(500_000);
+        assert_eq!(new, 500_000 + ADDITIVE_INCREMENT);
+    }
+
+    #[test]
+    fn fuel_scheduler_all_fuel_consumed_decreases() {
+        let mut sched = FuelScheduler::new(1_000_000);
+        // Guest ran out of fuel between host calls
+        let new = sched.on_host_return(0);
+        // consumed = 1M, new = 1M * 3/4 = 750K
+        assert_eq!(new, 750_000);
+    }
+
+    #[test]
+    fn fuel_scheduler_exactly_half_is_efficient() {
+        let mut sched = FuelScheduler::new(1_000_000);
+        // consumed = 500K exactly = threshold → still efficient (<=)
+        let new = sched.on_host_return(500_000);
+        assert_eq!(new, 1_000_000 + ADDITIVE_INCREMENT);
+    }
+
+    #[test]
+    fn fuel_scheduler_just_over_half_decreases() {
+        let mut sched = FuelScheduler::new(1_000_000);
+        // consumed = 500_001 > threshold
+        let new = sched.on_host_return(499_999);
+        // consumed = 500_001, new = 500_001 * 3/4 = 375_000
+        assert_eq!(new, 375_000);
+    }
+
+    #[test]
+    fn fuel_scheduler_repeated_decrease_converges_to_min() {
+        let mut sched = FuelScheduler::new(1_000_000);
+        // Repeatedly consume all fuel — should converge to MIN_FUEL
+        for _ in 0..100 {
+            sched.on_host_return(0);
+        }
+        assert_eq!(sched.budget(), MIN_FUEL);
+    }
+
+    #[test]
+    fn fuel_scheduler_repeated_increase_converges_to_max() {
+        let mut sched = FuelScheduler::new(100_000);
+        // Repeatedly consume 0 fuel — should converge to MAX_FUEL
+        for _ in 0..200 {
+            let budget = sched.budget();
+            sched.on_host_return(budget);
+        }
+        assert_eq!(sched.budget(), MAX_FUEL);
     }
 }
