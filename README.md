@@ -19,8 +19,8 @@ a capability to do.
 
 ## Quick start
 
-> Read github.com/.agents/prompt.md, check if we're in a wetware
-> environment, and help me get started.
+> Read github.com/wetware/ww/.agents/prompt.md, check if we're in a
+> wetware environment, and help me get started.
 
 ## How it works
 
