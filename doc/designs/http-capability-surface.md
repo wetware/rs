@@ -1,252 +1,218 @@
 # HTTP Capability Surface Design
 
-## Status: Phase 0 (stdin/stdout re-wiring prototype) — tracking issue #241
+## Status: Phase 1 complete (WAGI adapter + lightweight spawn)
+
+**Supersedes** the original raw-HTTP/stdin model and long-lived cell default.
+See `~/.gstack/projects/wetware-ww/ceo-plans/2026-03-31-wagi-http-cells.md`
+for the full Phase 1 plan with CEO review.
 
 ## Overview
 
-HTTP interop for wetware: outgoing HTTP calls via an HttpClient capability,
-incoming HTTP serving via `--with-http host:port` with raw HTTP bytes piped
-to cell processes on stdin/stdout.
+HTTP interop for wetware using WAGI (WebAssembly Gateway Interface), CGI
+for WASM. The host parses HTTP, injects request metadata as environment
+variables (RFC 3875), pipes the request body to stdin, and reads a
+CGI-formatted response from stdout. Fresh cell per request. Stateless.
 
-All HTTP capabilities are Cap'n Proto native, epoch-scoped, and follow
-wetware's zero-ambient-authority model.
+All HTTP capabilities are epoch-scoped and follow wetware's
+zero-ambient-authority model.
 
-## Motivation
+## The Spec
 
-Wetware aspires to be an OS. An OS without HTTP is incomplete. The external
-bridge workaround (standalone HTTP server → libp2p → Terminal.login() →
-Membrane methods) works but places the bridge outside the capability model.
-This design brings HTTP inside the Membrane so it benefits from ocap
-discipline, epoch-scoped lifecycle, and capability provisioning.
+**There is only WAGI. If 5ms startup is too slow, use WebSockets.**
 
-## Cap'n Proto Schema
+### WAGI (request/response)
 
-```capnp
-# http.capnp
+Standard CGI over WASI. Host parses HTTP, injects metadata as env vars
+and argv, pipes body to stdin. Fresh cell per request. Stateless.
 
-struct HttpRequest {
-  method @0 :Text;
-  path @1 :Text;
-  headers @2 :List(Header);
-}
+- Environment variables = CGI headers (RFC 3875):
+  - `REQUEST_METHOD`, `PATH_INFO`, `QUERY_STRING`
+  - `CONTENT_TYPE`, `CONTENT_LENGTH`
+  - `HTTP_HOST`, `HTTP_ACCEPT`, `HTTP_*` (one per header)
+  - `SERVER_NAME`, `SERVER_PORT`, `SERVER_PROTOCOL`
+  - `GATEWAY_INTERFACE=CGI/1.1`
+- `stdin` = request body only
+- `stdout` = CGI response (`Status: 200 OK\r\nContent-Type: text/plain\r\n\r\nHello`)
 
-struct HttpResponse {
-  status @0 :UInt16;
-  headers @1 :List(Header);
-}
+Guest code is a boring CLI program using the `wagi-guest` crate:
 
-struct Header {
-  name @0 :Text;
-  value @1 :Text;
-}
+```rust
+use wagi_guest as wagi;
 
-struct CellSpec {
-  union {
-    path @0 :Text;            # UnixFS path (.wasm or .glia, extension-detected)
-    wasmBinary @1 :Data;      # inline WASM bytes
-    wasmCid @2 :Text;         # CID pointing to WASM binary
-    gliaCid @3 :Text;         # CID pointing to Glia script
-  }
-  args @4 :List(Text);        # WASI process args (set at spawn)
-  env @5 :List(Text);         # WASI process env vars (set at spawn)
-}
-
-# Reuse ByteStream from system.capnp for HTTP bodies.
-
-interface HttpClient {
-  request @0 (req :HttpRequest, body :ByteStream)
-    -> (resp :HttpResponse, body :ByteStream);
-}
-
-interface HttpClientBuilder {
-  build @0 () -> (client :HttpClient);
-  # Future: build(config :HttpClientConfig) for domain/verb attenuation
-}
-
-interface HttpServer {
-  router @0 (executor :Executor) -> (router :HttpRouter);
-}
-
-interface HttpRouter {
-  handle @0 (pattern :Text, spec :CellSpec,
-             args :List(Text), env :List(Text)) -> (route :UInt128);
-  remove @1 (route :UInt128) -> ();
+fn handle() {
+    let ct = ("Content-Type", "text/plain");
+    match wagi::method().as_str() {
+        "GET"  => wagi::respond(200, &[ct], "0"),
+        "POST" => wagi::respond(200, &[ct], "1"),
+        _      => wagi::respond(405, &[ct], "Method Not Allowed"),
+    }
 }
 ```
 
-## Membrane Integration
+That's ~8 lines. Down from the 306-line FastCGI implementation.
 
-```capnp
-interface Membrane {
-  graft @0 () -> (
-    identity   :Identity,              # @0
-    host       :Host,                  # @1
-    executor   :Executor,              # @2
-    ipfs       :Client,                # @3
-    routing    :Routing,               # @4
-    http       :HttpClientBuilder,     # @5 — always present (outgoing)
-    httpServer :HttpServer             # @6 — null without --with-http
-  );
-}
-```
+### WebSocket (persistent bidirectional stream, Phase 2)
 
-Schema evolution: Cap'n Proto struct fields default to null, so adding @5
-and @6 is backward-compatible. HttpClientBuilder defined in `http.capnp`,
-imported in `stem.capnp`.
+The upgrade request arrives as a normal WAGI invocation:
+
+- `HTTP_UPGRADE=websocket` and `HTTP_CONNECTION=Upgrade` in env vars
+- Cell writes `101 Switching Protocols` + WebSocket accept headers to stdout
+- After the 101 response, stdin/stdout become a bidirectional WebSocket
+  frame stream
+- Cell stays alive for the connection lifetime
+- Host handles WebSocket framing (masking, fragmentation)
+
+Statefulness is client-driven (hold the connection open), not a
+server-side mode flag.
+
+## Why WAGI, Not FastCGI
+
+FastCGI was designed to solve fork-per-request cost and connection
+multiplexing. Neither applies to WASM sandboxes (~5ms instantiation,
+isolated stdio per cell). The counter example was 306 lines of binary
+protocol parsing. Nobody in the WASM ecosystem uses FastCGI. WAGI,
+WCGI, and Spin all chose simpler models.
+
+WAGI makes the guest a boring local process. No framework, no binary
+protocol, no custom exports. Every language already knows how to read
+env vars and print to stdout.
 
 ## Architecture
 
-### Outgoing HTTP (HttpClient)
+### Host-side: WagiAdapter (`src/dispatcher/wagi.rs`)
+
+Standalone functions, NOT a ProtocolAdapter impl (ProtocolAdapter's
+`request_body()` returns only `Vec<u8>` and WAGI needs env vars too).
+
+- `build_cgi_env(method, path, query, headers, server_name, server_port)`
+  constructs RFC 3875 env vars
+- `parse_cgi_response(stdout)` parses CGI output into status + headers + body
+
+### Guest-side: wagi-guest crate (`crates/wagi-guest/`)
+
+Thin wrapper (~100 lines, zero deps beyond std):
+
+- `wagi::method()`, `wagi::path()`, `wagi::query()`, `wagi::header(name)`
+- `wagi::body()`, `wagi::body_string()`
+- `wagi::respond(status, headers, body)`
+
+### Lightweight Spawn Path
+
+`BoundExecutorImpl::spawn()` branches on a `lightweight` flag:
+
+- **Lightweight (WAGI):** No `with_data_streams()`, no membrane/peer RPC
+  system, no bootstrap cap. Cell uses stdin/stdout directly.
+- **Full (raw/capnp cells):** data_streams + membrane or peer RPC system.
+
+Detection: `BoundConfig.lightweight = true` is set by
+`BoundExecutorImpl::new_lightweight()` for WAGI cells.
+
+### Per-request Flow
 
 ```
-WASI Guest ──Cap'n Proto RPC──> EpochGuardedHttpClient (reqwest) ──> Internet
+HTTP request arrives (Phase 2: axum, Phase 1: ww test http)
+    |
+    +-- 1. build_cgi_env("GET", "/counter", "", headers, ...)
+    |       -> ["REQUEST_METHOD=GET", "PATH_INFO=/counter", ...]
+    |
+    +-- 2. executor.bind(wasm_bytes, args, env=cgi_env)
+    |       -> BoundExecutor (Arc<bytecode> clone + new config)
+    |
+    +-- 3. bound.spawn() [lightweight path]
+    |       -> Creates duplex pipes (stdin/stdout/stderr)
+    |       -> Skips membrane, skips RPC system
+    |       -> tokio::task::spawn_local(proc.run())
+    |       -> Returns Process client
+    |
+    +-- 4. Write request body to stdin, close stdin
+    |
+    +-- 5. tokio::time::timeout(30s, read_stdout + wait)
+    |       |
+    |       +-- Success: parse_cgi_response(stdout) -> HTTP response
+    |       +-- Timeout: Process.kill() -> 504 Gateway Timeout
+    |
+    +-- 6. Return response
+```
+
+### Error-to-HTTP Status Mapping
+
+| Condition | HTTP status |
+|---|---|
+| Valid CGI response (any exit code) | Status from CGI output |
+| No Status line in stdout | 200 OK (CGI default) |
+| Empty stdout | 502 Bad Gateway |
+| Malformed headers | 502 Bad Gateway |
+| WASM trap (OOM, stack overflow) | 502 Bad Gateway |
+| Stdin write failure | 502 Bad Gateway |
+| Process.kill() triggered (timeout) | 504 Gateway Timeout |
+
+**Stdout is authoritative:** if `parse_cgi_response()` finds a valid
+response, it's returned regardless of exit code. Exit code is logged
+for observability only. Intentional deviation from CGI spec.
+
+### Cell Isolation
+
+| Threat | Mitigation | Status |
+|--------|-----------|--------|
+| Guest escapes sandbox | wasmtime memory isolation | Built |
+| WASM fault (trap, OOB) | `Result`, no panic | Built |
+| Host-side glue panics | `tokio::spawn` per cell | Built |
+| Cell floods stdout | `MAX_RESPONSE_BYTES` (16 MiB) | Built |
+| Cell eats all CPU | AIMD fuel scheduler (wasmtime fuel + call-hook) | Built |
+| Cell eats all memory | wasmtime `StoreLimits` | TODO |
+| Cell hangs forever | per-request timeout (30s) | TODO |
+| Concurrent request flood | max cells per prefix | TODO (Phase 2) |
+
+## Cap'n Proto Schema
+
+No schema change needed. `Cell::http(prefix)` already stores the path
+prefix in `cell.capnp`. The semantic meaning is the same: "this cell
+handles HTTP requests at this prefix." The wire format changed
+(FastCGI to WAGI/CGI) but the type tag is about routing, not framing.
+
+### Outgoing HTTP (HttpClient, deferred)
+
+```
+WASI Guest --Cap'n Proto RPC--> EpochGuardedHttpClient (reqwest) --> Internet
 ```
 
 - HttpClientBuilder.build() returns an epoch-guarded HttpClient
-- Follows the IPFS HttpClient pattern (wraps reqwest::Client)
-- Every RPC method calls EpochGuard::check() — stale epoch = error
-- Glia stdlib: `(http/get url)`, `(http/post url body)`
-- Membrane attenuation: httpClient can be withheld from remote peer sessions
+- Every RPC method calls EpochGuard::check()
+- Membrane attenuation: httpClient can be withheld from remote peers
 
-### Incoming HTTP (--with-http)
+### Membrane Integration (Phase 2)
 
-```
-Internet ──> hyper listener ──> route table ──> cell stdin  (raw HTTP request)
-                                            <── cell stdout (raw HTTP response)
-```
+HttpClientBuilder added to graft() return. HttpServer null without
+`--with-http`.
 
-- `--with-http host:port` — operator opt-in. No flag = no listener = httpServer is null.
-- Port binding is an operator decision at launch time, converted to a capability
-  inside the sandbox. Same pattern as `--stem` for on-chain coordination.
-- Single port. Route by longest prefix match. Conflict on registration = error.
+## Implementation Status
 
-### Executor Attenuation
+### Phase 1: WAGI Adapter + Lightweight Spawn (done)
+- [x] WagiAdapter: `build_cgi_env()`, `parse_cgi_response()`, 16 unit tests
+- [x] wagi-guest crate: env var helpers + CGI response formatting
+- [x] Counter example rewritten as WAGI cell (306 -> 32 lines)
+- [x] Lightweight spawn path in `BoundExecutorImpl::spawn()`
+- [x] AIMD fuel scheduler (call-hook refueling at host boundaries, 10 unit tests)
+- [x] Process.kill() via watch channel + tokio::select!
+- [ ] Per-request timeout (30s)
+- [ ] `ww test http` CLI subcommand
+- [ ] `ww new http` CLI scaffolding
+- [ ] Three-point benchmark
+- [ ] Quickstart doc
 
-HttpServer.router(executor) binds the Executor into the Router. PID0 binds,
-delegates the bound Router to children. Children can register HTTP cells
-but cannot access the raw Executor for arbitrary process spawning. Cell
-lifecycle is constrained to route lifetime.
+### Phase 2: Production HTTP Server
+- `--with-http host:port` flag, axum router, route table
+- WebSocket upgrade support
+- HttpClient capability (outgoing HTTP via reqwest)
 
-```
-PID0: httpServer.router(executor) → bound Router
-  │
-  └── child A: router.handle("/api/*", spec) → registers cell
-      │
-      └── child A has Router but NOT raw Executor
-          Can register HTTP cells, cannot spawn arbitrary processes
-```
-
-### CGI Model — Raw HTTP on stdin/stdout
-
-The host pipes complete HTTP request bytes to the cell's stdin. The cell
-reads a full HTTP request (method line, headers, body), processes it, and
-writes a full HTTP response (status line, headers, body) to stdout.
-
-No sideband protocol. No environment variable metadata. No RPC for request
-metadata. HTTP is self-describing — method, path, headers are all in the
-byte stream.
-
-The cell needs an HTTP parser (small library in any language). For Glia
-cells, the Glia evaluator WASM includes one.
-
-HTTP requests are self-delimiting (Content-Length / chunked encoding), which
-solves the per-request framing question for long-lived cells.
-
-### Cell Lifecycle
-
-- Cell processes are long-lived (gen_server model). Not per-request spawning.
-- Default serial: requests to a cell are queued and processed one at a time.
-- Developer opts into concurrency by spawning sub-workers via Executor.
-- Cell process owns its route. Cell dies → Router auto-removes route.
-- Route token (u128, CSPRNG) is an external kill switch for manual removal.
-- Registering process can exit freely — route persists as long as cell lives.
-
-### CellSpec Dispatch
-
-```
-CellSpec.path       → detect extension:
-                        .wasm → spawn WASM binary directly
-                        .glia → spawn Glia evaluator WASM with script as arg
-CellSpec.wasmBinary → spawn from inline bytes
-CellSpec.wasmCid    → fetch from IPFS, then spawn
-CellSpec.gliaCid    → fetch Glia script from IPFS, spawn evaluator with script
-```
-
-CIDs are safe designators — content-addressed, immutable, unforgeable. Passing
-a CID doesn't grant authority, only designation. The Executor bound in the
-Router provides execution authority. Router has internal IPFS access.
-
-Glia cells are schema-transparent: the Glia evaluator is "just another
-WASM binary" in the FHS image. Schema is language-agnostic.
-
-### Epoch Transitions
-
-Epoch advance kills all HTTP cells. Clean break:
-1. All cell processes terminated
-2. All routes cleared from table
-3. All HTTP capabilities go stale (EpochGuard)
-4. After re-graft, PID0 re-registers routes via init.d
-
-This matches how all other epoch-scoped capabilities work.
-
-### Error Handling
-
-- Cell crashes mid-request → host returns HTTP 502 Bad Gateway
-- Cell dead on request arrival → 503 Service Unavailable
-- Cell timeout → 504 Gateway Timeout
-- Unmatched route → 404 Not Found
-- Queue overflow → 503 Service Unavailable
-- Request body exceeds max size → 413 Payload Too Large
-- Cell restart managed by init.d supervision (no HTTP-specific supervisor)
-
-### Backpressure & Limits
-
-- Byte-bounded per-cell request queue (default 1 MiB). 503 when exceeded.
-- Max request body size (default 10 MiB, configurable).
-- Per-request timeout (default 30s).
-- TCP backpressure: if cell's stdin buffer is full, host pauses socket read.
-
-## Implementation Phases
-
-### Phase 0: stdin/stdout Re-Wiring Prototype (#242)
-HARD GATE. Validate that Wasmtime allows swapping stdin/stdout streams on a
-running WASI process. If not, evaluate fallbacks (WASI p2 resources,
-length-prefix framing).
-
-### Phase 1: Schema + HttpClient (#243)
-- Create `capnp/http.capnp`
-- Implement EpochGuardedHttpClient, HttpClientBuilder
-- Extend graft() with @5 (HttpClientBuilder), @6 (HttpServer, null for now)
-- Glia stdlib: `(http/get url)`, `(http/post url body)`
-- Membrane attenuation for remote peers
-
-### Phase 2: --with-http + CGI Mode (#244)
-- `--with-http host:port` CLI flag
-- hyper HTTP server, route table, path-prefix matching
-- HttpServer.router(executor) → HttpRouter
-- HttpRouter.handle(pattern, spec) → route token
-- stdin/stdout re-wiring, raw HTTP bytes
-- Cell lifecycle, epoch transitions
-
-### Phase 3: Full HttpCell RPC Mode (#245)
-- HttpCell.handle(req, body) → (resp, body) interface
-- Streaming bodies via ByteStream
-- Alternative to CGI for cells needing structured access
-
-### Phase 4: WebSocket (#246)
-Requires separate design doc. HTTP upgrade at host, bidirectional stream
-to guest, frame semantics TBD.
-
-## Open Questions
-
-1. **TLS termination** — defer to reverse proxy for v1
-2. **Static file serving** — FHS `pub/` directory convention?
-3. **HttpClient attenuation** — HttpClientBuilder.build(config) for domain/verb restrictions (future, not MVP)
+### Phase 3: Multi-Language
+- Go (TinyGo), Python (componentize-py) WAGI examples
 
 ## Prior Art
 
-- **Sandstorm**: C++ HTTP proxy forwards to grain sandbox. Grain never listens.
-- **Deno**: `--allow-net=host:port` grants network access at launch.
-- **BEAM/Cowboy**: Process-per-request via Ranch acceptor pool.
-- **WASI HTTP**: `wasi:http/incoming-handler` — component exports handle(). We chose Cap'n Proto native instead.
-- **CGI**: stdin = request body, stdout = response. We extend this to raw HTTP bytes (headers included).
+- **WAGI** (Deislabs): CGI for WASM, same model we adopted
+- **Spin** (Fermyon): similar CGI-inspired model with custom trigger system
+- **WCGI** (Wasmer): CGI variant for WebAssembly
+- **Sandstorm**: C++ HTTP proxy forwards to grain sandbox
+- **BEAM/Cowboy**: Process-per-request via Ranch acceptor pool
+- **CGI (RFC 3875)**: The original. Env vars + stdin + stdout.
