@@ -18,6 +18,8 @@
 //! // NOTE: interested in feedback from embedded apps and other
 //! // resource-constrained environments where execution mode matters.
 
+pub mod wagi;
+
 use std::fmt;
 
 use async_trait::async_trait;

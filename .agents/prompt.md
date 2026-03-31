@@ -156,7 +156,7 @@ plumbing to wire up:
 | Cell type | stdio carries | Host wires up |
 |-----------|--------------|---------------|
 | `raw(protocol)` | raw libp2p stream bytes | `/ww/0.1.0/stream/{protocol}` listener |
-| `http(prefix)` | FastCGI records | HTTP route -> FastCGI bridge |
+| `http(prefix)` | CGI env vars + stdin/stdout | WAGI (CGI for WASM) |
 | `capnp(Schema.Node)` | Cap'n Proto RPC | `/ww/0.1.0/rpc/{cid}` listener |
 | absent (no section) | Cap'n Proto RPC (WIT) | pid0 mode — full Membrane graft |
 
@@ -238,7 +238,7 @@ make shell     # Glia shell WASM
 make host      # host binary only
 make examples  # all examples (chess + echo + counter)
 make echo      # echo example (raw cell)
-make counter   # counter example (HTTP/FastCGI cell)
+make counter   # counter example (HTTP/WAGI cell)
 make chess     # chess example (Cap'n Proto RPC cell)
 make           # rebuild everything
 ```

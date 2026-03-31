@@ -12,3 +12,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Spike 2: Two Cap'n Proto RPC systems coexist on shared LocalSet
   - Spike 3: Off-thread WASM compilation (267x speedup via serialize/deserialize)
   - Bonus: current_thread runtime in std::thread (worker thread topology)
+- WAGI adapter and guest crate for HTTP cells (#304)
+  - `WagiAdapter` with `build_cgi_env()` and `parse_cgi_response()` (16 unit tests)
+  - `wagi-guest` crate: zero-dependency helper library for WAGI cells
+  - Counter example rewritten from 305 lines of FastCGI to 32 lines using `wagi-guest`
+- AIMD fuel scheduler for cooperative M:N cell scheduling (#303)
+  - Additive-increase multiplicative-decrease fuel budgeting at wasmtime host call boundaries
+  - Cells yield every 10K instructions; I/O-efficient cells converge to 10M fuel, compute-heavy to 10K
+  - 10 unit tests for FuelScheduler convergence and clamping behavior

@@ -1,4 +1,4 @@
-# Counter cell — HTTP/FastCGI demo
+# Counter cell — HTTP/WAGI demo
 #
 # Usage: make -C examples/counter
 
