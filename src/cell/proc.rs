@@ -446,13 +446,7 @@ impl Proc {
                 let consumed = prev_budget.saturating_sub(remaining);
                 let new_budget = ctx.data_mut().fuel_scheduler.on_host_return(remaining);
                 ctx.set_fuel(new_budget)?;
-                tracing::debug!(
-                    prev_budget,
-                    new_budget,
-                    remaining,
-                    consumed,
-                    "fuel.refuel"
-                );
+                tracing::debug!(prev_budget, new_budget, remaining, consumed, "fuel.refuel");
             }
             Ok(())
         });
