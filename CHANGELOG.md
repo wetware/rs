@@ -7,21 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
-- Process.kill() RPC for cell termination (#305)
-  - Kill signal via watch channel, exit code 137 (SIGKILL convention)
+- **HTTP cells via WAGI** — serve HTTP from any language that compiles to wasm32-wasip2 (#304)
+  - `WagiAdapter`: host-side CGI env var injection and response parsing (16 unit tests)
+  - `wagi-guest` crate: zero-dependency helpers for reading requests and writing responses
+  - Counter example rewritten from 305 lines of binary framing to 32 lines with `wagi-guest`
+- **AIMD fuel scheduler** — fair cooperative scheduling for multiple cells on one thread (#303)
+  - Cells yield every 10K WASM instructions, I/O-efficient cells get more fuel, compute-heavy cells get less
+  - Enables M:N cell scheduling without tokio work stealing
+- **Process.kill() RPC** — terminate a running cell from the host (#305)
+  - Sends kill signal via watch channel, cell exits with code 137
   - Both lightweight and full spawn paths support kill via `tokio::select!`
-- Lightweight spawn path for ephemeral cells (#305)
-  - Skips membrane/RPC setup for WAGI/CGI cells, reducing per-request overhead
-- Prerequisite spikes for thread-per-subsystem runtime (#306, refs #302)
-  - Spike 1: Two cells interleave on shared LocalSet via fuel yields
-  - Spike 2: Two Cap'n Proto RPC systems coexist on shared LocalSet
-  - Spike 3: Off-thread WASM compilation (267x speedup via serialize/deserialize)
-  - Bonus: current_thread runtime in std::thread (worker thread topology)
-- WAGI adapter and guest crate for HTTP cells (#304)
-  - `WagiAdapter` with `build_cgi_env()` and `parse_cgi_response()` (16 unit tests)
-  - `wagi-guest` crate: zero-dependency helper library for WAGI cells
-  - Counter example rewritten from 305 lines of FastCGI to 32 lines using `wagi-guest`
-- AIMD fuel scheduler for cooperative M:N cell scheduling (#303)
-  - Additive-increase multiplicative-decrease fuel budgeting at wasmtime host call boundaries
-  - Cells yield every 10K instructions; I/O-efficient cells converge to 10M fuel, compute-heavy to 10K
-  - 10 unit tests for FuelScheduler convergence and clamping behavior
+- **Lightweight spawn path** — faster cell startup for ephemeral HTTP cells (#305)
+  - Skips membrane/RPC setup for WAGI cells, reducing per-request overhead
+- **Thread-per-subsystem validation spikes** — Phase 0 of the Pingora-inspired runtime (#306, refs #302)
+  - Two cells interleave on shared LocalSet via fuel yields
+  - Two Cap'n Proto RPC systems coexist on shared LocalSet
+  - Off-thread WASM compilation achieves 267x speedup via serialize/deserialize
+  - Worker thread topology validated with explicit `current_thread` runtime

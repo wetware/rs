@@ -65,15 +65,15 @@
 **RESOLVED:** `handle_vat_connection()` now wraps `bootstrap_request()` in a 10s `tokio::time::timeout`. Produces a clear error referencing `system::serve()`.
 
 ## ~~Dual DHT — LAN + WAN content routing~~ ✅
-**RESOLVED:** `kad_lan` field added to `WetwareBehaviour` running `/ipfs/lan/kad/1.0.0` in server mode. Dual-dispatch provide/findProviders with cross-DHT PeerId dedup via `FindRequest`. Kubo peers classified by `is_lan_addr()` into WAN/LAN routing tables. 10 unit tests for extracted helpers. Design doc at `~/.gstack/projects/wetware-ww/lthibault-feat-local-routing-design-20260329-131709.md`.
+**RESOLVED:** `kad_lan` field added to `WetwareBehaviour` running `/ipfs/lan/kad/1.0.0` in server mode. Dual-dispatch provide/findProviders with cross-DHT PeerId dedup via `FindRequest`. Kubo peers classified by `is_lan_addr()` into WAN/LAN routing tables. 10 unit tests for extracted helpers.
 
 ## Thread-per-subsystem runtime (Pingora-inspired) (#302)
 **What:** Replace the single shared multi-threaded tokio runtime with a thread-per-subsystem topology. Each subsystem (libp2p swarm, HTTP/WAGI, executor, epoch) gets its own OS thread with its own `current_thread` tokio runtime. The executor gets N worker threads for M:N cell scheduling via fuel-based cooperative yielding.
 **Why:** Isolation (cells can't starve the swarm), predictable latency (no cross-subsystem task stealing), foundation for hot restart and per-cell resource accounting.
-**Context:** Inspired by Cloudflare Pingora's threading model, but without the Pingora dependency. `wasmtime::Store` is `!Send`, so executor threads must use `current_thread` + `LocalSet`. AIMD fuel scheduler yields every 10K instructions, enabling cooperative M:N scheduling within each thread. Cross-thread communication stays as tokio channels. Design doc at `~/.gstack/projects/wetware-ww/lthibault-master-design-20260331-182015.md`.
+**Context:** Inspired by Cloudflare Pingora's threading model, but without the Pingora dependency. `wasmtime::Store` is `!Send`, so executor threads must use `current_thread` + `LocalSet`. AIMD fuel scheduler yields every 10K instructions, enabling cooperative M:N scheduling within each thread. Cross-thread communication stays as tokio channels.
 **Effort:** M-L
 **Priority:** P1
-**Depends on:** AIMD fuel scheduler (done)
+**Depends on:** AIMD fuel scheduler (#303, merged), Phase 0 spikes (#306, merged)
 
 ## WAGI host-side implementation (axum + route table, Phase 2)
 **What:** Implement `--with-http host:port` flag that spawns an axum router. Routes by path prefix from `Cell::http(prefix)` custom section. Each request dispatches a cell spawn to the `ExecutorPool` via `SpawnRequest` channel, pipes CGI env vars + body to stdin, reads CGI response from stdout.

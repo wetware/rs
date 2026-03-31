@@ -3,8 +3,6 @@
 ## Status: Phase 1 complete (WAGI adapter + lightweight spawn)
 
 **Supersedes** the original raw-HTTP/stdin model and long-lived cell default.
-See `~/.gstack/projects/wetware-ww/ceo-plans/2026-03-31-wagi-http-cells.md`
-for the full Phase 1 plan with CEO review.
 
 ## Overview
 

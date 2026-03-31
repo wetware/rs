@@ -1,6 +1,6 @@
 # Wetware
 
-[![CI](https://github.com/wetware/rs/actions/workflows/rust.yml/badge.svg)](https://github.com/wetware/rs/actions/workflows/rust.yml)
+[![CI](https://github.com/wetware/ww/actions/workflows/rust.yml/badge.svg)](https://github.com/wetware/ww/actions/workflows/rust.yml)
 
 The peer-to-peer agentic OS.
 
@@ -73,4 +73,6 @@ podman run --rm wetware:latest                # boots kernel + shell
 - [Image layout](doc/images.md) — FHS convention, mounts, and on-chain coordination
 - [CLI reference](doc/cli.md) — full command-line usage
 - [Shell](doc/shell.md) — Glia shell details
+- [HTTP / WAGI](doc/designs/http-capability-surface.md) — HTTP cells via CGI for WASM
 - [Platform vision](doc/designs/economic-agent-platform.md) — roadmap and design
+- [Changelog](CHANGELOG.md) — what's new

@@ -27,7 +27,7 @@ on-chain head advances, forcing a re-graft.
 
 Schema definitions live in `capnp/`:
 
-- **`system.capnp`** — Host, Executor, Process, ByteStream, StreamListener, StreamDialer, VatListener, VatClient
+- **`system.capnp`** — Host, Executor, Process (including `kill()`), ByteStream, StreamListener, StreamDialer, VatListener, VatClient
 - **`stem.capnp`** — Terminal, Membrane, Epoch, Signer, Identity
 - **`ipfs.capnp`** — IPFS CoreAPI (UnixFS, Block, Pin, ...)
 - **`routing.capnp`** — Kademlia DHT (provide, findProviders, hash)
