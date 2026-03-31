@@ -4,7 +4,7 @@
 
 Glia's error handling and effect system, implemented in two phases:
 - **Phase 1 (#205):** `try`/`throw` with `Err(Val)` — error recovery for init.d scripts and services
-- **Phase 2:** `perform`/`with-handler` — full algebraic effect system with capability-effect fusion
+- **Phase 2 (#300):** `perform`/`with-effect-handler` — full algebraic effect system with capability-effect fusion, schema CID matching
 
 The design follows **Approach C (Capability-Effect Fusion):** standard Unison-style algebraic effects where the Membrane is the outermost effect handler. Every capability call is a `perform`. The handler stack mirrors the capability chain.
 
@@ -37,7 +37,7 @@ All share one structure: **interposing policy at a boundary** — the same thing
 1. **Effects are the ONLY way to interact with the outside world from Glia.** No backdoor calls that bypass the effect system.
 2. **One-shot continuations only.** Resume or abort, no cloning (OCaml 5's pragmatic choice).
 3. **Dynamic handler lookup.** `perform` walks up the handler stack at runtime (Unison-style, not Koka-style static evidence passing). Glia is dynamically typed.
-4. **`throw`/`try` are sugar over `:fail` effect.** Phase 1 ships them as special forms; Phase 2 replaces them with prelude macros over `perform`/`with-handler`.
+4. **`throw`/`try` are sugar over `:fail` effect.** Phase 1 ships them as special forms; Phase 2 replaces them with prelude macros over `perform`/`with-effect-handler`.
 
 ## Phase 1: Error Handling (#205)
 
@@ -73,15 +73,22 @@ All share one structure: **interposing policy at a boundary** — the same thing
 (guard (> n 0) (ex-info "must be positive" {:type :invalid}))
 ```
 
-## Phase 2: Full Effect System (Q2)
+## Phase 2: Full Effect System (#300)
 
 ### Language additions
-- `perform` — `(perform :effect-type data)` suspends computation. Returns value from handler's `resume`.
-- `with-handler` — `(with-handler {:effect-type handler-fn} body)` installs handlers. Handler fn receives `(data resume)`.
+- `perform` — two forms:
+  - `(perform :keyword data)` — keyword effect (environmental)
+  - `(perform cap :method args...)` — cap-targeted effect (object-scoped)
+- `with-effect-handler` — one unified form for both keyword and cap handlers:
+  - `(with-effect-handler :keyword handler-fn body...)` — single keyword handler
+  - `(with-effect-handler :k1 fn1 :k2 fn2 body...)` — multiple keyword handlers (inline kwargs)
+  - `(with-effect-handler cap handler-fn body...)` — cap handler
 
 ### Capability-effect fusion
-- `(host id)` becomes `(perform :host {:method "id"})`
-- Kernel installs Membrane as outermost handler for capability effects
+- `(host id)` becomes `(perform host :id)` (cap-targeted, not keyword)
+- Kernel installs cap handlers via `with-effect-handler` wrapping each form
+- Cap effects match by **schema CID** (BLAKE3 hash of canonical capnp schema bytes),
+  following Eff/Koka semantics: handlers match effect *types*, not instances
 - Authority checks happen in the handler (epoch validation, capability revocation)
 - Stale epoch detected → handler re-grafts and resumes transparently
 
@@ -89,6 +96,7 @@ All share one structure: **interposing policy at a boundary** — the same thing
 - **One-shot continuations:** `resume` can be called at most once. Calling twice is a runtime error.
 - **Handler stack recursion:** `perform` inside a handler skips the current handler frame, dispatches to next outer handler for the same effect type.
 - **`:fail` handlers CAN resume:** default handler (via `try`) does not resume. User-installed `:fail` handlers can resume, enabling retry/recovery.
+- **Schema CID matching:** two caps with the same capnp interface (same schema CID) match the same handler, regardless of which instance performed the effect. This enables type-based handler dispatch.
 
 ### Phase transition (Q1 → Q2)
 Phase 2 removes `Expr::Try`/`Expr::Throw` from the analyzer. `try`/`throw` become prelude macros:
@@ -96,48 +104,52 @@ Phase 2 removes `Expr::Try`/`Expr::Throw` from the analyzer. `try`/`throw` becom
 (defmacro throw [data]
   `(perform :fail ~data))
 
-(defmacro try [body]
-  `(with-handler
-     {:fail (fn [err _resume] {:err err})}
-     {:ok ~body}))
+(defmacro try [& body]
+  (let [error (gensym)]
+    `(with-effect-handler :fail (fn [~error] {:err ~error})
+       {:ok (do ~@body)})))
 ```
 
 ### Examples
 ```clojure
 ;; Testing — mock capabilities
-(with-handler
-  {:host (fn [req resume] (resume {:id "mock-peer"}))}
-  (assert (= (host id) "mock-peer")))
+(with-effect-handler my-host (fn [data resume] (resume {:id "mock-peer"}))
+  (assert (= (perform my-host :id) "mock-peer")))
 
 ;; Retry on transient failure
-(with-handler
-  {:fail (fn [err resume]
-           (when (= :network (:type err))
-             (sleep 1000)
-             (resume :retry)))}
+(with-effect-handler :fail (fn [err resume]
+                             (when (= :network (:type err))
+                               (sleep 1000)
+                               (resume :retry)))
   (publish-data))
 
 ;; Supervision
-(with-handler
-  {:fail (fn [err _resume]
-           (log "crashed:" err)
-           (restart-proc))}
+(with-effect-handler :fail (fn [err _resume]
+                             (log "crashed:" err)
+                             (restart-proc))
   (run-service))
 
-;; Audit trail
-(with-handler
-  {:host (fn [req resume]
-           (log "host access:" req)
-           (resume (perform :host req)))}
+;; Audit trail — intercept cap and forward
+(with-effect-handler my-host (fn [data resume]
+                               (log "host access:" data)
+                               (resume (perform my-host data)))
   (run-service))
+
+;; Multiple keyword handlers (inline kwargs)
+(with-effect-handler :log log-fn :fail fail-fn
+  (-> input
+      validate
+      (perform :log)
+      transform
+      (perform :fail)))
 ```
 
 ## Open Questions
 
-1. Should `with-handler` support a `finally` clause?
+1. Should `with-effect-handler` support a `finally` clause? (tracked in TODOS.md)
 2. Should capability effects use namespaced keywords (`:ww/host`) to avoid collision?
-3. Should `perform` without a matching handler error (fail-closed) or fall through?
-4. Continuation mechanism for Phase 2: likely `tokio::sync::oneshot` channel pair.
+3. `perform` without a matching handler propagates as `Val::Effect` — unhandled at top level is a runtime error (fail-closed).
+4. ~~Continuation mechanism:~~ Resolved — `tokio::sync::oneshot` channel pair.
 
 ## De-risk Strategy
 
