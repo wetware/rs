@@ -87,6 +87,9 @@ interface Process {
   # Return the capability exported by the guest via system::serve().
   # The cap is type-erased — cast to the expected interface on the guest side.
   # Errors if the guest didn't export a capability.
+
+  kill @5 () -> ();
+  # Terminate the process immediately. Fuel is revoked and the cell traps.
 }
 
 interface VatListener {
