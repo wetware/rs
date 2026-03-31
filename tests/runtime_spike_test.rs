@@ -188,8 +188,7 @@ async fn spike2_two_rpc_systems_on_shared_localset() {
             write_stdin(&cell_a, msg_a).await;
             write_stdin(&cell_b, msg_b).await;
 
-            let (result_a, result_b) =
-                tokio::join!(read_stdout(&cell_a), read_stdout(&cell_b),);
+            let (result_a, result_b) = tokio::join!(read_stdout(&cell_a), read_stdout(&cell_b),);
 
             assert_eq!(result_a, msg_a, "cell A RPC round-trip failed");
             assert_eq!(result_b, msg_b, "cell B RPC round-trip failed");
