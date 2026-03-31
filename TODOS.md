@@ -44,19 +44,11 @@
 **Priority:** P2
 **Depends on:** import system (#166)
 
-## RPC handshake timeout for VatClient.dial()
-**What:** Add an RPC-level timeout to `VatClientImpl::dial()` so it doesn't silently hang when the remote peer accepts the libp2p stream but never speaks Cap'n Proto.
-**Why:** The 30s `DIAL_TIMEOUT` only covers stream establishment. If the remote accepts the stream but doesn't run an RPC server, `rpc_system.bootstrap()` returns a proxy immediately, but method calls on that proxy hang until the TCP-level timeout (minutes). Guests see a silent hang.
-**Context:** The fix is to wrap the first RPC operation (or the bootstrap itself) in a timeout. E.g., send a lightweight probe after bootstrap and fail if no response within 30s. Or use `tokio::time::timeout` around the bootstrap cap retrieval.
-**Effort:** S
-**Priority:** P1
+## ~~RPC handshake timeout for VatClient.dial()~~ ✅
+**RESOLVED:** `VatClient::dial()` now wraps `remote_cap.when_resolved()` in a 30s `tokio::time::timeout` after `rpc_system.bootstrap()`. If the remote accepts the libp2p stream but never speaks Cap'n Proto, the dial fails with a clear timeout error instead of hanging indefinitely.
 
-## Epoch-watching in accept loops (VatListener + StreamListener)
-**What:** The accept loops in `VatListenerImpl::listen()` and `StreamListenerImpl::listen()` check the epoch guard once at entry but never recheck. A guest whose epoch goes stale continues accepting connections and spawning cells indefinitely.
-**Why:** This is a trust boundary violation. The membrane's epoch-based revocation is supposed to invalidate capabilities, but the long-lived accept loop keeps serving after revocation.
-**Context:** Fix by adding a `tokio::select!` inside the accept loop that watches the epoch guard's `receiver` for changes and breaks when stale. Same pattern needed in both `src/rpc/vat_listener.rs` and `src/rpc/stream_listener.rs` (search for the `while let Some` accept loops). The dialer has a shorter TOCTOU window but should also recheck epoch after stream establishment.
-**Effort:** S
-**Priority:** P1
+## ~~Epoch-watching in accept loops (VatListener + StreamListener)~~ ✅
+**RESOLVED:** Both accept loops now use `tokio::select!` to watch the epoch guard's `watch::Receiver` for changes. When the epoch sequence advances past the issued sequence, the loop breaks with a log warning. Same pattern in both `vat_listener.rs` and `stream_listener.rs`.
 
 ## ~~Protocol namespace collision between StreamListener and VatListener~~
 **RESOLVED:** Stream and vat protocols now use distinct prefixes:

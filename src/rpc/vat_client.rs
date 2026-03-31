@@ -23,6 +23,11 @@ use crate::system_capnp;
 /// Timeout for establishing the libp2p stream to a remote peer.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Timeout for the RPC bootstrap handshake after the stream is established.
+/// If the remote peer accepts the libp2p stream but never speaks Cap'n Proto,
+/// this prevents the caller from hanging indefinitely.
+const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub struct VatClientImpl {
     stream_control: libp2p_stream::Control,
     guard: EpochGuard,
@@ -91,6 +96,24 @@ impl system_capnp::vat_client::Server for VatClientImpl {
             let network = VatNetwork::new(reader, writer, Side::Client, Default::default());
             let mut rpc_system = RpcSystem::new(Box::new(network), None);
             let remote_cap: capnp::capability::Client = rpc_system.bootstrap(Side::Server);
+
+            // Verify the remote actually speaks Cap'n Proto by waiting for the
+            // bootstrap promise to resolve. Without this, rpc_system.bootstrap()
+            // returns a proxy immediately and method calls hang indefinitely if
+            // the remote never responds.
+            tokio::time::timeout(BOOTSTRAP_TIMEOUT, remote_cap.when_resolved())
+                .await
+                .map_err(|_| {
+                    capnp::Error::failed(format!(
+                        "RPC handshake timeout: {peer_id} on {stream_protocol} did not \
+                         respond within {BOOTSTRAP_TIMEOUT:?} (peer may not speak Cap'n Proto)"
+                    ))
+                })?
+                .map_err(|e| {
+                    capnp::Error::failed(format!(
+                        "RPC handshake failed with {peer_id} on {stream_protocol}: {e}"
+                    ))
+                })?;
 
             // Drive the RPC system in a background task. Cap'n Proto refcounting
             // handles shutdown: when the guest drops all capabilities obtained from

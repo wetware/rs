@@ -94,23 +94,42 @@ impl system_capnp::stream_listener::Server for StreamListenerImpl {
         tracing::info!(protocol = %stream_protocol, "Registered stream subprotocol cell");
 
         // Accept loop: for each incoming connection, spawn a cell process.
+        // Watches the epoch guard so we stop accepting when capabilities are revoked.
+        let mut epoch_rx = self.guard.receiver.clone();
+        let issued_seq = self.guard.issued_seq;
         tokio::task::spawn_local(async move {
-            while let Some((peer_id, stream)) = incoming.next().await {
-                tracing::debug!(
-                    peer = %peer_id,
-                    protocol = %stream_protocol,
-                    "Incoming stream subprotocol connection"
-                );
-                let executor = executor.clone();
-                let wasm = wasm.clone();
-                let protocol = protocol_suffix.clone();
-                tokio::task::spawn_local(async move {
-                    if let Err(e) = handle_connection(executor, &wasm, stream, &protocol).await {
-                        tracing::error!(protocol, "Stream cell connection error: {e}");
+            loop {
+                tokio::select! {
+                    conn = incoming.next() => {
+                        let Some((peer_id, stream)) = conn else {
+                            tracing::warn!(protocol = %stream_protocol, "Stream subprotocol accept loop ended unexpectedly");
+                            break;
+                        };
+                        tracing::debug!(
+                            peer = %peer_id,
+                            protocol = %stream_protocol,
+                            "Incoming stream subprotocol connection"
+                        );
+                        let executor = executor.clone();
+                        let wasm = wasm.clone();
+                        let protocol = protocol_suffix.clone();
+                        tokio::task::spawn_local(async move {
+                            if let Err(e) = handle_connection(executor, &wasm, stream, &protocol).await {
+                                tracing::error!(protocol, "Stream cell connection error: {e}");
+                            }
+                        });
                     }
-                });
+                    _ = epoch_rx.changed() => {
+                        if epoch_rx.borrow().seq != issued_seq {
+                            tracing::warn!(
+                                protocol = %stream_protocol,
+                                "Epoch became stale, closing stream accept loop"
+                            );
+                            break;
+                        }
+                    }
+                }
             }
-            tracing::warn!(protocol = %stream_protocol, "Stream subprotocol accept loop ended unexpectedly");
         });
 
         Promise::ok(())
