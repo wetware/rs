@@ -334,6 +334,72 @@ The host delegates to a local Kubo HTTP client (`http://localhost:5001`).
 Cap'n Proto pipelining allows `ipfs.unixfs().cat(path)` to
 resolve in a single round-trip.
 
+## Concurrency and scheduling
+
+### E-ordering (Cap'n Proto)
+
+Method calls on a single Cap'n Proto object are serialized. No races within
+an object. Calls across objects are independent and concurrent. Pipelining
+lets you chain calls on promises: `ipfs.unixfs().cat(path)` resolves in a
+single round-trip, not three. No locks, no semaphores. The object IS the
+synchronization boundary.
+
+### AIMD fuel scheduler
+
+Each WASM cell runs with a fuel budget that controls how many instructions
+it can execute before yielding. The scheduler uses additive-increase
+multiplicative-decrease (AIMD) to balance compute across cells sharing a
+thread:
+
+- Cells start with 1M fuel and yield every 10K instructions
+- On host call boundaries: if the cell used <50% of its budget (I/O-bound),
+  it gets 200K more next round (additive increase). If it used >=50%
+  (compute-heavy), the budget scales to 3/4 (multiplicative decrease).
+- I/O-efficient cells converge to 10M fuel. Compute-heavy cells converge
+  to 10K fuel. This prevents one cell from starving others.
+
+Implementation: `FuelScheduler` in `src/cell/proc.rs`. Uses wasmtime's
+`fuel_async_yield_interval` and `CallHook::ReturningFromHost`.
+
+### Thread-per-subsystem (planned, #302)
+
+The current runtime uses a single multi-threaded tokio runtime. The planned
+replacement is a Pingora-inspired thread-per-subsystem topology:
+
+```
+Host (Rust-side supervisor, owns service threads)
+ ├── Thread 1: SwarmService    — libp2p event loop (current_thread)
+ ├── Thread 2: WagiService     — axum + CGI dispatch (current_thread)
+ ├── Thread 3: EpochService    — on-chain watcher (current_thread)
+ └── Thread 4..N: ExecutorService — cells via fuel scheduling
+       └── current_thread + LocalSet each
+```
+
+Each subsystem gets its own OS thread with its own single-threaded tokio
+runtime. `wasmtime::Store` is `!Send`, so executor threads must use
+`current_thread` + `LocalSet`. The AIMD fuel scheduler enables cooperative
+M:N scheduling within each thread. Cross-thread communication uses tokio
+channels.
+
+Prerequisite spikes (Phase 0) are complete and validated. See
+`tests/runtime_spike_test.rs`.
+
+## Cell types
+
+Cells are tagged with a type via a WASM custom section (`"cell.capnp"`).
+The tag determines what the host wires up:
+
+| Cell type | stdio carries | Host wires up |
+|-----------|--------------|---------------|
+| `raw(protocol)` | raw libp2p stream bytes | `/ww/0.1.0/stream/{protocol}` listener |
+| `http(prefix)` | CGI env vars + stdin/stdout | WAGI (CGI for WASM) |
+| `capnp(Schema.Node)` | Cap'n Proto RPC | `/ww/0.1.0/rpc/{cid}` listener |
+| absent (no section) | Cap'n Proto RPC (WIT) | pid0 mode — full Membrane graft |
+
+HTTP cells use the lightweight spawn path: no membrane/RPC setup, just
+stdin/stdout. Fresh cell per request, stateless. See
+`doc/designs/http-capability-surface.md`.
+
 ## See also
 
 - [routing.md](routing.md) — DHT design, capability model, bootstrap lifecycle
