@@ -742,7 +742,6 @@ impl system_capnp::executor::Server for ExecutorImpl {
             content_store: self.content_store.clone(),
             signing_key: self.signing_key.clone(),
             stream_control: self.stream_control.clone(),
-            lightweight: false,
         });
 
         let client: system_capnp::bound_executor::Client = capnp_rpc::new_client(bound);
@@ -917,10 +916,6 @@ struct BoundConfig {
     content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
     signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
     stream_control: Option<libp2p_stream::Control>,
-    /// When true, spawn() uses the lightweight path: no data_streams,
-    /// no membrane/peer RPC system, no bootstrap cap. The cell
-    /// communicates via stdin/stdout only (WAGI/CGI model).
-    lightweight: bool,
 }
 
 impl BoundExecutorImpl {
@@ -930,36 +925,6 @@ impl BoundExecutorImpl {
         }
     }
 
-    /// Create a lightweight BoundExecutor for WAGI/HTTP cells.
-    ///
-    /// The returned Cap'n Proto client can be used with `HttpServer::handle()`
-    /// or directly via `spawn_request()`. The lightweight path skips
-    /// data_streams and membrane/peer RPC — the cell communicates via
-    /// stdin/stdout only.
-    pub fn new_lightweight(
-        bytecode: Arc<Vec<u8>>,
-        args: Vec<String>,
-        env: Vec<String>,
-        wasm_debug: bool,
-        network_state: NetworkState,
-        swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
-    ) -> system_capnp::bound_executor::Client {
-        let bound = Self::new(BoundConfig {
-            bytecode,
-            args,
-            env,
-            wasm_debug,
-            network_state,
-            swarm_cmd_tx,
-            guard: None,
-            epoch_rx: None,
-            content_store: None,
-            signing_key: None,
-            stream_control: None,
-            lightweight: true,
-        });
-        capnp_rpc::new_client(bound)
-    }
 }
 
 #[allow(refining_impl_trait)]
@@ -982,145 +947,93 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
 
             let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
             let (kill_tx, kill_rx) = tokio::sync::watch::channel(false);
+            // All cells get data_streams + membrane RPC.
+            // stdin/stdout semantics vary by cell type (wire protocol, CGI,
+            // or shutdown signal), but the WIT membrane channel is universal.
+            let (builder, mut handles) = ProcBuilder::new()
+                .with_env(config.env.clone())
+                .with_args(config.args.clone())
+                .with_wasm_debug(config.wasm_debug)
+                .with_bytecode((*config.bytecode).clone())
+                .with_stdio(guest_stdin, guest_stdout, guest_stderr)
+                .with_data_streams();
+
+            let proc = builder
+                .build()
+                .await
+                .map_err(|err| capnp::Error::failed(err.to_string()))?;
+
+            let (reader, writer) = handles
+                .take_host_split()
+                .ok_or_else(|| capnp::Error::failed("host stream missing".into()))?;
+
+            let network_state = config.network_state.clone();
+            let swarm_cmd_tx = config.swarm_cmd_tx.clone();
+            let wasm_debug = config.wasm_debug;
+            let epoch_rx = config.epoch_rx.clone();
+            let content_store = config.content_store.clone();
+            let signing_key = config.signing_key.clone();
+            let stream_control = config.stream_control.clone();
+
             let mut bootstrap_cap: Option<capnp::capability::Client> = None;
-
-            if config.lightweight {
-                // Lightweight spawn path: no data_streams, no membrane/peer RPC.
-                // The cell communicates via stdin/stdout only (WAGI/CGI model).
-                let builder = ProcBuilder::new()
-                    .with_env(config.env.clone())
-                    .with_args(config.args.clone())
-                    .with_wasm_debug(config.wasm_debug)
-                    .with_bytecode((*config.bytecode).clone())
-                    .with_stdio(guest_stdin, guest_stdout, guest_stderr);
-
-                let proc = builder
-                    .build()
-                    .await
-                    .map_err(|err| capnp::Error::failed(err.to_string()))?;
-
-                let mut kill_rx = kill_rx;
-                // Drain stderr to tracing on the ambient LocalSet.
-                tokio::task::spawn_local(async move {
-                    use tokio::io::AsyncBufReadExt;
-                    let reader = tokio::io::BufReader::new(host_stderr);
-                    let mut lines = reader.lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        tracing::info!("{}", line);
-                    }
-                });
-
-                tokio::task::spawn_local(async move {
-                    let exit_code = tokio::select! {
-                        result = proc.run() => {
-                            match result {
-                                Ok(()) => 0,
-                                Err(e) => {
-                                    tracing::error!(
-                                        "bound_executor: lightweight child failed: {}",
-                                        e
-                                    );
-                                    1
-                                }
-                            }
-                        }
-                        _ = kill_rx.changed() => {
-                            tracing::info!("bound_executor: lightweight child killed");
-                            137
-                        }
-                    };
-                    tracing::info!(
-                        "bound_executor: lightweight child exited with code {}",
-                        exit_code
-                    );
-                    let _ = exit_tx.send(exit_code);
-                });
+            let child_rpc_system = if let (Some(erx), Some(ic), Some(sc)) =
+                (epoch_rx, content_store, stream_control)
+            {
+                let (rpc, guest) = membrane::build_membrane_rpc(
+                    reader,
+                    writer,
+                    network_state,
+                    swarm_cmd_tx,
+                    wasm_debug,
+                    erx,
+                    ic,
+                    signing_key,
+                    sc,
+                );
+                bootstrap_cap = Some(guest.client);
+                rpc
             } else {
-                // Full spawn path: data_streams + membrane/peer RPC system.
-                let (builder, mut handles) = ProcBuilder::new()
-                    .with_env(config.env.clone())
-                    .with_args(config.args.clone())
-                    .with_wasm_debug(config.wasm_debug)
-                    .with_bytecode((*config.bytecode).clone())
-                    .with_stdio(guest_stdin, guest_stdout, guest_stderr)
-                    .with_data_streams();
+                build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug)
+            };
 
-                let proc = builder
-                    .build()
-                    .await
-                    .map_err(|err| capnp::Error::failed(err.to_string()))?;
+            let mut kill_rx = kill_rx;
+            // Spawn RPC system and stderr drain on the ambient LocalSet.
+            tokio::task::spawn_local(child_rpc_system.map(|_| ()));
 
-                let (reader, writer) = handles
-                    .take_host_split()
-                    .ok_or_else(|| capnp::Error::failed("host stream missing".into()))?;
+            tokio::task::spawn_local(async move {
+                use tokio::io::AsyncBufReadExt;
+                let reader = tokio::io::BufReader::new(host_stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::info!("{}", line);
+                }
+            });
 
-                let network_state = config.network_state.clone();
-                let swarm_cmd_tx = config.swarm_cmd_tx.clone();
-                let wasm_debug = config.wasm_debug;
-                let epoch_rx = config.epoch_rx.clone();
-                let content_store = config.content_store.clone();
-                let signing_key = config.signing_key.clone();
-                let stream_control = config.stream_control.clone();
-
-                let child_rpc_system = if let (Some(erx), Some(ic), Some(sc)) =
-                    (epoch_rx, content_store, stream_control)
-                {
-                    let (rpc, guest) = membrane::build_membrane_rpc(
-                        reader,
-                        writer,
-                        network_state,
-                        swarm_cmd_tx,
-                        wasm_debug,
-                        erx,
-                        ic,
-                        signing_key,
-                        sc,
-                    );
-                    bootstrap_cap = Some(guest.client);
-                    rpc
-                } else {
-                    build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug)
-                };
-
-                let mut kill_rx = kill_rx;
-                // Spawn RPC system and stderr drain on the ambient LocalSet.
-                tokio::task::spawn_local(child_rpc_system.map(|_| ()));
-
-                tokio::task::spawn_local(async move {
-                    use tokio::io::AsyncBufReadExt;
-                    let reader = tokio::io::BufReader::new(host_stderr);
-                    let mut lines = reader.lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        tracing::info!("{}", line);
-                    }
-                });
-
-                tokio::task::spawn_local(async move {
-                    let exit_code = tokio::select! {
-                        result = proc.run() => {
-                            match result {
-                                Ok(()) => 0,
-                                Err(e) => {
-                                    tracing::error!(
-                                        "bound_executor: child process failed: {}",
-                                        e
-                                    );
-                                    1
-                                }
+            tokio::task::spawn_local(async move {
+                let exit_code = tokio::select! {
+                    result = proc.run() => {
+                        match result {
+                            Ok(()) => 0,
+                            Err(e) => {
+                                tracing::error!(
+                                    "bound_executor: child process failed: {}",
+                                    e
+                                );
+                                1
                             }
                         }
-                        _ = kill_rx.changed() => {
-                            tracing::info!("bound_executor: child process killed");
-                            137
-                        }
-                    };
-                    tracing::info!(
-                        "bound_executor: child process exited with code {}",
-                        exit_code
-                    );
-                    let _ = exit_tx.send(exit_code);
-                });
-            }
+                    }
+                    _ = kill_rx.changed() => {
+                        tracing::info!("bound_executor: child process killed");
+                        137
+                    }
+                };
+                tracing::info!(
+                    "bound_executor: child process exited with code {}",
+                    exit_code
+                );
+                let _ = exit_tx.send(exit_code);
+            });
 
             let stdin =
                 capnp_rpc::new_client(ByteStreamImpl::new(host_stdin, StreamMode::WriteOnly));

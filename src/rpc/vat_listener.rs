@@ -6,6 +6,11 @@
 //! `system::serve()` exported bootstrap capability, and serves it to the
 //! connecting peer via Cap'n Proto RPC bootstrapping.
 //!
+//! **Stdin semantics for RPC cells:** stdin is a shutdown signal channel, not a
+//! data transport. The host never writes bytes — it only closes stdin to signal
+//! the cell to drain gracefully (equivalent to Go's `<-chan struct{}`). All I/O
+//! goes through the WIT data_streams side-channel.
+//!
 //! This is the capability-mode counterpart of `StreamListener` (byte-stream mode).
 
 use std::sync::Arc;
@@ -155,29 +160,52 @@ async fn handle_vat_connection(
     let response = req.send().promise.await?;
     let process = response.get()?.get_process()?;
 
-    // 2. Get the cell's exported bootstrap capability.
+    // 2. Get stdin handle. For RPC cells, stdin is a shutdown signal:
+    //    closing it tells the cell to drain and exit gracefully.
+    //    No bytes are ever written — it's a <-chan struct{}.
+    let stdin_resp = process.stdin_request().send().promise.await?;
+    let stdin = stdin_resp.get()?.get_stream()?;
+
+    // 3. Get the cell's exported bootstrap capability.
     //    Timeout guards against cells that never call system::serve().
-    let bootstrap_resp = tokio::time::timeout(
+    //    On failure, close stdin to clean up the orphaned cell process.
+    let bootstrap_resp = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
         process.bootstrap_request().send().promise,
     )
     .await
-    .map_err(|_| {
-        capnp::Error::failed(
-            "cell did not export bootstrap capability within 10s \
-             (did the guest call system::serve()?)"
-                .into(),
-        )
-    })??;
-    let bootstrap_cap: capnp::capability::Client =
-        bootstrap_resp.get()?.get_cap().get_as_capability()?;
+    {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(e)) => {
+            let _ = stdin.close_request().send().promise.await;
+            return Err(e);
+        }
+        Err(_timeout) => {
+            let _ = stdin.close_request().send().promise.await;
+            return Err(capnp::Error::failed(
+                "cell did not export bootstrap capability within 10s \
+                 (did the guest call system::serve()?)"
+                    .into(),
+            ));
+        }
+    };
+    let bootstrap_cap: capnp::capability::Client = match bootstrap_resp
+        .get()
+        .and_then(|r| r.get_cap().get_as_capability())
+    {
+        Ok(cap) => cap,
+        Err(e) => {
+            let _ = stdin.close_request().send().promise.await;
+            return Err(e);
+        }
+    };
 
-    // 3. Bridge: serve the cell's cap to the remote peer over the libp2p stream.
+    // 4. Bridge: serve the cell's cap to the remote peer over the libp2p stream.
     let (reader, writer) = Box::pin(stream).split();
     let network = VatNetwork::new(reader, writer, Side::Server, Default::default());
     let peer_rpc = RpcSystem::new(Box::new(network), Some(bootstrap_cap));
 
-    // 4. Drive the peer RPC system and cell process concurrently.
+    // 5. Drive the peer RPC system and cell process concurrently.
     //    When EITHER side finishes (peer disconnects OR cell exits),
     //    we tear down both to avoid serving a dead capability or
     //    keeping a cell alive with no peer.
@@ -191,14 +219,14 @@ async fn handle_vat_connection(
 
     tokio::select! {
         _ = peer_rpc => {
-            tracing::debug!(protocol = protocol_cid, "Peer disconnected, cleaning up cell");
-            // Peer disconnected. Drop process capability to trigger cleanup.
-            // The cell will see its host RPC connection close.
+            tracing::debug!(protocol = protocol_cid, "Peer disconnected, signaling cell shutdown");
+            // Peer disconnected. Close stdin to signal graceful shutdown.
+            let _ = stdin.close_request().send().promise.await;
         }
         exit_code = wait_fut => {
             tracing::debug!(exit_code, protocol = protocol_cid, "Vat cell process exited");
-            // Cell exited. The peer RPC will get disconnected errors
-            // on subsequent calls since the bootstrap cap is dead.
+            // Cell exited on its own. The peer RPC will get disconnected
+            // errors on subsequent calls since the bootstrap cap is dead.
         }
     }
 
