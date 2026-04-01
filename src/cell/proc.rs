@@ -35,14 +35,39 @@ use exports::wetware::streams::streams::Connection;
 pub const BUFFER_SIZE: usize = 1024;
 const PIPE_BUFFER_SIZE: usize = 64 * 1024;
 
-// Fuel metering constants (AIMD scheduler)
-const INITIAL_FUEL: u64 = 1_000_000; // ~1ms at 1GHz
-const MAX_FUEL: u64 = 10_000_000; // hard ceiling
-const MIN_FUEL: u64 = 10_000; // floor (prevent starvation)
-const ADDITIVE_INCREMENT: u64 = 100_000; // reward for efficient I/O
-const DECREASE_FACTOR_NUM: u64 = 3; // multiplicative penalty: 3/4 = 0.75
+// ---------------------------------------------------------------------------
+// Fuel metering constants
+//
+// Fuel is both the resource-metering unit and the cooperative preemption
+// primitive.  Every YIELD_INTERVAL instructions Wasmtime suspends the guest
+// and returns Poll::Pending to the Tokio LocalSet, giving other cells a turn.
+// Fuel exhaustion between host calls does NOT trap — it yields (async mode).
+//
+// Budget bounds are enforced by the AIMD scheduler on every ReturningFromHost
+// hook.  The scheduler converges I/O-bound guests toward MAX_FUEL and
+// compute-heavy guests toward MIN_FUEL, providing natural backpressure without
+// any external timer or OS interrupt.
+// ---------------------------------------------------------------------------
+
+/// Starting budget for a freshly spawned cell (~1 ms at 1 GHz).
+const INITIAL_FUEL: u64 = 1_000_000;
+/// Hard ceiling.  An I/O-bound cell that never exhausts its budget will
+/// converge here after enough additive increases.
+const MAX_FUEL: u64 = 10_000_000;
+/// Floor.  Prevents a compute-heavy cell from being throttled to zero and
+/// starved of all forward progress.
+const MIN_FUEL: u64 = 10_000;
+/// Additive increase applied to the budget when a guest is I/O-efficient
+/// (consumed < 50% of its budget before the next host call).
+const ADDITIVE_INCREMENT: u64 = 100_000;
+/// Numerator of the multiplicative decrease factor (3/4 = 0.75).
+const DECREASE_FACTOR_NUM: u64 = 3;
+/// Denominator of the multiplicative decrease factor.
 const DECREASE_FACTOR_DEN: u64 = 4;
-const YIELD_INTERVAL: u64 = 10_000; // yield to tokio every 10K instructions
+/// Wasmtime yields the guest back to the Tokio LocalSet every this many
+/// instructions.  Controls preemption granularity independently of the AIMD
+/// budget — a guest with a large budget still yields frequently.
+const YIELD_INTERVAL: u64 = 10_000;
 
 /// AIMD fuel scheduler for WASM cells.
 ///
@@ -66,7 +91,14 @@ impl FuelScheduler {
         Self { budget: initial }
     }
 
-    /// Called on `ReturningFromHost`. Returns the new fuel budget to set.
+    /// Adjust the fuel budget at a `ReturningFromHost` boundary.
+    ///
+    /// `remaining` is the fuel left in the store at the moment the guest
+    /// re-enters WASM after a host call.  The scheduler infers how much the
+    /// guest consumed during that slice (`prev_budget - remaining`) and applies
+    /// the AIMD policy.
+    ///
+    /// Returns the new budget to install via `store.set_fuel(...)`.
     pub fn on_host_return(&mut self, remaining: u64) -> u64 {
         let consumed = self.budget.saturating_sub(remaining);
         let threshold = self.budget / 2; // 50%
@@ -376,6 +408,12 @@ impl Proc {
         let stdout_stream = AsyncStdoutStream::new(BUFFER_SIZE, stdout);
         let stderr_stream = AsyncStdoutStream::new(BUFFER_SIZE, stderr);
 
+        // Build a Wasmtime engine with the two settings required for cooperative
+        // scheduling:
+        //   async_support — fuel exhaustion yields (Poll::Pending) instead of
+        //                   trapping, so the Tokio LocalSet can run other cells.
+        //   consume_fuel  — enables instruction counting; without this, fuel
+        //                   methods are no-ops and the AIMD scheduler is inert.
         let engine = if let Some(engine) = engine {
             engine
         } else {
@@ -438,12 +476,22 @@ impl Proc {
 
         let mut store = Store::new(&engine, state);
 
-        // Fuel metering: set initial budget and cooperative yield interval
+        // Load the initial fuel budget.  fuel_async_yield_interval controls how
+        // often Wasmtime suspends the guest to poll other Tokio tasks — this is
+        // independent of the AIMD budget ceiling.  A cell with MAX_FUEL still
+        // yields every YIELD_INTERVAL instructions.
         store.set_fuel(INITIAL_FUEL)?;
         store.fuel_async_yield_interval(Some(YIELD_INTERVAL))?;
         tracing::trace!(budget = INITIAL_FUEL, "fuel.initial");
 
-        // AIMD refueling at host call boundaries
+        // AIMD refueling hook: fires on every ReturningFromHost transition.
+        //
+        // We measure how much fuel the guest consumed during its last WASM
+        // slice and hand it to the scheduler, which applies the AIMD policy and
+        // returns a new budget.  set_fuel() reloads the tank so the guest can
+        // continue.  Note that this hook does NOT fire on fuel-yield events
+        // (those go through Poll::Pending); it fires when the guest makes a
+        // deliberate host call (WASI import, etc.).
         store.call_hook(|mut ctx, hook| {
             if matches!(hook, CallHook::ReturningFromHost) {
                 let remaining = ctx.get_fuel().unwrap_or(0);
