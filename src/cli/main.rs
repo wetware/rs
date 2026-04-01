@@ -979,7 +979,7 @@ pub extern "C" fn _start() {
         };
 
         // Executor pool: M:N cell scheduling across N worker threads.
-        let _executor_pool =
+        let executor_pool =
             ww::runtime::ExecutorPool::new(executor_threads, supervisor.shutdown_rx());
 
         tracing::info!(
@@ -1004,17 +1004,52 @@ pub extern "C" fn _start() {
 
         let cell = builder.build();
 
-        // The kernel cell runs on the current thread's tokio runtime.
-        // It creates its own LocalSet internally for !Send WASM futures.
-        // Child cells will use the ExecutorPool (via the Executor capability).
-        let result = cell.spawn_serving(stream_control).await?;
-        tracing::info!(code = result.exit_code, "Kernel exited");
+        // Spawn the kernel cell into the executor pool. The kernel's exit
+        // code flows back through the oneshot channel.
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        executor_pool
+            .spawn(ww::runtime::SpawnRequest {
+                name: "kernel".into(),
+                factory: Box::new(move |_shutdown| {
+                    Box::pin(async move {
+                        match cell.spawn_serving(stream_control).await {
+                            Ok(result) => {
+                                let _ = result_tx.send(Ok(result.exit_code));
+                            }
+                            Err(e) => {
+                                tracing::error!("kernel failed: {}", e);
+                                let _ = result_tx.send(Err(e));
+                            }
+                        }
+                    })
+                }),
+                // Exit code is sent explicitly by the factory above.
+                result_tx: None,
+            })
+            .map_err(|_| anyhow::anyhow!("executor pool rejected kernel spawn"))?;
+
+        // Wait for the kernel to exit.
+        let exit_code = match result_rx.await {
+            Ok(Ok(code)) => code,
+            Ok(Err(e)) => {
+                tracing::error!("Kernel error: {}", e);
+                1
+            }
+            Err(_) => {
+                tracing::error!("Kernel result channel dropped");
+                1
+            }
+        };
+        tracing::info!(code = exit_code, "Kernel exited");
 
         supervisor.shutdown();
 
         // Hold `merged` alive until after guest exits.
+        // ExecutorPool must also be dropped after the kernel exits but
+        // before process exit, to join worker threads cleanly.
+        drop(executor_pool);
         drop(merged);
-        std::process::exit(result.exit_code);
+        std::process::exit(exit_code);
     }
 
     /// Publish a wetware environment to IPFS
