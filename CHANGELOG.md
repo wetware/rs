@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Thread-per-subsystem runtime inspired by Cloudflare Pingora (#302)
+  - Each subsystem (libp2p swarm, epoch pipeline, WASM executor) runs on its own OS thread with its own single-threaded tokio runtime
+  - `Service` trait + `Host` supervisor for lifecycle management and coordinated shutdown
+  - `ExecutorPool` with M:N cell scheduling: N worker threads, each `current_thread` + `LocalSet`, least-loaded assignment with round-robin fallback
+  - `SwarmService` and `EpochService` run on dedicated threads, isolated from cell execution
+  - `--executor-threads` CLI flag (0 = auto-detect CPU cores)
+  - 6 unit tests covering host lifecycle, executor pool scheduling, error/panic handling
 - Process.kill() RPC for cell termination (#305)
   - Kill signal via watch channel, exit code 137 (SIGKILL convention)
   - Both lightweight and full spawn paths support kill via `tokio::select!`
