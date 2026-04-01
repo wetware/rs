@@ -199,6 +199,42 @@ RpcSession::connect()                      ProcBuilder::with_data_streams()
         +------------- Cap'n Proto RPC ----------+
 ```
 
+## Cell I/O semantics
+
+All cell types get `with_data_streams()` + membrane RPC. The WIT membrane
+channel is universal. What differs is the stdin/stdout semantics:
+
+| Cell type | stdin carries | stdout carries |
+|-----------|--------------|----------------|
+| **Raw** (`Cell::raw`) | Wire protocol bytes (libp2p stream) | Wire protocol bytes |
+| **HTTP/WAGI** (`Cell::http`) | CGI request body (RFC 3875) | CGI response |
+| **Cap'n Proto** (`Cell::capnp`) | Shutdown signal only (close = graceful exit) | Unused |
+| **pid0** (no cell section) | Host terminal / daemon stdin | Host terminal |
+
+For Cap'n Proto (RPC) cells, stdin is a shutdown signal channel, not a data
+transport. The host never writes bytes. It only closes stdin to tell the cell
+to drain gracefully (equivalent to Go's `<-chan struct{}`). All RPC I/O goes
+through the WIT data_streams side-channel.
+
+`handle_vat_connection` in `src/rpc/vat_listener.rs` demonstrates the pattern:
+when a peer disconnects, the host closes stdin to signal the cell to shut down.
+Error paths (bootstrap timeout, capability extraction failure) also close stdin
+to prevent orphaned cell processes.
+
+## Executor pool and M:N scheduling
+
+Cell processes run on an `ExecutorPool` of N worker threads (one per CPU core
+by default, configurable via `--executor-threads`). Each worker is an OS thread
+with a `current_thread` tokio runtime and a `LocalSet`, because `wasmtime::Store`
+is `!Send`.
+
+Cells are assigned to the least-loaded worker at spawn time (with round-robin
+fallback for ties). Multiple cells on the same worker cooperatively share the
+thread via the AIMD fuel scheduler: cells yield every ~10K instructions at
+wasmtime host call boundaries, giving sibling cells a chance to run.
+
+Reference: `src/runtime.rs`
+
 ## Notes and implications
 
 - The transport is **async** on the host and **poll-driven** on the guest

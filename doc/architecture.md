@@ -38,7 +38,7 @@ Authentication, if needed, is handled by wrapping the Membrane in a
 ```
 Traditional process:        Wetware guest:
   env vars     -> yes         env vars     -> only if explicitly passed
-  filesystem   -> yes         filesystem   -> none; content via UnixFS capability
+  filesystem   -> yes         filesystem   -> none; content via IPFS capability
   network      -> yes         network      -> no
   syscalls     -> yes         syscalls     -> WASI subset only
   ambient auth -> yes         ambient auth -> none
@@ -47,11 +47,11 @@ Traditional process:        Wetware guest:
 
 **There is no native filesystem on the guest side.** The WASI sandbox does
 not provide filesystem access. All content loading goes through capabilities
-— specifically the IPFS UnixFS capability obtained via `ipfs.unixfs().cat(path)`.
+— specifically the IPFS capability obtained via `ipfs.cat(path)`.
 
 The host publishes the merged FHS image to IPFS and sets `$WW_ROOT` to the
 resulting IPFS path (e.g. `/ipfs/QmHash...`). Guests resolve content relative
-to this root: `ipfs.unixfs().cat("$WW_ROOT/bin/main.wasm")`.
+to this root: `ipfs.cat("$WW_ROOT/bin/main.wasm")`.
 
 This is the foundation that makes untrusted code execution safe. An agent can
 only do what the capabilities it holds allow. If you don't hand it the

@@ -20,6 +20,7 @@ ww run [OPTIONS] <IMAGE>...
 |------|---------|-------------|
 | `--port <PORT>` | `2025` | libp2p swarm listen port |
 | `--wasm-debug` | off | Enable WASM debug info for guest processes |
+| `--executor-threads <N>` | `0` | Number of executor worker threads for cell scheduling. 0 = auto-detect (one per CPU core). Each thread runs its own single-threaded tokio runtime with a LocalSet for !Send WASM futures. |
 | `--stem <ADDR>` | none | Atom contract address (hex, 0x-prefixed). Enables epoch lifecycle: reads on-chain HEAD, prepends as base image layer, watches for updates. |
 | `--rpc-url <URL>` | `http://127.0.0.1:8545` | HTTP JSON-RPC endpoint for `eth_call` / `eth_getLogs` |
 | `--ws-url <URL>` | `ws://127.0.0.1:8545` | WebSocket JSON-RPC endpoint for `eth_subscribe` |
