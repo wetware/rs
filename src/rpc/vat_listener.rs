@@ -20,7 +20,7 @@ use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
-use futures::io::AsyncReadExt;
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use futures::StreamExt;
 use membrane::EpochGuard;
 
@@ -141,10 +141,13 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
 ///                  bootstrap =                         bootstrap = Membrane
 ///                  cell_cap ←── captures ←───────── cell exports via serve()
 /// ```
-async fn handle_vat_connection(
+///
+/// Generic over stream type so integration tests can substitute an in-memory
+/// duplex for the libp2p stream. Production callers pass `libp2p::Stream`.
+pub async fn handle_vat_connection(
     executor: system_capnp::executor::Client,
     cell_wasm: &[u8],
-    stream: libp2p::Stream,
+    stream: impl AsyncRead + AsyncWrite + 'static,
     protocol_cid: &str,
 ) -> Result<(), capnp::Error> {
     // 1. Spawn cell process via executor.runBytes.
