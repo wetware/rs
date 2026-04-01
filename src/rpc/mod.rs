@@ -924,7 +924,6 @@ impl BoundExecutorImpl {
             config: Arc::new(config),
         }
     }
-
 }
 
 #[allow(refining_impl_trait)]
