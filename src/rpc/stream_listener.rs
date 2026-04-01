@@ -2,7 +2,7 @@
 //!
 //! The `StreamListener` capability lets a guest register a libp2p subprotocol cell.
 //! For each incoming stream on that subprotocol, the host spawns a fresh WASI
-//! process (via the guest-provided `Executor`) with stdin/stdout wired to the
+//! process (via the guest-provided `BoundExecutor`) with stdin/stdout wired to the
 //! stream — the cell speaks whatever wire protocol it wants over stdio.
 
 use capnp::capability::Promise;
@@ -38,36 +38,10 @@ impl system_capnp::stream_listener::Server for StreamListenerImpl {
         pry!(self.guard.check());
 
         let params = pry!(params.get());
-        let executor: system_capnp::executor::Client = pry!(params.get_executor());
+        let bound_executor: system_capnp::bound_executor::Client = pry!(params.get_executor());
         let protocol_str = pry!(pry!(params.get_protocol())
             .to_str()
             .map_err(|e| capnp::Error::failed(e.to_string())));
-        let wasm = pry!(params.get_wasm()).to_vec();
-
-        // Verify the Cell type tag matches this listener and protocol.
-        match pry!(super::decode_cell_section(&wasm)) {
-            Some(super::CellType::Raw(ref embedded_protocol))
-                if embedded_protocol == protocol_str => {} // ok
-            Some(super::CellType::Raw(ref embedded_protocol)) => {
-                return Promise::err(capnp::Error::failed(format!(
-                    "Cell::raw protocol '{}' does not match listen protocol '{}'",
-                    embedded_protocol, protocol_str
-                )));
-            }
-            Some(other) => {
-                return Promise::err(capnp::Error::failed(format!(
-                    "StreamListener requires Cell::raw variant, got {:?}",
-                    std::mem::discriminant(&other)
-                )));
-            }
-            None => {
-                return Promise::err(capnp::Error::failed(
-                    "WASM binary does not contain a 'cell.capnp' custom section \
-                     (StreamListener requires Cell::raw)"
-                        .into(),
-                ));
-            }
-        }
 
         if protocol_str.is_empty() {
             return Promise::err(capnp::Error::failed(
@@ -110,11 +84,10 @@ impl system_capnp::stream_listener::Server for StreamListenerImpl {
                             protocol = %stream_protocol,
                             "Incoming stream subprotocol connection"
                         );
-                        let executor = executor.clone();
-                        let wasm = wasm.clone();
+                        let bound_executor = bound_executor.clone();
                         let protocol = protocol_suffix.clone();
                         tokio::task::spawn_local(async move {
-                            if let Err(e) = handle_connection(executor, &wasm, stream, &protocol).await {
+                            if let Err(e) = handle_connection(bound_executor, stream, &protocol).await {
                                 tracing::error!(protocol, "Stream cell connection error: {e}");
                             }
                         });
@@ -139,21 +112,12 @@ impl system_capnp::stream_listener::Server for StreamListenerImpl {
 /// Spawn a cell process for a single connection and pump
 /// stdin/stdout between the libp2p stream and the process.
 pub(crate) async fn handle_connection(
-    executor: system_capnp::executor::Client,
-    cell_wasm: &[u8],
+    bound_executor: system_capnp::bound_executor::Client,
     stream: libp2p::Stream,
     protocol: &str,
 ) -> Result<(), capnp::Error> {
-    // Spawn cell process via executor.runBytes.
-    let mut req = executor.run_bytes_request();
-    req.get().set_wasm(cell_wasm);
-    {
-        let mut env = req.get().init_env(3);
-        env.set(0, "WW_CELL=1");
-        env.set(1, format!("WW_PROTOCOL={protocol}"));
-        env.set(2, "PATH=/bin");
-    }
-    let response = req.send().promise.await?;
+    // Spawn cell process via BoundExecutor.spawn().
+    let response = bound_executor.spawn_request().send().promise.await?;
     let process = response.get()?.get_process()?;
 
     // Get stdin (write-only) and stdout (read-only) ByteStream clients.

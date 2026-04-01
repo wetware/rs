@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::host::SwarmCommand;
+use crate::http_capnp;
 use crate::ipfs;
 use crate::ipfs_capnp;
 use crate::routing_capnp;
@@ -131,7 +132,7 @@ impl stem_capnp::signer::Server for EpochGuardedDomainSigner {
 // HostGraftBuilder — GraftBuilder for the concrete stem graft response
 // ---------------------------------------------------------------------------
 
-/// Fills the graft response with epoch-guarded Host, Executor, IPFS Client, Routing, and node identity.
+/// Fills the graft response with epoch-guarded Host, Executor, IPFS Client, Routing, HttpClient, and node identity.
 pub struct HostGraftBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
@@ -140,6 +141,7 @@ pub struct HostGraftBuilder {
     signing_key: Option<Arc<SigningKey>>,
     stream_control: libp2p_stream::Control,
     epoch_rx: watch::Receiver<Epoch>,
+    allowed_hosts: Vec<String>,
 }
 
 impl HostGraftBuilder {
@@ -151,6 +153,7 @@ impl HostGraftBuilder {
         signing_key: Option<Arc<SigningKey>>,
         stream_control: libp2p_stream::Control,
         epoch_rx: watch::Receiver<Epoch>,
+        allowed_hosts: Vec<String>,
     ) -> Self {
         Self {
             network_state,
@@ -160,6 +163,7 @@ impl HostGraftBuilder {
             signing_key,
             stream_control,
             epoch_rx,
+            allowed_hosts,
         }
     }
 }
@@ -201,6 +205,13 @@ impl GraftBuilder for HostGraftBuilder {
             super::routing::RoutingImpl::new(self.swarm_cmd_tx.clone(), guard.clone()),
         );
         builder.set_routing(routing);
+
+        let http_client: http_capnp::http_client::Client =
+            capnp_rpc::new_client(super::http_client::EpochGuardedHttpProxy::new(
+                self.allowed_hosts.clone(),
+                guard.clone(),
+            ));
+        builder.set_http_client(http_client);
 
         if let Some(sk) = &self.signing_key {
             let keypair =
@@ -499,6 +510,7 @@ where
         signing_key,
         stream_control,
         epoch_rx.clone(),
+        Vec::new(), // allowed_hosts: empty = allow all (default)
     );
     // The local kernel is a trusted process — no challenge-response auth needed.
     // Auth applies to external peers connecting via libp2p to the guest's exported membrane.

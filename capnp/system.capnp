@@ -26,19 +26,26 @@ interface Host {
   # Obtain an Executor scoped to the same epoch as this Host.
 
   network @4 () -> (streamListener :StreamListener, streamDialer :StreamDialer,
-                    vatListener :VatListener, vatClient :VatClient);
-  # Obtain StreamListener/StreamDialer (libp2p byte-stream mode) and
-  # VatListener/VatClient (Cap'n Proto capability mode) for subprotocol I/O.
+                    vatListener :VatListener, vatClient :VatClient,
+                    httpListener :HttpListener);
+  # Obtain StreamListener/StreamDialer (libp2p byte-stream mode),
+  # VatListener/VatClient (Cap'n Proto capability mode), and
+  # HttpListener (WAGI/CGI mode) for subprotocol I/O.
 }
 
 interface StreamListener {
-  listen @0 (executor :Executor, protocol :Text, wasm :Data) -> ();
+  listen @0 (executor :BoundExecutor, protocol :Text) -> ();
   # Accept incoming libp2p streams on /ww/0.1.0/stream/{protocol}.
-  # For each stream, spawn a cell process via executor.runBytes(wasm)
+  # For each stream, spawn a cell process via BoundExecutor
   # and wire stdin/stdout to the stream.
-  #
-  # OCAP: caller delegates spawn authority via executor. Wrap executor in an attenuating
-  # proxy to restrict cell resources (memory, CPU, network).
+}
+
+interface HttpListener {
+  listen @0 (executor :BoundExecutor, prefix :Text) -> ();
+  # Accept HTTP requests matching the path prefix.
+  # For each request, spawn a cell process via BoundExecutor.
+  # CGI env vars are passed as environment, request body to stdin,
+  # CGI response read from stdout.
 }
 
 interface StreamDialer {
@@ -92,23 +99,27 @@ interface Process {
   # Terminate the process immediately. Fuel is revoked and the cell traps.
 }
 
+struct VatHandler {
+  union {
+    spawn @0 :BoundExecutor;
+    # Stateless: spawn a fresh cell per connection.
+    serve @1 :AnyPointer;
+    # Stateful: bootstrap all connections with this persistent capability.
+  }
+}
+
 interface VatListener {
-  listen @0 (executor :Executor, wasm :Data) -> ();
+  listen @0 (handler :VatHandler, schema :Data) -> ();
   # Accept incoming Cap'n Proto RPC connections on /ww/0.1.0/rpc/{cid}
   # where cid = CIDv1(raw, BLAKE3(schema)).
-  # The schema is extracted from the WASM binary's "schema.capnp" custom section.
-  # The section contains the canonical Cap'n Proto encoding of a schema.Node — its id field
-  # (the 64-bit unique type ID) is part of the hash input, so identical structures
-  # with different IDs produce different protocol addresses.
   #
-  # For each connection, spawn a cell process via executor.runBytes(wasm).
-  # The cell calls system::serve() to export a bootstrap capability, which
-  # flows back to the connecting peer via Cap'n Proto RPC bootstrapping.
+  # handler.spawn: for each connection, spawn a cell via the BoundExecutor.
+  # The cell calls system::serve() to export a bootstrap capability.
   #
-  # The cell's Membrane is never exposed to the remote peer.
-  # OCAP: caller delegates spawn authority via executor.
+  # handler.serve: bootstrap each connection with the provided capability.
+  # No cell spawning — one persistent capability serves all connections.
   #
-  # Errors if the cell WASM does not contain a "schema.capnp" custom section.
+  # Schema param is authoritative. WASM custom sections are optional hints.
 }
 
 interface VatClient {

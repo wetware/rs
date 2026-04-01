@@ -3975,6 +3975,7 @@ dependencies = [
  "capnp-rpc",
  "capnpc",
  "ed25519-dalek",
+ "hex",
  "libp2p-core",
  "libp2p-identity",
  "rand 0.8.5",

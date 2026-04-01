@@ -149,14 +149,24 @@ async fn test_vat_connection_closes_stdin_on_peer_disconnect() {
             // (the "host bridge"), the other for the simulated peer.
             let (peer_stream, bridge_stream) = tokio::io::duplex(8 * 1024);
 
-            // Spawn handle_vat_connection on a local task.
-            // It will: spawn cell → get bootstrap → serve cap to peer.
+            // Bind the executor to get a BoundExecutor, then spawn via the new API.
             let wasm_clone = wasm.clone();
             let executor_clone = executor.clone();
             let bridge_handle = tokio::task::spawn_local(async move {
-                ww::rpc::vat_listener::handle_vat_connection(
-                    executor_clone,
-                    &wasm_clone,
+                // Bind executor with wasm + env vars.
+                let mut bind_req = executor_clone.bind_request();
+                bind_req.get().set_wasm(&wasm_clone);
+                bind_req.get().init_args(0);
+                {
+                    let mut env = bind_req.get().init_env(3);
+                    env.set(0, "WW_CELL=1");
+                    env.set(1, "WW_PROTOCOL=test-protocol-cid");
+                    env.set(2, "PATH=/bin");
+                }
+                let bind_resp = bind_req.send().promise.await.unwrap();
+                let bound = bind_resp.get().unwrap().get_bound().unwrap();
+                ww::rpc::vat_listener::handle_vat_connection_spawn(
+                    bound,
                     // Convert tokio duplex → futures-io via compat layer.
                     bridge_stream.compat(),
                     "test-protocol-cid",

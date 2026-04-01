@@ -33,6 +33,15 @@ mod routing_capnp {
     include!(concat!(env!("OUT_DIR"), "/routing_capnp.rs"));
 }
 
+// Re-export capnp::schema_capnp at crate level so that generated cell_capnp
+// code (which references crate::schema_capnp::node) resolves correctly.
+use capnp::schema_capnp;
+
+#[allow(dead_code, clippy::match_single_binding)]
+mod cell_capnp {
+    include!(concat!(env!("OUT_DIR"), "/cell_capnp.rs"));
+}
+
 // Content-addressed schema CIDs for built-in capability interfaces.
 #[allow(dead_code)]
 mod schema_ids {
@@ -67,6 +76,123 @@ static LOGGER: StderrLogger = StderrLogger;
 fn init_logging() {
     if log::set_logger(&LOGGER).is_ok() {
         log::set_max_level(log::LevelFilter::Trace);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WASM custom section helpers
+// ---------------------------------------------------------------------------
+
+/// Extract a named custom section from a WASM binary.
+///
+/// Parses just enough of the WASM format to find custom sections without
+/// requiring the `wasmparser` crate. Returns `None` if the section is absent.
+fn extract_wasm_custom_section<'a>(wasm: &'a [u8], name: &str) -> Result<Option<&'a [u8]>, Val> {
+    // WASM binaries (both modules and components) start with an 8-byte header:
+    // magic (4 bytes) + version (4 bytes). After that, a sequence of sections.
+    if wasm.len() < 8 {
+        return Err(Val::from("WASM binary too short"));
+    }
+    let mut pos = 8;
+    while pos < wasm.len() {
+        if pos + 1 > wasm.len() {
+            break;
+        }
+        let section_id = wasm[pos];
+        pos += 1;
+
+        // Read section size (LEB128).
+        let (section_size, bytes_read) = read_leb128(&wasm[pos..])
+            .ok_or_else(|| Val::from("malformed LEB128 in WASM section"))?;
+        pos += bytes_read;
+
+        if pos + section_size > wasm.len() {
+            return Err(Val::from("WASM section extends past end of binary"));
+        }
+
+        // Custom section has id 0.
+        if section_id == 0 {
+            let section_data = &wasm[pos..pos + section_size];
+            // Custom section format: name_len (LEB128) + name + data.
+            let (name_len, name_bytes_read) = read_leb128(section_data)
+                .ok_or_else(|| Val::from("malformed LEB128 in custom section name"))?;
+            let name_start = name_bytes_read;
+            if name_start + name_len > section_data.len() {
+                return Err(Val::from("custom section name extends past section"));
+            }
+            let section_name = &section_data[name_start..name_start + name_len];
+            if section_name == name.as_bytes() {
+                let data_start = name_start + name_len;
+                return Ok(Some(&section_data[data_start..]));
+            }
+        }
+
+        pos += section_size;
+    }
+    Ok(None)
+}
+
+/// Read an unsigned LEB128 integer. Returns (value, bytes_consumed).
+fn read_leb128(data: &[u8]) -> Option<(usize, usize)> {
+    let mut result: usize = 0;
+    let mut shift = 0;
+    for (i, &byte) in data.iter().enumerate() {
+        result |= ((byte & 0x7F) as usize) << shift;
+        if byte & 0x80 == 0 {
+            return Some((result, i + 1));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None; // overflow
+        }
+    }
+    None // unterminated
+}
+
+/// Extract canonical schema.Node bytes from a WASM binary's "cell.capnp" section.
+///
+/// The section must contain a Cell::capnp variant. Returns the re-canonicalized
+/// schema.Node segment bytes (no framing), suitable for passing to VatListener
+/// as the schema param.
+fn extract_capnp_schema(wasm: &[u8]) -> Result<Vec<u8>, Val> {
+    let section_data = extract_wasm_custom_section(wasm, "cell.capnp")?
+        .ok_or_else(|| Val::from("host :listen — WASM has no 'cell.capnp' custom section"))?;
+
+    if section_data.is_empty() {
+        return Err(Val::from("host :listen — 'cell.capnp' section is empty"));
+    }
+
+    let aligned = section_data.to_vec();
+    let message = capnp::serialize::read_message_from_flat_slice(
+        &mut aligned.as_slice(),
+        capnp::message::ReaderOptions::default(),
+    )
+    .map_err(|e| Val::from(format!("host :listen — failed to decode cell.capnp: {e}")))?;
+
+    let cell: cell_capnp::cell::Reader = message
+        .get_root()
+        .map_err(|e| Val::from(format!("host :listen — failed to read Cell root: {e}")))?;
+
+    match cell.which() {
+        Ok(cell_capnp::cell::Which::Capnp(node)) => {
+            let node = node.map_err(|e| Val::from(format!("host :listen — bad schema node: {e}")))?;
+            let mut canonical_msg = capnp::message::Builder::new_default();
+            canonical_msg
+                .set_root_canonical(node)
+                .map_err(|e| Val::from(format!("host :listen — canonicalize failed: {e}")))?;
+            let segments = canonical_msg.get_segments_for_output();
+            if segments.len() != 1 {
+                return Err(Val::from(format!(
+                    "host :listen — canonical message has {} segments, expected 1",
+                    segments.len()
+                )));
+            }
+            Ok(segments[0].to_vec())
+        }
+        Ok(_) => Err(Val::from(
+            "host :listen — Cell section is not capnp variant (expected Cell::capnp for VatListener)",
+        )),
+        Err(e) => Err(Val::from(format!("host :listen — Cell union error: {e}"))),
     }
 }
 
@@ -372,7 +498,9 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                         };
                         match rest.len() {
                             2 => {
-                                // VatListener mode.
+                                // VatListener mode: (perform host :listen executor <wasm>)
+                                // Bind executor + wasm → BoundExecutor, extract schema
+                                // from WASM custom section, then call VatListener.listen().
                                 let wasm = match rest.get(1) {
                                     Some(Val::Bytes(b)) => b.clone(),
                                     _ => {
@@ -381,6 +509,26 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                         ))
                                     }
                                 };
+
+                                // Bind the executor with the wasm to get a BoundExecutor.
+                                let mut bind_req = executor.bind_request();
+                                bind_req.get().set_wasm(&wasm);
+                                let bind_resp = bind_req
+                                    .send()
+                                    .promise
+                                    .await
+                                    .map_err(|e| Val::from(e.to_string()))?;
+                                let bound = bind_resp
+                                    .get()
+                                    .map_err(|e| Val::from(e.to_string()))?
+                                    .get_bound()
+                                    .map_err(|e| Val::from(e.to_string()))?;
+
+                                // Extract schema bytes from the WASM "cell.capnp" section.
+                                // The kernel still reads the custom section to get schema
+                                // bytes for the explicit schema param.
+                                let schema_bytes = extract_capnp_schema(&wasm)?;
+
                                 let network_resp = host
                                     .network_request()
                                     .send()
@@ -394,8 +542,11 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                     .get_vat_listener()
                                     .map_err(|e| Val::from(e.to_string()))?;
                                 let mut req = listener.listen_request();
-                                req.get().set_executor(executor);
-                                req.get().set_wasm(&wasm);
+                                {
+                                    let mut handler = req.get().init_handler();
+                                    handler.set_spawn(bound);
+                                }
+                                req.get().set_schema(&schema_bytes);
                                 req.send()
                                     .promise
                                     .await
@@ -404,7 +555,9 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                 Val::Nil
                             }
                             3 => {
-                                // StreamListener mode.
+                                // StreamListener mode: (perform host :listen executor "proto" <wasm>)
+                                // Bind executor + wasm → BoundExecutor, then call
+                                // StreamListener.listen() with BoundExecutor + protocol.
                                 let protocol = match rest.get(1) {
                                     Some(Val::Str(s)) => s.clone(),
                                     _ => {
@@ -421,6 +574,21 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                         ))
                                     }
                                 };
+
+                                // Bind the executor with the wasm to get a BoundExecutor.
+                                let mut bind_req = executor.bind_request();
+                                bind_req.get().set_wasm(&wasm);
+                                let bind_resp = bind_req
+                                    .send()
+                                    .promise
+                                    .await
+                                    .map_err(|e| Val::from(e.to_string()))?;
+                                let bound = bind_resp
+                                    .get()
+                                    .map_err(|e| Val::from(e.to_string()))?
+                                    .get_bound()
+                                    .map_err(|e| Val::from(e.to_string()))?;
+
                                 let network_resp = host
                                     .network_request()
                                     .send()
@@ -434,9 +602,8 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                     .get_stream_listener()
                                     .map_err(|e| Val::from(e.to_string()))?;
                                 let mut req = listener.listen_request();
-                                req.get().set_executor(executor);
+                                req.get().set_executor(bound);
                                 req.get().set_protocol(&protocol);
-                                req.get().set_wasm(&wasm);
                                 req.send()
                                     .promise
                                     .await
