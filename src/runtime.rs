@@ -49,6 +49,12 @@ pub struct Host {
     shutdown_rx: watch::Receiver<()>,
 }
 
+impl Default for Host {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Host {
     /// Create a new Host supervisor.
     pub fn new() -> Self {
