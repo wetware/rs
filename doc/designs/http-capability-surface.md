@@ -96,16 +96,15 @@ Thin wrapper (~100 lines, zero deps beyond std):
 - `wagi::body()`, `wagi::body_string()`
 - `wagi::respond(status, headers, body)`
 
-### Lightweight Spawn Path
+### Spawn Path
 
-`BoundExecutorImpl::spawn()` branches on a `lightweight` flag:
+All cell types get `with_data_streams()` + membrane RPC. The WIT
+membrane channel is universal. stdin/stdout semantics vary by cell type:
 
-- **Lightweight (WAGI):** No `with_data_streams()`, no membrane/peer RPC
-  system, no bootstrap cap. Cell uses stdin/stdout directly.
-- **Full (raw/capnp cells):** data_streams + membrane or peer RPC system.
-
-Detection: `BoundConfig.lightweight = true` is set by
-`BoundExecutorImpl::new_lightweight()` for WAGI cells.
+- **Raw cells:** stdin/stdout carry wire protocol bytes.
+- **HTTP/WAGI cells:** stdin/stdout carry CGI request/response.
+- **Cap'n Proto cells:** stdin close = graceful shutdown signal,
+  stdout unused. All I/O goes through the WIT side-channel.
 
 ### Per-request Flow
 

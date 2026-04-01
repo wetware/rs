@@ -97,7 +97,7 @@
 ## WAGI host-side implementation (axum + route table, Phase 2)
 **What:** Implement `--with-http host:port` flag that spawns an axum router. Routes by path prefix from `Cell::http(prefix)` custom section. Each request dispatches a cell spawn to the `ExecutorPool` via `SpawnRequest` channel, pipes CGI env vars + body to stdin, reads CGI response from stdout.
 **Why:** `Cell::http` variant exists in the type system. Phase 1 delivers WAGI adapter, lightweight spawn, and `ww test http` CLI. Phase 2 adds the production HTTP server.
-**Context:** WagiAdapter (`src/dispatcher/wagi.rs`) provides `build_cgi_env()` and `parse_cgi_response()`. Lightweight spawn path in `BoundExecutorImpl::spawn()` skips membrane/RPC. axum runs on the dedicated WagiService thread (`current_thread` runtime). WASM execution happens on executor threads. ~100-150 lines for the server + route table.
+**Context:** WagiAdapter (`src/dispatcher/wagi.rs`) provides `build_cgi_env()` and `parse_cgi_response()`. All cells now get data_streams + membrane RPC (lightweight flag removed); HTTP cells use stdin/stdout for CGI I/O while accessing host capabilities via the WIT side-channel. axum runs on the dedicated WagiService thread (`current_thread` runtime). WASM execution happens on executor threads. ~100-150 lines for the server + route table.
 **Effort:** M
 **Priority:** P2
 **Depends on:** WAGI adapter (done), lightweight spawn (done), AIMD fuel scheduler (done), thread-per-subsystem runtime (#302)
