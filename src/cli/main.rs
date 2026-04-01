@@ -97,6 +97,12 @@ enum Commands {
         #[arg(long, default_value = "6")]
         confirmation_depth: u64,
 
+        /// Number of executor worker threads for cell scheduling.
+        /// Each worker runs its own single-threaded tokio runtime.
+        /// 0 = auto-detect (one per CPU core).
+        #[arg(long, default_value = "0")]
+        executor_threads: usize,
+
         /// Run as an MCP server. Reads MCP JSON-RPC from stdin, routes
         /// tools/call requests to a cell WASM process, writes responses
         /// to stdout. The cell binary is specified by the MOUNT arg
@@ -258,6 +264,7 @@ impl Commands {
                 rpc_url,
                 ws_url,
                 confirmation_depth,
+                executor_threads,
                 mcp,
             } => {
                 if mcp {
@@ -293,6 +300,7 @@ impl Commands {
                     rpc_url,
                     ws_url,
                     confirmation_depth,
+                    executor_threads,
                 )
                 .await
             }
@@ -786,6 +794,7 @@ pub extern "C" fn _start() {
         rpc_url: String,
         ws_url: String,
         confirmation_depth: u64,
+        executor_threads: usize,
     ) -> Result<()> {
         // Dev-mode compat: if a single local root mount has boot/main.wasm
         // but not bin/main.wasm, copy it over (the runtime expects bin/).
@@ -917,12 +926,61 @@ pub extern "C" fn _start() {
             }
         };
 
-        // Start the libp2p swarm.
-        let wetware_host = host::WetwareHost::new(port, keypair, kubo_bootstrap, kubo_peers)?;
-        let network_state = wetware_host.network_state();
-        let swarm_cmd_tx = wetware_host.swarm_cmd_tx();
-        let stream_control = wetware_host.stream_control();
-        tokio::spawn(wetware_host.run());
+        // ---- Thread-per-subsystem runtime (Pingora-inspired) ----
+        //
+        // Each subsystem gets its own OS thread + single-threaded tokio
+        // runtime.  The Host supervisor coordinates shutdown.
+        let (swarm_cmd_tx, swarm_cmd_rx) = tokio::sync::mpsc::channel(64);
+        let (swarm_ready_tx, swarm_ready_rx) = tokio::sync::oneshot::channel();
+
+        let mut supervisor = ww::runtime::Host::new();
+
+        // Swarm thread: libp2p event loop.
+        // The Libp2pHost is constructed inside the swarm thread so that
+        // TCP listeners register with the correct tokio reactor.
+        supervisor.spawn(
+            "swarm",
+            ww::runtime::SwarmService {
+                params: ww::runtime::SwarmServiceParams {
+                    port,
+                    keypair,
+                    kubo_bootstrap,
+                    kubo_peers,
+                },
+                cmd_rx: swarm_cmd_rx,
+                ready_tx: swarm_ready_tx,
+            },
+        );
+
+        // Wait for the swarm thread to construct the host and send back
+        // the stream control + network state.
+        let swarm_ready = swarm_ready_rx
+            .await
+            .context("Swarm service failed to start")?;
+        let network_state = swarm_ready.network_state;
+        let stream_control = swarm_ready.stream_control;
+
+        // Epoch thread: on-chain watcher (only when --stem is provided).
+        let epoch_channel_rx = if let Some((epoch_tx, epoch_rx)) = epoch_channel {
+            if let Some(config) = stem_config {
+                supervisor.spawn(
+                    "epoch",
+                    ww::runtime::EpochService {
+                        config,
+                        epoch_tx,
+                        confirmation_depth,
+                        ipfs_client,
+                    },
+                );
+            }
+            Some(epoch_rx)
+        } else {
+            None
+        };
+
+        // Executor pool: M:N cell scheduling across N worker threads.
+        let _executor_pool =
+            ww::runtime::ExecutorPool::new(executor_threads, supervisor.shutdown_rx());
 
         tracing::info!(
             mounts = all_mounts.len(),
@@ -940,28 +998,19 @@ pub extern "C" fn _start() {
             .with_content_store(content_store.clone())
             .with_signing_key(std::sync::Arc::new(sk));
 
-        // If we have an epoch channel, give the receiver to the cell
-        // and spawn the epoch pipeline with the sender.
-        if let Some((epoch_tx, epoch_rx)) = epoch_channel {
+        if let Some(epoch_rx) = epoch_channel_rx {
             builder = builder.with_epoch_rx(epoch_rx);
-
-            if let Some(config) = stem_config {
-                tokio::spawn(ww::epoch::run_epoch_pipeline(
-                    config,
-                    epoch_tx,
-                    confirmation_depth,
-                    ipfs_client,
-                ));
-            }
         }
 
         let cell = builder.build();
 
-        // spawn_serving registers a /wetware/capnp/1.0.0 libp2p stream
-        // cell that bootstraps each incoming connection with the
-        // membrane exported by the kernel.
+        // The kernel cell runs on the current thread's tokio runtime.
+        // It creates its own LocalSet internally for !Send WASM futures.
+        // Child cells will use the ExecutorPool (via the Executor capability).
         let result = cell.spawn_serving(stream_control).await?;
         tracing::info!(code = result.exit_code, "Kernel exited");
+
+        supervisor.shutdown();
 
         // Hold `merged` alive until after guest exits.
         drop(merged);
