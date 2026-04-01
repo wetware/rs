@@ -7,10 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.0.1.0] - 2026-04-01
 
 ### Changed
-- All cell types now get WIT data_streams + membrane RPC. HTTP/WAGI cells can access host capabilities (IPFS, routing, identity) through the WIT side-channel while still using stdin/stdout for CGI I/O.
-- Removed `lightweight` flag and `new_lightweight()` from `BoundExecutorImpl`. One spawn path for all cell types, differentiated only by stdin/stdout semantics.
-- RPC cells use stdin as a shutdown signal: host closes stdin to tell the cell to drain gracefully. No bytes are ever written. Equivalent to Go's `<-chan struct{}`.
-- `handle_vat_connection` closes stdin on error paths (bootstrap timeout, capability extraction failure) to prevent orphaned cell processes.
+- Every cell type now gets membrane RPC and WIT data_streams. HTTP/WAGI cells can access host capabilities (IPFS, routing, identity) through the WIT side-channel while using stdin/stdout for CGI I/O. No more "lightweight" cells that miss out on the capability system.
+- One spawn path for all cell types. The `lightweight` flag and `new_lightweight()` are gone. Cell types are differentiated by stdin/stdout semantics, not by which host plumbing they get.
+- RPC cells use stdin as a shutdown signal: closing stdin tells the cell to drain gracefully. No bytes are ever written (equivalent to Go's `<-chan struct{}`). `handle_vat_connection` closes stdin on all exit paths (peer disconnect, bootstrap timeout, capability extraction failure) to prevent orphaned processes.
 
 ## [Unreleased]
 
