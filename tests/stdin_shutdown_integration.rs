@@ -174,8 +174,7 @@ async fn test_vat_connection_closes_stdin_on_peer_disconnect() {
                 Default::default(),
             );
             let mut peer_rpc = RpcSystem::new(Box::new(peer_network), None);
-            let greeter: ww::greeter_capnp::greeter::Client =
-                peer_rpc.bootstrap(Side::Server);
+            let greeter: ww::greeter_capnp::greeter::Client = peer_rpc.bootstrap(Side::Server);
             let peer_rpc_handle = tokio::task::spawn_local(async move {
                 let _ = peer_rpc.await;
             });
@@ -184,13 +183,10 @@ async fn test_vat_connection_closes_stdin_on_peer_disconnect() {
             // the full two-RPC-system chain.
             let mut req = greeter.greet_request();
             req.get().set_name("shutdown-test");
-            let resp = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                req.send().promise,
-            )
-            .await
-            .expect("greet timed out (cell may not have exported bootstrap)")
-            .expect("greet RPC failed");
+            let resp = tokio::time::timeout(std::time::Duration::from_secs(15), req.send().promise)
+                .await
+                .expect("greet timed out (cell may not have exported bootstrap)")
+                .expect("greet RPC failed");
 
             let greeting = resp
                 .get()
@@ -212,13 +208,10 @@ async fn test_vat_connection_closes_stdin_on_peer_disconnect() {
             peer_rpc_handle.abort();
 
             // Wait for handle_vat_connection to finish.
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                bridge_handle,
-            )
-            .await
-            .expect("handle_vat_connection did not return within 10s after peer disconnect")
-            .expect("bridge task panicked");
+            let result = tokio::time::timeout(std::time::Duration::from_secs(10), bridge_handle)
+                .await
+                .expect("handle_vat_connection did not return within 10s after peer disconnect")
+                .expect("bridge task panicked");
 
             assert!(
                 result.is_ok(),
