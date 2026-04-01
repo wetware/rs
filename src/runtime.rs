@@ -109,6 +109,11 @@ impl Host {
 // Executor pool
 // ---------------------------------------------------------------------------
 
+/// A factory closure that crosses the thread boundary (Send) and produces
+/// a !Send future that runs on the worker's LocalSet.
+pub type SpawnFactory =
+    Box<dyn FnOnce(watch::Receiver<()>) -> Pin<Box<dyn Future<Output = ()>>> + Send>;
+
 /// A request to spawn a cell on an executor worker thread.
 ///
 /// The factory closure crosses the thread boundary (Send) and produces
@@ -118,7 +123,7 @@ pub struct SpawnRequest {
     pub name: String,
     /// Factory that produces the cell's future. Receives a shutdown receiver
     /// so cells can drain gracefully.
-    pub factory: Box<dyn FnOnce(watch::Receiver<()>) -> Pin<Box<dyn Future<Output = ()>>> + Send>,
+    pub factory: SpawnFactory,
     /// Optional channel to send the cell's exit code back to the caller.
     /// Used by the kernel to pipe its exit code to the CLI.
     pub result_tx: Option<tokio::sync::oneshot::Sender<Result<i32>>>,
