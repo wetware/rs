@@ -1000,45 +1000,40 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
                     .map_err(|err| capnp::Error::failed(err.to_string()))?;
 
                 let mut kill_rx = kill_rx;
+                // Drain stderr to tracing on the ambient LocalSet.
                 tokio::task::spawn_local(async move {
-                    // Drain stderr to tracing
-                    let local = tokio::task::LocalSet::new();
-                    local.spawn_local(async move {
-                        use tokio::io::AsyncBufReadExt;
-                        let reader = tokio::io::BufReader::new(host_stderr);
-                        let mut lines = reader.lines();
-                        while let Ok(Some(line)) = lines.next_line().await {
-                            tracing::info!("{}", line);
-                        }
-                    });
+                    use tokio::io::AsyncBufReadExt;
+                    let reader = tokio::io::BufReader::new(host_stderr);
+                    let mut lines = reader.lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        tracing::info!("{}", line);
+                    }
+                });
 
-                    local
-                        .run_until(async move {
-                            let exit_code = tokio::select! {
-                                result = proc.run() => {
-                                    match result {
-                                        Ok(()) => 0,
-                                        Err(e) => {
-                                            tracing::error!(
-                                                "bound_executor: lightweight child failed: {}",
-                                                e
-                                            );
-                                            1
-                                        }
-                                    }
+                tokio::task::spawn_local(async move {
+                    let exit_code = tokio::select! {
+                        result = proc.run() => {
+                            match result {
+                                Ok(()) => 0,
+                                Err(e) => {
+                                    tracing::error!(
+                                        "bound_executor: lightweight child failed: {}",
+                                        e
+                                    );
+                                    1
                                 }
-                                _ = kill_rx.changed() => {
-                                    tracing::info!("bound_executor: lightweight child killed");
-                                    137
-                                }
-                            };
-                            tracing::info!(
-                                "bound_executor: lightweight child exited with code {}",
-                                exit_code
-                            );
-                            let _ = exit_tx.send(exit_code);
-                        })
-                        .await;
+                            }
+                        }
+                        _ = kill_rx.changed() => {
+                            tracing::info!("bound_executor: lightweight child killed");
+                            137
+                        }
+                    };
+                    tracing::info!(
+                        "bound_executor: lightweight child exited with code {}",
+                        exit_code
+                    );
+                    let _ = exit_tx.send(exit_code);
                 });
             } else {
                 // Full spawn path: data_streams + membrane/peer RPC system.
@@ -1088,46 +1083,42 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
                 };
 
                 let mut kill_rx = kill_rx;
+                // Spawn RPC system and stderr drain on the ambient LocalSet.
+                tokio::task::spawn_local(child_rpc_system.map(|_| ()));
+
                 tokio::task::spawn_local(async move {
-                    let local = tokio::task::LocalSet::new();
-                    local.spawn_local(child_rpc_system.map(|_| ()));
+                    use tokio::io::AsyncBufReadExt;
+                    let reader = tokio::io::BufReader::new(host_stderr);
+                    let mut lines = reader.lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        tracing::info!("{}", line);
+                    }
+                });
 
-                    local.spawn_local(async move {
-                        use tokio::io::AsyncBufReadExt;
-                        let reader = tokio::io::BufReader::new(host_stderr);
-                        let mut lines = reader.lines();
-                        while let Ok(Some(line)) = lines.next_line().await {
-                            tracing::info!("{}", line);
+                tokio::task::spawn_local(async move {
+                    let exit_code = tokio::select! {
+                        result = proc.run() => {
+                            match result {
+                                Ok(()) => 0,
+                                Err(e) => {
+                                    tracing::error!(
+                                        "bound_executor: child process failed: {}",
+                                        e
+                                    );
+                                    1
+                                }
+                            }
                         }
-                    });
-
-                    local
-                        .run_until(async move {
-                            let exit_code = tokio::select! {
-                                result = proc.run() => {
-                                    match result {
-                                        Ok(()) => 0,
-                                        Err(e) => {
-                                            tracing::error!(
-                                                "bound_executor: child process failed: {}",
-                                                e
-                                            );
-                                            1
-                                        }
-                                    }
-                                }
-                                _ = kill_rx.changed() => {
-                                    tracing::info!("bound_executor: child process killed");
-                                    137
-                                }
-                            };
-                            tracing::info!(
-                                "bound_executor: child process exited with code {}",
-                                exit_code
-                            );
-                            let _ = exit_tx.send(exit_code);
-                        })
-                        .await;
+                        _ = kill_rx.changed() => {
+                            tracing::info!("bound_executor: child process killed");
+                            137
+                        }
+                    };
+                    tracing::info!(
+                        "bound_executor: child process exited with code {}",
+                        exit_code
+                    );
+                    let _ = exit_tx.send(exit_code);
                 });
             }
 

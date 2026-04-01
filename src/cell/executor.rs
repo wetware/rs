@@ -449,33 +449,31 @@ impl Cell {
         );
 
         tracing::debug!("Starting streams RPC server for guest");
-        let local = tokio::task::LocalSet::new();
-        local.spawn_local(rpc_system.map(|_| ()));
+        // Spawn RPC system and stream acceptors on the ambient LocalSet.
+        // When running inside an ExecutorPool worker, this targets the
+        // worker's LocalSet, enabling M:N cooperative scheduling with
+        // other cells on the same thread.
+        tokio::task::spawn_local(rpc_system.map(|_| ()));
 
         if let Some(control) = stream_control {
             let membrane = guest_membrane.clone();
             match terminal_signing_key {
                 Some(sk) => {
-                    local.spawn_local(accept_terminal_streams(control, membrane, sk));
+                    tokio::task::spawn_local(accept_terminal_streams(control, membrane, sk));
                 }
                 None => {
                     // No signing key (ephemeral node) — serve raw membrane without
                     // Terminal auth gate.  Remote peers get full capabilities.
-                    local.spawn_local(accept_capnp_streams(control, membrane));
+                    tokio::task::spawn_local(accept_capnp_streams(control, membrane));
                 }
             }
         }
 
-        let exit_code = local
-            .run_until(async move {
-                let exit_code = match join.await {
-                    Ok(Ok(())) => 0,
-                    Ok(Err(_)) | Err(_) => 1,
-                };
-                tracing::debug!(code = exit_code, "Guest exited (streams RPC)");
-                Ok::<i32, anyhow::Error>(exit_code)
-            })
-            .await?;
+        let exit_code = match join.await {
+            Ok(Ok(())) => 0,
+            Ok(Err(_)) | Err(_) => 1,
+        };
+        tracing::debug!(code = exit_code, "Guest exited (streams RPC)");
 
         Ok(SpawnResult {
             exit_code,

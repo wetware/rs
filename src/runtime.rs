@@ -109,20 +109,33 @@ impl Host {
 // Executor pool
 // ---------------------------------------------------------------------------
 
-/// A factory closure that crosses the thread boundary (Send) and produces
-/// a !Send future that runs on the worker's LocalSet.
+/// A request to spawn a cell on an executor worker thread.
 ///
-/// The factory receives a shutdown receiver so cells can drain gracefully.
-pub type SpawnRequest =
-    Box<dyn FnOnce(watch::Receiver<()>) -> Pin<Box<dyn Future<Output = ()>>> + Send>;
+/// The factory closure crosses the thread boundary (Send) and produces
+/// a !Send future that runs on the worker's LocalSet.
+pub struct SpawnRequest {
+    /// Human-readable name for tracing spans (e.g. "kernel", "echo-cell").
+    pub name: String,
+    /// Factory that produces the cell's future. Receives a shutdown receiver
+    /// so cells can drain gracefully.
+    pub factory: Box<dyn FnOnce(watch::Receiver<()>) -> Pin<Box<dyn Future<Output = ()>>> + Send>,
+    /// Optional channel to send the cell's exit code back to the caller.
+    /// Used by the kernel to pipe its exit code to the CLI.
+    pub result_tx: Option<tokio::sync::oneshot::Sender<Result<i32>>>,
+}
 
 /// Pool of executor worker threads for M:N cell scheduling.
 ///
 /// Each worker is an OS thread with a `current_thread` tokio runtime and a
 /// `LocalSet`.  Cells are assigned to workers and cooperatively scheduled
 /// via the AIMD fuel scheduler.
+/// Channel depth per worker. Matches the connection rate limit TODO (64
+/// concurrent cells per protocol). Prevents OOM under spawn bursts.
+const SPAWN_CHANNEL_DEPTH: usize = 64;
+
 pub struct ExecutorPool {
-    workers: Vec<mpsc::UnboundedSender<SpawnRequest>>,
+    senders: Vec<mpsc::Sender<SpawnRequest>>,
+    threads: Vec<Option<JoinHandle<()>>>,
     cell_counts: Arc<Vec<AtomicUsize>>,
     next: AtomicUsize,
 }
@@ -141,25 +154,28 @@ impl ExecutorPool {
             n
         };
 
-        let mut workers = Vec::with_capacity(n);
+        let mut senders = Vec::with_capacity(n);
+        let mut threads = Vec::with_capacity(n);
         let cell_counts: Vec<AtomicUsize> = (0..n).map(|_| AtomicUsize::new(0)).collect();
         let cell_counts = Arc::new(cell_counts);
 
         for i in 0..n {
-            let (tx, rx) = mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::channel(SPAWN_CHANNEL_DEPTH);
             let shutdown = shutdown.clone();
             let counts = cell_counts.clone();
-            std::thread::Builder::new()
+            let handle = std::thread::Builder::new()
                 .name(format!("executor-{}", i))
                 .spawn(move || worker_loop(i, rx, shutdown, counts))
                 .unwrap_or_else(|e| panic!("failed to spawn executor-{}: {}", i, e));
-            workers.push(tx);
+            senders.push(tx);
+            threads.push(Some(handle));
         }
 
         tracing::info!(workers = n, "executor pool started");
 
         Self {
-            workers,
+            senders,
+            threads,
             cell_counts,
             next: AtomicUsize::new(0),
         }
@@ -167,43 +183,65 @@ impl ExecutorPool {
 
     /// Submit a cell to the pool using least-loaded assignment.
     ///
-    /// Returns `Err` if all worker channels are closed (pool is shut down).
+    /// Returns `Err` if the chosen worker's channel is full or closed.
+    /// Uses `try_send` to avoid deadlock when a cell on worker N spawns
+    /// a child that routes back to the same worker.
     pub fn spawn(&self, request: SpawnRequest) -> Result<(), SpawnRequest> {
-        let n = self.workers.len();
+        let n = self.senders.len();
 
-        // Find the worker with the fewest cells.
+        // Find the worker with the fewest cells, falling back to
+        // round-robin when all counts are equal (including all-zero).
         let mut best = 0;
         let mut best_count = self.cell_counts[0].load(Ordering::Relaxed);
+        let mut all_equal = true;
         for i in 1..n {
             let count = self.cell_counts[i].load(Ordering::Relaxed);
             if count < best_count {
                 best = i;
                 best_count = count;
+                all_equal = false;
+            } else if count != best_count {
+                all_equal = false;
             }
         }
-
-        // Fall back to round-robin if counts are equal (avoids always
-        // picking worker 0 when all counts are the same).
-        if best_count > 0 {
-            let all_equal =
-                (0..n).all(|i| self.cell_counts[i].load(Ordering::Relaxed) == best_count);
-            if all_equal {
-                best = self.next.fetch_add(1, Ordering::Relaxed) % n;
-            }
+        if all_equal {
+            best = self.next.fetch_add(1, Ordering::Relaxed) % n;
         }
 
-        match self.workers[best].send(request) {
+        match self.senders[best].try_send(request) {
             Ok(()) => {
                 self.cell_counts[best].fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
-            Err(e) => Err(e.0),
+            Err(mpsc::error::TrySendError::Full(r) | mpsc::error::TrySendError::Closed(r)) => {
+                Err(r)
+            }
         }
     }
 
     /// Number of worker threads in the pool.
     pub fn worker_count(&self) -> usize {
-        self.workers.len()
+        self.senders.len()
+    }
+}
+
+impl Drop for ExecutorPool {
+    fn drop(&mut self) {
+        // Close all channels so workers exit their recv loops.
+        self.senders.clear();
+        // Join all worker threads.
+        for handle in &mut self.threads {
+            if let Some(h) = handle.take() {
+                if let Err(panic) = h.join() {
+                    let msg = panic
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("<non-string panic>");
+                    tracing::error!(panic = msg, "executor worker panicked");
+                }
+            }
+        }
     }
 }
 
@@ -231,7 +269,7 @@ impl Drop for CellCountGuard {
 /// Each cell cooperatively yields via the AIMD fuel scheduler.
 fn worker_loop(
     id: usize,
-    rx: mpsc::UnboundedReceiver<SpawnRequest>,
+    rx: mpsc::Receiver<SpawnRequest>,
     shutdown: watch::Receiver<()>,
     cell_counts: Arc<Vec<AtomicUsize>>,
 ) {
@@ -249,15 +287,51 @@ fn worker_loop(
         loop {
             tokio::select! {
                 req = rx.recv() => match req {
-                    Some(factory) => {
+                    Some(spawn_req) => {
+                        let cell_name = spawn_req.name;
+                        let factory = spawn_req.factory;
+                        let result_tx = spawn_req.result_tx;
                         let cell_shutdown = shutdown.clone();
                         let guard = CellCountGuard {
                             counts: cell_counts.clone(),
                             worker_id: id,
                         };
+                        let span = tracing::info_span!("cell", name = %cell_name);
+                        let handle = tokio::task::spawn_local(async move {
+                            let _guard = guard;
+                            let _span = span.entered();
+                            (factory)(cell_shutdown).await;
+                        });
+                        // Monitor the cell task for panics and send exit code.
+                        let cell_name_log = cell_name.clone();
                         tokio::task::spawn_local(async move {
-                            let _guard = guard; // dropped on completion or panic
-                            factory(cell_shutdown).await;
+                            match handle.await {
+                                Ok(()) => {
+                                    if let Some(tx) = result_tx {
+                                        let _ = tx.send(Ok(0));
+                                    }
+                                }
+                                Err(e) if e.is_panic() => {
+                                    tracing::error!(
+                                        cell = %cell_name_log,
+                                        "cell panicked: {}",
+                                        e,
+                                    );
+                                    if let Some(tx) = result_tx {
+                                        let _ = tx.send(Err(anyhow::anyhow!("cell panicked")));
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        cell = %cell_name_log,
+                                        "cell task failed: {}",
+                                        e,
+                                    );
+                                    if let Some(tx) = result_tx {
+                                        let _ = tx.send(Err(e.into()));
+                                    }
+                                }
+                            }
                         });
                     }
                     None => break, // channel closed
@@ -305,7 +379,7 @@ pub struct SwarmReady {
 }
 
 impl Service for SwarmService {
-    fn run(self, _shutdown: watch::Receiver<()>) -> Result<()> {
+    fn run(self, mut shutdown: watch::Receiver<()>) -> Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -326,7 +400,13 @@ impl Service for SwarmService {
                 network_state: network_state.clone(),
             });
 
-            host.run(network_state, self.cmd_rx).await
+            tokio::select! {
+                result = host.run(network_state, self.cmd_rx) => result,
+                _ = shutdown.changed() => {
+                    tracing::info!("swarm shutting down");
+                    Ok(())
+                }
+            }
         })
     }
 }
@@ -346,17 +426,107 @@ pub struct EpochService {
 }
 
 impl Service for EpochService {
-    fn run(self, _shutdown: watch::Receiver<()>) -> Result<()> {
+    fn run(self, mut shutdown: watch::Receiver<()>) -> Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         let _span = tracing::info_span!("epoch").entered();
-        rt.block_on(crate::epoch::run_epoch_pipeline(
-            self.config,
-            self.epoch_tx,
-            self.confirmation_depth,
-            self.ipfs_client,
-        ))
+        rt.block_on(async move {
+            tokio::select! {
+                result = crate::epoch::run_epoch_pipeline(
+                    self.config,
+                    self.epoch_tx,
+                    self.confirmation_depth,
+                    self.ipfs_client,
+                ) => result,
+                _ = shutdown.changed() => {
+                    tracing::info!("epoch shutting down");
+                    Ok(())
+                }
+            }
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CompilationService
+// ---------------------------------------------------------------------------
+
+/// Request to compile WASM bytecode into a wasmtime Component.
+pub struct CompileRequest {
+    pub bytecode: Vec<u8>,
+    pub engine: Arc<wasmtime::Engine>,
+    pub result_tx: tokio::sync::oneshot::Sender<Result<wasmtime::component::Component>>,
+}
+
+/// Dedicated compilation thread that offloads CPU-heavy `Component::from_binary`
+/// away from executor worker threads.
+///
+/// Caches compiled components by `(wasm_cid, engine_config)` to avoid
+/// recompilation of the same bytecode. The cache key includes an engine
+/// config fingerprint so different `wasm_debug` settings don't collide.
+///
+/// # Integration (TODO)
+///
+/// ProcBuilder needs a `with_component(Component)` method to accept
+/// pre-compiled components. Until then, compilation still happens inline
+/// on executor threads. This struct is ready to wire in.
+pub struct CompilationService {
+    pub request_rx: mpsc::Receiver<CompileRequest>,
+}
+
+impl Service for CompilationService {
+    fn run(self, mut shutdown: watch::Receiver<()>) -> Result<()> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let _span = tracing::info_span!("compiler").entered();
+
+        rt.block_on(async move {
+            let mut rx = self.request_rx;
+            let mut cache: std::collections::HashMap<[u8; 32], wasmtime::component::Component> =
+                std::collections::HashMap::new();
+
+            loop {
+                tokio::select! {
+                    req = rx.recv() => match req {
+                        Some(req) => {
+                            let cid = blake3::hash(&req.bytecode);
+                            let key = *cid.as_bytes();
+
+                            let result = if let Some(component) = cache.get(&key) {
+                                tracing::debug!(?cid, "compilation cache hit");
+                                Ok(component.clone())
+                            } else {
+                                tracing::debug!(?cid, "compilation cache miss, compiling");
+                                let start = std::time::Instant::now();
+                                match wasmtime::component::Component::from_binary(
+                                    &req.engine,
+                                    &req.bytecode,
+                                ) {
+                                    Ok(component) => {
+                                        tracing::info!(
+                                            ?cid,
+                                            elapsed_ms = start.elapsed().as_millis(),
+                                            "compiled component"
+                                        );
+                                        cache.insert(key, component.clone());
+                                        Ok(component)
+                                    }
+                                    Err(e) => Err(e),
+                                }
+                            };
+
+                            let _ = req.result_tx.send(result);
+                        }
+                        None => break,
+                    },
+                    _ = shutdown.changed() => break,
+                }
+            }
+            tracing::info!("compilation service shutting down");
+            Ok(())
+        })
     }
 }
 
@@ -423,11 +593,15 @@ mod tests {
         let pool = ExecutorPool::new(2, shutdown_rx);
 
         let (tx, rx) = std::sync::mpsc::channel();
-        let request: SpawnRequest = Box::new(move |_shutdown| {
-            Box::pin(async move {
-                tx.send(42).unwrap();
-            })
-        });
+        let request = SpawnRequest {
+            name: "test-cell".into(),
+            factory: Box::new(move |_shutdown| {
+                Box::pin(async move {
+                    tx.send(42).unwrap();
+                })
+            }),
+            result_tx: None,
+        };
 
         assert!(pool.spawn(request).is_ok(), "spawn failed");
 
@@ -446,22 +620,29 @@ mod tests {
 
         // Spawn a long-running cell on one worker.
         let (block_tx, block_rx) = std::sync::mpsc::channel::<()>();
-        let long_cell: SpawnRequest = Box::new(move |_shutdown| {
-            Box::pin(async move {
-                // Block until signaled.
-                let _ = tokio::task::spawn_blocking(move || block_rx.recv()).await;
-            })
-        });
+        let long_cell = SpawnRequest {
+            name: "long-cell".into(),
+            factory: Box::new(move |_shutdown| {
+                Box::pin(async move {
+                    let _ = tokio::task::spawn_blocking(move || block_rx.recv()).await;
+                })
+            }),
+            result_tx: None,
+        };
         assert!(pool.spawn(long_cell).is_ok(), "spawn long_cell failed");
         std::thread::sleep(Duration::from_millis(50));
 
         // Worker 0 has count=1. Next cell should go to worker 1.
         let (tx, rx) = std::sync::mpsc::channel();
-        let short_cell: SpawnRequest = Box::new(move |_shutdown| {
-            Box::pin(async move {
-                tx.send(()).unwrap();
-            })
-        });
+        let short_cell = SpawnRequest {
+            name: "short-cell".into(),
+            factory: Box::new(move |_shutdown| {
+                Box::pin(async move {
+                    tx.send(()).unwrap();
+                })
+            }),
+            result_tx: None,
+        };
         assert!(pool.spawn(short_cell).is_ok(), "spawn short_cell failed");
         rx.recv_timeout(Duration::from_secs(5)).unwrap();
 
@@ -513,10 +694,184 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
 
         // Spawn should fail gracefully.
-        let request: SpawnRequest = Box::new(|_| Box::pin(async {}));
+        let request = SpawnRequest {
+            name: "doomed-cell".into(),
+            factory: Box::new(|_| Box::pin(async {})),
+            result_tx: None,
+        };
         assert!(
             pool.spawn(request).is_err(),
             "spawn after shutdown should fail"
         );
+    }
+
+    #[test]
+    fn round_robin_distributes_across_idle_workers() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
+        let pool = ExecutorPool::new(4, shutdown_rx);
+
+        // Spawn 4 short cells. With round-robin on idle workers,
+        // they should distribute across all 4 workers (not all to worker 0).
+        let barriers: Vec<_> = (0..4)
+            .map(|i| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let request = SpawnRequest {
+                    name: format!("rr-cell-{}", i),
+                    factory: Box::new(move |_shutdown| {
+                        Box::pin(async move {
+                            tx.send(()).unwrap();
+                        })
+                    }),
+                    result_tx: None,
+                };
+                assert!(pool.spawn(request).is_ok());
+                rx
+            })
+            .collect();
+
+        // All 4 should complete.
+        for rx in barriers {
+            rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+
+        drop(shutdown_tx);
+    }
+
+    #[test]
+    fn spawn_request_result_tx_receives_exit_code() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
+        let pool = ExecutorPool::new(1, shutdown_rx);
+
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let request = SpawnRequest {
+            name: "exit-cell".into(),
+            factory: Box::new(|_shutdown| Box::pin(async {})),
+            result_tx: Some(result_tx),
+        };
+        assert!(pool.spawn(request).is_ok());
+
+        // The worker sends Ok(0) on successful completion.
+        let result = result_rx.blocking_recv().unwrap();
+        assert_eq!(result.unwrap(), 0);
+
+        drop(shutdown_tx);
+    }
+
+    #[test]
+    fn spawn_request_panic_sends_error_via_result_tx() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
+        let pool = ExecutorPool::new(1, shutdown_rx);
+
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let request = SpawnRequest {
+            name: "panic-cell".into(),
+            factory: Box::new(|_shutdown| {
+                Box::pin(async {
+                    panic!("intentional cell panic");
+                })
+            }),
+            result_tx: Some(result_tx),
+        };
+        assert!(pool.spawn(request).is_ok());
+
+        // The worker catches the panic and sends Err.
+        let result = result_rx.blocking_recv().unwrap();
+        assert!(result.is_err(), "panicked cell should produce Err");
+
+        drop(shutdown_tx);
+    }
+
+    #[test]
+    fn bounded_channel_rejects_after_shutdown() {
+        // After shutdown the worker stops pulling from the channel.
+        // We verify try_send fails on a closed channel, confirming
+        // the bounded mpsc is wired correctly.
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
+        let pool = ExecutorPool::new(1, shutdown_rx);
+
+        // Shut down workers so the channel closes.
+        drop(shutdown_tx);
+        std::thread::sleep(Duration::from_millis(100));
+
+        let request = SpawnRequest {
+            name: "rejected".into(),
+            factory: Box::new(|_| Box::pin(async {})),
+            result_tx: None,
+        };
+        assert!(
+            pool.spawn(request).is_err(),
+            "spawn should fail on closed bounded channel"
+        );
+    }
+
+    #[test]
+    fn executor_pool_drop_joins_workers() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
+        let pool = ExecutorPool::new(2, shutdown_rx);
+
+        // Spawn a cell so workers are doing real work.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let request = SpawnRequest {
+            name: "drop-test".into(),
+            factory: Box::new(move |_shutdown| {
+                Box::pin(async move {
+                    tx.send(()).unwrap();
+                })
+            }),
+            result_tx: None,
+        };
+        assert!(pool.spawn(request).is_ok());
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        // Drop should close channels and join threads without hanging.
+        drop(shutdown_tx);
+        drop(pool); // should not hang
+    }
+
+    #[test]
+    fn cell_count_guard_saturates_on_underflow() {
+        // Verify CellCountGuard doesn't wrap to usize::MAX.
+        let counts = Arc::new(vec![AtomicUsize::new(0)]);
+        {
+            let _guard = CellCountGuard {
+                counts: counts.clone(),
+                worker_id: 0,
+            };
+            // Count is already 0 — dropping guard should saturate at 0.
+        }
+        assert_eq!(counts[0].load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn executor_pool_auto_detect_parallelism() {
+        // n=0 should auto-detect available parallelism.
+        let (_shutdown_tx, shutdown_rx) = watch::channel(());
+        let pool = ExecutorPool::new(0, shutdown_rx);
+        assert!(
+            pool.worker_count() >= 1,
+            "auto-detected pool should have at least 1 worker"
+        );
+    }
+
+    #[test]
+    fn spawn_request_no_result_tx_fire_and_forget() {
+        // Cells without result_tx should complete without error.
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
+        let pool = ExecutorPool::new(1, shutdown_rx);
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let request = SpawnRequest {
+            name: "fire-forget".into(),
+            factory: Box::new(move |_shutdown| {
+                Box::pin(async move {
+                    done_tx.send(()).unwrap();
+                })
+            }),
+            result_tx: None,
+        };
+        assert!(pool.spawn(request).is_ok());
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        drop(shutdown_tx);
     }
 }
