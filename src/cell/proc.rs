@@ -52,6 +52,11 @@ const YIELD_INTERVAL: u64 = 10_000; // yield to tokio every 10K instructions
 ///
 /// This creates natural backpressure: well-behaved guests stay near MAX_FUEL,
 /// while compute-heavy guests converge toward MIN_FUEL.
+///
+/// The decrease branch uses classic AIMD: `new = budget * 3/4`, giving
+/// smooth, predictable decay regardless of how much fuel was actually
+/// consumed.  This avoids oscillation for guests that alternate between
+/// I/O-heavy and compute-heavy rounds.
 pub struct FuelScheduler {
     budget: u64,
 }
@@ -71,7 +76,7 @@ impl FuelScheduler {
             (self.budget + ADDITIVE_INCREMENT).min(MAX_FUEL)
         } else {
             // Guest burned most of its budget: multiplicative decrease
-            (consumed * DECREASE_FACTOR_NUM / DECREASE_FACTOR_DEN).max(MIN_FUEL)
+            (self.budget * DECREASE_FACTOR_NUM / DECREASE_FACTOR_DEN).max(MIN_FUEL)
         };
 
         self.budget = new_budget;
@@ -792,8 +797,8 @@ mod tests {
         let mut sched = FuelScheduler::new(1_000_000);
         // Guest used 900K of 1M budget (90% > 50% threshold) → expensive
         let new = sched.on_host_return(100_000);
-        // consumed = 900K, new = 900K * 3/4 = 675K
-        assert_eq!(new, 675_000);
+        // budget = 1M, new = 1M * 3/4 = 750K
+        assert_eq!(new, 750_000);
         assert_eq!(sched.budget(), new);
     }
 
@@ -827,7 +832,7 @@ mod tests {
         let mut sched = FuelScheduler::new(1_000_000);
         // Guest ran out of fuel between host calls
         let new = sched.on_host_return(0);
-        // consumed = 1M, new = 1M * 3/4 = 750K
+        // budget = 1M, new = 1M * 3/4 = 750K
         assert_eq!(new, 750_000);
     }
 
@@ -844,8 +849,8 @@ mod tests {
         let mut sched = FuelScheduler::new(1_000_000);
         // consumed = 500_001 > threshold
         let new = sched.on_host_return(499_999);
-        // consumed = 500_001, new = 500_001 * 3/4 = 375_000
-        assert_eq!(new, 375_000);
+        // budget = 1M, new = 1M * 3/4 = 750_000
+        assert_eq!(new, 750_000);
     }
 
     #[test]
