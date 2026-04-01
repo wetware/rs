@@ -75,6 +75,25 @@
 **Priority:** P1
 **Depends on:** AIMD fuel scheduler (done)
 
+## Metrics-over-WAGI cell
+**What:** A `Cell::http("/metrics")` that exposes executor pool stats (cell counts per worker, spawn channel depth, compilation cache hit rate) as Prometheus-format metrics over the WAGI HTTP path.
+**Why:** Operators need visibility into runtime health without attaching a debugger. Standard Prometheus scraping works with existing monitoring stacks.
+**Context:** Deferred from thread-per-subsystem scope (#302). The executor pool exposes `cell_counts` and `worker_count()` already. CompilationService (when built) will track cache hits/misses. Wire these into a metrics cell that formats as Prometheus text exposition.
+**Effort:** S
+**Priority:** P2
+**Depends on:** WAGI host implementation (Phase 2), CompilationService
+
+## Worker health monitoring / heartbeats
+**What:** Each executor worker thread emits periodic heartbeat timestamps. A monitor checks for stale workers (no heartbeat in N seconds) and logs warnings.
+**Why:** A stuck WASM cell (infinite loop that doesn't yield fuel) silently blocks its worker thread. Without heartbeats, the operator can't tell which worker is stuck or that capacity is degraded.
+**Context:** Deferred from thread-per-subsystem scope (#302). Implementation: each worker updates an `AtomicU64` timestamp after each fuel yield. A lightweight monitor thread (or the Host supervisor) periodically scans timestamps. Stale = no update in 5s. Log warning with worker ID and last-known cell name.
+**Effort:** S
+**Priority:** P2
+**Depends on:** Thread-per-subsystem runtime (#302)
+
+## ~~Nested LocalSet cleanup in spawn_rpc_inner~~ ✅
+**RESOLVED:** `spawn_rpc_inner()` in `src/cell/executor.rs` and both spawn paths in `src/rpc/mod.rs` now use `tokio::task::spawn_local()` targeting the ambient worker `LocalSet` instead of creating nested `LocalSet`s. RPC systems and stderr drains run as sibling tasks on the worker, enabling proper M:N cooperative scheduling.
+
 ## WAGI host-side implementation (axum + route table, Phase 2)
 **What:** Implement `--with-http host:port` flag that spawns an axum router. Routes by path prefix from `Cell::http(prefix)` custom section. Each request dispatches a cell spawn to the `ExecutorPool` via `SpawnRequest` channel, pipes CGI env vars + body to stdin, reads CGI response from stdout.
 **Why:** `Cell::http` variant exists in the type system. Phase 1 delivers WAGI adapter, lightweight spawn, and `ww test http` CLI. Phase 2 adds the production HTTP server.
