@@ -11,8 +11,7 @@ use std::path::{Path, PathBuf};
 ///                 → find Greeter interface node by name
 ///                 → schema_id::extract_schemas (canonical bytes + BLAKE3)
 ///                 → `GREETER_SCHEMA_CID` const in generated Rust
-///                 → embedded in WASM custom section "cell.capnp"
-///                   (post-build injection via `make discovery`)
+///                 → schema bytes passed explicitly via RPC at runtime
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let manifest_path = Path::new(&manifest_dir);
