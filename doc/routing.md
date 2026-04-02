@@ -12,9 +12,9 @@ The `Routing` capability (obtained via `membrane.graft()`) provides:
 
 | Method | Shell syntax | Description |
 |--------|-------------|-------------|
-| `provide` | `(routing provide "name")` | Hash name to CID, announce this node as a provider |
-| `find` | `(routing find "name" [:count N])` | Discover providers for a name (default 20) |
-| `hash` | `(routing hash "data")` | Compute CID from data (advanced — `provide` hashes internally) |
+| `provide` | `(perform routing :provide "name")` | Hash name to CID, announce this node as a provider |
+| `find` | `(perform routing :find "name" [:count N])` | Discover providers for a name (default 20) |
+| `hash` | `(perform routing :hash "data")` | Compute CID from data (advanced — `provide` hashes internally) |
 
 All methods are epoch-guarded: they fail with `staleEpoch` when the on-chain head
 advances, forcing a re-graft.
@@ -23,10 +23,10 @@ advances, forcing a re-graft.
 
 ```clojure
 ;; Node A: announce as a price oracle
-(routing provide "price-oracle")
+(perform routing :provide "price-oracle")
 
 ;; Node B: discover price oracles
-(routing find "price-oracle")
+(perform routing :find "price-oracle")
 ;; → [{:peer-id "12D3KooW..." :addrs ["/ip4/1.2.3.4/tcp/2025" ...]} ...]
 ```
 
@@ -38,7 +38,7 @@ is hashed to a CIDv1 (SHA-256, raw codec) which becomes the DHT key.
 ```
 DHT discovery (untrusted)          Terminal auth (trusted)
 ─────────────────────────          ──────────────────────
-(routing find "oracle")     →     (host connect addr)
+(perform routing :find "oracle")  →  (perform host :connect addr)
   returns peer addresses            establish RPC connection
                                     Terminal.login(signer)
                                     verify identity
@@ -52,8 +52,8 @@ challenge-response tells you *whether you trust them*.
 ## Key format
 
 Provider keys are CIDv1 hashes (SHA-256, raw codec) of the service name string.
-The shell's `(routing provide "name")` and `(routing find "name")` handle hashing
-internally. The raw `(routing hash "data")` method is exposed for advanced use
+The shell's `(perform routing :provide "name")` and `(perform routing :find "name")` handle hashing
+internally. The raw `(perform routing :hash "data")` method is exposed for advanced use
 cases (e.g. content-addressed lookups).
 
 ## Limitations

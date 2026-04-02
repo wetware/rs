@@ -58,7 +58,7 @@ Each terminal drops you into a Glia shell.
 From each Glia shell, run the discovery demo in service mode:
 
 ```clojure
-/ > (executor run (load "bin/discovery.wasm"))
+/ > (perform executor :run (load "bin/discovery.wasm") "serve")
 ```
 
 Expected output on Agent B:
@@ -122,7 +122,10 @@ The same binary serves both roles:
 ; Register RPC cell for the Greeter capability.
 ; VatListener spawns a cell per connection; the cell exports
 ; a Greeter capability via system::serve().
-(host :listen executor (load "bin/discovery.wasm"))
+(def discovery-wasm (load "bin/discovery.wasm"))
+(def discovery-schema (load "bin/discovery.schema"))
+
+(perform host :listen executor discovery-wasm discovery-schema)
 ```
 
 The script registers the discovery binary with the host's

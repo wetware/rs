@@ -27,10 +27,10 @@ shell.
 ## Step 3 of 3: Try it (~1 min)
 
 ```clojure
-(host id)              ;; your peer identity
-(host peers)           ;; connected peers
-(executor echo "hello") ;; round-trip RPC — this is an effect crossing the process boundary
-(exit)                 ;; done
+(perform host :id)              ;; your peer identity
+(perform host :peers)           ;; connected peers
+(perform executor :echo "hello") ;; round-trip RPC — this is an effect crossing the process boundary
+(exit)                          ;; done
 ```
 
 ⚗️ **That's it.**  You just booted a p2p capability-secured OS:

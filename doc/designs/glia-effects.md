@@ -61,14 +61,14 @@ All share one structure: **interposing policy at a boundary** — the same thing
 (try (/ 1 0))
 ;; => {:err {:type :arithmetic :message "division by zero"}}
 
-(try-let [id (host id)]
+(try-let [id (perform host :id)]
   (println "connected:" id)
   (catch e
     (println "failed:" (:type e))))
 
 (throw (ex-info "peer unreachable" {:type :network :peer "QmFoo"}))
 
-(or-else (host id) "unknown")
+(or-else (perform host :id) "unknown")
 
 (guard (> n 0) (ex-info "must be positive" {:type :invalid}))
 ```
@@ -80,7 +80,7 @@ All share one structure: **interposing policy at a boundary** — the same thing
 - `with-handler` — `(with-handler {:effect-type handler-fn} body)` installs handlers. Handler fn receives `(data resume)`.
 
 ### Capability-effect fusion
-- `(host id)` becomes `(perform :host {:method "id"})`
+- `(perform host :id)` lowers to `(perform :host {:method "id"})`
 - Kernel installs Membrane as outermost handler for capability effects
 - Authority checks happen in the handler (epoch validation, capability revocation)
 - Stale epoch detected → handler re-grafts and resumes transparently
@@ -107,7 +107,7 @@ Phase 2 removes `Expr::Try`/`Expr::Throw` from the analyzer. `try`/`throw` becom
 ;; Testing — mock capabilities
 (with-handler
   {:host (fn [req resume] (resume {:id "mock-peer"}))}
-  (assert (= (host id) "mock-peer")))
+  (assert (= (perform host :id) "mock-peer")))
 
 ;; Retry on transient failure
 (with-handler

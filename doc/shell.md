@@ -9,20 +9,21 @@ When `ww run` detects a TTY on stdin it sets `WW_TTY=1` in the guest
 environment. The kernel starts a Clojure-inspired Lisp REPL:
 
 ```
-/ ❯ (host id)
+/ ❯ (perform host :id)
 "00240801122025c7ea..."
-/ ❯ (executor echo "hello")
+/ ❯ (perform executor :echo "hello")
 "hello"
 / ❯ (exit)
 ```
 
 ### Syntax
 
-Every expression is an S-expression. The first symbol selects the
-capability, the second names the method, and the rest are arguments:
+Every expression is an S-expression. Effects use the `perform` form:
+the first argument is the capability, the second is a keyword naming
+the method, and the rest are arguments:
 
 ```
-(capability method [args...])
+(perform capability :method [args...])
 ```
 
 Strings are double-quoted. Symbols are bare words. Comments start with
@@ -34,23 +35,23 @@ Strings are double-quoted. Symbols are bare words. Comments start with
 
 | Method | Example | Description |
 |--------|---------|-------------|
-| `id` | `(host id)` | Peer ID (hex-encoded) |
-| `addrs` | `(host addrs)` | Listen multiaddrs |
-| `peers` | `(host peers)` | Connected peers with addresses |
-| `connect` | `(host connect "/ip4/1.2.3.4/tcp/2025/p2p/12D3...")` | Dial a peer |
+| `id` | `(perform host :id)` | Peer ID (hex-encoded) |
+| `addrs` | `(perform host :addrs)` | Listen multiaddrs |
+| `peers` | `(perform host :peers)` | Connected peers with addresses |
+| `connect` | `(perform host :connect "/ip4/1.2.3.4/tcp/2025/p2p/12D3...")` | Dial a peer |
 
 #### executor
 
 | Method | Example | Description |
 |--------|---------|-------------|
-| `echo` | `(executor echo "hello")` | Diagnostic echo (round-trips through RPC) |
+| `echo` | `(perform executor :echo "hello")` | Diagnostic echo (round-trips through RPC) |
 
 #### ipfs
 
 | Method | Example | Description |
 |--------|---------|-------------|
-| `cat` | `(ipfs cat "/ipfs/QmFoo...")` | Fetch IPFS content (UTF-8 or byte count) |
-| `ls` | `(ipfs ls "/ipfs/QmFoo...")` | List directory entries |
+| `cat` | `(perform ipfs :cat "/ipfs/QmFoo...")` | Fetch IPFS content (UTF-8 or byte count) |
+| `ls` | `(perform ipfs :ls "/ipfs/QmFoo...")` | List directory entries |
 
 IPFS methods pipeline through the `UnixFS` sub-API of the
 `Ipfs.Client` capability on the session.

@@ -42,7 +42,7 @@ This drops you into the Glia shell.
 From the Glia shell, run the counter cell interactively:
 
 ```clojure
-/ > (executor run (load "bin/counter.wasm"))
+/ > (perform executor :run (load "bin/counter.wasm") "serve")
 ```
 
 Then test with curl:
@@ -136,7 +136,7 @@ well-specified binary protocol for this job.
 ```clojure
 ; Register the counter cell as an HTTP handler at /counter.
 ; HttpListener spawns a cell per request and pipes FastCGI.
-(host :listen executor "/counter" (load "bin/counter.wasm"))
+(perform host :listen executor "/counter" (load "bin/counter.wasm"))
 ```
 
 The script registers the counter binary with the host's

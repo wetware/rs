@@ -4,11 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.0.3.3] - 2026-04-02
+
+### Fixed
+- All documentation uses correct `(perform cap :method ...)` Glia syntax
+- Example READMEs match actual init.d scripts (schema arg, subcommands)
+
 ## [0.0.3.2] - 2026-04-02
 
 ### Changed
 - Cell guests dispatch on subcommands instead of envvars: no args = cell mode, `serve` / `consume` for application roles
-- Init.d scripts only register cells; user starts services from the Glia shell with `(executor run wasm "serve")`
+- Init.d scripts only register cells; user starts services from the Glia shell with `(perform executor :run wasm "serve")`
 - `WW_CELL_MODE` envvar is now informational only (set by kernel, not used for dispatch)
 - `WW_CELL=1` envvar removed entirely
 
