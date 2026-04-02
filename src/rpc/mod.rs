@@ -470,6 +470,7 @@ pub struct HostImpl {
     wasm_debug: bool,
     guard: Option<EpochGuard>,
     stream_control: Option<libp2p_stream::Control>,
+    route_registry: Option<crate::dispatcher::server::RouteRegistry>,
 }
 
 impl HostImpl {
@@ -486,7 +487,17 @@ impl HostImpl {
             wasm_debug,
             guard,
             stream_control,
+            route_registry: None,
         }
+    }
+
+    /// Set the HTTP route registry for WAGI service integration.
+    pub fn with_route_registry(
+        mut self,
+        registry: crate::dispatcher::server::RouteRegistry,
+    ) -> Self {
+        self.route_registry = Some(registry);
+        self
     }
 
     fn check_epoch(&self) -> Result<(), capnp::Error> {
@@ -602,8 +613,12 @@ impl system_capnp::host::Server for HostImpl {
         let vat_client: system_capnp::vat_client::Client = capnp_rpc::new_client(
             vat_client::VatClientImpl::new(stream_control, guard.clone()),
         );
+        let registry = self
+            .route_registry
+            .clone()
+            .unwrap_or_else(crate::dispatcher::server::new_registry);
         let http_listener: system_capnp::http_listener::Client =
-            capnp_rpc::new_client(http_listener::HttpListenerImpl::new(guard));
+            capnp_rpc::new_client(http_listener::HttpListenerImpl::new(guard, registry));
         results.get().set_stream_listener(stream_listener);
         results.get().set_stream_dialer(stream_dialer);
         results.get().set_vat_listener(vat_listener);
@@ -824,6 +839,7 @@ impl system_capnp::executor::Server for ExecutorImpl {
                     ic,
                     signing_key,
                     sc,
+                    None, // route_registry: child cells don't get HTTP routes
                 );
                 (rpc, Some(guest.client))
             } else {
@@ -998,6 +1014,7 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
                     ic,
                     signing_key,
                     sc,
+                    None, // route_registry: spawned cells don't get HTTP routes
                 );
                 bootstrap_cap = Some(guest.client);
                 rpc

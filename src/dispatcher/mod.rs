@@ -18,6 +18,7 @@
 //! // NOTE: interested in feedback from embedded apps and other
 //! // resource-constrained environments where execution mode matters.
 
+pub mod server;
 pub mod wagi;
 
 use std::fmt;

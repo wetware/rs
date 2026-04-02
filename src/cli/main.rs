@@ -110,6 +110,11 @@ enum Commands {
         /// tools/list) are handled by the adapter, not the cell.
         #[arg(long)]
         mcp: bool,
+
+        /// Enable the WAGI HTTP server on the given address.
+        /// Example: --http-listen 127.0.0.1:8080
+        #[arg(long, value_name = "ADDR")]
+        http_listen: Option<String>,
     },
 
     /// Generate a new Ed25519 identity secret.
@@ -266,6 +271,7 @@ impl Commands {
                 confirmation_depth,
                 executor_threads,
                 mcp,
+                http_listen,
             } => {
                 if mcp {
                     // TODO(mikel): Wire MCP adapter here.
@@ -301,6 +307,7 @@ impl Commands {
                     ws_url,
                     confirmation_depth,
                     executor_threads,
+                    http_listen,
                 )
                 .await
             }
@@ -795,6 +802,7 @@ pub extern "C" fn _start() {
         ws_url: String,
         confirmation_depth: u64,
         executor_threads: usize,
+        http_listen: Option<String>,
     ) -> Result<()> {
         // Dev-mode compat: if a single local root mount has boot/main.wasm
         // but not bin/main.wasm, copy it over (the runtime expects bin/).
@@ -982,10 +990,29 @@ pub extern "C" fn _start() {
         let executor_pool =
             ww::runtime::ExecutorPool::new(executor_threads, supervisor.shutdown_rx());
 
+        // WAGI HTTP server thread (only when --http-listen is provided).
+        let route_registry = if let Some(ref addr) = http_listen {
+            let listen_addr: std::net::SocketAddr = addr
+                .parse()
+                .context("invalid --http-listen address (expected host:port)")?;
+            let registry = ww::dispatcher::server::new_registry();
+            supervisor.spawn(
+                "wagi-http",
+                ww::runtime::WagiService {
+                    listen_addr,
+                    registry: registry.clone(),
+                },
+            );
+            Some(registry)
+        } else {
+            None
+        };
+
         tracing::info!(
             mounts = all_mounts.len(),
             root = %image_path,
             port,
+            http = http_listen.as_deref().unwrap_or("disabled"),
             "Booting environment"
         );
 
@@ -997,6 +1024,10 @@ pub extern "C" fn _start() {
             .with_image_root(merged.path().into())
             .with_content_store(content_store.clone())
             .with_signing_key(std::sync::Arc::new(sk));
+
+        if let Some(registry) = route_registry {
+            builder = builder.with_route_registry(registry);
+        }
 
         if let Some(epoch_rx) = epoch_channel_rx {
             builder = builder.with_epoch_rx(epoch_rx);

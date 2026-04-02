@@ -355,6 +355,9 @@ fn worker_loop(
 use crate::host::{KuboBootstrapInfo, SwarmCommand};
 use crate::rpc::NetworkState;
 
+// Re-export WagiService so cli/main.rs can use `ww::runtime::WagiService`.
+pub use crate::dispatcher::server::WagiService;
+
 /// Parameters for constructing a [`Libp2pHost`] inside the swarm thread.
 ///
 /// The host must be constructed on the same tokio runtime that will poll it,

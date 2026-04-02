@@ -142,9 +142,11 @@ pub struct HostGraftBuilder {
     stream_control: libp2p_stream::Control,
     epoch_rx: watch::Receiver<Epoch>,
     allowed_hosts: Vec<String>,
+    route_registry: Option<crate::dispatcher::server::RouteRegistry>,
 }
 
 impl HostGraftBuilder {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         network_state: NetworkState,
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
@@ -164,7 +166,17 @@ impl HostGraftBuilder {
             stream_control,
             epoch_rx,
             allowed_hosts,
+            route_registry: None,
         }
+    }
+
+    /// Set the HTTP route registry for WAGI integration.
+    pub fn with_route_registry(
+        mut self,
+        registry: crate::dispatcher::server::RouteRegistry,
+    ) -> Self {
+        self.route_registry = Some(registry);
+        self
     }
 }
 
@@ -174,13 +186,17 @@ impl GraftBuilder for HostGraftBuilder {
         guard: &EpochGuard,
         mut builder: stem_capnp::membrane::graft_results::Builder<'_>,
     ) -> Result<(), capnp::Error> {
-        let host: system_capnp::host::Client = capnp_rpc::new_client(super::HostImpl::new(
+        let mut host_impl = super::HostImpl::new(
             self.network_state.clone(),
             self.swarm_cmd_tx.clone(),
             self.wasm_debug,
             Some(guard.clone()),
             Some(self.stream_control.clone()),
-        ));
+        );
+        if let Some(ref registry) = self.route_registry {
+            host_impl = host_impl.with_route_registry(registry.clone());
+        }
+        let host: system_capnp::host::Client = capnp_rpc::new_client(host_impl);
         builder.set_host(host);
 
         let executor: system_capnp::executor::Client =
@@ -497,12 +513,13 @@ pub fn build_membrane_rpc<R, W>(
     content_store: Arc<dyn ipfs::ContentStore>,
     signing_key: Option<Arc<SigningKey>>,
     stream_control: libp2p_stream::Control,
+    route_registry: Option<crate::dispatcher::server::RouteRegistry>,
 ) -> (RpcSystem<Side>, GuestMembrane)
 where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
 {
-    let sess_builder = HostGraftBuilder::new(
+    let mut sess_builder = HostGraftBuilder::new(
         network_state,
         swarm_cmd_tx,
         wasm_debug,
@@ -512,6 +529,9 @@ where
         epoch_rx.clone(),
         Vec::new(), // allowed_hosts: empty = allow all (default)
     );
+    if let Some(registry) = route_registry {
+        sess_builder = sess_builder.with_route_registry(registry);
+    }
     // The local kernel is a trusted process — no challenge-response auth needed.
     // Auth applies to external peers connecting via libp2p to the guest's exported membrane.
     let membrane_server = MembraneServer::new(epoch_rx, sess_builder);
