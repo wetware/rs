@@ -36,81 +36,87 @@ pub const BUFFER_SIZE: usize = 1024;
 const PIPE_BUFFER_SIZE: usize = 64 * 1024;
 
 // ---------------------------------------------------------------------------
-// Fuel metering constants
+// Fuel metering
 //
 // Fuel is both the resource-metering unit and the cooperative preemption
 // primitive.  Every YIELD_INTERVAL instructions Wasmtime suspends the guest
 // and returns Poll::Pending to the Tokio LocalSet, giving other cells a turn.
-// Fuel exhaustion between host calls does NOT trap — it yields (async mode).
 //
-// Budget bounds are enforced by the AIMD scheduler on every ReturningFromHost
-// hook.  The scheduler converges I/O-bound guests toward MAX_FUEL and
-// compute-heavy guests toward MIN_FUEL, providing natural backpressure without
-// any external timer or OS interrupt.
+// The fuel budget IS the scheduling quantum: larger budgets give cells higher
+// effective priority (more instructions per yield cycle).  The EWMA estimator
+// tracks consumed/budget ratio and sizes the budget inversely: I/O-bound
+// cells get large budgets, compute-heavy cells get small ones.
+//
+// Two refueling paths:
+//   - call_hook (ReturningFromHost): fires on every host call, EWMA adapts.
+//   - epoch_deadline_callback: fires every EPOCH_TICK_MS, prevents
+//     Trap::OutOfFuel for cells that don't make host calls.
 // ---------------------------------------------------------------------------
 
-/// Starting budget for a freshly spawned cell (~1 ms at 1 GHz).
-const INITIAL_FUEL: u64 = 1_000_000;
-/// Hard ceiling.  An I/O-bound cell that never exhausts its budget will
-/// converge here after enough additive increases.
-const MAX_FUEL: u64 = 10_000_000;
-/// Floor.  Prevents a compute-heavy cell from being throttled to zero and
-/// starved of all forward progress.
-const MIN_FUEL: u64 = 10_000;
-/// Additive increase applied to the budget when a guest is I/O-efficient
-/// (consumed < 50% of its budget before the next host call).
-const ADDITIVE_INCREMENT: u64 = 100_000;
-/// Numerator of the multiplicative decrease factor (3/4 = 0.75).
-const DECREASE_FACTOR_NUM: u64 = 3;
-/// Denominator of the multiplicative decrease factor.
-const DECREASE_FACTOR_DEN: u64 = 4;
-/// Wasmtime yields the guest back to the Tokio LocalSet every this many
-/// instructions.  Controls preemption granularity independently of the AIMD
-/// budget — a guest with a large budget still yields frequently.
-const YIELD_INTERVAL: u64 = 10_000;
+use crate::sched::{INITIAL_FUEL, MAX_FUEL, MIN_FUEL, RATIO_SCALE, YIELD_INTERVAL};
 
-/// AIMD fuel scheduler for WASM cells.
+/// Ratio-based EWMA fuel estimator for WASM cells.
 ///
-/// Tracks the current fuel budget and adjusts it at host call boundaries:
-/// - Additive increase when the guest is I/O-efficient (used < 50% of budget)
-/// - Multiplicative decrease when the guest is compute-heavy (used >= 50%)
+/// Tracks the consumed/budget ratio via an exponentially weighted moving
+/// average (α=0.3) and sizes the budget inversely: low ratio (I/O-bound)
+/// → large budget, high ratio (compute-bound) → small budget.
 ///
-/// This creates natural backpressure: well-behaved guests stay near MAX_FUEL,
-/// while compute-heavy guests converge toward MIN_FUEL.
-///
-/// The decrease branch uses classic AIMD: `new = budget * 3/4`, giving
-/// smooth, predictable decay regardless of how much fuel was actually
-/// consumed.  This avoids oscillation for guests that alternate between
-/// I/O-heavy and compute-heavy rounds.
-pub struct FuelScheduler {
+/// Using the ratio instead of absolute consumed avoids a feedback loop
+/// where consumed depends on budget, which would spiral to MIN_FUEL under
+/// bursty workloads.
+pub struct FuelEstimator {
     budget: u64,
+    /// EWMA of consumed/budget ratio (fixed-point, 0..RATIO_SCALE).
+    avg_ratio: u64,
+    /// False until the first on_host_return observation.
+    initialized: bool,
+    /// Host calls observed since the last epoch tick.  The epoch callback
+    /// only updates the EWMA when this is zero (genuinely compute-bound).
+    /// Cells that make host calls are already handled by the call_hook,
+    /// so the epoch callback just refuels without double-observing.
+    host_calls_this_epoch: u32,
 }
 
-impl FuelScheduler {
+impl FuelEstimator {
     pub fn new(initial: u64) -> Self {
-        Self { budget: initial }
+        Self {
+            budget: initial,
+            avg_ratio: RATIO_SCALE / 2,
+            initialized: false,
+            host_calls_this_epoch: 0,
+        }
     }
 
     /// Adjust the fuel budget at a `ReturningFromHost` boundary.
     ///
     /// `remaining` is the fuel left in the store at the moment the guest
-    /// re-enters WASM after a host call.  The scheduler infers how much the
-    /// guest consumed during that slice (`prev_budget - remaining`) and applies
-    /// the AIMD policy.
+    /// re-enters WASM after a host call.  The estimator computes the
+    /// consumed/budget ratio, updates the EWMA, and returns a new budget
+    /// sized inversely to the ratio.
     ///
     /// Returns the new budget to install via `store.set_fuel(...)`.
     pub fn on_host_return(&mut self, remaining: u64) -> u64 {
         let consumed = self.budget.saturating_sub(remaining);
-        let threshold = self.budget / 2; // 50%
-
-        let new_budget = if consumed <= threshold {
-            // Guest is I/O-efficient: additive increase
-            (self.budget + ADDITIVE_INCREMENT).min(MAX_FUEL)
+        let ratio = if self.budget > 0 {
+            consumed * RATIO_SCALE / self.budget
         } else {
-            // Guest burned most of its budget: multiplicative decrease
-            (self.budget * DECREASE_FACTOR_NUM / DECREASE_FACTOR_DEN).max(MIN_FUEL)
+            RATIO_SCALE / 2
         };
 
+        if !self.initialized {
+            // Seed from first real observation — avoids cold-start bias.
+            self.avg_ratio = ratio;
+            self.initialized = true;
+        } else {
+            // EWMA α=0.3: single division for less truncation.
+            self.avg_ratio = (self.avg_ratio * 7 + ratio * 3) / 10;
+        }
+
+        // Budget inversely proportional to utilization ratio.
+        // ratio=0 (pure I/O) → budget=MAX_FUEL
+        // ratio=1000 (pure compute) → budget=0, clamped to MIN_FUEL
+        let new_budget =
+            (MAX_FUEL * (RATIO_SCALE - self.avg_ratio) / RATIO_SCALE).clamp(MIN_FUEL, MAX_FUEL);
         self.budget = new_budget;
         new_budget
     }
@@ -118,6 +124,11 @@ impl FuelScheduler {
     /// Returns the current budget.
     pub fn budget(&self) -> u64 {
         self.budget
+    }
+
+    /// Returns the current EWMA ratio (0..RATIO_SCALE).
+    pub fn avg_ratio(&self) -> u64 {
+        self.avg_ratio
     }
 }
 
@@ -140,8 +151,8 @@ pub struct ComponentRunStates {
     /// When `Some`, the guest filesystem is backed by a CidTree
     /// instead of a preopened host directory.
     pub cid_tree: Option<std::sync::Arc<crate::vfs::CidTree>>,
-    /// AIMD fuel scheduler, refuels at host call boundaries.
-    pub fuel_scheduler: FuelScheduler,
+    /// EWMA fuel estimator, refuels at host call boundaries.
+    pub fuel_estimator: FuelEstimator,
 }
 
 // Required for WASI IO to work.
@@ -423,18 +434,24 @@ impl Proc {
         let stdout_stream = AsyncStdoutStream::new(BUFFER_SIZE, stdout);
         let stderr_stream = AsyncStdoutStream::new(BUFFER_SIZE, stderr);
 
-        // Build a Wasmtime engine with the two settings required for cooperative
-        // scheduling:
-        //   async_support — fuel exhaustion yields (Poll::Pending) instead of
-        //                   trapping, so the Tokio LocalSet can run other cells.
-        //   consume_fuel  — enables instruction counting; without this, fuel
-        //                   methods are no-ops and the AIMD scheduler is inert.
+        // Build a Wasmtime engine with three settings for cooperative scheduling:
+        //   async_support      — fuel exhaustion yields (Poll::Pending) instead
+        //                        of trapping, so the Tokio LocalSet can run
+        //                        other cells.
+        //   consume_fuel       — enables instruction counting; without this,
+        //                        fuel methods are no-ops and the estimator is
+        //                        inert.
+        //   epoch_interruption — enables the epoch_deadline_callback that
+        //                        refuels compute-bound cells, preventing
+        //                        Trap::OutOfFuel for guests that don't make
+        //                        host calls frequently enough.
         let engine = if let Some(engine) = engine {
             engine
         } else {
             let mut wasm_config = WasmConfig::new();
             wasm_config.async_support(true);
             wasm_config.consume_fuel(true);
+            wasm_config.epoch_interruption(true);
             Arc::new(Engine::new(&wasm_config)?)
         };
         let mut linker = Linker::new(&engine);
@@ -494,7 +511,7 @@ impl Proc {
             data_stream,
             cache_mode,
             cid_tree,
-            fuel_scheduler: FuelScheduler::new(INITIAL_FUEL),
+            fuel_estimator: FuelEstimator::new(INITIAL_FUEL),
         };
 
         let mut store = Store::new(&engine, state);
@@ -507,22 +524,53 @@ impl Proc {
         store.fuel_async_yield_interval(Some(YIELD_INTERVAL))?;
         tracing::trace!(budget = INITIAL_FUEL, "fuel.initial");
 
-        // AIMD refueling hook: fires on every ReturningFromHost transition.
+        // Epoch-based refueling: prevents Trap::OutOfFuel for compute-bound
+        // cells.  When Engine::increment_epoch() is called (by the epoch tick
+        // task in runtime.rs), this callback fires inside the Store context
+        // and refuels the cell with its current EWMA-estimated budget.
         //
-        // We measure how much fuel the guest consumed during its last WASM
-        // slice and hand it to the scheduler, which applies the AIMD policy and
-        // returns a new budget.  set_fuel() reloads the tank so the guest can
-        // continue.  Note that this hook does NOT fire on fuel-yield events
-        // (those go through Poll::Pending); it fires when the guest makes a
-        // deliberate host call (WASI import, etc.).
+        // For I/O-bound cells this is a no-op (they're already refueled by
+        // the call_hook below).  For compute-bound cells, this is the only
+        // refueling path — without it, fuel exhaustion causes Trap::OutOfFuel.
+        store.epoch_deadline_callback(|mut ctx| {
+            let est = &mut ctx.data_mut().fuel_estimator;
+            if est.host_calls_this_epoch == 0 {
+                // No host calls this epoch — cell is compute-bound.
+                // Observe full consumption so EWMA converges toward MIN_FUEL.
+                est.on_host_return(0);
+            }
+            // I/O cells: the call_hook already updated the EWMA.
+            // Just refuel, don't double-observe.
+            est.host_calls_this_epoch = 0;
+            let budget = est.budget();
+            ctx.set_fuel(budget)?;
+            tracing::trace!(budget, "fuel.epoch_refuel");
+            Ok(wasmtime::UpdateDeadline::Continue(1))
+        });
+        store.set_epoch_deadline(1);
+
+        // EWMA refueling hook: fires on every ReturningFromHost transition.
+        //
+        // The estimator tracks the consumed/budget ratio via EWMA and sizes
+        // the budget inversely.  set_fuel() reloads the tank so the guest can
+        // continue.  This hook does NOT fire on fuel-yield events (those go
+        // through Poll::Pending); it fires when the guest makes a deliberate
+        // host call (WASI import, etc.).
+        //
+        // Compute-bound cells that don't make host calls are refueled by the
+        // epoch_deadline_callback above to prevent Trap::OutOfFuel.
         store.call_hook(|mut ctx, hook| {
             if matches!(hook, CallHook::ReturningFromHost) {
                 let remaining = ctx.get_fuel().unwrap_or(0);
-                let prev_budget = ctx.data().fuel_scheduler.budget();
-                let consumed = prev_budget.saturating_sub(remaining);
-                let new_budget = ctx.data_mut().fuel_scheduler.on_host_return(remaining);
+                ctx.data_mut().fuel_estimator.host_calls_this_epoch += 1;
+                let new_budget = ctx.data_mut().fuel_estimator.on_host_return(remaining);
                 ctx.set_fuel(new_budget)?;
-                tracing::debug!(prev_budget, new_budget, remaining, consumed, "fuel.refuel");
+                tracing::debug!(
+                    new_budget,
+                    remaining,
+                    avg_ratio = ctx.data().fuel_estimator.avg_ratio(),
+                    "fuel.refuel"
+                );
             }
             Ok(())
         });
@@ -851,97 +899,136 @@ mod tests {
     }
 
     // =========================================================================
-    // FuelScheduler AIMD tests
+    // FuelEstimator EWMA tests
     // =========================================================================
 
     #[test]
-    fn fuel_scheduler_additive_increase_when_efficient() {
-        let mut sched = FuelScheduler::new(1_000_000);
-        // Guest used 400K of 1M budget (40% < 50% threshold) → efficient
-        let new = sched.on_host_return(600_000);
-        assert_eq!(new, 1_000_000 + ADDITIVE_INCREMENT);
-        assert_eq!(sched.budget(), new);
+    fn fuel_estimator_seeds_from_first_observation() {
+        let mut est = FuelEstimator::new(1_000_000);
+        assert!(!est.initialized);
+        // First call: consumed = 100K of 1M → ratio = 100
+        est.on_host_return(900_000);
+        assert!(est.initialized);
+        assert_eq!(est.avg_ratio(), 100); // seeded directly, not blended
     }
 
     #[test]
-    fn fuel_scheduler_multiplicative_decrease_when_expensive() {
-        let mut sched = FuelScheduler::new(1_000_000);
-        // Guest used 900K of 1M budget (90% > 50% threshold) → expensive
-        let new = sched.on_host_return(100_000);
-        // budget = 1M, new = 1M * 3/4 = 750K
-        assert_eq!(new, 750_000);
-        assert_eq!(sched.budget(), new);
+    fn fuel_estimator_ewma_blends_after_first() {
+        let mut est = FuelEstimator::new(1_000_000);
+        // Seed: ratio = 100 (10% utilization)
+        est.on_host_return(900_000);
+        assert_eq!(est.avg_ratio(), 100);
+        // Second call: same ratio. EWMA: (100*7 + 100*3) / 10 = 100
+        let budget = est.budget();
+        let remaining = budget - (budget * 100 / RATIO_SCALE);
+        est.on_host_return(remaining);
+        assert_eq!(est.avg_ratio(), 100);
     }
 
     #[test]
-    fn fuel_scheduler_clamps_to_max() {
-        let mut sched = FuelScheduler::new(MAX_FUEL - 1);
-        // Efficient: would push above MAX_FUEL
-        let new = sched.on_host_return(MAX_FUEL - 1); // consumed = 0
-        assert_eq!(new, MAX_FUEL);
+    fn fuel_estimator_io_bound_converges_to_max() {
+        let mut est = FuelEstimator::new(1_000_000);
+        // Repeatedly consume 0 fuel — pure I/O proxy
+        for _ in 0..50 {
+            let budget = est.budget();
+            est.on_host_return(budget); // consumed = 0
+        }
+        // Ratio → 0, budget → MAX_FUEL
+        assert!(
+            est.avg_ratio() < 5,
+            "ratio should be near 0, got {}",
+            est.avg_ratio()
+        );
+        assert_eq!(est.budget(), MAX_FUEL);
     }
 
     #[test]
-    fn fuel_scheduler_clamps_to_min() {
-        let mut sched = FuelScheduler::new(MIN_FUEL);
-        // Guest used all fuel
-        let new = sched.on_host_return(0);
-        // consumed = MIN_FUEL, new = MIN_FUEL * 3/4 = 7500, but clamped to MIN_FUEL
-        assert_eq!(new, MIN_FUEL);
+    fn fuel_estimator_compute_bound_converges_to_min() {
+        let mut est = FuelEstimator::new(1_000_000);
+        // Repeatedly consume all fuel
+        for _ in 0..50 {
+            est.on_host_return(0); // consumed = budget
+        }
+        // Ratio → 1000, budget → MIN_FUEL
+        assert!(
+            est.avg_ratio() > 990,
+            "ratio should be near 1000, got {}",
+            est.avg_ratio()
+        );
+        assert_eq!(est.budget(), MIN_FUEL);
     }
 
     #[test]
-    fn fuel_scheduler_zero_consumed_increases() {
-        let mut sched = FuelScheduler::new(500_000);
-        // Pure I/O: guest used 0 fuel
-        let new = sched.on_host_return(500_000);
-        assert_eq!(new, 500_000 + ADDITIVE_INCREMENT);
-    }
-
-    #[test]
-    fn fuel_scheduler_all_fuel_consumed_decreases() {
-        let mut sched = FuelScheduler::new(1_000_000);
-        // Guest ran out of fuel between host calls
-        let new = sched.on_host_return(0);
-        // budget = 1M, new = 1M * 3/4 = 750K
-        assert_eq!(new, 750_000);
-    }
-
-    #[test]
-    fn fuel_scheduler_exactly_half_is_efficient() {
-        let mut sched = FuelScheduler::new(1_000_000);
-        // consumed = 500K exactly = threshold → still efficient (<=)
-        let new = sched.on_host_return(500_000);
-        assert_eq!(new, 1_000_000 + ADDITIVE_INCREMENT);
-    }
-
-    #[test]
-    fn fuel_scheduler_just_over_half_decreases() {
-        let mut sched = FuelScheduler::new(1_000_000);
-        // consumed = 500_001 > threshold
-        let new = sched.on_host_return(499_999);
-        // budget = 1M, new = 1M * 3/4 = 750_000
-        assert_eq!(new, 750_000);
-    }
-
-    #[test]
-    fn fuel_scheduler_repeated_decrease_converges_to_min() {
-        let mut sched = FuelScheduler::new(1_000_000);
-        // Repeatedly consume all fuel — should converge to MIN_FUEL
+    fn fuel_estimator_bursty_no_spiral() {
+        let mut est = FuelEstimator::new(1_000_000);
+        // Alternate: I/O round (consumed=0) and compute round (consumed=budget)
         for _ in 0..100 {
-            sched.on_host_return(0);
+            let budget = est.budget();
+            est.on_host_return(budget); // I/O: consumed = 0
+            est.on_host_return(0); // Compute: consumed = budget
         }
-        assert_eq!(sched.budget(), MIN_FUEL);
+        // Ratio should stabilize around 500 (alternating 0 and 1000).
+        // Budget should NOT spiral to MIN_FUEL.
+        let ratio = est.avg_ratio();
+        assert!(
+            (400..600).contains(&ratio),
+            "bursty ratio should be ~500, got {}",
+            ratio
+        );
+        assert!(
+            est.budget() > MIN_FUEL * 10,
+            "budget should not spiral to MIN_FUEL, got {}",
+            est.budget()
+        );
     }
 
     #[test]
-    fn fuel_scheduler_repeated_increase_converges_to_max() {
-        let mut sched = FuelScheduler::new(100_000);
-        // Repeatedly consume 0 fuel — should converge to MAX_FUEL
-        for _ in 0..200 {
-            let budget = sched.budget();
-            sched.on_host_return(budget);
+    fn fuel_estimator_clamps_to_min() {
+        let mut est = FuelEstimator::new(MIN_FUEL);
+        // All fuel consumed → ratio = 1000 → budget clamped to MIN_FUEL
+        est.on_host_return(0);
+        assert_eq!(est.budget(), MIN_FUEL);
+    }
+
+    #[test]
+    fn fuel_estimator_clamps_to_max() {
+        let mut est = FuelEstimator::new(MAX_FUEL);
+        // Zero consumed → ratio = 0 → budget = MAX_FUEL
+        est.on_host_return(MAX_FUEL);
+        assert_eq!(est.budget(), MAX_FUEL);
+    }
+
+    #[test]
+    fn fuel_estimator_zero_budget_defaults_ratio() {
+        let mut est = FuelEstimator::new(0);
+        // Budget is 0 — ratio defaults to 500
+        est.on_host_return(0);
+        assert_eq!(est.avg_ratio(), RATIO_SCALE / 2);
+    }
+
+    #[test]
+    fn fuel_estimator_workload_shift_converges() {
+        let mut est = FuelEstimator::new(1_000_000);
+        // Start as I/O-bound (ratio ~100)
+        for _ in 0..20 {
+            let budget = est.budget();
+            let remaining = budget - (budget / 10); // 10% utilization
+            est.on_host_return(remaining);
         }
-        assert_eq!(sched.budget(), MAX_FUEL);
+        let io_ratio = est.avg_ratio();
+        assert!(io_ratio < 150, "I/O ratio should be <150, got {}", io_ratio);
+
+        // Shift to compute-heavy (ratio ~900)
+        for _ in 0..20 {
+            let budget = est.budget();
+            let remaining = budget / 10; // 90% utilization
+            est.on_host_return(remaining);
+        }
+        let compute_ratio = est.avg_ratio();
+        assert!(
+            compute_ratio > 800,
+            "compute ratio should be >800, got {}",
+            compute_ratio
+        );
     }
 }

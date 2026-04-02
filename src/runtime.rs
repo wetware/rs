@@ -5,7 +5,7 @@
 //! supervisor owns all threads and coordinates shutdown.
 //!
 //! Executor threads use `current_thread` + `LocalSet` because `wasmtime::Store`
-//! is `!Send`.  M:N cell scheduling comes from the AIMD fuel scheduler
+//! is `!Send`.  M:N cell scheduling comes from the EWMA fuel estimator
 //! (`src/cell/proc.rs`), not tokio work stealing.
 
 use std::future::Future;
@@ -13,9 +13,13 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::{mpsc, watch};
+use wasmtime::Engine;
+
+use crate::sched::EPOCH_TICK_MS;
 
 // ---------------------------------------------------------------------------
 // Service trait
@@ -133,7 +137,7 @@ pub struct SpawnRequest {
 ///
 /// Each worker is an OS thread with a `current_thread` tokio runtime and a
 /// `LocalSet`.  Cells are assigned to workers and cooperatively scheduled
-/// via the AIMD fuel scheduler.
+/// via the EWMA fuel estimator.
 /// Channel depth per worker. Matches the connection rate limit TODO (64
 /// concurrent cells per protocol). Prevents OOM under spawn bursts.
 const SPAWN_CHANNEL_DEPTH: usize = 64;
@@ -143,6 +147,10 @@ pub struct ExecutorPool {
     threads: Vec<Option<JoinHandle<()>>>,
     cell_counts: Arc<Vec<AtomicUsize>>,
     next: AtomicUsize,
+    /// Shared engine for all cells. Callers should pass this to CellBuilder
+    /// via `with_wasmtime_engine()` so all cells on a worker share the same
+    /// Engine and respond to `increment_epoch()`.
+    engine: Arc<Engine>,
 }
 
 impl ExecutorPool {
@@ -159,6 +167,15 @@ impl ExecutorPool {
             n
         };
 
+        // Create a shared Engine with fuel + epoch support.  All cells on
+        // all workers share this Engine so Engine::increment_epoch() reaches
+        // every Store's epoch_deadline_callback.
+        let mut wasm_config = wasmtime::Config::new();
+        wasm_config.async_support(true);
+        wasm_config.consume_fuel(true);
+        wasm_config.epoch_interruption(true);
+        let engine = Arc::new(Engine::new(&wasm_config).expect("failed to create wasmtime engine"));
+
         let mut senders = Vec::with_capacity(n);
         let mut threads = Vec::with_capacity(n);
         let cell_counts: Vec<AtomicUsize> = (0..n).map(|_| AtomicUsize::new(0)).collect();
@@ -168,9 +185,10 @@ impl ExecutorPool {
             let (tx, rx) = mpsc::channel(SPAWN_CHANNEL_DEPTH);
             let shutdown = shutdown.clone();
             let counts = cell_counts.clone();
+            let engine = engine.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("executor-{}", i))
-                .spawn(move || worker_loop(i, rx, shutdown, counts))
+                .spawn(move || worker_loop(i, rx, shutdown, counts, engine))
                 .unwrap_or_else(|e| panic!("failed to spawn executor-{}: {}", i, e));
             senders.push(tx);
             threads.push(Some(handle));
@@ -183,6 +201,7 @@ impl ExecutorPool {
             threads,
             cell_counts,
             next: AtomicUsize::new(0),
+            engine,
         }
     }
 
@@ -228,6 +247,14 @@ impl ExecutorPool {
     pub fn worker_count(&self) -> usize {
         self.senders.len()
     }
+
+    /// Shared Wasmtime engine for all cells in this pool.
+    ///
+    /// Pass this to `CellBuilder::with_wasmtime_engine()` so all cells share
+    /// the same Engine and respond to `Engine::increment_epoch()`.
+    pub fn engine(&self) -> Arc<Engine> {
+        Arc::clone(&self.engine)
+    }
 }
 
 impl Drop for ExecutorPool {
@@ -271,12 +298,17 @@ impl Drop for CellCountGuard {
 ///
 /// Runs a `current_thread` tokio runtime with a `LocalSet`.  Receives
 /// `SpawnRequest` factories over the channel, spawns them as local tasks.
-/// Each cell cooperatively yields via the AIMD fuel scheduler.
+/// Each cell cooperatively yields via the EWMA fuel estimator.
+///
+/// An epoch tick task calls `Engine::increment_epoch()` every EPOCH_TICK_MS,
+/// triggering each Store's `epoch_deadline_callback` to refuel compute-bound
+/// cells that don't make host calls frequently enough.
 fn worker_loop(
     id: usize,
     rx: mpsc::Receiver<SpawnRequest>,
     shutdown: watch::Receiver<()>,
     cell_counts: Arc<Vec<AtomicUsize>>,
+    engine: Arc<Engine>,
 ) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -287,6 +319,25 @@ fn worker_loop(
     let _span = tracing::info_span!("executor", worker = id).entered();
 
     rt.block_on(local.run_until(async move {
+        // Epoch tick task: bumps the Engine epoch counter every EPOCH_TICK_MS.
+        // This triggers epoch_deadline_callback in every Store on this Engine,
+        // refueling compute-bound cells that would otherwise Trap::OutOfFuel.
+        //
+        // Only worker 0 runs the tick task because all workers share the same
+        // Arc<Engine>.  increment_epoch() is a global atomic bump, so running
+        // it on N workers would advance the epoch N times per tick.
+        if id == 0 {
+            let tick_engine = engine.clone();
+            tokio::task::spawn_local(async move {
+                let mut interval = tokio::time::interval(Duration::from_millis(EPOCH_TICK_MS));
+                interval.tick().await; // skip immediate first tick
+                loop {
+                    interval.tick().await;
+                    tick_engine.increment_epoch();
+                }
+            });
+        }
+
         let mut rx = rx;
         let mut shutdown = shutdown;
         loop {

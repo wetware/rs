@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.0.2.0] - 2026-04-02
+
+### Added
+- Ratio-based EWMA fuel estimator replacing the binary AIMD scheduler. Tracks consumed/budget ratio via exponential moving average, sizes budgets inversely: I/O-bound cells get large budgets, compute-heavy cells get small ones.
+- `src/sched.rs` module with shared scheduling constants (fuel limits, yield interval, epoch tick rate)
+- Epoch-based refueling via `epoch_deadline_callback`. Compute-bound cells that don't make host calls get refueled every 10ms, preventing `Trap::OutOfFuel`. The epoch callback only updates the EWMA for cells with zero host calls that epoch, avoiding false observations for I/O cells that straddle epoch boundaries.
+- Epoch tick task on executor worker 0 (calls `Engine::increment_epoch()` every 10ms on the shared Engine)
+- Shared `Arc<Engine>` in `ExecutorPool` with `engine()` accessor for callers
+
+### Changed
+- AIMD fuel scheduler (`FuelScheduler`) replaced by `FuelEstimator` in `ComponentRunStates`
+- Fuel budget is now the scheduling quantum: larger budget = higher effective priority
+- Wasmtime engine config now enables `epoch_interruption(true)` alongside existing fuel support
+- Call hook logs EWMA ratio alongside budget for observability
+
+### Removed
+- AIMD constants (`ADDITIVE_INCREMENT`, `DECREASE_FACTOR_NUM/DEN`)
+- Binary 50% threshold classification (replaced by continuous ratio tracking)
+
 ## [0.0.5.0] - 2026-04-02
 
 ### Added
