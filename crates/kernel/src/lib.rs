@@ -94,6 +94,11 @@ struct Session {
     /// never crosses the host–guest boundary; only this capability reference is passed.
     #[allow(dead_code)]
     identity: stem_capnp::identity::Client,
+    /// Outbound HTTP capability for WASM guests.
+    ///
+    /// Domain-scoped proxy — the host checks URL host against an allowlist.
+    /// Exposed to glia scripts via `(perform host :http-client)`.
+    http_client: http_capnp::http_client::Client,
     cwd: String,
 }
 
@@ -272,11 +277,17 @@ fn extract_method(data: &Val) -> Result<(String, Vec<Val>), Val> {
     Ok((method, items[1..].to_vec()))
 }
 
-fn make_host_handler(host: system_capnp::host::Client) -> Val {
+fn make_host_handler(
+    host: system_capnp::host::Client,
+    runtime: system_capnp::runtime::Client,
+    http_client: http_capnp::http_client::Client,
+) -> Val {
     Val::AsyncNativeFn {
         name: "host-handler".into(),
         func: Rc::new(move |args: Vec<Val>| {
             let host = host.clone();
+            let runtime = runtime.clone();
+            let http_client = http_client.clone();
             Box::pin(async move {
                 let (method, rest) = extract_method(&args[0])?;
                 let resume = &args[1];
@@ -358,8 +369,74 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                         Val::List(items)
                     }
                     "listen" => {
-                        // (perform host :listen runtime <wasm>)         → VatListener
-                        // (perform host :listen runtime "proto" <wasm>) → StreamListener
+                        // Cell-based registration:
+                        //   (perform host :listen <cell>)          → VatListener
+                        //   (perform host :listen <cell> "/path")  → HttpListener
+                        if let Some(Val::Cell { wasm, schema, caps: _caps }) = rest.first() {
+                            let mut load_req = runtime.load_request();
+                            load_req.get().set_wasm(wasm);
+                            let executor = load_req.send().pipeline.get_executor();
+
+                            let network_resp = host
+                                .network_request()
+                                .send()
+                                .promise
+                                .await
+                                .map_err(|e| Val::from(e.to_string()))?;
+                            let network = network_resp
+                                .get()
+                                .map_err(|e| Val::from(e.to_string()))?;
+
+                            match rest.get(1) {
+                                None => {
+                                    // VatListener: (perform host :listen <cell>)
+                                    let listener = network
+                                        .get_vat_listener()
+                                        .map_err(|e| Val::from(e.to_string()))?;
+                                    let mut req = listener.listen_request();
+                                    {
+                                        let mut handler = req.get().init_handler();
+                                        handler.set_spawn(executor);
+                                    }
+                                    if let Some(s) = schema {
+                                        req.get().set_schema(s);
+                                    }
+                                    // TODO: thread _caps into spawned cells' membranes (Step 6)
+                                    req.send()
+                                        .promise
+                                        .await
+                                        .map_err(|e| Val::from(e.to_string()))?;
+                                    log::info!("host :listen — registered vat handler (cell)");
+                                    return call_resume(resume, Val::Nil);
+                                }
+                                Some(Val::Str(prefix)) => {
+                                    // HttpListener: (perform host :listen <cell> "/path")
+                                    let listener = network
+                                        .get_http_listener()
+                                        .map_err(|e| Val::from(e.to_string()))?;
+                                    let mut req = listener.listen_request();
+                                    req.get().set_executor(executor);
+                                    req.get().set_prefix(prefix);
+                                    // TODO: thread _caps into spawned cells' membranes (Step 6)
+                                    req.send()
+                                        .promise
+                                        .await
+                                        .map_err(|e| Val::from(e.to_string()))?;
+                                    log::info!(
+                                        "host :listen — registered HTTP handler at {prefix} (cell)"
+                                    );
+                                    return call_resume(resume, Val::Nil);
+                                }
+                                Some(other) => {
+                                    return Err(Val::from(format!(
+                                        "host :listen <cell> — optional 2nd arg must be a path string, got {other}"
+                                    )));
+                                }
+                            }
+                        }
+
+                        // Legacy path: (perform host :listen runtime <wasm>)         → VatListener
+                        //              (perform host :listen runtime "proto" <wasm>) → StreamListener
                         let runtime = match rest.first() {
                             Some(Val::Cap { name, inner, .. }) if name == "runtime" => inner
                                 .downcast_ref::<system_capnp::runtime::Client>()
@@ -480,6 +557,15 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                     "host :listen — usage: (perform host :listen runtime <wasm>) or (perform host :listen runtime \"proto\" <wasm>)",
                                 ))
                             }
+                        }
+                    }
+                    "http-client" => {
+                        // (perform host :http-client) → Val::Cap wrapping HttpClient
+                        // Future: parse :allow and :rate kwargs from rest
+                        Val::Cap {
+                            name: "http".into(),
+                            schema_cid: schema_ids::HTTP_CLIENT_CID.to_string(),
+                            inner: Rc::new(http_client.clone()),
                         }
                     }
                     _ => return Err(Val::from(format!("host: unknown method :{method}"))),
@@ -1208,6 +1294,7 @@ fn run_impl() {
             runtime: results.get_runtime()?,
             routing: results.get_routing()?,
             identity: results.get_identity()?,
+            http_client: results.get_http_client()?,
             cwd: "/".to_string(),
         });
 
@@ -1225,7 +1312,7 @@ fn run_impl() {
                     "host",
                     schema_ids::HOST_CID,
                     Rc::new(s.host.clone()),
-                    make_host_handler(s.host.clone()),
+                    make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone()),
                 ),
                 (
                     "runtime",
@@ -1810,12 +1897,26 @@ mod tests {
 
     // --- Helper: construct a Session with test stubs ---
 
+    struct TestHttpClient;
+
+    #[allow(refining_impl_trait)]
+    impl http_capnp::http_client::Server for TestHttpClient {
+        fn get(
+            self: capnp::capability::Rc<Self>,
+            _p: http_capnp::http_client::GetParams,
+            _r: http_capnp::http_client::GetResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
+    }
+
     fn test_session() -> Session {
         Session {
             host: capnp_rpc::new_client(TestHost),
             runtime: capnp_rpc::new_client(TestRuntime),
             routing: capnp_rpc::new_client(TestRouting),
             identity: capnp_rpc::new_client(TestIdentity),
+            http_client: capnp_rpc::new_client(TestHttpClient),
             cwd: "/".into(),
         }
     }
@@ -1867,7 +1968,7 @@ mod tests {
     async fn test_host_id_returns_bs58() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone());
+            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let result = call_handler(&handler, "id", &[]).await.unwrap();
             let expected = bs58::encode(STUB_PEER_ID).into_string();
             assert_eq!(result, Val::Str(expected));
@@ -1879,7 +1980,7 @@ mod tests {
     async fn test_host_addrs_returns_multiaddr_strings() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone());
+            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let result = call_handler(&handler, "addrs", &[]).await.unwrap();
             match result {
                 Val::List(addrs) => {
@@ -1896,7 +1997,7 @@ mod tests {
     async fn test_host_peers_returns_map_format() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone());
+            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let result = call_handler(&handler, "peers", &[]).await.unwrap();
             match result {
                 Val::List(peers) => {
@@ -1922,7 +2023,7 @@ mod tests {
     async fn test_host_unknown_method_returns_error() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone());
+            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let err = call_handler(&handler, "bogus", &[]).await.unwrap_err();
             let msg = format!("{err}");
             assert!(msg.contains("unknown method"), "got: {msg}");
@@ -1936,7 +2037,7 @@ mod tests {
     async fn test_host_listen_vat_passes_runtime() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone());
+            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let runtime_cap = Val::Cap {
                 name: "runtime".into(),
                 schema_cid: "test-runtime-cid".into(),
@@ -1961,7 +2062,7 @@ mod tests {
     async fn test_host_listen_stream_passes_runtime() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone());
+            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let runtime_cap = Val::Cap {
                 name: "runtime".into(),
                 schema_cid: "test-runtime-cid".into(),
@@ -1990,7 +2091,7 @@ mod tests {
     async fn test_host_listen_missing_runtime_errors() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone());
+            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let err = call_handler(&handler, "listen", &[Val::Bytes(b"wasm".to_vec())]).await;
             assert!(err.is_err(), "should require runtime capability");
         })
@@ -2001,7 +2102,7 @@ mod tests {
     async fn test_host_listen_wrong_cap_type_errors() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone());
+            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let bad_cap = Val::Cap {
                 name: "not-runtime".into(),
                 schema_cid: "test-not-runtime-cid".into(),
@@ -2023,7 +2124,7 @@ mod tests {
     async fn test_host_listen_forged_runtime_cap_wrong_inner_type() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone());
+            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let forged_cap = Val::Cap {
                 name: "runtime".into(),
                 schema_cid: "test-runtime-cid".into(),
@@ -2046,7 +2147,7 @@ mod tests {
     async fn test_host_listen_string_instead_of_cap_errors() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone());
+            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let err = call_handler(
                 &handler,
                 "listen",
@@ -2064,7 +2165,7 @@ mod tests {
     async fn test_host_listen_nil_instead_of_cap_errors() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone());
+            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let err = call_handler(
                 &handler,
                 "listen",
@@ -2080,7 +2181,7 @@ mod tests {
     async fn test_host_listen_stream_wrong_cap_type_errors() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone());
+            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let bad_cap = Val::Cap {
                 name: "imposter".into(),
                 schema_cid: "test-imposter-cid".into(),
@@ -2110,7 +2211,7 @@ mod tests {
     async fn test_host_listen_stream_missing_runtime_errors() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone());
+            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let err = call_handler(
                 &handler,
                 "listen",
@@ -2126,7 +2227,7 @@ mod tests {
     async fn test_host_listen_wrong_arity_returns_error() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone());
+            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             // 0 args after :listen — should error
             assert!(call_handler(&handler, "listen", &[]).await.is_err());
             // 4 args after :listen — should error
@@ -2314,7 +2415,7 @@ mod tests {
                 "host",
                 "test-host-cid",
                 Rc::new(session.host.clone()),
-                make_host_handler(session.host.clone()),
+                make_host_handler(session.host.clone(), session.runtime.clone(), session.http_client.clone()),
             ),
             (
                 "runtime",
