@@ -11,6 +11,13 @@ all:
 	cargo build -p discovery --target $(WASM_TARGET) --release
 	@mkdir -p bin
 	cp $(ROOT)/target/$(WASM_TARGET)/release/discovery.wasm bin/discovery.wasm
+	@# Copy compiled schema bytes next to the WASM binary.
+	@GREETER_OUT=$$(find $(ROOT)/target/$(WASM_TARGET)/release/build -path '*/discovery-*/out/greeter_schema.bin' | head -1) && \
+		if [ -n "$$GREETER_OUT" ]; then \
+			cp "$$GREETER_OUT" bin/discovery.schema; \
+		else \
+			echo "WARNING: greeter_schema.bin not found"; \
+		fi
 
 clean:
-	rm -f bin/discovery.wasm
+	rm -f bin/discovery.wasm bin/discovery.schema

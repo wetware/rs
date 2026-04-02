@@ -1,0 +1,11 @@
+; Oracle init.d script — evaluated by the kernel at boot.
+;
+; The oracle uses VatListener.serve() internally (persistent capability
+; shared across all connections). Unlike chess (which uses VatListener.spawn
+; for per-connection cells), the oracle manages its own listener, DHT
+; registration, and price fetching.
+;
+; Service mode (default): fetches gas prices, serves PriceOracle via RPC.
+; Consumer mode (WW_CONSUMER=1): discovers oracle providers and queries them.
+
+(perform executor :run (load "bin/oracle.wasm"))

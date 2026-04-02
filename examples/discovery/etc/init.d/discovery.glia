@@ -1,0 +1,14 @@
+; Discovery init.d script — evaluated by the kernel at boot.
+;
+; Registers a Greeter RPC cell and runs the discovery service.
+
+; Load the discovery WASM binary and its schema.
+(def discovery-wasm (load "bin/discovery.wasm"))
+(def discovery-schema (load "bin/discovery.schema"))
+
+; Register RPC cell — VatListener spawns a Greeter cell per connection.
+(perform host :listen executor discovery-wasm discovery-schema)
+
+; Run the discovery service — blocks until exit.
+; Provides schema CID on DHT, discovers peers, dials via VatClient.
+(perform executor :run discovery-wasm)
