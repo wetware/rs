@@ -8,13 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - `ipfs :add` handler: `(perform ipfs :add <bytes>)` returns CID
-- `ww init <name>` scaffolds typed cell guest projects (capnp schema, build.rs, boot/main.capnp symlink)
-- `ww build` produces `boot/main.schema` alongside `boot/main.wasm`
+- `ww init <name>` scaffolds typed cell guest projects
+- `ww build` places artifacts in bin/ (wasm + schema)
 - Oracle example README
+- Init.d scripts for all examples (chess, discovery, oracle, echo, counter)
 
 ### Changed
-- Kernel loads schema from `boot/main.schema` instead of WASM custom sections
-- Example Makefiles produce `boot/main.schema` instead of running `schema-inject`
+- Kernel reads schema from explicit RPC params (not WASM custom sections)
+- Example Makefiles simplified (no schema-inject step)
 
 ### Removed
 - `schema-inject` binary and `inject` feature from schema-id crate
