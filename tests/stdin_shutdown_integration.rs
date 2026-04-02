@@ -158,10 +158,10 @@ async fn test_vat_connection_closes_stdin_on_peer_disconnect() {
                 bind_req.get().set_wasm(&wasm_clone);
                 bind_req.get().init_args(0);
                 {
-                    let mut env = bind_req.get().init_env(3);
-                    env.set(0, "WW_CELL=1");
-                    env.set(1, "WW_PROTOCOL=test-protocol-cid");
-                    env.set(2, "PATH=/bin");
+                    // No args = cell mode (default). No WW_CELL envvar needed.
+                    let mut env = bind_req.get().init_env(2);
+                    env.set(0, "WW_PROTOCOL=test-protocol-cid");
+                    env.set(1, "PATH=/bin");
                 }
                 let bind_resp = bind_req.send().promise.await.unwrap();
                 let bound = bind_resp.get().unwrap().get_bound().unwrap();

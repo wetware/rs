@@ -402,8 +402,7 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                 };
 
                                 // Bind the executor with the wasm to get a BoundExecutor.
-                                // Set WW_CELL_MODE=vat so the guest knows it was spawned
-                                // by a VatListener.
+                                // WW_CELL_MODE=vat is informational (guest dispatches on args).
                                 let mut bind_req = executor.bind_request();
                                 {
                                     let mut b = bind_req.get();
@@ -469,8 +468,7 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                 };
 
                                 // Bind the executor with the wasm to get a BoundExecutor.
-                                // Set WW_CELL_MODE=raw so the guest knows it was spawned
-                                // by a StreamListener.
+                                // WW_CELL_MODE=raw is informational (guest dispatches on args).
                                 let mut bind_req = executor.bind_request();
                                 {
                                     let mut b = bind_req.get();
