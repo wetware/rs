@@ -786,6 +786,7 @@ impl WasmtimeHost {
         let mut config = WasmConfig::new();
         config.async_support(true);
         config.consume_fuel(true);
+        config.epoch_interruption(true);
         let engine = Engine::new(&config)?;
         Ok(Self {
             engine: Arc::new(engine),
