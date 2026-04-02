@@ -32,11 +32,11 @@ interface Membrane {
     identity :Identity,                           # Host-side identity hub: maps signing domains → Signers.
     host     :import "system.capnp".Host,         # Swarm-level operations (id, addrs, peers, network).
     executor :import "system.capnp".Executor,     # WASM execution (runBytes, echo).
-    ipfs     :import "ipfs.capnp".Client,         # IPFS CoreAPI (unixfs, block, dag, ...).
     routing  :import "routing.capnp".Routing,      # Content routing + data transfer via IPFS.
     httpClient :import "http.capnp".HttpClient    # Outbound HTTP (domain-scoped).
   );
   # Pure capability provisioning (ocap model). Having a Membrane reference IS
   # authorization — no signer needed. Wrap in Terminal(Membrane) to gate access.
   # Listener/Dialer accessed via host.network().
+  # IPFS content access goes through the WASI virtual filesystem (CidTree).
 }

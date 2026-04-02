@@ -635,7 +635,6 @@ pub struct ExecutorImpl {
     guard: Option<EpochGuard>,
     // When present, child processes get a full Membrane bootstrap (not bare Host).
     epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
-    content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
     signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
     stream_control: Option<libp2p_stream::Control>,
 }
@@ -653,7 +652,6 @@ impl ExecutorImpl {
             wasm_debug,
             guard,
             epoch_rx: None,
-            content_store: None,
             signing_key: None,
             stream_control: None,
         }
@@ -668,17 +666,18 @@ impl ExecutorImpl {
         wasm_debug: bool,
         guard: Option<EpochGuard>,
         epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
-        content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
+        _content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
         signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
         stream_control: Option<libp2p_stream::Control>,
     ) -> Self {
+        // NOTE: content_store parameter kept for API compatibility but ignored.
+        // IPFS reads go through WASI virtual FS now. Remove parameter in follow-up.
         Self {
             network_state,
             swarm_cmd_tx,
             wasm_debug,
             guard,
             epoch_rx,
-            content_store,
             signing_key,
             stream_control,
         }
@@ -764,7 +763,6 @@ impl system_capnp::executor::Server for ExecutorImpl {
             swarm_cmd_tx: self.swarm_cmd_tx.clone(),
             guard: self.guard.clone(),
             epoch_rx: self.epoch_rx.clone(),
-            content_store: self.content_store.clone(),
             signing_key: self.signing_key.clone(),
             stream_control: self.stream_control.clone(),
         });
@@ -788,7 +786,6 @@ impl system_capnp::executor::Server for ExecutorImpl {
         let network_state = self.network_state.clone();
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
         let epoch_rx = self.epoch_rx.clone();
-        let content_store = self.content_store.clone();
         let signing_key = self.signing_key.clone();
         let stream_control = self.stream_control.clone();
         Promise::from_future(async move {
@@ -826,28 +823,26 @@ impl system_capnp::executor::Server for ExecutorImpl {
             let (reader, writer) = handles
                 .take_host_split()
                 .ok_or_else(|| capnp::Error::failed("host stream missing".into()))?;
-            let (child_rpc_system, bootstrap_cap) = if let (Some(erx), Some(ic), Some(sc)) =
-                (epoch_rx, content_store, stream_control)
-            {
-                let (rpc, guest) = membrane::build_membrane_rpc(
-                    reader,
-                    writer,
-                    network_state,
-                    swarm_cmd_tx,
-                    wasm_debug,
-                    erx,
-                    ic,
-                    signing_key,
-                    sc,
-                    None, // route_registry: child cells don't get HTTP routes
-                );
-                (rpc, Some(guest.client))
-            } else {
-                (
-                    build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug),
-                    None,
-                )
-            };
+            let (child_rpc_system, bootstrap_cap) =
+                if let (Some(erx), Some(sc)) = (epoch_rx, stream_control) {
+                    let (rpc, guest) = membrane::build_membrane_rpc(
+                        reader,
+                        writer,
+                        network_state,
+                        swarm_cmd_tx,
+                        wasm_debug,
+                        erx,
+                        signing_key,
+                        sc,
+                        None, // route_registry: child cells don't get HTTP routes
+                    );
+                    (rpc, Some(guest.client))
+                } else {
+                    (
+                        build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug),
+                        None,
+                    )
+                };
 
             tokio::task::spawn_local(async move {
                 let local = tokio::task::LocalSet::new();
@@ -939,7 +934,6 @@ struct BoundConfig {
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     guard: Option<EpochGuard>,
     epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
-    content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
     signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
     stream_control: Option<libp2p_stream::Control>,
 }
@@ -996,14 +990,11 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
             let swarm_cmd_tx = config.swarm_cmd_tx.clone();
             let wasm_debug = config.wasm_debug;
             let epoch_rx = config.epoch_rx.clone();
-            let content_store = config.content_store.clone();
             let signing_key = config.signing_key.clone();
             let stream_control = config.stream_control.clone();
 
             let mut bootstrap_cap: Option<capnp::capability::Client> = None;
-            let child_rpc_system = if let (Some(erx), Some(ic), Some(sc)) =
-                (epoch_rx, content_store, stream_control)
-            {
+            let child_rpc_system = if let (Some(erx), Some(sc)) = (epoch_rx, stream_control) {
                 let (rpc, guest) = membrane::build_membrane_rpc(
                     reader,
                     writer,
@@ -1011,7 +1002,6 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
                     swarm_cmd_tx,
                     wasm_debug,
                     erx,
-                    ic,
                     signing_key,
                     sc,
                     None, // route_registry: spawned cells don't get HTTP routes

@@ -13,11 +13,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Atomic root-CID swap via `ArcSwap` for epoch updates (FS swap happens-before capability death)
 - Pre-warm root directory listing before epoch swap
 
+### Removed
+- IPFS capability (`ipfs` field) from membrane graft response (stem.capnp)
+- `EpochGuardedIpfsClient` and `EpochGuardedUnixFS` from host RPC layer
+- 7 IPFS capability tests (replaced by VFS tests in fs_intercept and vfs modules)
+
 ### Changed
 - Kernel ipfs handler reads through WASI virtual FS instead of Cap'n Proto RPC
 - `(perform ipfs :cat path)` and `(perform ipfs :ls path)` now use `std::fs`
 - `(perform ipfs :add)` returns error (deferred to stem contract)
 - Kernel boot sequence (`run_initd`) uses WASI `read_dir` + `read` instead of IPFS ls/cat
+- One filesystem surface: all guest content access goes through WASI virtual FS
 
 ## [0.0.3.3] - 2026-04-02
 
