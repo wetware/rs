@@ -31,7 +31,7 @@ interface Membrane {
   graft @0 () -> (
     identity :Identity,                           # Host-side identity hub: maps signing domains → Signers.
     host     :import "system.capnp".Host,         # Swarm-level operations (id, addrs, peers, network).
-    executor :import "system.capnp".Executor,     # WASM execution (runBytes, echo).
+    runtime  :import "system.capnp".Runtime,      # WASM compilation + execution (load, shutdown).
     routing  :import "routing.capnp".Routing,      # Content routing + data transfer via IPFS.
     httpClient :import "http.capnp".HttpClient    # Outbound HTTP (domain-scoped).
   );
