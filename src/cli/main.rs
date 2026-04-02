@@ -111,6 +111,12 @@ enum Commands {
         /// Example: --http-listen 127.0.0.1:8080
         #[arg(long, value_name = "ADDR")]
         http_listen: Option<String>,
+
+        /// Runtime cache policy for `Runtime.load()`.
+        /// "shared" (default): same WASM bytes → same Executor server.
+        /// "isolated": always create a fresh Executor server.
+        #[arg(long, default_value = "shared", env = "WW_RUNTIME_CACHE_POLICY")]
+        runtime_cache_policy: String,
     },
 
     /// Generate a new Ed25519 identity secret.
@@ -268,20 +274,21 @@ impl Commands {
                 executor_threads,
                 mcp,
                 http_listen,
+                runtime_cache_policy,
             } => {
                 if mcp {
                     // TODO(mikel): Wire MCP adapter here.
                     // The infrastructure is ready:
                     //   - ProtocolAdapter trait: src/dispatcher/mod.rs
                     //   - HttpServer::run() accepts any ProtocolAdapter
-                    //   - BoundExecutor: capnp/system.capnp + src/rpc/mod.rs
+                    //   - Executor: capnp/system.capnp + src/rpc/mod.rs
                     //   - SwappableReader/Writer: src/cell/swappable.rs (for Mode B)
                     //
                     // Implementation steps:
                     //   1. Implement McpAdapter: ProtocolAdapter for MCP JSON-RPC
                     //   2. Load cell WASM from boot/main.wasm
-                    //   3. executor.bind(wasm, args, env) → BoundExecutor
-                    //   4. HttpServer::new(bound).run(&mut adapter).await
+                    //   3. runtime.load(wasm) → Executor
+                    //   4. HttpServer::new(executor).run(&mut adapter).await
                     eprintln!("MCP mode is not yet implemented. See src/dispatcher/mod.rs for the ProtocolAdapter trait.");
                     std::process::exit(1);
                 }
@@ -304,6 +311,7 @@ impl Commands {
                     confirmation_depth,
                     executor_threads,
                     http_listen,
+                    runtime_cache_policy,
                 )
                 .await
             }
@@ -1036,6 +1044,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         confirmation_depth: u64,
         executor_threads: usize,
         http_listen: Option<String>,
+        runtime_cache_policy: String,
     ) -> Result<()> {
         // Dev-mode compat: if a single local root mount has boot/main.wasm
         // but not bin/main.wasm, copy it over (the runtime expects bin/).
@@ -1250,6 +1259,15 @@ wasip2::cli::command::export!({iface_name}Guest);
             "Booting environment"
         );
 
+        let cache_policy = match runtime_cache_policy.as_str() {
+            "shared" => ww::rpc::CachePolicy::Shared,
+            "isolated" => ww::rpc::CachePolicy::Isolated,
+            other => anyhow::bail!(
+                "invalid --runtime-cache-policy '{}' (expected 'shared' or 'isolated')",
+                other
+            ),
+        };
+
         let mut builder = CellBuilder::new(image_path)
             .with_loader(Box::new(loader))
             .with_network_state(network_state)
@@ -1257,7 +1275,8 @@ wasip2::cli::command::export!({iface_name}Guest);
             .with_wasm_debug(wasm_debug)
             .with_image_root(merged.path().into())
             .with_content_store(content_store.clone())
-            .with_signing_key(std::sync::Arc::new(sk));
+            .with_signing_key(std::sync::Arc::new(sk))
+            .with_cache_policy(cache_policy);
 
         if let Some(registry) = route_registry {
             builder = builder.with_route_registry(registry);
