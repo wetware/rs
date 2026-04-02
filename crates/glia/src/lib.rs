@@ -164,6 +164,17 @@ pub enum Val {
         schema_cid: String,
         inner: std::rc::Rc<dyn std::any::Any>,
     },
+    /// A cell definition: WASM binary + optional schema + captured capabilities.
+    ///
+    /// Created by the `cell` function, which bundles wasm/schema bytes with
+    /// all `Val::Cap` bindings from its lexical scope. When the cell is
+    /// registered via `(perform host :listen ...)`, the host extracts wasm,
+    /// schema, and caps — injecting the caps into spawned children's membranes.
+    Cell {
+        wasm: Vec<u8>,
+        schema: Option<Vec<u8>>,
+        caps: Vec<(String, Val)>,
+    },
 }
 
 impl core::fmt::Debug for Val {
@@ -193,6 +204,13 @@ impl core::fmt::Debug for Val {
             Val::AsyncNativeFn { name, .. } => write!(f, "AsyncNativeFn({name})"),
             Val::Resume(v) => f.debug_tuple("Resume").field(v).finish(),
             Val::Cap { name, .. } => write!(f, "Cap({name})"),
+            Val::Cell { wasm, schema, caps } => write!(
+                f,
+                "Cell({} bytes, schema={}, {} caps)",
+                wasm.len(),
+                schema.as_ref().map_or("none".to_string(), |s| format!("{} bytes", s.len())),
+                caps.len()
+            ),
         }
     }
 }
@@ -246,6 +264,11 @@ impl PartialEq for Val {
             }
             // Caps match by schema CID (same capnp interface = same type).
             (Val::Cap { schema_cid: a, .. }, Val::Cap { schema_cid: b, .. }) => a == b,
+            // Cells are equal if wasm and schema match (caps are opaque).
+            (
+                Val::Cell { wasm: wa, schema: sa, .. },
+                Val::Cell { wasm: wb, schema: sb, .. },
+            ) => wa == wb && sa == sb,
             // Recur, Effect, and Resume are internal sentinels — never equal.
             (Val::Recur(_), _) | (_, Val::Recur(_)) => false,
             (Val::Effect { .. }, _) | (_, Val::Effect { .. }) => false,
@@ -299,6 +322,17 @@ impl core::fmt::Display for Val {
             Val::NativeFn { name, .. } => write!(f, "#<native-fn {name}>"),
             Val::AsyncNativeFn { name, .. } => write!(f, "#<async-native-fn {name}>"),
             Val::Cap { name, .. } => write!(f, "#<cap {name}>"),
+            Val::Cell { wasm, schema, caps } => {
+                write!(f, "#<cell {} bytes", wasm.len())?;
+                if let Some(s) = schema {
+                    write!(f, ", schema {} bytes", s.len())?;
+                }
+                if !caps.is_empty() {
+                    let names: Vec<&str> = caps.iter().map(|(n, _)| n.as_str()).collect();
+                    write!(f, ", caps [{}]", names.join(" "))?;
+                }
+                write!(f, ">")
+            }
             Val::Resume(val) => write!(f, "#<resume {val}>"),
         }
     }

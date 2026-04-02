@@ -103,6 +103,24 @@ impl Env {
         }
     }
 
+    /// Collect all `Val::Cap` bindings visible in the current scope.
+    ///
+    /// Searches from innermost scope outward, returning `(name, cap)` pairs.
+    /// Inner bindings shadow outer ones (only the innermost binding per name
+    /// is returned). Used by `cell` to capture granted capabilities.
+    pub fn collect_caps(&self) -> Vec<(String, Val)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut caps = Vec::new();
+        for frame in self.frames.iter().rev() {
+            for (name, val) in frame {
+                if matches!(val, Val::Cap { .. }) && seen.insert(name.clone()) {
+                    caps.push((name.clone(), val.clone()));
+                }
+            }
+        }
+        caps
+    }
+
     /// Collapse all frames into a single merged HashMap (inner overrides outer).
     /// Returns a new Env with one frame containing all visible bindings.
     /// Used by `fn` to capture the definition-time environment.
@@ -908,6 +926,7 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
                 Val::NativeFn { .. } => "native-fn",
                 Val::AsyncNativeFn { .. } => "async-native-fn",
                 Val::Cap { .. } => "cap",
+                Val::Cell { .. } => "cell",
                 Val::Resume(_) => "resume",
             };
             Some(Ok(Val::Keyword(kw.into())))
@@ -2170,6 +2189,39 @@ pub fn eval<'a, D: Dispatch>(
                             ))
                         }
                     }
+                }
+
+                // --- Built-in: cell (captures Val::Cap bindings from scope) ---
+                if head == "cell" {
+                    let args = eval_args(raw_args, env, dispatch).await?;
+                    let wasm = match args.first() {
+                        Some(Val::Bytes(b)) => b.clone(),
+                        _ => {
+                            return Err(eval_err!(
+                                "cell: first arg must be wasm bytes, got {}",
+                                args.first().map_or("nothing".into(), |v| format!("{v}"))
+                            ))
+                        }
+                    };
+                    let schema = match args.get(1) {
+                        Some(Val::Bytes(b)) => Some(b.clone()),
+                        None => None,
+                        _ => {
+                            return Err(eval_err!(
+                                "cell: second arg (schema) must be bytes, got {}",
+                                args[1]
+                            ))
+                        }
+                    };
+                    if args.len() > 2 {
+                        return Err(eval_err!(
+                            "cell: expected 1-2 args (wasm [schema]), got {}",
+                            args.len()
+                        ));
+                    }
+                    // Capture all Val::Cap bindings from the lexical environment.
+                    let caps = env.collect_caps();
+                    return Ok(Val::Cell { wasm, schema, caps });
                 }
 
                 // --- Higher-order builtins (need env + dispatch for fn invocation) ---
