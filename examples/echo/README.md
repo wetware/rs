@@ -9,8 +9,8 @@ The echo cell implements the WASI `cli::run` guest interface. On start, it
 polls stdin in a loop, copying each chunk to stdout verbatim. On EOF it
 flushes and exits. No dependencies beyond `wasip2` and `wit-bindgen`.
 
-This is a `Cell::raw` cell (no Cap'n Proto schema, no custom section). The
-host spawns it as a WASI process and pipes stdin/stdout via `ByteStream`
+This is a `Cell::raw` cell (no Cap'n Proto schema, no `boot/main.schema`).
+The host spawns it as a WASI process and pipes stdin/stdout via `ByteStream`
 capabilities. It's the simplest possible cell, useful for validating the
 full spawn-pipe-collect pipeline without protocol-specific logic.
 

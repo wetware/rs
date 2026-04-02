@@ -7,11 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.0.3.0] - 2026-04-02
 
 ### Added
-- `fs` capability for capability-gated filesystem access: `(perform fs :read "path")`
 - `ipfs :add` handler: `(perform ipfs :add <bytes>)` returns CID
 - `ww init <name>` scaffolds typed cell guest projects (capnp schema, build.rs, boot/main.capnp symlink)
 - `ww build` produces `boot/main.schema` alongside `boot/main.wasm`
-- `capnp/fs.capnp` schema for the Fs capability interface
 - Oracle example README
 
 ### Changed

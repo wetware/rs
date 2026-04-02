@@ -34,11 +34,6 @@ mod routing_capnp {
 }
 
 #[allow(dead_code)]
-mod fs_capnp {
-    include!(concat!(env!("OUT_DIR"), "/fs_capnp.rs"));
-}
-
-#[allow(dead_code)]
 mod http_capnp {
     include!(concat!(env!("OUT_DIR"), "/http_capnp.rs"));
 }
@@ -148,8 +143,6 @@ type HandlerFn = for<'a> fn(
 /// ipfs, routing) are handled via cap-targeted perform + with-effect-handler.
 fn build_dispatch() -> HashMap<&'static str, HandlerFn> {
     let mut t: HashMap<&'static str, HandlerFn> = HashMap::new();
-    // `load` is deprecated — use (perform fs :read "path") instead.
-    // Kept as sugar that delegates to the same WASI read logic.
     t.insert("load", |a, _| Box::pin(std::future::ready(eval_load(a))));
     t.insert("cd", |a, c| Box::pin(std::future::ready(eval_cd(a, c))));
     t.insert("help", |_, _| {
@@ -640,52 +633,6 @@ fn make_executor_handler(executor: system_capnp::executor::Client) -> Val {
                         Val::Int(exit_code as i64)
                     }
                     _ => return Err(Val::from(format!("executor: unknown method :{method}"))),
-                };
-                call_resume(resume, result)
-            })
-        }),
-    }
-}
-
-/// Filesystem effect handler — routes (perform fs :read "path") to WASI virtual FS.
-///
-/// Unlike other capabilities, this doesn't wrap a Cap'n Proto RPC client.
-/// The kernel handles it locally via std::fs, reading from the WASI-preopened
-/// merged FHS image directory.
-fn make_fs_handler() -> Val {
-    Val::AsyncNativeFn {
-        name: "fs-handler".into(),
-        func: Rc::new(move |args: Vec<Val>| {
-            Box::pin(async move {
-                let (method, rest) = extract_method(&args[0])?;
-                let resume = &args[1];
-                let result = match method.as_str() {
-                    "read" => {
-                        let path = match rest.first() {
-                            Some(Val::Str(s)) => s.clone(),
-                            _ => return Err(Val::from("fs :read — expected string path")),
-                        };
-                        let resolved = if path.starts_with('/') {
-                            path.clone()
-                        } else {
-                            format!("/{path}")
-                        };
-                        // Use the same caching strategy as the old `load` builtin
-                        // to work around ESPIPE on repeated reads in WASI P2.
-                        thread_local! {
-                            static CACHE: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
-                        }
-                        let cached = CACHE.with(|c| c.borrow().get(&resolved).cloned());
-                        if let Some(bytes) = cached {
-                            Val::Bytes(bytes)
-                        } else {
-                            let bytes = std::fs::read(&resolved)
-                                .map_err(|e| Val::from(format!("fs :read {resolved}: {e}")))?;
-                            CACHE.with(|c| c.borrow_mut().insert(resolved, bytes.clone()));
-                            Val::Bytes(bytes)
-                        }
-                    }
-                    _ => return Err(Val::from(format!("fs: unknown method :{method}"))),
                 };
                 call_resume(resume, result)
             })
@@ -1404,8 +1351,7 @@ fn run_impl() {
         // performs to these handlers via the effect system.
         {
             let s = ctx.borrow();
-            let caps: [(&str, &str, Rc<dyn std::any::Any>, Val); 5] = [
-                ("fs", schema_ids::FS_CID, Rc::new(()), make_fs_handler()),
+            let caps: [(&str, &str, Rc<dyn std::any::Any>, Val); 4] = [
                 (
                     "host",
                     schema_ids::HOST_CID,
@@ -2491,8 +2437,7 @@ mod tests {
 
     /// Helper: bind all caps + handlers in env (same as kernel boot).
     fn bind_caps_in_env(env: &mut Env, session: &Session) {
-        let caps: [(&str, &str, Rc<dyn std::any::Any>, Val); 5] = [
-            ("fs", "test-fs-cid", Rc::new(()), make_fs_handler()),
+        let caps: [(&str, &str, Rc<dyn std::any::Any>, Val); 4] = [
             (
                 "host",
                 "test-host-cid",

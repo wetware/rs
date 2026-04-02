@@ -57,9 +57,9 @@ Based on discovery, produce a concrete design.  Cover:
   endpoints.  For `raw`, define the wire format.
 - **Image layout**: what goes in `bin/`, `svc/`, `etc/`.
   Reference `doc/images.md`.
-- **Build pipeline**: source → WASM component → `schema-inject`
-  (if non-pid0).  Reference `examples/counter/Makefile` as
-  template.
+- **Build pipeline**: `ww init <name>` → develop → `ww build`
+  (produces `boot/main.wasm` + `boot/main.schema` for capnp cells).
+  Reference `examples/counter/Makefile` as template.
 - **Capability map**: which capabilities each agent needs.  Flag
   anything that could be attenuated.  Reference `doc/capabilities.md`.
 - **Membrane design**: what pid0 exports, what children receive.
@@ -84,7 +84,7 @@ Produce a design document another human (or AI) can execute from:
 - Cell type for each agent
 - Capability map: per-agent capabilities and attenuations
 - Image layout: directory tree
-- Build pipeline: compile + inject steps
+- Build pipeline: `ww init` scaffolding + `ww build` artifacts
 - Protocol specs: interface sketches, endpoints, or wire format
 - Open questions and risks
 

@@ -149,23 +149,20 @@ they can only do what they've been explicitly granted capabilities
 to do.
 
 **Cells** are the unit of computation.  Each Cell is a WASM binary
-with an optional type tag — a Cap'n Proto union stored in a WASM
-custom section named `"cell.capnp"`.  The tag tells the host what
-plumbing to wire up:
+with an optional type tag stored as a separate file in the FHS
+image layout.  The tag tells the host what plumbing to wire up:
 
-| Cell type | stdio carries | Host wires up |
-|-----------|--------------|---------------|
-| `raw(protocol)` | raw libp2p stream bytes | `/ww/0.1.0/stream/{protocol}` listener |
-| `http(prefix)` | CGI env vars + stdin/stdout | WAGI (CGI for WASM) |
-| `capnp(Schema.Node)` | Cap'n Proto RPC | `/ww/0.1.0/rpc/{cid}` listener |
-| absent (no section) | Cap'n Proto RPC (WIT) | pid0 mode — full Membrane graft |
+| Cell type | FHS layout | Host wires up |
+|-----------|-----------|---------------|
+| `capnp` | `boot/main.wasm` + `boot/main.schema` + `boot/main.capnp` | `/ww/0.1.0/rpc/{cid}` listener |
+| `raw` | `boot/main.wasm` (protocol via envvar) | `/ww/0.1.0/stream/{protocol}` listener |
+| `http` | `boot/main.wasm` (prefix via envvar) | WAGI (CGI for WASM) |
+| pid0 | `boot/main.wasm` only | full Membrane graft |
 
-Cell types are injected post-build with `schema-inject`:
-```
-schema-inject wasm.wasm --raw bitswap
-schema-inject wasm.wasm --http /api/v1
-schema-inject wasm.wasm --capnp schema.bytes
-```
+For capnp cells, `main.schema` contains canonical `schema.Node`
+bytes (compiled from the `.capnp` source), and `main.capnp` is
+a symlink to the source schema for human inspection.  `ww init`
+scaffolds this layout; `ww build` produces all artifacts.
 
 Architecture (three layers):
 - **Host** (`ww` binary): boots a libp2p swarm, loads the kernel
@@ -176,8 +173,8 @@ Architecture (three layers):
 - **Children**: spawned by pid0 with attenuated capabilities.
 
 Key abstractions:
-- **Cell type system**: `capnp/cell.capnp` — determines how a
-  process talks to the network (raw streams, HTTP, or typed RPC).
+- **Cell type system**: `boot/main.schema` — determines how a
+  process talks to the network (schema-keyed RPC for capnp cells).
 - **Membrane**: the capability hub.  `graft()` returns epoch-scoped
   capabilities.  pid0 can wrap/filter capabilities and export an
   attenuated Membrane to the network.

@@ -38,7 +38,7 @@ Walk through together:
 2. **Why it matters**: this is the stdin/stdout convention that *all*
    cell types share.  Everything else builds on this.
 3. **Build it**: run `make -C examples/echo` yourself and show the
-   output.  No `schema-inject` needed (no custom section).
+   output.  No `boot/main.schema` needed (raw cell, no typed schema).
 4. **See it tested**: `examples/echo_handler_e2e.rs` shows how the
    host spawns and exercises it.
 
@@ -72,16 +72,16 @@ Walk through together:
    `POST /counter` (increments).  405 for everything else.
 2. **The key difference**: this cell has a *type tag*.  Run
    `make -C examples/counter` yourself and show the output — the
-   user should see the two-step pipeline (compile, then inject).
-   Point out the `schema-inject bin/counter.wasm --http /counter`
-   step: "This is what tells the host to route HTTP traffic here."
+   user should see the build pipeline producing `boot/main.wasm`.
+   Point out that the HTTP path prefix is how the host knows to
+   route HTTP traffic here.
 3. **FastCGI protocol**: the cell speaks binary FastCGI over stdio.
    The host translates HTTP ↔ FastCGI.  Simpler than parsing HTTP/1.1.
 4. **Per-request spawn**: each request gets a fresh instance.  Counter
    resets — that's expected for the demo.
 
 ⚗️ **Name the win**: "You've seen the full build pipeline: compile
-WASM, inject cell type, host routes traffic.  That's how HTTP cells
+WASM, host routes traffic by cell type.  That's how HTTP cells
 work."
 
 Check in: "Ready for the big one (Chess), or want to dig into

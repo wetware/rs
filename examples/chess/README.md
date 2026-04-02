@@ -77,29 +77,29 @@ value in the Glia environment, and scripts pass it explicitly to
 functions that need spawn authority.
 
 ```clojure
-; Register RPC cell — schema extracted from WASM custom section.
+; Register RPC cell — schema loaded from boot/main.schema.
 ; The executor is passed explicitly (no ambient authority).
-(host listen executor (perform :load "bin/chess-demo.wasm"))
+(host listen executor (load "bin/chess-demo.wasm"))
 
 ; Run the chess demo in service mode — blocks until exit.
-(executor run (perform :load "bin/chess-demo.wasm"))
+(executor run (load "bin/chess-demo.wasm"))
 ```
 
-`(perform :load "bin/chess-demo.wasm")` loads bytes via the `:load` effect
-handler, resolved relative to `$WW_ROOT` (the merged image root). The
-executor capability is the spawn authority that `VatListener` needs to
-create cell processes. The host inspects the WASM binary's `cell.capnp`
-custom section to derive the protocol CID.
+`(load "bin/chess-demo.wasm")` reads bytes from the WASI virtual
+filesystem, resolved relative to `$WW_ROOT` (the merged image root).
+The executor capability is the spawn authority that `VatListener`
+needs to create cell processes. The kernel reads `boot/main.schema`
+to derive the protocol CID.
 
 ## Schema CID
 
 The protocol address is derived at build time from the ChessEngine
 Cap'n Proto schema: `CIDv1(raw, BLAKE3(canonical(schema.Node)))`.
 This CID serves as both the DHT key and the subprotocol address
-(`/ww/0.1.0/<cid>`). The canonical schema bytes are embedded in the
-WASM binary as a custom section named `cell.capnp`. The host
-extracts the section and derives the CID at runtime. See `build.rs`,
-the `schema-id` crate, and `make chess` for the injection step.
+(`/ww/0.1.0/<cid>`). The canonical schema bytes are stored in
+`boot/main.schema` alongside the WASM binary. The kernel reads
+this file at boot to derive the CID. See `build.rs` and the
+`schema-id` crate for the compilation step.
 
 ## Prerequisites
 

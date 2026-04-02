@@ -6,7 +6,7 @@ returns the response.
 
 ## What it demonstrates
 
-1. `Cell::http("/counter")` tag in the WASM custom section
+1. `Cell::http("/counter")` type in the FHS image layout
 2. Host-side `HttpListener` routes `GET /counter` and `POST /counter`
    to the counter cell
 3. FastCGI framing over stdin/stdout between host and guest
@@ -117,8 +117,8 @@ examples/counter/
 make -C examples/counter
 ```
 
-This compiles the WASI component and injects the `Cell::http("/counter")`
-tag via `schema-inject --http /counter`.
+This compiles the WASI component and produces the `boot/main.wasm`
+artifact with the `Cell::http("/counter")` type.
 
 ## Dependencies (host-side, not yet implemented)
 
