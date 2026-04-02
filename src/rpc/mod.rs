@@ -13,6 +13,9 @@ pub mod stream_listener;
 pub mod vat_client;
 pub mod vat_listener;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use capnp::capability::Promise;
@@ -464,6 +467,7 @@ impl system_capnp::process::Server for ProcessImpl {
     }
 }
 
+#[allow(dead_code)] // swarm_cmd_tx and wasm_debug reserved for future Host methods
 pub struct HostImpl {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
@@ -563,22 +567,6 @@ impl system_capnp::host::Server for HostImpl {
         })
     }
 
-    fn executor(
-        self: capnp::capability::Rc<Self>,
-        _params: system_capnp::host::ExecutorParams,
-        mut results: system_capnp::host::ExecutorResults,
-    ) -> Promise<(), capnp::Error> {
-        pry!(self.check_epoch());
-        let executor: system_capnp::executor::Client = capnp_rpc::new_client(ExecutorImpl::new(
-            self.network_state.clone(),
-            self.swarm_cmd_tx.clone(),
-            self.wasm_debug,
-            self.guard.clone(),
-        ));
-        results.get().set_executor(executor);
-        Promise::ok(())
-    }
-
     fn network(
         self: capnp::capability::Rc<Self>,
         _params: system_capnp::host::NetworkParams,
@@ -628,67 +616,120 @@ impl system_capnp::host::Server for HostImpl {
     }
 }
 
-pub struct ExecutorImpl {
+// =========================================================================
+// CachePolicy — operator-level runtime cache configuration
+// =========================================================================
+
+/// Runtime-wide cache policy for `Runtime.load()`.
+///
+/// Set by `--runtime-cache-policy` CLI flag or `WW_RUNTIME_CACHE_POLICY` env var.
+/// Default is `Shared` — the common case for performance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CachePolicy {
+    /// `load(same bytes)` → clone of cached Executor client (same server object).
+    #[default]
+    Shared,
+    /// `load(same bytes)` → fresh Executor server every time.
+    Isolated,
+}
+
+// =========================================================================
+// RuntimeImpl — system-wide WASM compilation + execution runtime
+// =========================================================================
+
+/// The Runtime capability: compiles WASM and returns attenuated Executors.
+///
+/// **System-wide singleton**: RuntimeImpl is created once and every membrane
+/// graft (including child cells) receives a clone of the same client. This
+/// guarantees system-wide cache sharing by construction.
+///
+/// **OCAP discipline**: Runtime is the powerful capability (can load any binary).
+/// Only pid0 gets it from `graft()`. Executor is the attenuated capability
+/// (bound to one binary, can only spawn instances). pid0 hands Executors to
+/// listeners, never Runtime.
+pub struct RuntimeImpl {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
     guard: Option<EpochGuard>,
-    // When present, child processes get a full Membrane bootstrap (not bare Host).
     epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
     signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
     stream_control: Option<libp2p_stream::Control>,
+    /// Runtime-wide cache policy (from `WW_RUNTIME_CACHE_POLICY` env var).
+    cache_policy: CachePolicy,
+    /// BLAKE3(wasm bytes) → cached Executor client (used when policy = Shared).
+    ///
+    /// RefCell is correct because Cap'n Proto server dispatch runs on a
+    /// single-threaded LocalSet.
+    executor_cache: RefCell<HashMap<[u8; 32], system_capnp::executor::Client>>,
+    /// Back-reference to this Runtime's own client. Injected by
+    /// [`create_runtime_client`] after construction. Cloned into each
+    /// ExecutorImpl so child cells receive the same Runtime through their
+    /// membrane graft.
+    self_client: Rc<RefCell<Option<system_capnp::runtime::Client>>>,
 }
 
-impl ExecutorImpl {
-    pub fn new(
-        network_state: NetworkState,
-        swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
-        wasm_debug: bool,
-        guard: Option<EpochGuard>,
-    ) -> Self {
-        Self {
-            network_state,
-            swarm_cmd_tx,
-            wasm_debug,
-            guard,
-            epoch_rx: None,
-            signing_key: None,
-            stream_control: None,
-        }
-    }
-
-    /// Construct with full Membrane propagation fields, so child processes
-    /// spawned via `run_bytes` get a Membrane bootstrap (not bare Host).
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_full(
-        network_state: NetworkState,
-        swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
-        wasm_debug: bool,
-        guard: Option<EpochGuard>,
-        epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
-        _content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
-        signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
-        stream_control: Option<libp2p_stream::Control>,
-    ) -> Self {
-        // NOTE: content_store parameter kept for API compatibility but ignored.
-        // IPFS reads go through WASI virtual FS now. Remove parameter in follow-up.
-        Self {
-            network_state,
-            swarm_cmd_tx,
-            wasm_debug,
-            guard,
-            epoch_rx,
-            signing_key,
-            stream_control,
-        }
-    }
-
+impl RuntimeImpl {
     fn check_epoch(&self) -> Result<(), capnp::Error> {
         match self.guard {
             Some(ref g) => g.check(),
             None => Ok(()),
         }
     }
+
+    /// Create a new ExecutorImpl bound to the given bytecode and wrap it as a client.
+    fn make_executor(&self, bytecode: Arc<Vec<u8>>) -> system_capnp::executor::Client {
+        let runtime_client = self
+            .self_client
+            .borrow()
+            .clone()
+            .expect("runtime self-reference must be set (use create_runtime_client)");
+        capnp_rpc::new_client(ExecutorImpl {
+            bytecode,
+            wasm_debug: self.wasm_debug,
+            network_state: self.network_state.clone(),
+            swarm_cmd_tx: self.swarm_cmd_tx.clone(),
+            guard: self.guard.clone(),
+            epoch_rx: self.epoch_rx.clone(),
+            signing_key: self.signing_key.clone(),
+            stream_control: self.stream_control.clone(),
+            runtime_client,
+        })
+    }
+}
+
+/// Create a RuntimeImpl, wrap it as a client, and inject the self-reference.
+///
+/// This is the only way to construct a `runtime::Client` backed by a real RuntimeImpl.
+/// The returned client is a singleton — clone it wherever a Runtime is needed to
+/// ensure all cells share the same compilation/executor cache.
+#[allow(clippy::too_many_arguments)]
+pub fn create_runtime_client(
+    network_state: NetworkState,
+    swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
+    wasm_debug: bool,
+    guard: Option<EpochGuard>,
+    epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
+    signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
+    stream_control: Option<libp2p_stream::Control>,
+    cache_policy: CachePolicy,
+) -> system_capnp::runtime::Client {
+    let self_client = Rc::new(RefCell::new(None));
+    let runtime = RuntimeImpl {
+        network_state,
+        swarm_cmd_tx,
+        wasm_debug,
+        guard,
+        epoch_rx,
+        signing_key,
+        stream_control,
+        cache_policy,
+        executor_cache: RefCell::new(HashMap::new()),
+        self_client: self_client.clone(),
+    };
+    let client: system_capnp::runtime::Client = capnp_rpc::new_client(runtime);
+    *self_client.borrow_mut() = Some(client.clone());
+    client
 }
 
 fn read_text_list(list: capnp::text_list::Reader<'_>) -> Vec<String> {
@@ -718,33 +759,14 @@ fn read_data_result(data: capnp::Result<capnp::data::Reader<'_>>) -> Vec<u8> {
 }
 
 #[allow(refining_impl_trait)]
-impl system_capnp::executor::Server for ExecutorImpl {
-    fn echo(
+impl system_capnp::runtime::Server for RuntimeImpl {
+    fn load(
         self: capnp::capability::Rc<Self>,
-        params: system_capnp::executor::EchoParams,
-        mut results: system_capnp::executor::EchoResults,
+        params: system_capnp::runtime::LoadParams,
+        mut results: system_capnp::runtime::LoadResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.check_epoch());
-        let message = match pry!(params.get()).get_message() {
-            Ok(s) => s.to_string().unwrap_or_else(|_| String::new()),
-            Err(_) => String::new(),
-        };
-        tracing::debug!(message, "echo");
-        let response = format!("Echo: {}", message);
-        results.get().set_response(&response);
-        Promise::ok(())
-    }
-
-    fn bind(
-        self: capnp::capability::Rc<Self>,
-        params: system_capnp::executor::BindParams,
-        mut results: system_capnp::executor::BindResults,
-    ) -> Promise<(), capnp::Error> {
-        pry!(self.check_epoch());
-        let params = pry!(params.get());
-        let wasm = read_data_result(params.get_wasm());
-        let args = read_text_list_result(params.get_args());
-        let env = read_text_list_result(params.get_env());
+        let wasm = read_data_result(pry!(params.get()).get_wasm());
 
         if wasm.len() > MAX_WASM_BYTES {
             return Promise::err(capnp::Error::failed(format!(
@@ -754,181 +776,55 @@ impl system_capnp::executor::Server for ExecutorImpl {
             )));
         }
 
-        let bound = BoundExecutorImpl::new(BoundConfig {
-            bytecode: Arc::new(wasm),
-            args,
-            env,
-            wasm_debug: self.wasm_debug,
-            network_state: self.network_state.clone(),
-            swarm_cmd_tx: self.swarm_cmd_tx.clone(),
-            guard: self.guard.clone(),
-            epoch_rx: self.epoch_rx.clone(),
-            signing_key: self.signing_key.clone(),
-            stream_control: self.stream_control.clone(),
-        });
+        let key = *blake3::hash(&wasm).as_bytes();
 
-        let client: system_capnp::bound_executor::Client = capnp_rpc::new_client(bound);
-        results.get().set_bound(client);
+        let executor = match self.cache_policy {
+            CachePolicy::Shared => {
+                // Check cache with a short-lived borrow to avoid overlap with borrow_mut below.
+                let cached = self.executor_cache.borrow().get(&key).cloned();
+                if let Some(client) = cached {
+                    tracing::debug!(?key, "runtime.load: executor cache hit (shared)");
+                    client
+                } else {
+                    tracing::debug!(?key, "runtime.load: executor cache miss, creating");
+                    let client = self.make_executor(Arc::new(wasm));
+                    self.executor_cache.borrow_mut().insert(key, client.clone());
+                    client
+                }
+            }
+            CachePolicy::Isolated => {
+                tracing::debug!(?key, "runtime.load: creating isolated executor");
+                self.make_executor(Arc::new(wasm))
+            }
+        };
+
+        results.get().set_executor(executor);
         Promise::ok(())
     }
 
-    fn run_bytes(
+    fn shutdown(
         self: capnp::capability::Rc<Self>,
-        params: system_capnp::executor::RunBytesParams,
-        mut results: system_capnp::executor::RunBytesResults,
+        _params: system_capnp::runtime::ShutdownParams,
+        _results: system_capnp::runtime::ShutdownResults,
     ) -> Promise<(), capnp::Error> {
-        pry!(self.check_epoch());
-        let params = pry!(params.get());
-        let args = read_text_list_result(params.get_args());
-        let env = read_text_list_result(params.get_env());
-        let wasm = read_data_result(params.get_wasm());
-        let wasm_debug = self.wasm_debug;
-        let network_state = self.network_state.clone();
-        let swarm_cmd_tx = self.swarm_cmd_tx.clone();
-        let epoch_rx = self.epoch_rx.clone();
-        let signing_key = self.signing_key.clone();
-        let stream_control = self.stream_control.clone();
-        Promise::from_future(async move {
-            if wasm.len() > MAX_WASM_BYTES {
-                return Err(capnp::Error::failed(format!(
-                    "WASM binary too large ({} bytes, max {})",
-                    wasm.len(),
-                    MAX_WASM_BYTES,
-                )));
-            }
-            tracing::debug!("run_bytes: starting child process spawn");
-            let bytecode = wasm;
-
-            // 64 KiB matches PIPE_BUFFER_SIZE (the host↔guest RPC pipe).
-            let (host_stderr, guest_stderr) = io::duplex(64 * 1024);
-            let (host_stdin, guest_stdin) = io::duplex(64 * 1024);
-            let (host_stdout, guest_stdout) = io::duplex(64 * 1024);
-
-            let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
-            let (kill_tx, mut kill_rx) = tokio::sync::watch::channel(false);
-
-            let (builder, mut handles) = ProcBuilder::new()
-                .with_env(env)
-                .with_args(args)
-                .with_wasm_debug(wasm_debug)
-                .with_bytecode(bytecode)
-                .with_stdio(guest_stdin, guest_stdout, guest_stderr)
-                .with_data_streams();
-
-            let proc = builder
-                .build()
-                .await
-                .map_err(|err| capnp::Error::failed(err.to_string()))?;
-
-            let (reader, writer) = handles
-                .take_host_split()
-                .ok_or_else(|| capnp::Error::failed("host stream missing".into()))?;
-            let (child_rpc_system, bootstrap_cap) =
-                if let (Some(erx), Some(sc)) = (epoch_rx, stream_control) {
-                    let (rpc, guest) = membrane::build_membrane_rpc(
-                        reader,
-                        writer,
-                        network_state,
-                        swarm_cmd_tx,
-                        wasm_debug,
-                        erx,
-                        signing_key,
-                        sc,
-                        None, // route_registry: child cells don't get HTTP routes
-                    );
-                    (rpc, Some(guest.client))
-                } else {
-                    (
-                        build_peer_rpc(reader, writer, network_state, swarm_cmd_tx, wasm_debug),
-                        None,
-                    )
-                };
-
-            tokio::task::spawn_local(async move {
-                let local = tokio::task::LocalSet::new();
-                local.spawn_local(child_rpc_system.map(|_| ()));
-
-                // Drain child stderr → host tracing so child logs are visible.
-                // Without this, the 64 KiB duplex buffer fills and the child blocks.
-                local.spawn_local(async move {
-                    use tokio::io::AsyncBufReadExt;
-                    let reader = tokio::io::BufReader::new(host_stderr);
-                    let mut lines = reader.lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        tracing::info!("{}", line);
-                    }
-                });
-
-                local
-                    .run_until(async move {
-                        let exit_code = tokio::select! {
-                            result = proc.run() => {
-                                match result {
-                                    Ok(()) => 0,
-                                    Err(e) => {
-                                        tracing::error!("run_bytes: child process failed: {}", e);
-                                        1
-                                    }
-                                }
-                            }
-                            _ = kill_rx.changed() => {
-                                tracing::info!("run_bytes: child process killed");
-                                137 // SIGKILL convention
-                            }
-                        };
-                        tracing::info!("run_bytes: child process exited with code {}", exit_code);
-                        let _ = exit_tx.send(exit_code);
-                    })
-                    .await;
-            });
-
-            tracing::info!("run_bytes: child process started, RPC system active");
-
-            let stdin =
-                capnp_rpc::new_client(ByteStreamImpl::new(host_stdin, StreamMode::WriteOnly));
-            let stdout =
-                capnp_rpc::new_client(ByteStreamImpl::new(host_stdout, StreamMode::ReadOnly));
-            // Child stderr is drained above; provide a no-op stream for the Process interface.
-            let (dummy_stderr, _) = io::duplex(1);
-            let stderr =
-                capnp_rpc::new_client(ByteStreamImpl::new(dummy_stderr, StreamMode::ReadOnly));
-
-            let process_impl = if let Some(cap) = bootstrap_cap {
-                ProcessImpl::with_bootstrap(stdin, stdout, stderr, exit_rx, cap, kill_tx)
-            } else {
-                ProcessImpl::new(stdin, stdout, stderr, exit_rx, kill_tx)
-            };
-            let process_client: system_capnp::process::Client = capnp_rpc::new_client(process_impl);
-            results.get().set_process(process_client);
-
-            Ok(())
-        })
+        tracing::info!("runtime.shutdown: stub (tokio-runtime-per-Runtime is a future PR)");
+        Promise::ok(())
     }
 }
 
 // =========================================================================
-// BoundExecutor — capability-attenuated executor
+// ExecutorImpl — attenuated capability bound to one WASM binary
 // =========================================================================
 
-/// A BoundExecutor that stores WASM bytes (shared via Arc) and args/env.
-/// Each spawn() creates a fresh WASI process from the stored bytecode.
+/// An Executor bound to a specific WASM binary. Each `spawn(args, env)` creates
+/// a fresh WASI process from the stored bytecode with the given args and env.
 ///
-/// Note: WASM compilation happens per-spawn (in ProcBuilder::build).
-/// Pre-compilation (storing a wasmtime::Module) is a future optimization
-/// that would reduce spawn latency from ~5ms to ~1ms.
-///
-/// Capability attenuation: the holder can spawn workers but cannot change
-/// what binary runs or what args/env are passed.
-pub struct BoundExecutorImpl {
-    /// Pre-bound configuration — everything needed to spawn a process.
-    /// Shared via Arc so the capnp::capability::Rc wrapper works.
-    config: Arc<BoundConfig>,
-}
-
-struct BoundConfig {
+/// This is the attenuated capability in the OCAP model: the holder can spawn
+/// workers but cannot load arbitrary code. Args and env are late-bound per-spawn,
+/// which solves the WAGI CGI env var problem (per-request env vars like
+/// REQUEST_METHOD, PATH_INFO, etc.).
+pub struct ExecutorImpl {
     bytecode: Arc<Vec<u8>>,
-    args: Vec<String>,
-    env: Vec<String>,
     wasm_debug: bool,
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
@@ -936,28 +832,32 @@ struct BoundConfig {
     epoch_rx: Option<tokio::sync::watch::Receiver<::membrane::Epoch>>,
     signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
     stream_control: Option<libp2p_stream::Control>,
-}
-
-impl BoundExecutorImpl {
-    fn new(config: BoundConfig) -> Self {
-        Self {
-            config: Arc::new(config),
-        }
-    }
+    /// Runtime client (singleton) — passed to child cells through their membrane graft.
+    runtime_client: system_capnp::runtime::Client,
 }
 
 #[allow(refining_impl_trait)]
-impl system_capnp::bound_executor::Server for BoundExecutorImpl {
+impl system_capnp::executor::Server for ExecutorImpl {
     fn spawn(
         self: capnp::capability::Rc<Self>,
-        _params: system_capnp::bound_executor::SpawnParams,
-        mut results: system_capnp::bound_executor::SpawnResults,
+        params: system_capnp::executor::SpawnParams,
+        mut results: system_capnp::executor::SpawnResults,
     ) -> Promise<(), capnp::Error> {
-        if let Some(ref guard) = self.config.guard {
+        if let Some(ref guard) = self.guard {
             pry!(guard.check());
         }
 
-        let config = self.config.clone();
+        let params = pry!(params.get());
+        let args = read_text_list_result(params.get_args());
+        let env = read_text_list_result(params.get_env());
+        let bytecode = self.bytecode.clone();
+        let wasm_debug = self.wasm_debug;
+        let network_state = self.network_state.clone();
+        let swarm_cmd_tx = self.swarm_cmd_tx.clone();
+        let epoch_rx = self.epoch_rx.clone();
+        let signing_key = self.signing_key.clone();
+        let stream_control = self.stream_control.clone();
+        let runtime_client = self.runtime_client.clone();
 
         Promise::from_future(async move {
             let (host_stderr, guest_stderr) = io::duplex(64 * 1024);
@@ -970,10 +870,10 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
             // stdin/stdout semantics vary by cell type (wire protocol, CGI,
             // or shutdown signal), but the WIT membrane channel is universal.
             let (builder, mut handles) = ProcBuilder::new()
-                .with_env(config.env.clone())
-                .with_args(config.args.clone())
-                .with_wasm_debug(config.wasm_debug)
-                .with_bytecode((*config.bytecode).clone())
+                .with_env(env)
+                .with_args(args)
+                .with_wasm_debug(wasm_debug)
+                .with_bytecode((*bytecode).clone())
                 .with_stdio(guest_stdin, guest_stdout, guest_stderr)
                 .with_data_streams();
 
@@ -985,13 +885,6 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
             let (reader, writer) = handles
                 .take_host_split()
                 .ok_or_else(|| capnp::Error::failed("host stream missing".into()))?;
-
-            let network_state = config.network_state.clone();
-            let swarm_cmd_tx = config.swarm_cmd_tx.clone();
-            let wasm_debug = config.wasm_debug;
-            let epoch_rx = config.epoch_rx.clone();
-            let signing_key = config.signing_key.clone();
-            let stream_control = config.stream_control.clone();
 
             let mut bootstrap_cap: Option<capnp::capability::Client> = None;
             let child_rpc_system = if let (Some(erx), Some(sc)) = (epoch_rx, stream_control) {
@@ -1005,6 +898,7 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
                     signing_key,
                     sc,
                     None, // route_registry: spawned cells don't get HTTP routes
+                    runtime_client,
                 );
                 bootstrap_cap = Some(guest.client);
                 rpc
@@ -1031,23 +925,17 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
                         match result {
                             Ok(()) => 0,
                             Err(e) => {
-                                tracing::error!(
-                                    "bound_executor: child process failed: {}",
-                                    e
-                                );
+                                tracing::error!("executor: child process failed: {}", e);
                                 1
                             }
                         }
                     }
                     _ = kill_rx.changed() => {
-                        tracing::info!("bound_executor: child process killed");
-                        137
+                        tracing::info!("executor: child process killed");
+                        137 // SIGKILL convention
                     }
                 };
-                tracing::info!(
-                    "bound_executor: child process exited with code {}",
-                    exit_code
-                );
+                tracing::info!("executor: child process exited with code {}", exit_code);
                 let _ = exit_tx.send(exit_code);
             });
 
@@ -1182,83 +1070,9 @@ mod tests {
             .await;
     }
 
-    #[tokio::test]
-    async fn test_executor_echo() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let (host, _server, _rx) = setup_rpc();
-
-                let executor = host.executor_request().send().pipeline.get_executor();
-
-                let mut req = executor.echo_request();
-                req.get().set_message("hello world");
-                let resp = req.send().promise.await.unwrap();
-                let response = resp
-                    .get()
-                    .unwrap()
-                    .get_response()
-                    .unwrap()
-                    .to_str()
-                    .unwrap();
-                assert_eq!(response, "Echo: hello world");
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn test_executor_echo_empty_message() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let (host, _server, _rx) = setup_rpc();
-
-                let executor = host.executor_request().send().pipeline.get_executor();
-
-                let req = executor.echo_request();
-                let resp = req.send().promise.await.unwrap();
-                let response = resp
-                    .get()
-                    .unwrap()
-                    .get_response()
-                    .unwrap()
-                    .to_str()
-                    .unwrap();
-                assert_eq!(response, "Echo: ");
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn test_executor_echo_concurrent() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let (host, _server, _rx) = setup_rpc();
-
-                let executor = host.executor_request().send().pipeline.get_executor();
-
-                let mut futures = Vec::new();
-                for i in 0..5 {
-                    let mut req = executor.echo_request();
-                    req.get().set_message(format!("msg-{i}"));
-                    futures.push(req.send().promise);
-                }
-
-                for (i, fut) in futures.into_iter().enumerate() {
-                    let resp = fut.await.unwrap();
-                    let response = resp
-                        .get()
-                        .unwrap()
-                        .get_response()
-                        .unwrap()
-                        .to_str()
-                        .unwrap();
-                    assert_eq!(response, format!("Echo: msg-{i}"));
-                }
-            })
-            .await;
-    }
+    // Echo tests removed — echo method deleted from API.
+    // Runtime.load() and Executor.spawn() are tested via integration tests
+    // that compile real WASM (not mockable in unit tests without a wasmtime Engine).
 
     #[tokio::test]
     async fn test_network_state_snapshot() {
@@ -1443,9 +1257,8 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                // Create a mock capability: use an Executor echo as the bootstrap cap.
+                // Use the Host cap as the bootstrap capability.
                 let (host, _server, _rx) = setup_rpc();
-                let executor_cap = host.executor_request().send().pipeline.get_executor();
 
                 let (stdin, stdout, stderr, exit_rx, kill_tx) = dummy_process_parts();
                 let process_impl = ProcessImpl::with_bootstrap(
@@ -1453,7 +1266,7 @@ mod tests {
                     stdout,
                     stderr,
                     exit_rx,
-                    executor_cap.client.clone(),
+                    host.client.clone(),
                     kill_tx,
                 );
                 let process = setup_process_rpc(process_impl);
@@ -1462,19 +1275,11 @@ mod tests {
                 let resp = process.bootstrap_request().send().promise.await.unwrap();
                 let cap = resp.get().unwrap().get_cap();
 
-                // Cast it back to an Executor and verify it works.
-                let executor: system_capnp::executor::Client = cap.get_as_capability().unwrap();
-                let mut echo_req = executor.echo_request();
-                echo_req.get().set_message("via bootstrap");
-                let echo_resp = echo_req.send().promise.await.unwrap();
-                let text = echo_resp
-                    .get()
-                    .unwrap()
-                    .get_response()
-                    .unwrap()
-                    .to_str()
-                    .unwrap();
-                assert_eq!(text, "Echo: via bootstrap");
+                // Cast it back to a Host and verify it works.
+                let host2: system_capnp::host::Client = cap.get_as_capability().unwrap();
+                let id_resp = host2.id_request().send().promise.await.unwrap();
+                let peer_id = id_resp.get().unwrap().get_peer_id().unwrap();
+                assert_eq!(peer_id, &[1, 2, 3, 4]);
             })
             .await;
     }
@@ -1508,7 +1313,6 @@ mod tests {
         local
             .run_until(async {
                 let (host, _server, _rx) = setup_rpc();
-                let executor_cap = host.executor_request().send().pipeline.get_executor();
 
                 let (stdin, stdout, stderr, exit_rx, kill_tx) = dummy_process_parts();
                 let process_impl = ProcessImpl::with_bootstrap(
@@ -1516,27 +1320,19 @@ mod tests {
                     stdout,
                     stderr,
                     exit_rx,
-                    executor_cap.client.clone(),
+                    host.client.clone(),
                     kill_tx,
                 );
                 let process = setup_process_rpc(process_impl);
 
                 // Call bootstrap() twice — both should return working caps.
-                for i in 0..2 {
+                for _ in 0..2 {
                     let resp = process.bootstrap_request().send().promise.await.unwrap();
                     let cap = resp.get().unwrap().get_cap();
-                    let executor: system_capnp::executor::Client = cap.get_as_capability().unwrap();
-                    let mut req = executor.echo_request();
-                    req.get().set_message(format!("call-{i}"));
-                    let echo_resp = req.send().promise.await.unwrap();
-                    let text = echo_resp
-                        .get()
-                        .unwrap()
-                        .get_response()
-                        .unwrap()
-                        .to_str()
-                        .unwrap();
-                    assert_eq!(text, format!("Echo: call-{i}"));
+                    let host2: system_capnp::host::Client = cap.get_as_capability().unwrap();
+                    let id_resp = host2.id_request().send().promise.await.unwrap();
+                    let peer_id = id_resp.get().unwrap().get_peer_id().unwrap();
+                    assert_eq!(peer_id, &[1, 2, 3, 4]);
                 }
             })
             .await;
@@ -1553,14 +1349,13 @@ mod tests {
             .run_until(async {
                 let (host, _server, _rx) = setup_rpc();
 
-                // Create a "delayed" executor cap using new_future_client.
+                // Create a "delayed" host cap using new_future_client.
                 // This simulates a pipelined cap that resolves after 200ms.
                 let host_clone = host.clone();
-                let delayed_executor: system_capnp::executor::Client =
+                let delayed_host: system_capnp::host::Client =
                     capnp_rpc::new_future_client(async move {
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        let resp = host_clone.executor_request().send().promise.await?;
-                        resp.get()?.get_executor()
+                        Ok::<_, capnp::Error>(host_clone)
                     });
 
                 // Store the delayed cap in ProcessImpl.
@@ -1570,7 +1365,7 @@ mod tests {
                     stdout,
                     stderr,
                     exit_rx,
-                    delayed_executor.client.clone(),
+                    delayed_host.client.clone(),
                     kill_tx,
                 );
                 let process = setup_process_rpc(process_impl);
@@ -1578,20 +1373,12 @@ mod tests {
                 // Call bootstrap() immediately — the cap hasn't resolved yet.
                 let resp = process.bootstrap_request().send().promise.await.unwrap();
                 let cap = resp.get().unwrap().get_cap();
-                let executor: system_capnp::executor::Client = cap.get_as_capability().unwrap();
+                let host2: system_capnp::host::Client = cap.get_as_capability().unwrap();
 
                 // Use the cap — should block until the delayed future resolves.
-                let mut echo_req = executor.echo_request();
-                echo_req.get().set_message("delayed bootstrap");
-                let echo_resp = echo_req.send().promise.await.unwrap();
-                let text = echo_resp
-                    .get()
-                    .unwrap()
-                    .get_response()
-                    .unwrap()
-                    .to_str()
-                    .unwrap();
-                assert_eq!(text, "Echo: delayed bootstrap");
+                let id_resp = host2.id_request().send().promise.await.unwrap();
+                let peer_id = id_resp.get().unwrap().get_peer_id().unwrap();
+                assert_eq!(peer_id, &[1, 2, 3, 4]);
             })
             .await;
     }
@@ -1672,7 +1459,7 @@ mod tests {
     // These test the full capability bridge pattern used by VatListener/VatClient
     // without requiring libp2p or WASM. We simulate the bridge with duplex streams:
     //
-    //   Cell (Executor echo)
+    //   Cell (Host cap)
     //       ↓ bootstrap cap
     //   Process.bootstrap()
     //       ↓ cap over duplex
@@ -1680,7 +1467,7 @@ mod tests {
     //       ↓ duplex stream
     //   Remote peer (Side::Client, bootstraps → gets cell_cap)
     //       ↓
-    //   Uses the cap (echo request)
+    //   Uses the cap (id request)
 
     /// Simulate the host bridge: serve a bootstrap cap over a duplex stream,
     /// return the "remote peer" side client that bootstrapped from it.
@@ -1726,9 +1513,8 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                // 1. Create a real Executor (the "cell's exported cap").
+                // 1. Create a Host cap (the "cell's exported cap").
                 let (host, _server, _rx) = setup_rpc();
-                let executor_cap = host.executor_request().send().pipeline.get_executor();
 
                 // 2. Store it in a ProcessImpl (simulates build_membrane_rpc capture).
                 let (stdin, stdout, stderr, exit_rx, kill_tx) = dummy_process_parts();
@@ -1737,7 +1523,7 @@ mod tests {
                     stdout,
                     stderr,
                     exit_rx,
-                    executor_cap.client.clone(),
+                    host.client.clone(),
                     kill_tx,
                 );
                 let process = setup_process_rpc(process_impl);
@@ -1748,21 +1534,13 @@ mod tests {
                     resp.get().unwrap().get_cap().get_as_capability().unwrap();
 
                 // 4. Bridge: serve it over a duplex (simulates the libp2p stream bridge).
-                let (remote_executor, _bridge): (system_capnp::executor::Client, _) =
+                let (remote_host, _bridge): (system_capnp::host::Client, _) =
                     setup_bridge(bootstrap_cap);
 
                 // 5. Remote peer uses the cap through the bridge.
-                let mut echo_req = remote_executor.echo_request();
-                echo_req.get().set_message("hello from remote peer");
-                let echo_resp = echo_req.send().promise.await.unwrap();
-                let text = echo_resp
-                    .get()
-                    .unwrap()
-                    .get_response()
-                    .unwrap()
-                    .to_str()
-                    .unwrap();
-                assert_eq!(text, "Echo: hello from remote peer");
+                let id_resp = remote_host.id_request().send().promise.await.unwrap();
+                let peer_id = id_resp.get().unwrap().get_peer_id().unwrap();
+                assert_eq!(peer_id, &[1, 2, 3, 4]);
             })
             .await;
     }
@@ -1774,7 +1552,6 @@ mod tests {
         local
             .run_until(async {
                 let (host, _server, _rx) = setup_rpc();
-                let executor_cap = host.executor_request().send().pipeline.get_executor();
 
                 let (stdin, stdout, stderr, exit_rx, kill_tx) = dummy_process_parts();
                 let process_impl = ProcessImpl::with_bootstrap(
@@ -1782,7 +1559,7 @@ mod tests {
                     stdout,
                     stderr,
                     exit_rx,
-                    executor_cap.client.clone(),
+                    host.client.clone(),
                     kill_tx,
                 );
                 let process = setup_process_rpc(process_impl);
@@ -1791,22 +1568,14 @@ mod tests {
                 let bootstrap_cap: capnp::capability::Client =
                     resp.get().unwrap().get_cap().get_as_capability().unwrap();
 
-                let (remote_executor, _bridge): (system_capnp::executor::Client, _) =
+                let (remote_host, _bridge): (system_capnp::host::Client, _) =
                     setup_bridge(bootstrap_cap);
 
                 // Make 5 calls through the bridge.
-                for i in 0..5 {
-                    let mut req = remote_executor.echo_request();
-                    req.get().set_message(format!("msg-{i}"));
-                    let resp = req.send().promise.await.unwrap();
-                    let text = resp
-                        .get()
-                        .unwrap()
-                        .get_response()
-                        .unwrap()
-                        .to_str()
-                        .unwrap();
-                    assert_eq!(text, format!("Echo: msg-{i}"));
+                for _ in 0..5 {
+                    let id_resp = remote_host.id_request().send().promise.await.unwrap();
+                    let peer_id = id_resp.get().unwrap().get_peer_id().unwrap();
+                    assert_eq!(peer_id, &[1, 2, 3, 4]);
                 }
             })
             .await;
@@ -1819,7 +1588,6 @@ mod tests {
         local
             .run_until(async {
                 let (host, _server, _rx) = setup_rpc();
-                let executor_cap = host.executor_request().send().pipeline.get_executor();
 
                 let (stdin, stdout, stderr, exit_rx, kill_tx) = dummy_process_parts();
                 let process_impl = ProcessImpl::with_bootstrap(
@@ -1827,7 +1595,7 @@ mod tests {
                     stdout,
                     stderr,
                     exit_rx,
-                    executor_cap.client.clone(),
+                    host.client.clone(),
                     kill_tx,
                 );
                 let process = setup_process_rpc(process_impl);
@@ -1836,27 +1604,19 @@ mod tests {
                 let bootstrap_cap: capnp::capability::Client =
                     resp.get().unwrap().get_cap().get_as_capability().unwrap();
 
-                let (remote_executor, _bridge): (system_capnp::executor::Client, _) =
+                let (remote_host, _bridge): (system_capnp::host::Client, _) =
                     setup_bridge(bootstrap_cap);
 
                 // Fire 5 calls concurrently (pipelined), then collect results.
                 let mut futures = Vec::new();
-                for i in 0..5 {
-                    let mut req = remote_executor.echo_request();
-                    req.get().set_message(format!("concurrent-{i}"));
-                    futures.push(req.send().promise);
+                for _ in 0..5 {
+                    futures.push(remote_host.id_request().send().promise);
                 }
 
-                for (i, fut) in futures.into_iter().enumerate() {
+                for fut in futures {
                     let resp = fut.await.unwrap();
-                    let text = resp
-                        .get()
-                        .unwrap()
-                        .get_response()
-                        .unwrap()
-                        .to_str()
-                        .unwrap();
-                    assert_eq!(text, format!("Echo: concurrent-{i}"));
+                    let peer_id = resp.get().unwrap().get_peer_id().unwrap();
+                    assert_eq!(peer_id, &[1, 2, 3, 4]);
                 }
             })
             .await;
@@ -1870,10 +1630,9 @@ mod tests {
         local
             .run_until(async {
                 let (host, _server, _rx) = setup_rpc();
-                let executor_cap = host.executor_request().send().pipeline.get_executor();
 
                 // Create two independent process+bridge chains.
-                let mut remote_executors = Vec::new();
+                let mut remote_hosts = Vec::new();
                 for _ in 0..2 {
                     let (stdin, stdout, stderr, exit_rx, kill_tx) = dummy_process_parts();
                     let process_impl = ProcessImpl::with_bootstrap(
@@ -1881,7 +1640,7 @@ mod tests {
                         stdout,
                         stderr,
                         exit_rx,
-                        executor_cap.client.clone(),
+                        host.client.clone(),
                         kill_tx,
                     );
                     let process = setup_process_rpc(process_impl);
@@ -1890,23 +1649,15 @@ mod tests {
                     let cap: capnp::capability::Client =
                         resp.get().unwrap().get_cap().get_as_capability().unwrap();
 
-                    let (remote, _bridge): (system_capnp::executor::Client, _) = setup_bridge(cap);
-                    remote_executors.push(remote);
+                    let (remote, _bridge): (system_capnp::host::Client, _) = setup_bridge(cap);
+                    remote_hosts.push(remote);
                 }
 
                 // Both bridges work independently.
-                for (i, remote) in remote_executors.iter().enumerate() {
-                    let mut req = remote.echo_request();
-                    req.get().set_message(format!("bridge-{i}"));
-                    let resp = req.send().promise.await.unwrap();
-                    let text = resp
-                        .get()
-                        .unwrap()
-                        .get_response()
-                        .unwrap()
-                        .to_str()
-                        .unwrap();
-                    assert_eq!(text, format!("Echo: bridge-{i}"));
+                for remote in &remote_hosts {
+                    let id_resp = remote.id_request().send().promise.await.unwrap();
+                    let peer_id = id_resp.get().unwrap().get_peer_id().unwrap();
+                    assert_eq!(peer_id, &[1, 2, 3, 4]);
                 }
             })
             .await;
@@ -1935,6 +1686,25 @@ mod tests {
     /// The control won't be used for actual I/O in these tests.
     fn dummy_stream_control() -> libp2p_stream::Control {
         libp2p_stream::Behaviour::new().new_control()
+    }
+
+    /// Stub Executor for tests that need an executor::Client without real WASM.
+    struct StubExecutor;
+
+    #[allow(refining_impl_trait)]
+    impl system_capnp::executor::Server for StubExecutor {
+        fn spawn(
+            self: capnp::capability::Rc<Self>,
+            _params: system_capnp::executor::SpawnParams,
+            _results: system_capnp::executor::SpawnResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::failed("stub executor".into()))
+        }
+    }
+
+    /// Create a stub Executor client for tests.
+    fn stub_executor() -> system_capnp::executor::Client {
+        capnp_rpc::new_client(StubExecutor)
     }
 
     /// Build a minimal WASM component with an optional custom section.
@@ -1973,19 +1743,12 @@ mod tests {
                 let listener: system_capnp::vat_listener::Client =
                     capnp_rpc::new_client(listener_impl);
 
-                let (host, _server, _rx) = setup_rpc();
-                let executor = host.executor_request().send().pipeline.get_executor();
-
-                // Bind an executor to get a BoundExecutor for the handler.
-                let mut bind_req = executor.bind_request();
-                bind_req.get().set_wasm(&wasm_without_custom_section());
-                let bind_resp = bind_req.send().promise.await.unwrap();
-                let bound = bind_resp.get().unwrap().get_bound().unwrap();
+                let executor = stub_executor();
 
                 let mut req = listener.listen_request();
                 {
                     let mut handler = req.get().init_handler();
-                    handler.set_spawn(bound);
+                    handler.set_spawn(executor);
                 }
                 req.get().set_schema(&[]); // empty schema
 
@@ -2058,19 +1821,12 @@ mod tests {
                 })
                 .unwrap();
 
-                let (host, _server, _rx) = setup_rpc();
-                let executor = host.executor_request().send().pipeline.get_executor();
-
-                // Bind an executor to get a BoundExecutor for the handler.
-                let mut bind_req = executor.bind_request();
-                bind_req.get().set_wasm(&wasm_without_custom_section());
-                let bind_resp = bind_req.send().promise.await.unwrap();
-                let bound = bind_resp.get().unwrap().get_bound().unwrap();
+                let executor = stub_executor();
 
                 let mut req = listener.listen_request();
                 {
                     let mut handler = req.get().init_handler();
-                    handler.set_spawn(bound);
+                    handler.set_spawn(executor);
                 }
                 req.get().set_schema(b"some schema");
 
@@ -2127,14 +1883,7 @@ mod tests {
                 let listener2 = vat_listener::VatListenerImpl::new(control2, guard);
                 let client2: system_capnp::vat_listener::Client = capnp_rpc::new_client(listener2);
 
-                let (host, _server, _rx) = setup_rpc();
-                let executor = host.executor_request().send().pipeline.get_executor();
-
-                // Bind an executor to get a BoundExecutor for the handler.
-                let mut bind_req = executor.bind_request();
-                bind_req.get().set_wasm(&wasm_without_custom_section());
-                let bind_resp = bind_req.send().promise.await.unwrap();
-                let bound = bind_resp.get().unwrap().get_bound().unwrap();
+                let executor = stub_executor();
 
                 // Both registrations use the same schema → same protocol CID.
                 let schema = b"some schema bytes";
@@ -2143,7 +1892,7 @@ mod tests {
                 let mut req1 = client1.listen_request();
                 {
                     let mut handler = req1.get().init_handler();
-                    handler.set_spawn(bound.clone());
+                    handler.set_spawn(executor.clone());
                 }
                 req1.get().set_schema(schema);
                 req1.send()
@@ -2155,7 +1904,7 @@ mod tests {
                 let mut req2 = client2.listen_request();
                 {
                     let mut handler = req2.get().init_handler();
-                    handler.set_spawn(bound);
+                    handler.set_spawn(executor);
                 }
                 req2.get().set_schema(schema);
                 let result = req2.send().promise.await;
@@ -2212,7 +1961,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// End-to-end: pass schema bytes and a BoundExecutor to VatListener,
+    /// End-to-end: pass schema bytes and an Executor to VatListener,
     /// and verify it successfully registers a protocol.
     #[tokio::test]
     async fn test_vat_listener_accepts_valid_schema_and_handler() {
@@ -2225,19 +1974,12 @@ mod tests {
                 let listener: system_capnp::vat_listener::Client =
                     capnp_rpc::new_client(listener_impl);
 
-                let (host, _server, _rx) = setup_rpc();
-                let executor = host.executor_request().send().pipeline.get_executor();
-
-                // Bind an executor to get a BoundExecutor for the handler.
-                let mut bind_req = executor.bind_request();
-                bind_req.get().set_wasm(&wasm_without_custom_section());
-                let bind_resp = bind_req.send().promise.await.unwrap();
-                let bound = bind_resp.get().unwrap().get_bound().unwrap();
+                let executor = stub_executor();
 
                 let mut req = listener.listen_request();
                 {
                     let mut handler = req.get().init_handler();
-                    handler.set_spawn(bound);
+                    handler.set_spawn(executor);
                 }
                 req.get().set_schema(b"valid schema bytes");
 
@@ -2258,22 +2000,21 @@ mod tests {
         // cell-side RPC system we directly control, then abort() it.
         //
         // Topology:
-        //   cell RPC (Side::Server, serves executor)
+        //   cell RPC (Side::Server, serves Host)
         //       ↓ bootstrap
-        //   cell_cap (client ref to executor)
+        //   cell_cap (client ref to Host)
         //       ↓ bridged over
         //   bridge RPC (Side::Server, bootstrap = cell_cap)
         //       ↓ bootstrap
-        //   remote_executor (remote peer's view)
+        //   remote_host (remote peer's view)
         //
         // We abort the cell RPC task, which drops the RPC system,
-        // closes the duplex half, and disconnects the executor cap.
+        // closes the duplex half, and disconnects the Host cap.
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                // Create a real executor to serve as the cell's exported cap.
+                // Create a Host cap to serve as the cell's exported cap.
                 let (host, _server, _rx) = setup_rpc();
-                let executor_cap = host.executor_request().send().pipeline.get_executor();
 
                 // Set up a cell-side RPC system we control.
                 let (cell_stream, host_stream) = io::duplex(8 * 1024);
@@ -2286,7 +2027,7 @@ mod tests {
                     Side::Server,
                     Default::default(),
                 );
-                let cell_rpc = RpcSystem::new(Box::new(cell_network), Some(executor_cap.client));
+                let cell_rpc = RpcSystem::new(Box::new(cell_network), Some(host.client));
                 let cell_task = tokio::task::spawn_local(async move {
                     let _ = cell_rpc.await;
                 });
@@ -2298,29 +2039,20 @@ mod tests {
                     Default::default(),
                 );
                 let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
-                let cell_cap: system_capnp::executor::Client = client_rpc.bootstrap(Side::Server);
+                let cell_cap: system_capnp::host::Client = client_rpc.bootstrap(Side::Server);
                 let cell_cap = cell_cap.client;
                 tokio::task::spawn_local(async move {
                     let _ = client_rpc.await;
                 });
 
                 // Bridge the cell cap to a remote peer.
-                let (remote_executor, _bridge): (system_capnp::executor::Client, _) =
+                let (remote_host, _bridge): (system_capnp::host::Client, _) =
                     setup_bridge(cell_cap);
 
                 // Verify it works while alive.
-                let mut req = remote_executor.echo_request();
-                req.get().set_message("alive");
-                let resp = req.send().promise.await.unwrap();
-                assert_eq!(
-                    resp.get()
-                        .unwrap()
-                        .get_response()
-                        .unwrap()
-                        .to_str()
-                        .unwrap(),
-                    "Echo: alive"
-                );
+                let id_resp = remote_host.id_request().send().promise.await.unwrap();
+                let peer_id = id_resp.get().unwrap().get_peer_id().unwrap();
+                assert_eq!(peer_id, &[1, 2, 3, 4]);
 
                 // Kill the cell's RPC system.
                 cell_task.abort();
@@ -2328,11 +2060,11 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
                 // Call through the bridge should now fail.
-                let mut req = remote_executor.echo_request();
-                req.get().set_message("should fail");
-                let result =
-                    tokio::time::timeout(std::time::Duration::from_millis(500), req.send().promise)
-                        .await;
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    remote_host.id_request().send().promise,
+                )
+                .await;
 
                 // Either the inner call errors (disconnected) or the timeout fires
                 // (cap is dead but stream hasn't noticed yet). Both prove the cell

@@ -130,16 +130,21 @@ impl stem_capnp::signer::Server for EpochGuardedDomainSigner {
 // HostGraftBuilder — GraftBuilder for the concrete stem graft response
 // ---------------------------------------------------------------------------
 
-/// Fills the graft response with epoch-guarded Host, Executor, Routing, HttpClient, and node identity.
+/// Fills the graft response with epoch-guarded Host, Runtime, Routing, HttpClient, and node identity.
+///
+/// **Runtime singleton**: the builder holds a pre-created `runtime::Client` that
+/// points to a single `RuntimeImpl` backend. Every graft clones this client, so
+/// all cells (including children) share the same compilation/executor cache.
 pub struct HostGraftBuilder {
     network_state: NetworkState,
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     wasm_debug: bool,
     signing_key: Option<Arc<SigningKey>>,
     stream_control: libp2p_stream::Control,
-    epoch_rx: watch::Receiver<Epoch>,
     allowed_hosts: Vec<String>,
     route_registry: Option<crate::dispatcher::server::RouteRegistry>,
+    /// Pre-created Runtime client (singleton — same backend for every graft).
+    runtime_client: system_capnp::runtime::Client,
 }
 
 impl HostGraftBuilder {
@@ -150,8 +155,8 @@ impl HostGraftBuilder {
         wasm_debug: bool,
         signing_key: Option<Arc<SigningKey>>,
         stream_control: libp2p_stream::Control,
-        epoch_rx: watch::Receiver<Epoch>,
         allowed_hosts: Vec<String>,
+        runtime_client: system_capnp::runtime::Client,
     ) -> Self {
         Self {
             network_state,
@@ -159,9 +164,9 @@ impl HostGraftBuilder {
             wasm_debug,
             signing_key,
             stream_control,
-            epoch_rx,
             allowed_hosts,
             route_registry: None,
+            runtime_client,
         }
     }
 
@@ -194,18 +199,7 @@ impl GraftBuilder for HostGraftBuilder {
         let host: system_capnp::host::Client = capnp_rpc::new_client(host_impl);
         builder.set_host(host);
 
-        let executor: system_capnp::executor::Client =
-            capnp_rpc::new_client(super::ExecutorImpl::new_full(
-                self.network_state.clone(),
-                self.swarm_cmd_tx.clone(),
-                self.wasm_debug,
-                Some(guard.clone()),
-                Some(self.epoch_rx.clone()),
-                None, // content_store removed — IPFS reads go through WASI virtual FS
-                self.signing_key.clone(),
-                Some(self.stream_control.clone()),
-            ));
-        builder.set_executor(executor);
+        builder.set_runtime(self.runtime_client.clone());
 
         let routing: routing_capnp::routing::Client = capnp_rpc::new_client(
             super::routing::RoutingImpl::new(self.swarm_cmd_tx.clone(), guard.clone()),
@@ -270,6 +264,7 @@ pub fn build_membrane_rpc<R, W>(
     signing_key: Option<Arc<SigningKey>>,
     stream_control: libp2p_stream::Control,
     route_registry: Option<crate::dispatcher::server::RouteRegistry>,
+    runtime_client: system_capnp::runtime::Client,
 ) -> (RpcSystem<Side>, GuestMembrane)
 where
     R: AsyncRead + Unpin + 'static,
@@ -281,8 +276,8 @@ where
         wasm_debug,
         signing_key,
         stream_control,
-        epoch_rx.clone(),
         Vec::new(), // allowed_hosts: empty = allow all (default)
+        runtime_client,
     );
     if let Some(registry) = route_registry {
         sess_builder = sess_builder.with_route_registry(registry);
