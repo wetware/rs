@@ -1,113 +1,26 @@
-# Chess Example
+# Chess Engine
 
 Two-node cross-network chess over libp2p RPC capabilities.
 
-## How it works
+## What it demonstrates
 
-The `ww run` command takes one or more **image layers** as positional args.
-Each layer is a directory that gets merged into a single FHS root, left to
-right. The kernel (PID 0) sees this merged root as its virtual filesystem.
-
-```sh
-ww run --port=2025 crates/kernel examples/chess
-```
-
-Here, `crates/kernel` is the base layer (the kernel WASM binary) and
-`examples/chess` is stacked on top. After merging, the kernel's filesystem
-contains everything from both directories. Concretely, the contents of
-`examples/chess/` are available to PID 0 under `$WW_ROOT/`:
-
-```
-$WW_ROOT/
-├── bin/
-│   └── chess-demo.wasm    ← from examples/chess (built by `make chess`)
-├── etc/
-│   └── init.d/
-│       └── chess.glia     ← from examples/chess
-├── boot/
-│   └── main.wasm          ← from crates/kernel
-└── ...
-```
-
-The host publishes this merged directory to IPFS and sets `$WW_ROOT` to
-`/ipfs/<cid>`. When the kernel's init system reads `etc/init.d/chess.glia`,
-the `(perform :load "bin/chess-demo.wasm")` call resolves the path relative
-to `$WW_ROOT`, fetching the bytes from the merged image via the WASI
-filesystem interceptor.
-
-This is the key idea: **any directory can be an image layer.** You build a
-chess demo by putting the right files in the right FHS paths and stacking
-the directory onto the kernel.
-
-## Architecture
-
-```
-              kernel boot
-                  │
-          chess.glia evaluated
-             ┌────┴────┐
-   (host listen)     (executor run)
-          │              │
-      cell mode      service mode
-    (per-connection) (discovery loop)
-```
-
-Two execution modes, selected by the init.d script:
-
-- **Cell** (`WW_CELL`): per-connection RPC cell spawned by
-  `VatListener`. Creates a `ChessEngineImpl` and exports it via
-  `system::serve()`. The host bridges the capability to the connecting
-  peer via Cap'n Proto RPC bootstrapping.
-- **Service** (default): long-running discovery loop. Provides the
-  schema CID on the DHT, discovers peers via `routing.find_providers()`,
-  dials them with `VatClient` to get typed `ChessEngine` capabilities,
-  and plays random games. Exponential backoff (2 s to 15 min).
-
-Each node registers a `VatListener` for the ChessEngine schema,
-announces the schema CID on the Kademlia DHT, discovers peers, and
-plays random UCI moves via typed Cap'n Proto RPC. Every completed game
-publishes a content-addressed replay log to IPFS (see
-[doc/replay.md](doc/replay.md)).
-
-## Init.d Script
-
-`etc/init.d/chess.glia` is evaluated by the kernel at boot. Each form
-is a capability invocation. The kernel binds `executor` as a capability
-value in the Glia environment, and scripts pass it explicitly to
-functions that need spawn authority.
-
-```clojure
-; Register RPC cell — schema extracted from WASM custom section.
-; The executor is passed explicitly (no ambient authority).
-(host listen executor (perform :load "bin/chess-demo.wasm"))
-
-; Run the chess demo in service mode — blocks until exit.
-(executor run (perform :load "bin/chess-demo.wasm"))
-```
-
-`(perform :load "bin/chess-demo.wasm")` loads bytes via the `:load` effect
-handler, resolved relative to `$WW_ROOT` (the merged image root). The
-executor capability is the spawn authority that `VatListener` needs to
-create cell processes. The host inspects the WASM binary's `cell.capnp`
-custom section to derive the protocol CID.
-
-## Schema CID
-
-The protocol address is derived at build time from the ChessEngine
-Cap'n Proto schema: `CIDv1(raw, BLAKE3(canonical(schema.Node)))`.
-This CID serves as both the DHT key and the subprotocol address
-(`/ww/0.1.0/<cid>`). The canonical schema bytes are embedded in the
-WASM binary as a custom section named `cell.capnp`. The host
-extracts the section and derives the CID at runtime. See `build.rs`,
-the `schema-id` crate, and `make chess` for the injection step.
+- **Cap'n Proto cell** (`WW_CELL_MODE=vat`) -- schema-keyed RPC
+- `VatListener` for per-connection capability cells
+- `VatClient` for typed RPC dialing
+- Schema-keyed DHT discovery via `routing.provide()` / `findProviders()`
+- IPFS replay log publishing
+- Dual-mode binary: cell mode (RPC server) + service mode (discovery loop)
 
 ## Prerequisites
 
-A running Kubo node for DHT bootstrap:
-
-```sh
-ipfs daemon
-```
+- Rust toolchain with `wasm32-wasip2` target:
+  ```sh
+  rustup target add wasm32-wasip2
+  ```
+- A running Kubo node for DHT bootstrap:
+  ```sh
+  ipfs daemon
+  ```
 
 ## Building
 
@@ -115,9 +28,16 @@ ipfs daemon
 make chess
 ```
 
+This compiles the WASM guest and copies the compiled schema bytes
+(`chess-demo.schema`) next to the binary. The schema is passed
+explicitly via RPC at runtime -- no custom sections.
+
 ## Running
 
-Stack the chess layer on top of the kernel:
+### Step 1: Boot the nodes
+
+Stack the chess layer on top of the kernel. The init.d script
+registers the chess cell with the host's `VatListener`.
 
 ```sh
 # Terminal 1
@@ -127,8 +47,123 @@ ww run --port=2025 crates/kernel examples/chess
 ww run --port=2026 crates/kernel examples/chess
 ```
 
-Both nodes bootstrap into the DHT, exchange provider records, discover
-each other, and play a game of random chess via typed RPC.
+Each terminal drops you into a Glia shell.
+
+### Step 2: Start the service
+
+From each Glia shell, run the chess demo in service mode:
+
+```clojure
+/ > (executor run (load "bin/chess-demo.wasm"))
+```
+
+Both nodes bootstrap into the DHT, exchange provider records,
+discover each other, and play a game of random chess via typed RPC.
+
+## How it works
+
+### Image layers
+
+The `ww run` command takes one or more **image layers** as positional
+args. Each layer is a directory that gets merged into a single FHS
+root, left to right. The kernel (PID 0) sees this merged root as
+its virtual filesystem.
+
+```
+$WW_ROOT/
+├── bin/
+│   └── chess-demo.wasm    <- from examples/chess (built by make chess)
+├── etc/
+│   └── init.d/
+│       └── chess.glia     <- from examples/chess
+├── boot/
+│   └── main.wasm          <- from crates/kernel
+└── ...
+```
+
+The host publishes this merged directory to IPFS and sets `$WW_ROOT`
+to `/ipfs/<cid>`. When the kernel's init system reads
+`etc/init.d/chess.glia`, the `(load "bin/chess-demo.wasm")` call
+resolves the path relative to `$WW_ROOT`, fetching the bytes from
+the merged image via the WASI filesystem interceptor.
+
+### Architecture
+
+```
+              kernel boot
+                  |
+          chess.glia evaluated
+             ┌────┴────┐
+   (host :listen)  (executor run)
+          |              |
+      cell mode      service mode
+    (per-connection) (discovery loop)
+```
+
+Two execution modes, selected by the init.d script:
+
+- **Cell mode** (`WW_CELL_MODE=vat`): per-connection RPC cell
+  spawned by `VatListener`. Creates a `ChessEngineImpl` and exports
+  it via `system::serve()`. The host bridges the capability to the
+  connecting peer via Cap'n Proto RPC bootstrapping.
+- **Service mode** (default): long-running discovery loop. Provides
+  the schema CID on the DHT, discovers peers via
+  `routing.find_providers()`, dials them with `VatClient` to get
+  typed `ChessEngine` capabilities, and plays random games.
+  Exponential backoff (2 s to 15 min).
+
+### Schema CID
+
+The protocol address is derived at build time from the ChessEngine
+Cap'n Proto schema: `CIDv1(raw, BLAKE3(canonical(schema.Node)))`.
+This CID serves as both the DHT key and the subprotocol address
+(`/ww/0.1.0/rpc/{cid}`). Schema bytes are compiled at build time
+and passed explicitly via RPC -- the host reads `bin/chess-demo.schema`
+from the image to derive the CID.
+
+### Schema
+
+```capnp
+interface ChessEngine {
+  getState      @0 () -> (fen :Text);
+  applyMove     @1 (uci :Text) -> (ok :Bool, reason :Text);
+  getLegalMoves @2 () -> (moves :List(Text));
+  getStatus     @3 () -> (status :GameStatus);
+
+  enum GameStatus {
+    ongoing   @0;
+    checkmate @1;
+    stalemate @2;
+    draw      @3;
+  }
+}
+```
+
+## Init.d script
+
+`etc/init.d/chess.glia`:
+
+```clojure
+; Register RPC cell for the ChessEngine capability.
+; VatListener spawns a cell process per connection; the cell exports
+; a ChessEngine capability via system::serve().
+(host :listen executor (load "bin/chess-demo.wasm"))
+
+; Run the chess demo in service mode -- blocks until exit.
+; The service discovers peers via DHT and dials them with VatClient
+; to get typed ChessEngine capabilities.
+(executor run (load "bin/chess-demo.wasm"))
+```
+
+The first form registers the chess binary with the host's
+`VatListener`. The schema is read from `bin/chess-demo.schema`
+(adjacent to the WASM binary). Each incoming RPC connection spawns
+a fresh cell that exports a `ChessEngine` capability.
+
+The second form runs the same binary in service mode. It provides
+the schema CID on the DHT, discovers peers, and plays random games.
+
+The executor capability is passed explicitly -- no ambient authority.
 
 ## Tests
 
@@ -138,4 +173,24 @@ cargo test -p chess --lib
 
 ## See also
 
-- [doc/replay.md](doc/replay.md) — replay log structure
+- [doc/replay.md](doc/replay.md) -- replay log structure
+
+## Files
+
+```
+examples/chess/
+├── Cargo.toml
+├── Makefile              # make chess
+├── README.md             # this file
+├── chess.capnp           # ChessEngine schema source
+├── bin/                  # build output (gitignored)
+│   ├── chess-demo.wasm
+│   └── chess-demo.schema # compiled schema bytes
+├── doc/
+│   └── replay.md         # replay log format
+├── etc/
+│   └── init.d/
+│       └── chess.glia    # cell registration + service launch
+└── src/
+    └── lib.rs            # guest implementation
+```
