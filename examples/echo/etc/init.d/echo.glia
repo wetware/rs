@@ -1,0 +1,11 @@
+; Echo init.d script — evaluated by the kernel at boot.
+;
+; Registers a raw stream cell for the echo protocol.
+; Each connection gets a fresh cell that echoes stdin to stdout.
+;
+; To test from the shell:
+;   (executor run (load "bin/echo.wasm"))
+
+(def echo-wasm (load "bin/echo.wasm"))
+
+(perform host :listen executor "echo" echo-wasm)

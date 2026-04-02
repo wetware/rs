@@ -1,0 +1,11 @@
+; Counter init.d script — evaluated by the kernel at boot.
+;
+; Registers an HTTP/WAGI cell on the /counter path prefix.
+; Each HTTP request gets a fresh cell process with CGI env vars.
+;
+; To test from the shell:
+;   (executor run (load "bin/counter.wasm"))
+
+(def counter-wasm (load "bin/counter.wasm"))
+
+(perform host :listen executor "/counter" counter-wasm)
