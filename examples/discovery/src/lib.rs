@@ -4,12 +4,13 @@
 //!   build → schema-inject → IPFS push → provide on DHT →
 //!   findProviders → dial via VatClient → typed RPC call
 //!
-//! **Cell mode** (`WW_CELL=1`): An RPC capability cell spawned by
-//! VatListener. Creates a Greeter and exports it via `system::serve()`.
+//! Two modes, selected by subcommand:
 //!
-//! **Service mode** (default): Provides the schema CID on the DHT,
-//! discovers peers via `routing.find_providers()`, dials them via
-//! `VatClient` to get typed Greeter capabilities, and calls `greet()`.
+//! **Cell mode** (no args, default): spawned by VatListener per RPC
+//! connection. Creates a Greeter and exports it via `system::serve()`.
+//!
+//! **`serve`**: provides the schema CID on the DHT, discovers peers via
+//! `routing.find_providers()`, dials them via `VatClient`, calls `greet()`.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -285,11 +286,15 @@ struct DiscoveryGuest;
 impl Guest for DiscoveryGuest {
     fn run() -> Result<(), ()> {
         init_logging();
-        if std::env::var("WW_CELL").is_ok() {
-            run_cell();
-        } else {
-            log::info!("discovery guest starting (service mode)");
-            system::run(|membrane: Membrane| async move { run_service(membrane).await });
+        match std::env::args().nth(1).as_deref() {
+            Some("serve") => {
+                log::info!("discovery: serve — DHT provide + peer discovery");
+                system::run(|membrane: Membrane| async move { run_service(membrane).await });
+            }
+            _ => {
+                // Default (no args): cell mode — spawned by VatListener.
+                run_cell();
+            }
         }
         Ok(())
     }

@@ -2,19 +2,19 @@
 //!
 //! Demonstrates:
 //!   - HttpClient capability for outbound HTTP (domain-scoped)
-//!   - Cell mode with system::serve() for RPC capability export
+//!   - Subcommand dispatch (cell / serve / consume)
 //!   - DHT discovery via routing.provide()/findProviders()
 //!
-//! **Cell mode** (`WW_CELL=1`): An RPC capability cell spawned by
-//! VatListener. Creates a PriceOracle, fetches prices via HttpClient,
+//! Three modes, selected by subcommand:
+//!
+//! **Cell mode** (no args, default): spawned by VatListener per RPC
+//! connection. Creates a PriceOracle, fetches prices via HttpClient,
 //! and exports it via `system::serve()`.
 //!
-//! **Service mode** (default): Provides schema CID on the DHT and
-//! re-provides periodically. The init.d script registers the cell
-//! first, then runs this service loop.
+//! **`serve`**: provides schema CID on the DHT, re-provides periodically.
 //!
-//! **Consumer mode** (`WW_CONSUMER=1`): Discovers oracle providers via
-//! DHT, dials via VatClient, queries prices.
+//! **`consume`**: discovers oracle providers via DHT, dials via VatClient,
+//! queries prices.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -473,18 +473,18 @@ struct OracleGuest;
 impl Guest for OracleGuest {
     fn run() -> Result<(), ()> {
         init_logging();
-        match std::env::var("WW_CELL_MODE").as_deref() {
-            Ok("vat") => {
-                log::info!("oracle guest starting (vat cell mode)");
-                run_cell();
+        match std::env::args().nth(1).as_deref() {
+            Some("serve") => {
+                log::info!("oracle: serve — DHT provide loop");
+                system::run(|membrane: Membrane| async move { run_service(membrane).await });
             }
-            _ if std::env::var("WW_CONSUMER").is_ok() => {
-                log::info!("oracle guest starting (consumer mode)");
+            Some("consume") => {
+                log::info!("oracle: consume — discover + query prices");
                 system::run(|membrane: Membrane| async move { run_consumer(membrane).await });
             }
             _ => {
-                log::info!("oracle guest starting (service mode)");
-                system::run(|membrane: Membrane| async move { run_service(membrane).await });
+                // Default (no args): cell mode — spawned by VatListener.
+                run_cell();
             }
         }
         Ok(())

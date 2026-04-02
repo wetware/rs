@@ -1,0 +1,16 @@
+; Oracle init.d script — evaluated by the kernel at boot.
+;
+; Registers the PriceOracle RPC cell. VatListener spawns a cell per
+; connection (no args = cell mode); each cell exports PriceOracle
+; via system::serve() and fetches prices via HttpClient.
+;
+; To start the DHT provider from the shell:
+;   (executor run (load "bin/oracle.wasm") "serve")
+;
+; To discover and query oracle providers:
+;   (executor run (load "bin/oracle.wasm") "consume")
+
+(def oracle-wasm (load "bin/oracle.wasm"))
+(def oracle-schema (load "bin/oracle.schema"))
+
+(perform host :listen executor oracle-wasm oracle-schema)

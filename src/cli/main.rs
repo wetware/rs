@@ -549,19 +549,33 @@ struct {iface_name}Guest;
 
 impl Guest for {iface_name}Guest {{
     fn run() -> Result<(), ()> {{
-        system::run(|membrane: Membrane| async move {{
-            let graft_resp = membrane.graft_request().send().promise.await?;
-            let results = graft_resp.get()?;
-            let host = results.get_host()?;
+        match std::env::args().nth(1).as_deref() {{
+            Some("serve") => {{
+                log::info!("{name}: serve");
+                system::run(|membrane: Membrane| async move {{
+                    let graft_resp = membrane.graft_request().send().promise.await?;
+                    let results = graft_resp.get()?;
+                    let host = results.get_host()?;
 
-            let id_resp = host.id_request().send().promise.await?;
-            let peer_id = id_resp.get()?.get_peer_id()?;
-            log::info!("{name}: peer {{:?}}", peer_id);
+                    let id_resp = host.id_request().send().promise.await?;
+                    let peer_id = id_resp.get()?.get_peer_id()?;
+                    log::info!("{name}: peer {{:?}}", peer_id);
 
-            // TODO: export your capability via VatListener, register on DHT, etc.
+                    // TODO: provide on DHT, discover peers, etc.
 
-            Ok(())
-        }});
+                    Ok(())
+                }});
+            }}
+            _ => {{
+                // Default (no args): cell mode — spawned by VatListener.
+                let impl_ = {iface_name}Impl;
+                let client: {name}_capnp::{snake_name}::Client = capnp_rpc::new_client(impl_);
+                log::info!("{name}: cell mode");
+                system::serve(client.client, |_membrane: Membrane| async move {{
+                    std::future::pending().await
+                }});
+            }}
+        }}
         Ok(())
     }}
 }}
@@ -580,7 +594,7 @@ wasip2::cli::command::export!({iface_name}Guest);
 ; each cell exports its capability via system::serve().
 ;
 ; To run the service from the shell:
-;   (executor run (load "bin/{name}.wasm"))
+;   (executor run (load "bin/{name}.wasm") "serve")
 
 (def {snake_name}-wasm (load "bin/{name}.wasm"))
 (def {snake_name}-schema (load "bin/{name}.schema"))

@@ -1,12 +1,12 @@
 //! Integration test: discovery cell spawn + Greeter RPC round-trip.
 //!
 //! Validates the host-side chain that VatListener uses internally:
-//!   executor.runBytes(wasm, WW_CELL=1) → process.bootstrap() → Greeter cap → greet()
+//!   executor.runBytes(wasm) → process.bootstrap() → Greeter cap → greet()
 //!
-//! No libp2p networking required. Uses in-memory RPC over duplex streams.
+//! No args = cell mode (default). No libp2p networking required.
+//! Uses in-memory RPC over duplex streams.
 //!
-//! Requires a pre-built discovery WASM with injected cell.capnp section at
-//! `examples/discovery/bin/discovery.wasm`.
+//! Requires a pre-built discovery WASM at `examples/discovery/bin/discovery.wasm`.
 //! Build:  make discovery
 
 use std::sync::Arc;
@@ -62,9 +62,9 @@ async fn spawn_greeter_cell(
     let mut req = executor.run_bytes_request();
     req.get().set_wasm(wasm);
     {
-        let mut env = req.get().init_env(2);
-        env.set(0, "WW_CELL=1");
-        env.set(1, "WW_PEER_ID=deadbeefcafebabe");
+        // No args = cell mode (default). No WW_CELL envvar needed.
+        let mut env = req.get().init_env(1);
+        env.set(0, "WW_PEER_ID=deadbeefcafebabe");
     }
     let resp = req.send().promise.await.expect("runBytes failed");
     let process = resp.get().unwrap().get_process().unwrap();

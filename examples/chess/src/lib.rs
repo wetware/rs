@@ -3,16 +3,14 @@
 //! This binary serves two roles, selected by env vars set in the
 //! init.d script (`etc/init.d/chess.glia`):
 //!
-//! **Cell mode** (`WW_CELL=1`): An RPC capability cell spawned
-//! by VatListener. Creates a ChessEngine and exports it via
-//! `system::serve()`. The host bridges the capability to the connecting
-//! peer via Cap'n Proto RPC bootstrapping.
+//! Two modes, selected by subcommand:
 //!
-//! **Service mode** (default): Spawned by an init.d script after the
-//! RPC cell is registered. Provides the schema CID on the DHT,
-//! discovers peers via `routing.find_providers()`, dials them via
-//! `VatClient` to get typed ChessEngine capabilities, and plays random
-//! games logging replays to IPFS.
+//! **Cell mode** (no args, default): spawned by VatListener per RPC
+//! connection. Creates a ChessEngine and exports it via `system::serve()`.
+//!
+//! **`serve`**: provides the schema CID on the DHT, discovers peers via
+//! `routing.find_providers()`, dials them via `VatClient` to get typed
+//! ChessEngine capabilities, and plays random games logging replays.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -563,13 +561,15 @@ struct ChessGuest;
 impl Guest for ChessGuest {
     fn run() -> Result<(), ()> {
         init_logging();
-        if std::env::var("WW_CELL").is_ok() {
-            // Cell mode: export ChessEngine via RPC.
-            run_cell();
-        } else {
-            // Service mode: discovery loop with VatClient.
-            log::info!("chess guest starting (service mode)");
-            system::run(|membrane: Membrane| async move { run_service(membrane).await });
+        match std::env::args().nth(1).as_deref() {
+            Some("serve") => {
+                log::info!("chess: serve — discovery + game loop");
+                system::run(|membrane: Membrane| async move { run_service(membrane).await });
+            }
+            _ => {
+                // Default (no args): cell mode — spawned by VatListener.
+                run_cell();
+            }
         }
         Ok(())
     }
