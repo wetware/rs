@@ -465,6 +465,81 @@ async fn run_consumer(membrane: Membrane) -> Result<(), capnp::Error> {
 }
 
 // ---------------------------------------------------------------------------
+// HTTP/WAGI mode — stateless per-request handler
+// ---------------------------------------------------------------------------
+
+/// HTTP cell handler: graft membrane, fetch prices, respond with JSON.
+///
+/// stdin/stdout carry CGI (body in, response out). The RPC membrane runs
+/// over the `wetware:streams` side-channel — no conflict.
+fn run_http() -> Result<(), ()> {
+    use wagi_guest as wagi;
+
+    system::run(|membrane: Membrane| async move {
+        let graft_resp = membrane.graft_request().send().promise.await?;
+        let http = graft_resp.get()?.get_http_client()?;
+
+        let cache = init_cache();
+        if let Err(e) = fetch_prices(&http, &cache).await {
+            log::warn!("http: price fetch failed: {e}");
+            wagi::respond(
+                502,
+                &[("Content-Type", "text/plain")],
+                &format!("price fetch failed: {e}"),
+            );
+            return Ok(());
+        }
+
+        let query = wagi::query();
+        let json = build_json_response(&cache, &query);
+        wagi::respond(200, &[("Content-Type", "application/json")], &json);
+        Ok(())
+    });
+
+    Ok(())
+}
+
+/// Build a JSON response from the price cache.
+///
+/// If `query` contains `pair=X`, return only that pair.
+/// Otherwise return all pairs.
+fn build_json_response(cache: &PriceCache, query: &str) -> String {
+    let map = cache.borrow();
+
+    // Parse ?pair=ETH/gas from query string.
+    let filter_pair = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("pair="))
+        .map(|s| s.replace("%2F", "/").replace("%2f", "/"));
+
+    let mut pairs = serde_json::Map::new();
+    for (name, entry) in map.iter() {
+        if let Some(ref filter) = filter_pair {
+            if name != filter {
+                continue;
+            }
+        }
+        let divisor = 10_f64.powi(entry.decimals as i32);
+        let display_price = entry.price as f64 / divisor;
+        let mut obj = serde_json::Map::new();
+        obj.insert("price".into(), serde_json::Value::from(display_price));
+        obj.insert("unit".into(), serde_json::Value::from("gwei"));
+        obj.insert(
+            "confidence".into(),
+            serde_json::Value::from(entry.confidence),
+        );
+        obj.insert(
+            "timestamp".into(),
+            serde_json::Value::from(entry.timestamp),
+        );
+        pairs.insert(name.clone(), serde_json::Value::Object(obj));
+    }
+
+    let root = serde_json::json!({ "pairs": pairs });
+    serde_json::to_string_pretty(&root).unwrap_or_else(|_| r#"{"error":"json serialization"}"#.into())
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -473,6 +548,13 @@ struct OracleGuest;
 impl Guest for OracleGuest {
     fn run() -> Result<(), ()> {
         init_logging();
+
+        // HTTP/WAGI mode: detected by CGI env var presence.
+        // HttpListener injects REQUEST_METHOD; VatListener does not.
+        if std::env::var("REQUEST_METHOD").is_ok() {
+            return run_http();
+        }
+
         match std::env::args().nth(1).as_deref() {
             Some("serve") => {
                 log::info!("oracle: serve — DHT provide loop");
@@ -638,5 +720,54 @@ mod tests {
                 assert!(resp.is_err(), "unknown pair should error");
             })
             .await;
+    }
+
+    // --- JSON response tests ---
+
+    #[test]
+    fn test_json_response_all_pairs() {
+        let cache = init_cache();
+        cache.borrow_mut().insert(
+            "ETH/gas".to_string(),
+            PriceEntry {
+                price: 30_000_000_000,
+                decimals: 9,
+                timestamp: 1700000000,
+                confidence: 0.99,
+            },
+        );
+        let json = build_json_response(&cache, "");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed["pairs"]["ETH/gas"]["price"].is_number());
+        assert!(parsed["pairs"]["POLYGON/gas"].is_object());
+        assert!(parsed["pairs"]["BASE/gas"].is_object());
+    }
+
+    #[test]
+    fn test_json_response_filtered_pair() {
+        let cache = init_cache();
+        cache.borrow_mut().insert(
+            "ETH/gas".to_string(),
+            PriceEntry {
+                price: 30_000_000_000,
+                decimals: 9,
+                timestamp: 1700000000,
+                confidence: 0.99,
+            },
+        );
+        let json = build_json_response(&cache, "pair=ETH%2Fgas");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed["pairs"]["ETH/gas"]["price"].is_number());
+        // Other pairs should not be present
+        assert!(parsed["pairs"]["POLYGON/gas"].is_null());
+    }
+
+    #[test]
+    fn test_json_response_unknown_pair_filter() {
+        let cache = init_cache();
+        let json = build_json_response(&cache, "pair=DOGE%2Fusd");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let pairs = parsed["pairs"].as_object().unwrap();
+        assert!(pairs.is_empty());
     }
 }

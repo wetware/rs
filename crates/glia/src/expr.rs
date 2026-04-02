@@ -185,7 +185,8 @@ pub fn analyze(val: &Val) -> Result<Expr, String> {
         | Val::NativeFn { .. }
         | Val::AsyncNativeFn { .. }
         | Val::Resume(_)
-        | Val::Cap { .. } => Ok(Expr::Const(val.clone())),
+        | Val::Cap { .. }
+        | Val::Cell { .. } => Ok(Expr::Const(val.clone())),
     }
 }
 

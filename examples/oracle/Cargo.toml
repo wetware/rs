@@ -15,7 +15,8 @@ hex       = "0.4"
 rand      = "0.9"
 serde     = { version = "1", features = ["derive"] }
 serde_json = "1"
-system    = { path = "../../std/system" }
+system     = { path = "../../std/system" }
+wagi-guest = { path = "../../crates/wagi-guest" }
 
 [lib]
 crate-type = ["cdylib"]
