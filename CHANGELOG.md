@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Listeners (StreamListener, VatListener, HttpListener) take `Executor` instead of `BoundExecutor`
 - Kernel `:run` and `:listen` handlers use two-step `runtime.load()` → `executor.spawn()` pattern
 - Cap'n Proto pipelining resolves `load()` → `spawn()` in one round-trip
+- All documentation, agent prompts, example READMEs, and init.d scripts updated for Runtime API
 
 ## [0.0.4.0] - 2026-04-02
 
