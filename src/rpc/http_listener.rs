@@ -2,7 +2,7 @@
 //!
 //! The `HttpListener` capability lets a guest register an HTTP endpoint.
 //! For each incoming request matching the path prefix, the host spawns a
-//! cell process (via the guest-provided `BoundExecutor`) with CGI env vars
+//! cell process (via the guest-provided `Executor`) with CGI env vars
 //! as environment, request body piped to stdin, and CGI response read from stdout.
 //!
 //! Route registrations are stored in a shared `RouteRegistry` that the
@@ -57,7 +57,7 @@ impl system_capnp::http_listener::Server for HttpListenerImpl {
         let (tx, rx) = mpsc::channel::<CgiRequest>(64);
 
         // Spawn a local task that receives HTTP requests from the channel,
-        // spawns cells via BoundExecutor, and sends CGI responses back.
+        // spawns cells via Executor, and sends CGI responses back.
         tokio::task::spawn_local(dispatch_loop(executor, rx));
 
         // Register the route with its request sender.
@@ -74,7 +74,7 @@ impl system_capnp::http_listener::Server for HttpListenerImpl {
 
 /// Receive HTTP requests from the channel, spawn cells, send responses back.
 async fn dispatch_loop(
-    executor: system_capnp::bound_executor::Client,
+    executor: system_capnp::executor::Client,
     mut rx: mpsc::Receiver<CgiRequest>,
 ) {
     while let Some(req) = rx.recv().await {
@@ -89,7 +89,7 @@ async fn dispatch_loop(
 
 /// Spawn a cell, pipe stdin/stdout, parse CGI response.
 async fn handle_one_request(
-    executor: &system_capnp::bound_executor::Client,
+    executor: &system_capnp::executor::Client,
     req: &CgiRequest,
 ) -> CgiResponse {
     match spawn_and_run(executor, req).await {
@@ -113,19 +113,17 @@ async fn handle_one_request(
     }
 }
 
-/// Spawn a cell via BoundExecutor, write body to stdin, read stdout.
+/// Spawn a cell via Executor, write body to stdin, read stdout.
+///
+/// Per-request CGI env vars (REQUEST_METHOD, PATH_INFO, etc.) are passed via
+/// `executor.spawn(args, env)` — this is the late-binding pattern that the
+/// Runtime+Executor API was designed for.
 async fn spawn_and_run(
-    executor: &system_capnp::bound_executor::Client,
+    executor: &system_capnp::executor::Client,
     req: &CgiRequest,
 ) -> Result<Vec<u8>, capnp::Error> {
-    // TODO: Pass CGI env vars to the cell per-request. Currently BoundExecutor.spawn()
-    // doesn't accept per-request env vars (they're bound at bind time). For WAGI, the
-    // CGI env vars need to be set per request. Options:
-    //   a) spawn_with_env() method on BoundExecutor
-    //   b) Encode env vars as a length-prefixed header on stdin
-    // For now, build the env vars (for future use) but don't pass them.
     let (server_name, server_port) = server::extract_server_info(&req.headers);
-    let _env = crate::dispatcher::wagi::build_cgi_env(
+    let env = crate::dispatcher::wagi::build_cgi_env(
         &req.method,
         &req.path,
         &req.query,
@@ -134,7 +132,15 @@ async fn spawn_and_run(
         server_port,
     );
 
-    let spawn_resp = executor.spawn_request().send().promise.await?;
+    let mut spawn_req = executor.spawn_request();
+    {
+        let mut builder = spawn_req.get();
+        let mut env_list = builder.reborrow().init_env(env.len() as u32);
+        for (i, e) in env.iter().enumerate() {
+            env_list.set(i as u32, e);
+        }
+    }
+    let spawn_resp = spawn_req.send().promise.await?;
     let process = spawn_resp.get()?.get_process()?;
 
     // Write request body to stdin, then close.

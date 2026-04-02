@@ -4,7 +4,7 @@
 //! that exports a typed capability. Two modes are supported:
 //!
 //! **Spawn mode** (VatHandler::spawn): for each incoming connection, spawn a fresh
-//! cell process via the BoundExecutor, capture its `system::serve()` exported
+//! cell process via the Executor, capture its `system::serve()` exported
 //! bootstrap capability, and serve it to the connecting peer via Cap'n Proto RPC.
 //!
 //! **Serve mode** (VatHandler::serve): bootstrap each connection with a persistent
@@ -78,8 +78,8 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
         let handler_which = pry!(handler.which());
 
         match handler_which {
-            system_capnp::vat_handler::Which::Spawn(bound_executor) => {
-                let bound_executor: system_capnp::bound_executor::Client = pry!(bound_executor);
+            system_capnp::vat_handler::Which::Spawn(executor) => {
+                let executor: system_capnp::executor::Client = pry!(executor);
 
                 // Accept loop: for each incoming connection, spawn a cell and bridge RPC.
                 let mut epoch_rx = self.guard.receiver.clone();
@@ -97,11 +97,11 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
                                     protocol = %stream_protocol,
                                     "Incoming vat connection (spawn mode)"
                                 );
-                                let bound_executor = bound_executor.clone();
+                                let executor = executor.clone();
                                 let protocol_cid = protocol_cid.clone();
                                 tokio::task::spawn_local(async move {
                                     if let Err(e) =
-                                        handle_vat_connection_spawn(bound_executor, stream, &protocol_cid).await
+                                        handle_vat_connection_spawn(executor, stream, &protocol_cid).await
                                     {
                                         tracing::error!(protocol = protocol_cid, "Vat cell connection error: {e}");
                                     }
@@ -184,12 +184,12 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
 /// Generic over stream type so integration tests can substitute an in-memory
 /// duplex for the libp2p stream. Production callers pass `libp2p::Stream`.
 pub async fn handle_vat_connection_spawn(
-    bound_executor: system_capnp::bound_executor::Client,
+    executor: system_capnp::executor::Client,
     stream: impl AsyncRead + AsyncWrite + 'static,
     protocol_cid: &str,
 ) -> Result<(), capnp::Error> {
-    // 1. Spawn cell process via BoundExecutor.spawn().
-    let response = bound_executor.spawn_request().send().promise.await?;
+    // 1. Spawn cell process via Executor.spawn().
+    let response = executor.spawn_request().send().promise.await?;
     let process = response.get()?.get_process()?;
 
     // 2. Get stdin handle. For RPC cells, stdin is a shutdown signal:

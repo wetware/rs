@@ -85,14 +85,14 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// Mode A (per-request spawn): each handle() call spawns a fresh process.
 /// Mode B (long-lived worker): not yet implemented — will use SwappableReader/Writer.
 pub struct HttpServer {
-    /// Cap'n Proto client for the bound executor.
-    bound: crate::system_capnp::bound_executor::Client,
+    /// Cap'n Proto client for the executor.
+    executor: crate::system_capnp::executor::Client,
 }
 
 impl HttpServer {
-    /// Create a new HttpServer with a bound executor.
-    pub fn new(bound: crate::system_capnp::bound_executor::Client) -> Self {
-        Self { bound }
+    /// Create a new HttpServer with an executor.
+    pub fn new(executor: crate::system_capnp::executor::Client) -> Self {
+        Self { executor }
     }
 
     /// Handle one request: spawn process, pipe stdin/stdout, wait for exit.
@@ -102,7 +102,7 @@ impl HttpServer {
     /// stdout, waits for exit.
     pub async fn handle(&self, body: Vec<u8>) -> Result<(Vec<u8>, i32), capnp::Error> {
         // Spawn a fresh process
-        let spawn_resp = self.bound.spawn_request().send().promise.await?;
+        let spawn_resp = self.executor.spawn_request().send().promise.await?;
         let process = spawn_resp.get()?.get_process()?;
 
         // Write request body to stdin, then close
@@ -176,6 +176,6 @@ mod tests {
     #[test]
     fn http_server_struct_exists() {
         // Can't construct without a real capnp client, but verify the type exists
-        let _: fn(crate::system_capnp::bound_executor::Client) -> HttpServer = HttpServer::new;
+        let _: fn(crate::system_capnp::executor::Client) -> HttpServer = HttpServer::new;
     }
 }

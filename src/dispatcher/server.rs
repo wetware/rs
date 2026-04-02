@@ -6,10 +6,10 @@
 //! (`dispatcher::wagi`).
 //!
 //! Architecture: Cap'n Proto clients are `!Send`, so the axum handler
-//! can't hold a `BoundExecutor` directly. Instead, each route registers
+//! can't hold a `Executor` directly. Instead, each route registers
 //! a `RequestSender` (an mpsc channel). The axum handler sends requests
 //! through the channel, and a local task on the RPC event loop receives
-//! them, spawns cells via `BoundExecutor`, and sends responses back.
+//! them, spawns cells via `Executor`, and sends responses back.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};

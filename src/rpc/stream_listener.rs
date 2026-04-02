@@ -2,7 +2,7 @@
 //!
 //! The `StreamListener` capability lets a guest register a libp2p subprotocol cell.
 //! For each incoming stream on that subprotocol, the host spawns a fresh WASI
-//! process (via the guest-provided `BoundExecutor`) with stdin/stdout wired to the
+//! process (via the guest-provided `Executor`) with stdin/stdout wired to the
 //! stream — the cell speaks whatever wire protocol it wants over stdio.
 
 use capnp::capability::Promise;
@@ -38,7 +38,7 @@ impl system_capnp::stream_listener::Server for StreamListenerImpl {
         pry!(self.guard.check());
 
         let params = pry!(params.get());
-        let bound_executor: system_capnp::bound_executor::Client = pry!(params.get_executor());
+        let executor: system_capnp::executor::Client = pry!(params.get_executor());
         let protocol_str = pry!(pry!(params.get_protocol())
             .to_str()
             .map_err(|e| capnp::Error::failed(e.to_string())));
@@ -84,10 +84,10 @@ impl system_capnp::stream_listener::Server for StreamListenerImpl {
                             protocol = %stream_protocol,
                             "Incoming stream subprotocol connection"
                         );
-                        let bound_executor = bound_executor.clone();
+                        let executor = executor.clone();
                         let protocol = protocol_suffix.clone();
                         tokio::task::spawn_local(async move {
-                            if let Err(e) = handle_connection(bound_executor, stream, &protocol).await {
+                            if let Err(e) = handle_connection(executor, stream, &protocol).await {
                                 tracing::error!(protocol, "Stream cell connection error: {e}");
                             }
                         });
@@ -112,12 +112,12 @@ impl system_capnp::stream_listener::Server for StreamListenerImpl {
 /// Spawn a cell process for a single connection and pump
 /// stdin/stdout between the libp2p stream and the process.
 pub(crate) async fn handle_connection(
-    bound_executor: system_capnp::bound_executor::Client,
+    executor: system_capnp::executor::Client,
     stream: libp2p::Stream,
     protocol: &str,
 ) -> Result<(), capnp::Error> {
-    // Spawn cell process via BoundExecutor.spawn().
-    let response = bound_executor.spawn_request().send().promise.await?;
+    // Spawn cell process via Executor.spawn().
+    let response = executor.spawn_request().send().promise.await?;
     let process = response.get()?.get_process()?;
 
     // Get stdin (write-only) and stdout (read-only) ByteStream clients.
