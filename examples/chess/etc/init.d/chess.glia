@@ -3,16 +3,19 @@
 ; Each form is wrapped in cap handlers + effect handlers by the kernel,
 ; so capabilities are invoked via (perform cap :method args...).
 
+; Load the chess WASM binary and its schema.
+(def chess-wasm (load "bin/chess-demo.wasm"))
+(def chess-schema (load "bin/chess-demo.schema"))
+
 ; Register RPC cell for the ChessEngine capability.
-; The schema is extracted from the WASM binary's "schema.capnp" custom section.
 ; VatListener spawns a cell process per connection; the cell exports
 ; a ChessEngine capability via system::serve().
 ;
-; The executor is passed explicitly — it's the spawn authority the listener
-; needs to create cell processes. No ambient injection.
-(perform host :listen executor (perform :load "bin/chess-demo.wasm"))
+; The executor is the spawn authority. The schema bytes identify the
+; protocol on the network (CID derived from canonical schema.Node).
+(perform host :listen executor chess-wasm chess-schema)
 
 ; Run the chess demo in service mode — blocks until exit.
 ; The service process discovers peers via DHT and dials them with VatClient
 ; to get typed ChessEngine capabilities.
-(perform executor :run (perform :load "bin/chess-demo.wasm"))
+(perform executor :run chess-wasm)

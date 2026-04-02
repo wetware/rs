@@ -79,22 +79,6 @@ fn init_logging() {
 // WASM custom section helpers
 // ---------------------------------------------------------------------------
 
-/// Extract a named custom section from a WASM binary.
-///
-/// Load schema bytes from boot/main.schema in the FHS image.
-fn load_schema_bytes() -> Result<Vec<u8>, Val> {
-    let bytes = std::fs::read("/boot/main.schema")
-        .map_err(|e| Val::from(format!("schema: boot/main.schema: {e}")))?;
-    if bytes.is_empty() {
-        return Err(Val::from("schema: boot/main.schema is empty"));
-    }
-    log::info!(
-        "schema: loaded from boot/main.schema ({} bytes)",
-        bytes.len()
-    );
-    Ok(bytes)
-}
-
 // ---------------------------------------------------------------------------
 // Evaluator — dispatches (capability method args...) to RPC calls
 // ---------------------------------------------------------------------------
@@ -397,14 +381,22 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                         };
                         match rest.len() {
                             2 => {
-                                // VatListener mode: (perform host :listen executor <wasm>)
-                                // Bind executor + wasm → BoundExecutor, extract schema
-                                // from WASM custom section, then call VatListener.listen().
+                                // VatListener mode: (perform host :listen executor <wasm> <schema>)
+                                // Bind executor + wasm → BoundExecutor, then call
+                                // VatListener.listen() with the explicit schema bytes.
                                 let wasm = match rest.get(1) {
                                     Some(Val::Bytes(b)) => b.clone(),
                                     _ => {
                                         return Err(Val::from(
-                                            "host :listen — expected wasm bytes",
+                                            "host :listen — expected wasm bytes as 2nd arg",
+                                        ))
+                                    }
+                                };
+                                let schema_bytes = match rest.get(2) {
+                                    Some(Val::Bytes(b)) => b.clone(),
+                                    _ => {
+                                        return Err(Val::from(
+                                            "host :listen — expected schema bytes as 3rd arg",
                                         ))
                                     }
                                 };
@@ -422,9 +414,6 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                     .map_err(|e| Val::from(e.to_string()))?
                                     .get_bound()
                                     .map_err(|e| Val::from(e.to_string()))?;
-
-                                // Load schema bytes from boot/main.schema.
-                                let schema_bytes = load_schema_bytes()?;
 
                                 let network_resp = host
                                     .network_request()

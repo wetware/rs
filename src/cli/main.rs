@@ -35,7 +35,7 @@ enum Commands {
         name: String,
     },
 
-    /// Build a guest project, placing the compiled WASM at boot/main.wasm.
+    /// Build a guest project, placing artifacts in bin/.
     ///
     /// Compiles a Rust project targeting wasm32-wasip2 and copies the
     /// artifact into the project's FHS root at boot/main.wasm.
@@ -335,8 +335,8 @@ impl Commands {
         }
 
         // Create directory structure
-        std::fs::create_dir_all(target_dir.join("boot"))?;
         std::fs::create_dir_all(target_dir.join("src"))?;
+        std::fs::create_dir_all(target_dir.join("etc/init.d"))?;
 
         // foo.capnp — skeleton interface
         let iface_name = to_pascal_case(&name);
@@ -359,18 +359,6 @@ interface {iface_name} {{
 "#,
         );
         std::fs::write(target_dir.join(format!("{name}.capnp")), capnp_content)?;
-
-        // boot/main.capnp → ../foo.capnp
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(
-            format!("../{name}.capnp"),
-            target_dir.join("boot/main.capnp"),
-        )?;
-        #[cfg(not(unix))]
-        std::fs::copy(
-            target_dir.join(format!("{name}.capnp")),
-            target_dir.join("boot/main.capnp"),
-        )?;
 
         // Cargo.toml
         let cargo_toml = format!(
@@ -584,12 +572,30 @@ wasip2::cli::command::export!({iface_name}Guest);
         );
         std::fs::write(target_dir.join("src/lib.rs"), lib_rs)?;
 
+        // etc/init.d/<name>.glia — skeleton init script
+        let glia = format!(
+            r#"; {name} init.d script — evaluated by the kernel at boot.
+
+; Load the WASM binary and its schema.
+(def {snake_name}-wasm (load "bin/{name}.wasm"))
+(def {snake_name}-schema (load "bin/{name}.schema"))
+
+; Register RPC cell — VatListener spawns a cell per connection.
+(perform host :listen executor {snake_name}-wasm {snake_name}-schema)
+
+; Run the service — blocks until exit.
+(perform executor :run {snake_name}-wasm)
+"#,
+            snake_name = name.replace('-', "_"),
+        );
+        std::fs::write(target_dir.join(format!("etc/init.d/{name}.glia")), glia)?;
+
         println!("Initialized cell project: {name}/");
-        println!("  {name}.capnp       — capability interface (edit this)");
-        println!("  Cargo.toml         — project configuration");
-        println!("  build.rs           — schema compilation");
-        println!("  src/lib.rs         — guest entry point");
-        println!("  boot/main.capnp    → ../{name}.capnp");
+        println!("  {name}.capnp            — capability interface (edit this)");
+        println!("  Cargo.toml              — project configuration");
+        println!("  build.rs                — schema compilation");
+        println!("  src/lib.rs              — guest entry point");
+        println!("  etc/init.d/{name}.glia  — kernel init script");
         println!();
         println!("Next steps:");
         println!("  1. Edit {name}.capnp with your interface methods");
@@ -599,7 +605,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         Ok(())
     }
 
-    /// Build a guest project, placing the compiled WASM at boot/main.wasm
+    /// Build a guest project, placing artifacts in bin/
     async fn build(path: PathBuf) -> Result<()> {
         let cargo_toml = path.join("Cargo.toml");
 
@@ -668,35 +674,30 @@ wasip2::cli::command::export!({iface_name}Guest);
             )
         })?;
 
-        // Copy to boot/main.wasm
-        let boot_dir = path.join("boot");
-        std::fs::create_dir_all(&boot_dir).context("Failed to create boot directory")?;
+        // Copy WASM to bin/<name>.wasm
+        let bin_dir = path.join("bin");
+        std::fs::create_dir_all(&bin_dir).context("Failed to create bin directory")?;
 
-        let dst_wasm = boot_dir.join("main.wasm");
+        let crate_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("main");
+        let dst_wasm = bin_dir.join(format!("{crate_name}.wasm"));
         std::fs::copy(&src_wasm, &dst_wasm).context(format!(
             "Failed to copy {} to {}",
             src_wasm.display(),
             dst_wasm.display()
         ))?;
 
-        println!("  boot/main.wasm");
+        println!("  bin/{crate_name}.wasm");
 
-        // If boot/main.capnp exists (or a symlink to the schema source),
-        // find the compiled schema bytes from the build output and write
-        // boot/main.schema.
-        let main_capnp = boot_dir.join("main.capnp");
-        if main_capnp.exists() {
-            // Find *_schema.bin in the build output directory.
-            // The project's build.rs writes it to OUT_DIR.
-            let build_dir = path.join("target/wasm32-wasip2/release/build");
-            let schema_bin = Self::find_schema_bin(&build_dir, &path)?;
-            let dst_schema = boot_dir.join("main.schema");
+        // Copy schema bytes next to the WASM if the build produced them.
+        let build_dir = path.join("target/wasm32-wasip2/release/build");
+        if let Ok(schema_bin) = Self::find_schema_bin(&build_dir, &path) {
+            let dst_schema = bin_dir.join(format!("{crate_name}.schema"));
             std::fs::copy(&schema_bin, &dst_schema).context(format!(
                 "Failed to copy {} to {}",
                 schema_bin.display(),
                 dst_schema.display(),
             ))?;
-            println!("  boot/main.schema");
+            println!("  bin/{crate_name}.schema");
         }
 
         println!("Build complete: {}", path.display());
@@ -735,8 +736,7 @@ wasip2::cli::command::export!({iface_name}Guest);
             "Schema binary not found: {pattern}\n\
              \n\
              The project's build.rs should produce this file.\n\
-             Make sure boot/main.capnp exists and the build.rs calls\n\
-             schema_id::write_schema_bytes()."
+             Make sure the build.rs calls schema_id::write_schema_bytes()."
         )
     }
 

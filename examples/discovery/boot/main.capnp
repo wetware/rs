@@ -1,1 +1,0 @@
-../greeter.capnp
