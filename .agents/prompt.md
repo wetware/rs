@@ -149,23 +149,24 @@ they can only do what they've been explicitly granted capabilities
 to do.
 
 **Cells** are the unit of computation.  Each Cell is a WASM binary
-with an optional type tag — a Cap'n Proto union stored in a WASM
-custom section named `"cell.capnp"`.  The tag tells the host what
-plumbing to wire up:
+whose stdio is wired to a transport by the host.  The `WW_CELL_MODE`
+envvar tells the guest what plumbing it's running under:
 
-| Cell type | stdio carries | Host wires up |
-|-----------|--------------|---------------|
-| `raw(protocol)` | raw libp2p stream bytes | `/ww/0.1.0/stream/{protocol}` listener |
-| `http(prefix)` | CGI env vars + stdin/stdout | WAGI (CGI for WASM) |
-| `capnp(Schema.Node)` | Cap'n Proto RPC | `/ww/0.1.0/rpc/{cid}` listener |
-| absent (no section) | Cap'n Proto RPC (WIT) | pid0 mode — full Membrane graft |
+| `WW_CELL_MODE` | stdio carries | Host wires up |
+|----------------|--------------|---------------|
+| `vat` | Cap'n Proto RPC | `/ww/0.1.0/rpc/{cid}` listener |
+| `raw` | raw libp2p stream bytes | `/ww/0.1.0/stream/{protocol}` listener |
+| `http` | CGI env vars + stdin/stdout | WAGI (CGI for WASM) |
+| absent | Cap'n Proto RPC (host channel) | pid0 — full Membrane graft |
 
-Cell types are injected post-build with `schema-inject`:
-```
-schema-inject wasm.wasm --raw bitswap
-schema-inject wasm.wasm --http /api/v1
-schema-inject wasm.wasm --capnp schema.bytes
-```
+The kernel (`boot/main.wasm`) is pid0 — a raw cell whose stdio
+is the host's Cap'n Proto RPC channel, not a libp2p stream.  It
+grafts the full Membrane and spawns all other cells.  `WW_CELL_MODE`
+is absent for pid0.
+
+Schema bytes for capnp cells are compiled at build time and passed
+explicitly to `VatListener.listen()` via init.d scripts.  `ww init`
+scaffolds a complete cell project; `ww build` produces all artifacts.
 
 Architecture (three layers):
 - **Host** (`ww` binary): boots a libp2p swarm, loads the kernel
@@ -176,8 +177,8 @@ Architecture (three layers):
 - **Children**: spawned by pid0 with attenuated capabilities.
 
 Key abstractions:
-- **Cell type system**: `capnp/cell.capnp` — determines how a
-  process talks to the network (raw streams, HTTP, or typed RPC).
+- **Cell type system**: `boot/main.schema` — determines how a
+  process talks to the network (schema-keyed RPC for capnp cells).
 - **Membrane**: the capability hub.  `graft()` returns epoch-scoped
   capabilities.  pid0 can wrap/filter capabilities and export an
   attenuated Membrane to the network.

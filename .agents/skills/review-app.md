@@ -29,13 +29,14 @@ deliverable that keeps the review feeling productive.
 
 ### 1. Cell type correctness
 
-- Right custom section for the use case?
+- Correct FHS layout for the use case?
 - Cell type appropriate? (`raw` for streams, `http` for REST,
   `capnp` for typed RPC, absent for pid0)
-- For `capnp`: embedded schema matches actual interface?
+- For `capnp`: `boot/main.schema` matches actual interface?
+  `boot/main.capnp` symlink points to source schema?
 - For `http`: path prefix matches host routing?
 - For `raw`: protocol ID valid (non-empty, no `/`)?
-- `schema-inject` idempotent in build pipeline?
+- `ww build` produces correct artifacts?
 
 ### 2. Principle of least authority
 
@@ -101,7 +102,7 @@ After each area, share what you found.  Then compile a summary:
 2. **Findings** — numbered, each with severity
    (critical / warning / suggestion) and a concrete fix
 3. **Cell type audit** — confirm type is appropriate and correctly
-   injected
+   laid out (`boot/main.schema` present and valid for capnp cells)
 4. **Capability map** — table: current capabilities vs. recommended
    minimum
 
