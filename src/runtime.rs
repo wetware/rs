@@ -431,6 +431,7 @@ pub struct EpochService {
     pub epoch_tx: watch::Sender<Epoch>,
     pub confirmation_depth: u64,
     pub ipfs_client: crate::ipfs::HttpClient,
+    pub cid_tree: Option<std::sync::Arc<crate::vfs::CidTree>>,
 }
 
 impl Service for EpochService {
@@ -446,6 +447,7 @@ impl Service for EpochService {
                     self.epoch_tx,
                     self.confirmation_depth,
                     self.ipfs_client,
+                    self.cid_tree,
                 ) => result,
                 _ = shutdown.changed() => {
                     tracing::info!("epoch shutting down");

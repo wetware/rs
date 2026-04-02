@@ -26,6 +26,7 @@ pub async fn run_epoch_pipeline(
     epoch_tx: watch::Sender<Epoch>,
     confirmation_depth: u64,
     ipfs_client: ipfs::HttpClient,
+    cid_tree: Option<Arc<crate::vfs::CidTree>>,
 ) -> Result<()> {
     let indexer = Arc::new(AtomIndexer::new(config.clone()));
     let mut events = indexer.subscribe();
@@ -71,8 +72,14 @@ pub async fn run_epoch_pipeline(
                 };
 
                 for fe in finalized {
-                    if let Err(e) =
-                        handle_finalized(&fe, &epoch_tx, &ipfs_client, &mut prev_ipfs_path).await
+                    if let Err(e) = handle_finalized(
+                        &fe,
+                        &epoch_tx,
+                        &ipfs_client,
+                        &mut prev_ipfs_path,
+                        cid_tree.as_ref(),
+                    )
+                    .await
                     {
                         warn!(seq = fe.seq, "Failed to handle finalized event: {e}");
                     }
@@ -95,24 +102,47 @@ pub async fn run_epoch_pipeline(
     Ok(())
 }
 
-/// Process a single finalized event: pin new CID, unpin old, advance epoch.
+/// Process a single finalized event: pin new CID, swap CidTree, unpin old, advance epoch.
+///
+/// When a CidTree is present, the ordering follows the two-layer revocation model:
+/// 1. Pin new CID
+/// 2. Pre-warm CidTree directory cache for new root
+/// 3. Swap CidTree root (FS sees new content)
+/// 4. Unpin old CID
+/// 5. Broadcast epoch (capabilities die, guests re-negotiate)
 async fn handle_finalized(
     fe: &FinalizedEvent,
     epoch_tx: &watch::Sender<Epoch>,
     ipfs_client: &ipfs::HttpClient,
     prev_ipfs_path: &mut Option<String>,
+    cid_tree: Option<&Arc<crate::vfs::CidTree>>,
 ) -> Result<()> {
     let ipfs_path =
         cid_bytes_to_ipfs_path(&fe.cid).context("Failed to convert finalized CID to IPFS path")?;
 
-    // Pin the new head.
+    // Extract CID string from /ipfs/<cid>
+    let cid_str = ipfs_path
+        .strip_prefix("/ipfs/")
+        .unwrap_or(&ipfs_path)
+        .to_string();
+
+    // 1. Pin the new head.
     if let Err(e) = ipfs_client.pin_add(&ipfs_path).await {
         warn!(path = %ipfs_path, "Failed to pin new head (continuing): {e}");
     } else {
         info!(seq = fe.seq, path = %ipfs_path, "Pinned new head");
     }
 
-    // Unpin the previous head.
+    // 2-3. Pre-warm and swap CidTree root (FS swap happens-before capability death).
+    if let Some(tree) = cid_tree {
+        if let Err(e) = tree.pre_warm(&cid_str).await {
+            warn!(cid = %cid_str, "CidTree pre-warm failed (continuing): {e}");
+        }
+        tree.swap_root(cid_str);
+        info!(seq = fe.seq, "CidTree root swapped");
+    }
+
+    // 4. Unpin the previous head.
     if let Some(prev) = prev_ipfs_path.take() {
         if let Err(e) = ipfs_client.pin_rm(&prev).await {
             warn!(path = %prev, "Failed to unpin old head (continuing): {e}");
@@ -123,6 +153,7 @@ async fn handle_finalized(
 
     *prev_ipfs_path = Some(ipfs_path);
 
+    // 5. Broadcast epoch (capabilities die, guests re-negotiate).
     let new_epoch = Epoch {
         seq: fe.seq,
         head: fe.cid.clone(),

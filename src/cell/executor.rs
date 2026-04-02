@@ -67,6 +67,7 @@ pub struct CellBuilder {
     network_state: Option<NetworkState>,
     swarm_cmd_tx: Option<mpsc::Sender<SwarmCommand>>,
     image_root: Option<PathBuf>,
+    cid_tree: Option<Arc<crate::vfs::CidTree>>,
     initial_epoch: Option<Epoch>,
     content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
     epoch_rx: Option<watch::Receiver<Epoch>>,
@@ -90,6 +91,7 @@ impl CellBuilder {
             network_state: None,
             swarm_cmd_tx: None,
             image_root: None,
+            cid_tree: None,
             initial_epoch: None,
             content_store: None,
             epoch_rx: None,
@@ -159,6 +161,12 @@ impl CellBuilder {
         self
     }
 
+    /// Set the CidTree for virtual filesystem resolution.
+    pub fn with_cid_tree(mut self, tree: Arc<crate::vfs::CidTree>) -> Self {
+        self.cid_tree = Some(tree);
+        self
+    }
+
     /// Set the initial epoch from on-chain state.
     ///
     /// When set, this epoch seeds the watch channel instead of the default
@@ -215,6 +223,7 @@ impl CellBuilder {
             network_state: self.network_state.expect("network_state must be set"),
             swarm_cmd_tx: self.swarm_cmd_tx.expect("swarm_cmd_tx must be set"),
             image_root: self.image_root,
+            cid_tree: self.cid_tree,
             initial_epoch: self.initial_epoch,
             content_store: self.content_store.unwrap_or_else(|| {
                 Arc::new(crate::ipfs::HttpClient::new("http://localhost:5001".into()))
@@ -244,6 +253,7 @@ pub struct Cell {
     pub network_state: NetworkState,
     pub swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     pub image_root: Option<PathBuf>,
+    pub cid_tree: Option<Arc<crate::vfs::CidTree>>,
     pub initial_epoch: Option<Epoch>,
     pub content_store: Arc<dyn crate::ipfs::ContentStore>,
     pub epoch_rx: Option<watch::Receiver<Epoch>>,
@@ -298,6 +308,7 @@ impl Cell {
             network_state: _,
             swarm_cmd_tx: _,
             image_root,
+            cid_tree,
             initial_epoch: _,
             content_store: _,
             epoch_rx: _,
@@ -386,7 +397,7 @@ impl Cell {
             guest_env.push(format!("WW_ROOT={}", path));
         }
 
-        let builder = builder
+        let mut builder = builder
             .with_wasm_debug(wasm_debug)
             .with_env(guest_env)
             .with_args(args)
@@ -394,6 +405,9 @@ impl Cell {
             .with_loader(Some(loader))
             .with_stdio(stdin_handle, stdout_handle, stderr_handle)
             .with_image_root(image_root);
+        if let Some(tree) = cid_tree {
+            builder = builder.with_cid_tree(tree);
+        }
         let (builder, handles) = builder.with_data_streams();
 
         let proc = builder.build().await?;

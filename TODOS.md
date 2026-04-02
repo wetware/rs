@@ -125,3 +125,19 @@
 **Effort:** M
 **Priority:** P3
 **Depends on:** WAGI host implementation (Phase 2)
+
+## CidTree: concurrent directory listing cache
+**What:** Replace `Mutex<LruCache>` in `CidTree` with a concurrent cache (`dashmap` or `quick_cache`) to reduce contention under high concurrent cell load.
+**Why:** Every path resolution for every guest call acquires the dir_cache mutex for each directory level. With many cells sharing a CidTree, this serializes all FS operations at the lock.
+**Context:** CID-keyed entries are immutable, making this a read-mostly workload. `dashmap` or `quick_cache` would allow concurrent reads without lock contention. Profile first to confirm this is actually a bottleneck before migrating.
+**Effort:** S
+**Priority:** P3
+**Depends on:** CidTree virtual filesystem (src/vfs.rs)
+
+## CidTree: streaming reads for large files
+**What:** Add a streaming read path for CidTree-backed files that pipes IPFS content directly to the WASI read buffer instead of materializing the entire file to staging first.
+**Why:** Current approach fetches full file content to `staging_dir/CID` on `open_at`. For large files (ML models, datasets), this blocks the open call until the entire file is downloaded.
+**Context:** Requires implementing custom `read_via_stream` in `fs_intercept.rs` instead of delegating to wasmtime-wasi's standard impl. This breaks the "delegate everything" pattern which is the current design's main simplicity win. Only worth doing when large-file workloads exist.
+**Effort:** M
+**Priority:** P3
+**Depends on:** CidTree virtual filesystem (src/vfs.rs)
