@@ -18,7 +18,6 @@ fn main() {
         .file(capnp_dir.join("ipfs.capnp"))
         .file(capnp_dir.join("routing.capnp"))
         .file(capnp_dir.join("stem.capnp"))
-        .file(capnp_dir.join("cell.capnp"))
         .file(capnp_dir.join("fs.capnp"))
         .file(capnp_dir.join("http.capnp"))
         .raw_code_generator_request_path(&raw_request)
@@ -61,10 +60,6 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         capnp_dir.join("stem.capnp").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        capnp_dir.join("cell.capnp").display()
     );
     println!(
         "cargo:rerun-if-changed={}",

@@ -5478,8 +5478,6 @@ dependencies = [
  "capnp",
  "capnpc",
  "cid",
- "wasm-encoder 0.243.0",
- "wasmparser 0.243.0",
 ]
 
 [[package]]

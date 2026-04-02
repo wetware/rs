@@ -1372,6 +1372,21 @@ async fn main() -> Result<()> {
     cli.command.run().await
 }
 
+/// Convert a kebab-case or snake_case name to PascalCase.
+/// "price-oracle" → "PriceOracle", "foo_bar" → "FooBar", "foo" → "Foo"
+fn to_pascal_case(s: &str) -> String {
+    s.split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1400,19 +1415,4 @@ mod tests {
         assert_eq!(source, "/etc/identity");
         assert_eq!(ww::keys::encode(&loaded_sk), encoded);
     }
-}
-
-/// Convert a kebab-case or snake_case name to PascalCase.
-/// "price-oracle" → "PriceOracle", "foo_bar" → "FooBar", "foo" → "Foo"
-fn to_pascal_case(s: &str) -> String {
-    s.split(|c| c == '-' || c == '_')
-        .filter(|w| !w.is_empty())
-        .map(|w| {
-            let mut chars = w.chars();
-            match chars.next() {
-                Some(c) => c.to_uppercase().to_string() + chars.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect()
 }

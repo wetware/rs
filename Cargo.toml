@@ -80,7 +80,7 @@ name = "ww"
 path = "src/cli/main.rs"
 
 [dev-dependencies]
-schema-id = { path = "crates/schema-id", features = ["inject"] }
+schema-id = { path = "crates/schema-id" }
 wasm-encoder = "0.243"
 
 [build-dependencies]

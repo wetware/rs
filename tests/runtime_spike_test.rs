@@ -62,7 +62,7 @@ async fn spawn_echo_cell(
     req.get().set_wasm(wasm);
     {
         let mut env = req.get().init_env(1);
-        env.set(0, &format!("WW_LABEL={label}"));
+        env.set(0, format!("WW_LABEL={label}").as_str());
     }
     let resp = req.send().promise.await.expect("runBytes failed");
     resp.get().unwrap().get_process().unwrap()

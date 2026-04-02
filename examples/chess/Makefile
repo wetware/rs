@@ -5,24 +5,20 @@
 WASM_TARGET := wasm32-wasip2
 ROOT := ../..
 
-.PHONY: all schema-inject clean
+.PHONY: all clean
 
-all: schema-inject
+all:
 	cargo build -p chess --target $(WASM_TARGET) --release
-	@mkdir -p bin
+	@mkdir -p bin boot
 	cp $(ROOT)/target/$(WASM_TARGET)/release/chess.wasm bin/chess-demo.wasm
-	@# Inject cell.capnp custom section into the WASM binary.
-	@# The schema bytes were written by build.rs during compilation.
+	@# Copy compiled schema bytes to boot/main.schema.
 	@CHESS_OUT=$$(find $(ROOT)/target/$(WASM_TARGET)/release/build -path '*/chess-*/out/chess_engine_schema.bin' | head -1) && \
 		if [ -n "$$CHESS_OUT" ]; then \
-			cargo run --bin schema-inject -p schema-id --features inject -- \
-				bin/chess-demo.wasm --capnp "$$CHESS_OUT"; \
+			cp "$$CHESS_OUT" boot/main.schema; \
+			echo "boot/main.schema ($$(wc -c < "$$CHESS_OUT" | tr -d ' ') bytes)"; \
 		else \
-			echo "WARNING: chess_engine_schema.bin not found; skipping schema injection"; \
+			echo "WARNING: chess_engine_schema.bin not found"; \
 		fi
 
-schema-inject:
-	cargo build --bin schema-inject -p schema-id --features inject
-
 clean:
-	rm -f bin/chess-demo.wasm
+	rm -f bin/chess-demo.wasm boot/main.schema
