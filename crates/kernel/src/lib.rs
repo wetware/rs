@@ -85,7 +85,7 @@ fn init_logging() {
 
 struct Session {
     host: system_capnp::host::Client,
-    executor: system_capnp::executor::Client,
+    runtime: system_capnp::runtime::Client,
     routing: routing_capnp::routing::Client,
     /// Host-side node identity hub for this session.
     ///
@@ -122,7 +122,7 @@ type HandlerFn = for<'a> fn(
     &'a RefCell<Session>,
 ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>>;
 
-/// Build the dispatch table for builtins only. Capability verbs (host, executor,
+/// Build the dispatch table for builtins only. Capability verbs (host, runtime,
 /// ipfs, routing) are handled via cap-targeted perform + with-effect-handler.
 fn build_dispatch() -> HashMap<&'static str, HandlerFn> {
     let mut t: HashMap<&'static str, HandlerFn> = HashMap::new();
@@ -358,31 +358,29 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                         Val::List(items)
                     }
                     "listen" => {
-                        // (perform host :listen executor <wasm>)         → VatListener
-                        // (perform host :listen executor "proto" <wasm>) → StreamListener
-                        let executor = match rest.first() {
-                            Some(Val::Cap { name, inner, .. }) if name == "executor" => inner
-                                .downcast_ref::<system_capnp::executor::Client>()
+                        // (perform host :listen runtime <wasm>)         → VatListener
+                        // (perform host :listen runtime "proto" <wasm>) → StreamListener
+                        let runtime = match rest.first() {
+                            Some(Val::Cap { name, inner, .. }) if name == "runtime" => inner
+                                .downcast_ref::<system_capnp::runtime::Client>()
                                 .cloned()
                                 .ok_or_else(|| {
-                                    Val::from("host :listen — executor cap has wrong inner type")
+                                    Val::from("host :listen — runtime cap has wrong inner type")
                                 })?,
                             Some(Val::Cap { name, .. }) => {
                                 return Err(Val::from(format!(
-                                    "host :listen — expected executor cap, got '{name}'"
+                                    "host :listen — expected runtime cap, got '{name}'"
                                 )))
                             }
                             _ => {
-                                return Err(Val::from(
-                                    "host :listen — executor capability required",
-                                ))
+                                return Err(Val::from("host :listen — runtime capability required"))
                             }
                         };
                         match rest.len() {
                             2 => {
-                                // VatListener mode: (perform host :listen executor <wasm> <schema>)
-                                // Bind executor + wasm → BoundExecutor, then call
-                                // VatListener.listen() with the explicit schema bytes.
+                                // VatListener mode: (perform host :listen runtime <wasm>)
+                                // Load wasm via Runtime → Executor, then call
+                                // VatListener.listen() with the Executor.
                                 let wasm = match rest.get(1) {
                                     Some(Val::Bytes(b)) => b.clone(),
                                     _ => {
@@ -391,34 +389,14 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                         ))
                                     }
                                 };
-                                let schema_bytes = match rest.get(2) {
-                                    Some(Val::Bytes(b)) => b.clone(),
-                                    _ => {
-                                        return Err(Val::from(
-                                            "host :listen — expected schema bytes as 3rd arg",
-                                        ))
-                                    }
-                                };
 
-                                // Bind the executor with the wasm to get a BoundExecutor.
-                                // WW_CELL_MODE=vat is informational (guest dispatches on args).
-                                let mut bind_req = executor.bind_request();
-                                {
-                                    let mut b = bind_req.get();
-                                    b.set_wasm(&wasm);
-                                    let mut env = b.init_env(1);
-                                    env.set(0, "WW_CELL_MODE=vat");
-                                }
-                                let bind_resp = bind_req
+                                // Load the wasm to get an Executor (pipelining).
+                                let mut load_req = runtime.load_request();
+                                load_req.get().set_wasm(&wasm);
+                                let executor = load_req
                                     .send()
-                                    .promise
-                                    .await
-                                    .map_err(|e| Val::from(e.to_string()))?;
-                                let bound = bind_resp
-                                    .get()
-                                    .map_err(|e| Val::from(e.to_string()))?
-                                    .get_bound()
-                                    .map_err(|e| Val::from(e.to_string()))?;
+                                    .pipeline
+                                    .get_executor();
 
                                 let network_resp = host
                                     .network_request()
@@ -435,9 +413,8 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                 let mut req = listener.listen_request();
                                 {
                                     let mut handler = req.get().init_handler();
-                                    handler.set_spawn(bound);
+                                    handler.set_spawn(executor);
                                 }
-                                req.get().set_schema(&schema_bytes);
                                 req.send()
                                     .promise
                                     .await
@@ -446,9 +423,9 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                 Val::Nil
                             }
                             3 => {
-                                // StreamListener mode: (perform host :listen executor "proto" <wasm>)
-                                // Bind executor + wasm → BoundExecutor, then call
-                                // StreamListener.listen() with BoundExecutor + protocol.
+                                // StreamListener mode: (perform host :listen runtime "proto" <wasm>)
+                                // Load wasm via Runtime → Executor, then call
+                                // StreamListener.listen() with Executor + protocol.
                                 let protocol = match rest.get(1) {
                                     Some(Val::Str(s)) => s.clone(),
                                     _ => {
@@ -466,25 +443,13 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                     }
                                 };
 
-                                // Bind the executor with the wasm to get a BoundExecutor.
-                                // WW_CELL_MODE=raw is informational (guest dispatches on args).
-                                let mut bind_req = executor.bind_request();
-                                {
-                                    let mut b = bind_req.get();
-                                    b.set_wasm(&wasm);
-                                    let mut env = b.init_env(1);
-                                    env.set(0, "WW_CELL_MODE=raw");
-                                }
-                                let bind_resp = bind_req
+                                // Load the wasm to get an Executor (pipelining).
+                                let mut load_req = runtime.load_request();
+                                load_req.get().set_wasm(&wasm);
+                                let executor = load_req
                                     .send()
-                                    .promise
-                                    .await
-                                    .map_err(|e| Val::from(e.to_string()))?;
-                                let bound = bind_resp
-                                    .get()
-                                    .map_err(|e| Val::from(e.to_string()))?
-                                    .get_bound()
-                                    .map_err(|e| Val::from(e.to_string()))?;
+                                    .pipeline
+                                    .get_executor();
 
                                 let network_resp = host
                                     .network_request()
@@ -499,7 +464,7 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                     .get_stream_listener()
                                     .map_err(|e| Val::from(e.to_string()))?;
                                 let mut req = listener.listen_request();
-                                req.get().set_executor(bound);
+                                req.get().set_executor(executor);
                                 req.get().set_protocol(&protocol);
                                 req.send()
                                     .promise
@@ -512,7 +477,7 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                             }
                             _ => {
                                 return Err(Val::from(
-                                    "host :listen — usage: (perform host :listen executor <wasm>) or (perform host :listen executor \"proto\" <wasm>)",
+                                    "host :listen — usage: (perform host :listen runtime <wasm>) or (perform host :listen runtime \"proto\" <wasm>)",
                                 ))
                             }
                         }
@@ -525,48 +490,28 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
     }
 }
 
-fn make_executor_handler(executor: system_capnp::executor::Client) -> Val {
+fn make_runtime_handler(runtime: system_capnp::runtime::Client) -> Val {
     Val::AsyncNativeFn {
-        name: "executor-handler".into(),
+        name: "runtime-handler".into(),
         func: Rc::new(move |args: Vec<Val>| {
-            let executor = executor.clone();
+            let runtime = runtime.clone();
             Box::pin(async move {
                 let (method, rest) = extract_method(&args[0])?;
                 let resume = &args[1];
                 let result = match method.as_str() {
-                    "echo" => {
-                        let msg = match rest.first() {
-                            Some(Val::Str(s)) | Some(Val::Sym(s)) => s.clone(),
-                            _ => return Err(Val::from("executor :echo — expected string")),
-                        };
-                        let mut req = executor.echo_request();
-                        req.get().set_message(&msg);
-                        let resp = req
-                            .send()
-                            .promise
-                            .await
-                            .map_err(|e| Val::from(e.to_string()))?;
-                        let text = resp
-                            .get()
-                            .map_err(|e| Val::from(e.to_string()))?
-                            .get_response()
-                            .map_err(|e| Val::from(e.to_string()))?
-                            .to_str()
-                            .map_err(|e| Val::from(e.to_string()))?;
-                        Val::Str(text.to_string())
-                    }
                     "run" => {
-                        // (perform executor :run <wasm-bytes> :env {"KEY" "VAL" ...})
+                        // (perform runtime :run <wasm-bytes> :env {"KEY" "VAL" ...})
                         let wasm = match rest.first() {
                             Some(Val::Bytes(b)) => b.clone(),
                             _ => {
                                 return Err(Val::from(
-                                    "executor :run — first arg must be wasm bytes",
+                                    "runtime :run — first arg must be wasm bytes",
                                 ))
                             }
                         };
-                        // Parse optional keyword args: :env {map}
+                        // Parse optional keyword args: :env {map}, :args [list]
                         let mut env_pairs: Vec<String> = Vec::new();
+                        let spawn_args: Vec<String> = Vec::new();
                         let mut i = 1;
                         while i < rest.len() {
                             if let Val::Keyword(k) = &rest[i] {
@@ -591,15 +536,26 @@ fn make_executor_handler(executor: system_capnp::executor::Client) -> Val {
                         }
 
                         log::info!(
-                            "executor :run — spawning process ({} bytes, {} env vars)",
+                            "runtime :run — spawning process ({} bytes, {} env vars)",
                             wasm.len(),
                             env_pairs.len()
                         );
 
-                        let mut req = executor.run_bytes_request();
+                        // runtime.load(wasm) → Executor (pipelining)
+                        let mut load_req = runtime.load_request();
+                        load_req.get().set_wasm(&wasm);
+                        let executor = load_req.send().pipeline.get_executor();
+
+                        // executor.spawn(args, env) → Process
+                        let mut req = executor.spawn_request();
                         {
                             let mut b = req.get();
-                            b.set_wasm(&wasm);
+                            if !spawn_args.is_empty() {
+                                let mut arg_list = b.reborrow().init_args(spawn_args.len() as u32);
+                                for (j, a) in spawn_args.iter().enumerate() {
+                                    arg_list.set(j as u32, a);
+                                }
+                            }
                             if !env_pairs.is_empty() {
                                 let mut env_list = b.init_env(env_pairs.len() as u32);
                                 for (j, e) in env_pairs.iter().enumerate() {
@@ -618,7 +574,7 @@ fn make_executor_handler(executor: system_capnp::executor::Client) -> Val {
                             .get_process()
                             .map_err(|e| Val::from(e.to_string()))?;
 
-                        log::info!("executor :run — process spawned, waiting for exit");
+                        log::info!("runtime :run — process spawned, waiting for exit");
                         let wait_resp = process
                             .wait_request()
                             .send()
@@ -629,10 +585,10 @@ fn make_executor_handler(executor: system_capnp::executor::Client) -> Val {
                             .get()
                             .map_err(|e| Val::from(e.to_string()))?
                             .get_exit_code();
-                        log::info!("executor :run — process exited ({})", exit_code);
+                        log::info!("runtime :run — process exited ({})", exit_code);
                         Val::Int(exit_code as i64)
                     }
-                    _ => return Err(Val::from(format!("executor: unknown method :{method}"))),
+                    _ => return Err(Val::from(format!("runtime: unknown method :{method}"))),
                 };
                 call_resume(resume, result)
             })
@@ -865,10 +821,15 @@ async fn eval_path_lookup(cmd: &str, args: &[Val], ctx: &RefCell<Session>) -> Re
         ];
         let bytes = candidates.iter().find_map(|p| std::fs::read(p).ok());
         if let Some(bytes) = bytes {
-            let mut req = ctx.borrow().executor.run_bytes_request();
+            // runtime.load(wasm) → Executor (pipelining)
+            let mut load_req = ctx.borrow().runtime.load_request();
+            load_req.get().set_wasm(&bytes);
+            let executor = load_req.send().pipeline.get_executor();
+
+            // executor.spawn(args, env) → Process
+            let mut req = executor.spawn_request();
             {
-                let mut b = req.get();
-                b.set_wasm(&bytes);
+                let b = req.get();
                 let mut arg_list = b.init_args(str_args.len() as u32);
                 for (i, a) in str_args.iter().enumerate() {
                     arg_list.set(i as u32, a);
@@ -947,11 +908,10 @@ Capabilities (via perform):
   (perform host :id)                         Peer ID
   (perform host :addrs)                      Listen addresses
   (perform host :peers)                      Connected peers
-  (perform host :listen executor <wasm>)     Register RPC handler (schema in WASM)
-  (perform host :listen executor \"p\" <wasm>) Register stream handler
+  (perform host :listen runtime <wasm>)      Register RPC handler
+  (perform host :listen runtime \"p\" <wasm>) Register stream handler
 
-  (perform executor :echo \"<msg>\")           Diagnostic echo
-  (perform executor :run <wasm> :env {})     Spawn foreground process
+  (perform runtime :run <wasm> :env {})      Spawn foreground process
 
   (perform ipfs :cat \"<path>\")               Fetch IPFS content (bytes)
   (perform ipfs :ls \"<path>\")                List IPFS directory
@@ -1003,7 +963,7 @@ fn parse_initd_script(name: &str, data: &[u8]) -> Option<Vec<Val>> {
 /// Produces:
 /// ```glia
 /// (with-effect-handler host host-handler
-///   (with-effect-handler executor executor-handler
+///   (with-effect-handler runtime runtime-handler
 ///     (with-effect-handler ipfs ipfs-handler
 ///       (with-effect-handler routing routing-handler
 ///         (with-effect-handler :load (fn [path resume] (resume (load path)))
@@ -1029,7 +989,7 @@ fn wrap_with_handlers(form: &Val) -> Val {
     ]);
 
     // Wrap in cap handlers (innermost to outermost).
-    let caps = ["routing", "ipfs", "executor", "host"];
+    let caps = ["routing", "ipfs", "runtime", "host"];
     let mut wrapped = with_load;
     for cap_name in &caps {
         let handler_name = format!("{cap_name}-handler");
@@ -1045,7 +1005,7 @@ fn wrap_with_handlers(form: &Val) -> Val {
 
 /// Scan `$WW_ROOT/etc/init.d/*.glia` via IPFS UnixFS, parse and evaluate
 /// each file as a glia script. Returns true if any expression blocked
-/// (i.e. a foreground process ran to completion via `(executor run ...)`).
+/// (i.e. a foreground process ran to completion via `(runtime run ...)`).
 async fn run_initd(
     env: &mut Env,
     ctx: &RefCell<Session>,
@@ -1118,7 +1078,7 @@ async fn run_initd(
             match eval(&wrapped, env, ctx, dispatch).await {
                 Ok(Val::Nil) => {}
                 Ok(Val::Int(code)) => {
-                    // An (executor run ...) that returned an exit code means
+                    // A (runtime run ...) that returned an exit code means
                     // a foreground process ran to completion.
                     log::info!("init.d: {name}: foreground process exited ({code})");
                     blocked = true;
@@ -1245,7 +1205,7 @@ fn run_impl() {
 
         let ctx = RefCell::new(Session {
             host: results.get_host()?,
-            executor: results.get_executor()?,
+            runtime: results.get_runtime()?,
             routing: results.get_routing()?,
             identity: results.get_identity()?,
             cwd: "/".to_string(),
@@ -1268,10 +1228,10 @@ fn run_impl() {
                     make_host_handler(s.host.clone()),
                 ),
                 (
-                    "executor",
-                    schema_ids::EXECUTOR_CID,
-                    Rc::new(s.executor.clone()),
-                    make_executor_handler(s.executor.clone()),
+                    "runtime",
+                    schema_ids::RUNTIME_CID,
+                    Rc::new(s.runtime.clone()),
+                    make_runtime_handler(s.runtime.clone()),
                 ),
                 (
                     // ipfs handler now reads through WASI virtual FS, not RPC.
@@ -1312,7 +1272,7 @@ fn run_impl() {
         }
 
         // Run init.d scripts first. If a foreground process blocked
-        // (e.g. `(executor run ...)` in the script), we're done.
+        // (e.g. `(runtime run ...)` in the script), we're done.
         let blocked = run_initd(&mut env, &ctx, &dispatch)
             .await
             .unwrap_or_else(|e| {
@@ -1506,10 +1466,10 @@ mod tests {
             assert_eq!(items[0], Val::Sym("with-effect-handler".into()));
             assert_eq!(items[1], Val::Sym("host".into()));
             assert_eq!(items[2], Val::Sym("host-handler".into()));
-            // items[3] is (with-effect-handler executor ...)
+            // items[3] is (with-effect-handler runtime ...)
             if let Val::List(inner) = &items[3] {
                 assert_eq!(inner[0], Val::Sym("with-effect-handler".into()));
-                assert_eq!(inner[1], Val::Sym("executor".into()));
+                assert_eq!(inner[1], Val::Sym("runtime".into()));
             } else {
                 panic!("expected nested effect handler");
             }
@@ -1587,14 +1547,6 @@ mod tests {
             Promise::ok(())
         }
 
-        fn executor(
-            self: capnp::capability::Rc<Self>,
-            _params: system_capnp::host::ExecutorParams,
-            _results: system_capnp::host::ExecutorResults,
-        ) -> Promise<(), capnp::Error> {
-            Promise::err(capnp::Error::unimplemented("stub".into()))
-        }
-
         fn network(
             self: capnp::capability::Rc<Self>,
             _params: system_capnp::host::NetworkParams,
@@ -1609,26 +1561,42 @@ mod tests {
         }
     }
 
-    // --- Stub Executor: echo returns input ---
+    // --- Stub Runtime: load returns a stub Executor ---
+
+    struct TestRuntime;
+
+    #[allow(refining_impl_trait)]
+    impl system_capnp::runtime::Server for TestRuntime {
+        fn load(
+            self: capnp::capability::Rc<Self>,
+            _params: system_capnp::runtime::LoadParams,
+            mut results: system_capnp::runtime::LoadResults,
+        ) -> Promise<(), capnp::Error> {
+            results
+                .get()
+                .set_executor(capnp_rpc::new_client(TestExecutor));
+            Promise::ok(())
+        }
+
+        fn shutdown(
+            self: capnp::capability::Rc<Self>,
+            _params: system_capnp::runtime::ShutdownParams,
+            _results: system_capnp::runtime::ShutdownResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::ok(())
+        }
+    }
+
+    // --- Stub Executor: spawn returns unimplemented ---
 
     struct TestExecutor;
 
     #[allow(refining_impl_trait)]
     impl system_capnp::executor::Server for TestExecutor {
-        fn echo(
+        fn spawn(
             self: capnp::capability::Rc<Self>,
-            params: system_capnp::executor::EchoParams,
-            mut results: system_capnp::executor::EchoResults,
-        ) -> Promise<(), capnp::Error> {
-            let msg = capnp_rpc::pry!(capnp_rpc::pry!(params.get()).get_message());
-            results.get().set_response(msg);
-            Promise::ok(())
-        }
-
-        fn run_bytes(
-            self: capnp::capability::Rc<Self>,
-            _params: system_capnp::executor::RunBytesParams,
-            _results: system_capnp::executor::RunBytesResults,
+            _params: system_capnp::executor::SpawnParams,
+            _results: system_capnp::executor::SpawnResults,
         ) -> Promise<(), capnp::Error> {
             Promise::err(capnp::Error::unimplemented("stub".into()))
         }
@@ -1686,7 +1654,7 @@ mod tests {
         }
     }
 
-    // --- Stub VatListener: asserts executor is present ---
+    // --- Stub VatListener: asserts handler is present ---
 
     struct TestVatListener;
 
@@ -1698,11 +1666,8 @@ mod tests {
             _results: system_capnp::vat_listener::ListenResults,
         ) -> Promise<(), capnp::Error> {
             let params = capnp_rpc::pry!(params.get());
-            if !params.has_executor() {
-                return Promise::err(capnp::Error::failed("executor not set".into()));
-            }
-            if !params.has_wasm() {
-                return Promise::err(capnp::Error::failed("wasm not set".into()));
+            if !params.has_handler() {
+                return Promise::err(capnp::Error::failed("handler not set".into()));
             }
             Promise::ok(())
         }
@@ -1725,9 +1690,6 @@ mod tests {
             }
             if !params.has_protocol() {
                 return Promise::err(capnp::Error::failed("protocol not set".into()));
-            }
-            if !params.has_wasm() {
-                return Promise::err(capnp::Error::failed("wasm not set".into()));
             }
             Promise::ok(())
         }
@@ -1851,8 +1813,7 @@ mod tests {
     fn test_session() -> Session {
         Session {
             host: capnp_rpc::new_client(TestHost),
-            executor: capnp_rpc::new_client(TestExecutor),
-            ipfs: capnp_rpc::new_client(TestIpfs),
+            runtime: capnp_rpc::new_client(TestRuntime),
             routing: capnp_rpc::new_client(TestRouting),
             identity: capnp_rpc::new_client(TestIdentity),
             cwd: "/".into(),
@@ -1972,19 +1933,19 @@ mod tests {
     // --- host listen tests ---
 
     #[tokio::test]
-    async fn test_host_listen_vat_passes_executor() {
+    async fn test_host_listen_vat_passes_runtime() {
         run_local(async {
             let s = test_session();
             let handler = make_host_handler(s.host.clone());
-            let executor_cap = Val::Cap {
-                name: "executor".into(),
-                schema_cid: "test-executor-cid".into(),
-                inner: Rc::new(s.executor.clone()),
+            let runtime_cap = Val::Cap {
+                name: "runtime".into(),
+                schema_cid: "test-runtime-cid".into(),
+                inner: Rc::new(s.runtime.clone()),
             };
             let result = call_handler(
                 &handler,
                 "listen",
-                &[executor_cap, Val::Bytes(b"fake-wasm".to_vec())],
+                &[runtime_cap, Val::Bytes(b"fake-wasm".to_vec())],
             )
             .await;
             assert!(
@@ -1997,20 +1958,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_host_listen_stream_passes_executor() {
+    async fn test_host_listen_stream_passes_runtime() {
         run_local(async {
             let s = test_session();
             let handler = make_host_handler(s.host.clone());
-            let executor_cap = Val::Cap {
-                name: "executor".into(),
-                schema_cid: "test-executor-cid".into(),
-                inner: Rc::new(s.executor.clone()),
+            let runtime_cap = Val::Cap {
+                name: "runtime".into(),
+                schema_cid: "test-runtime-cid".into(),
+                inner: Rc::new(s.runtime.clone()),
             };
             let result = call_handler(
                 &handler,
                 "listen",
                 &[
-                    executor_cap,
+                    runtime_cap,
                     Val::Str("my-protocol".into()),
                     Val::Bytes(b"fake-wasm".to_vec()),
                 ],
@@ -2026,12 +1987,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_host_listen_missing_executor_errors() {
+    async fn test_host_listen_missing_runtime_errors() {
         run_local(async {
             let s = test_session();
             let handler = make_host_handler(s.host.clone());
             let err = call_handler(&handler, "listen", &[Val::Bytes(b"wasm".to_vec())]).await;
-            assert!(err.is_err(), "should require executor capability");
+            assert!(err.is_err(), "should require runtime capability");
         })
         .await;
     }
@@ -2042,8 +2003,8 @@ mod tests {
             let s = test_session();
             let handler = make_host_handler(s.host.clone());
             let bad_cap = Val::Cap {
-                name: "not-executor".into(),
-                schema_cid: "test-not-executor-cid".into(),
+                name: "not-runtime".into(),
+                schema_cid: "test-not-runtime-cid".into(),
                 inner: Rc::new(42i32),
             };
             let err =
@@ -2051,7 +2012,7 @@ mod tests {
             assert!(err.is_err(), "should reject wrong capability type");
             let msg = format!("{}", err.unwrap_err());
             assert!(
-                msg.contains("not-executor"),
+                msg.contains("not-runtime"),
                 "error should name the wrong cap: {msg}"
             );
         })
@@ -2059,13 +2020,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_host_listen_forged_executor_cap_wrong_inner_type() {
+    async fn test_host_listen_forged_runtime_cap_wrong_inner_type() {
         run_local(async {
             let s = test_session();
             let handler = make_host_handler(s.host.clone());
             let forged_cap = Val::Cap {
-                name: "executor".into(),
-                schema_cid: "test-executor-cid".into(),
+                name: "runtime".into(),
+                schema_cid: "test-runtime-cid".into(),
                 inner: Rc::new(42i32),
             };
             let err = call_handler(
@@ -2089,12 +2050,12 @@ mod tests {
             let err = call_handler(
                 &handler,
                 "listen",
-                &[Val::Str("executor".into()), Val::Bytes(b"wasm".to_vec())],
+                &[Val::Str("runtime".into()), Val::Bytes(b"wasm".to_vec())],
             )
             .await;
-            assert!(err.is_err(), "string should not pass as executor cap");
+            assert!(err.is_err(), "string should not pass as runtime cap");
             let msg = format!("{}", err.unwrap_err());
-            assert!(msg.contains("executor capability required"), "got: {msg}");
+            assert!(msg.contains("runtime capability required"), "got: {msg}");
         })
         .await;
     }
@@ -2110,7 +2071,7 @@ mod tests {
                 &[Val::Nil, Val::Bytes(b"wasm".to_vec())],
             )
             .await;
-            assert!(err.is_err(), "nil should not pass as executor cap");
+            assert!(err.is_err(), "nil should not pass as runtime cap");
         })
         .await;
     }
@@ -2146,7 +2107,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_host_listen_stream_missing_executor_errors() {
+    async fn test_host_listen_stream_missing_runtime_errors() {
         run_local(async {
             let s = test_session();
             let handler = make_host_handler(s.host.clone());
@@ -2156,7 +2117,7 @@ mod tests {
                 &[Val::Str("my-protocol".into()), Val::Bytes(b"wasm".to_vec())],
             )
             .await;
-            assert!(err.is_err(), "stream listen without executor should error");
+            assert!(err.is_err(), "stream listen without runtime should error");
         })
         .await;
     }
@@ -2169,16 +2130,16 @@ mod tests {
             // 0 args after :listen — should error
             assert!(call_handler(&handler, "listen", &[]).await.is_err());
             // 4 args after :listen — should error
-            let executor_cap = Val::Cap {
-                name: "executor".into(),
-                schema_cid: "test-executor-cid".into(),
-                inner: Rc::new(s.executor.clone()),
+            let runtime_cap = Val::Cap {
+                name: "runtime".into(),
+                schema_cid: "test-runtime-cid".into(),
+                inner: Rc::new(s.runtime.clone()),
             };
             assert!(call_handler(
                 &handler,
                 "listen",
                 &[
-                    executor_cap,
+                    runtime_cap,
                     Val::Str("a".into()),
                     Val::Bytes(b"b".to_vec()),
                     Val::Str("extra".into()),
@@ -2190,17 +2151,16 @@ mod tests {
         .await;
     }
 
-    // --- executor tests ---
+    // --- runtime tests ---
 
     #[tokio::test]
-    async fn test_executor_echo() {
+    async fn test_runtime_unknown_method_returns_error() {
         run_local(async {
             let s = test_session();
-            let handler = make_executor_handler(s.executor.clone());
-            let result = call_handler(&handler, "echo", &[Val::Str("hello".into())])
-                .await
-                .unwrap();
-            assert_eq!(result, Val::Str("hello".into()));
+            let handler = make_runtime_handler(s.runtime.clone());
+            let err = call_handler(&handler, "bogus", &[]).await.unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("unknown method"), "got: {msg}");
         })
         .await;
     }
@@ -2357,16 +2317,17 @@ mod tests {
                 make_host_handler(session.host.clone()),
             ),
             (
-                "executor",
-                "test-executor-cid",
-                Rc::new(session.executor.clone()),
-                make_executor_handler(session.executor.clone()),
+                "runtime",
+                "test-runtime-cid",
+                Rc::new(session.runtime.clone()),
+                make_runtime_handler(session.runtime.clone()),
             ),
+            // ipfs handler reads through WASI virtual FS, no capability needed
             (
                 "ipfs",
                 "test-ipfs-cid",
-                Rc::new(session.ipfs.clone()),
-                make_ipfs_handler(session.ipfs.clone()),
+                Rc::new(Val::Nil),
+                make_ipfs_handler(),
             ),
             (
                 "routing",
@@ -2440,7 +2401,7 @@ mod tests {
 
     // --- init script eval integration ---
 
-    /// Eval (perform host :listen executor (perform :load "path")) end-to-end.
+    /// Eval (perform host :listen runtime (perform :load "path")) end-to-end.
     #[tokio::test]
     async fn test_chess_glia_listen_form_evals_end_to_end() {
         run_local(async {
@@ -2455,7 +2416,7 @@ mod tests {
             std::env::remove_var("WW_ROOT");
 
             let script = format!(
-                r#"(perform host :listen executor (perform :load "{}"))"#,
+                r#"(perform host :listen runtime (perform :load "{}"))"#,
                 wasm_path.to_str().unwrap()
             );
             let form = read(&script).unwrap();
@@ -2485,8 +2446,8 @@ mod tests {
             std::env::remove_var("WW_ROOT");
 
             let script = format!(
-                r#"(perform host :listen executor (perform :load "{}"))
-                   (perform executor :run (perform :load "{}"))"#,
+                r#"(perform host :listen runtime (perform :load "{}"))
+                   (perform runtime :run (perform :load "{}"))"#,
                 wasm_path.to_str().unwrap(),
                 wasm_path.to_str().unwrap()
             );
@@ -2503,11 +2464,11 @@ mod tests {
                 result.unwrap_err()
             );
 
-            // Second form: (perform executor :run ...) — fails because TestExecutor
-            // returns "unimplemented" for run_bytes. Expected.
+            // Second form: (perform runtime :run ...) — fails because TestExecutor
+            // returns "unimplemented" for spawn. Expected.
             let wrapped = wrap_with_handlers(&forms[1]);
             let result = eval(&wrapped, &mut env, &ctx, &dispatch).await;
-            assert!(result.is_err(), "executor run should fail against stub");
+            assert!(result.is_err(), "runtime run should fail against stub");
         })
         .await;
     }
