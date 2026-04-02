@@ -77,19 +77,23 @@ value in the Glia environment, and scripts pass it explicitly to
 functions that need spawn authority.
 
 ```clojure
-; Register RPC cell — schema loaded from boot/main.schema.
-; The executor is passed explicitly (no ambient authority).
-(host listen executor (load "bin/chess-demo.wasm"))
+; Register RPC cell — schema passed explicitly.
+(def chess-wasm (load "bin/chess-demo.wasm"))
+(def chess-schema (load "bin/chess-demo.schema"))
+(perform host :listen executor chess-wasm chess-schema)
+```
 
-; Run the chess demo in service mode — blocks until exit.
-(executor run (load "bin/chess-demo.wasm"))
+The init.d script only registers the cell. The user starts the
+discovery service from the Glia shell:
+
+```clojure
+/ > (executor run (load "bin/chess-demo.wasm"))
 ```
 
 `(load "bin/chess-demo.wasm")` reads bytes from the WASI virtual
 filesystem, resolved relative to `$WW_ROOT` (the merged image root).
-The executor capability is the spawn authority that `VatListener`
-needs to create cell processes. The kernel reads `boot/main.schema`
-to derive the protocol CID.
+The schema bytes are passed explicitly to `VatListener.listen()` for
+protocol CID derivation.
 
 ## Schema CID
 
@@ -117,18 +121,22 @@ make chess
 
 ## Running
 
-Stack the chess layer on top of the kernel:
+Boot two nodes, each stacking the chess layer on the kernel.
+The init.d script registers the ChessEngine RPC cell automatically.
+Then start the discovery service from the Glia shell:
 
 ```sh
 # Terminal 1
 ww run --port=2025 crates/kernel examples/chess
+/ > (executor run (load "bin/chess-demo.wasm"))
 
 # Terminal 2
 ww run --port=2026 crates/kernel examples/chess
+/ > (executor run (load "bin/chess-demo.wasm"))
 ```
 
-Both nodes bootstrap into the DHT, exchange provider records, discover
-each other, and play a game of random chess via typed RPC.
+Both nodes provide the schema CID on the DHT, discover each other,
+and play a game of random chess via typed RPC.
 
 ## Tests
 

@@ -17,14 +17,18 @@ schema bytes for the Greeter interface) alongside `boot/main.wasm`.
 
 ## Run
 
-Open two terminals:
+Boot two nodes, each stacking the discovery layer on the kernel.
+The init.d script registers the Greeter RPC cell automatically.
+Then start the discovery service from the Glia shell:
 
 ```bash
-# Terminal A — boots Agent A, provides Greeter on DHT
-cargo run -- run examples/discovery
+# Terminal A — boot node, then start discovery service
+cargo run -- run --port=2025 crates/kernel examples/discovery
+/ > (executor run (load "bin/discovery.wasm"))
 
-# Terminal B — boots Agent B, discovers A, calls greet()
-cargo run -- run examples/discovery
+# Terminal B — boot node, then start discovery service
+cargo run -- run --port=2026 crates/kernel examples/discovery
+/ > (executor run (load "bin/discovery.wasm"))
 ```
 
 Expected output on Agent B:

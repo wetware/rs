@@ -76,15 +76,21 @@ make oracle
 
 ## Running
 
-```sh
-# Terminal 1 — start the oracle service
-ww run --port=2025 crates/kernel examples/oracle
+Boot two nodes, each stacking the oracle layer on the kernel.
+The init.d script registers the PriceOracle RPC cell automatically.
+Then start the service/consumer from the Glia shell:
 
-# Terminal 2 — start a consumer that discovers and queries the oracle
-WW_CONSUMER=1 ww run --port=2026 crates/kernel examples/oracle
+```sh
+# Terminal 1 — boot node, then start the oracle service
+ww run --port=2025 crates/kernel examples/oracle
+/ > (executor run (load "bin/oracle.wasm"))
+
+# Terminal 2 — boot node, then start a consumer
+ww run --port=2026 crates/kernel examples/oracle
+/ > (executor run (load "bin/oracle.wasm") :env {"WW_CONSUMER" "1"})
 ```
 
-The service node fetches gas prices, exports the PriceOracle capability,
+The service node fetches gas prices, exports PriceOracle via RPC cells,
 and provides the schema CID on the DHT. The consumer discovers the
 service, dials it via VatClient, and logs prices to stderr.
 
