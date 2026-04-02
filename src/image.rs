@@ -405,6 +405,99 @@ async fn copy_merge(root_mounts: &[&Mount], client: &ipfs::HttpClient, dst: &Pat
     Ok(())
 }
 
+// ── Virtual mount resolution (lazy CidTree path) ─────────────────
+
+/// Resolve mounts into a root CID and local overrides for the virtual filesystem.
+///
+/// Unlike `apply_mounts()` which materializes everything to a TempDir, this
+/// function only performs the DAG merge to produce a merged root CID, and
+/// collects targeted mounts as `LocalOverride` entries. No file content is
+/// copied or fetched — that happens lazily when the guest opens files.
+///
+/// Returns `(root_cid, local_overrides)` suitable for constructing a `CidTree`.
+pub async fn resolve_mounts_virtual(
+    mounts: &[Mount],
+    ipfs_client: &ipfs::HttpClient,
+) -> Result<(
+    String,
+    std::collections::HashMap<std::path::PathBuf, crate::vfs::LocalOverride>,
+)> {
+    use crate::vfs::LocalOverride;
+
+    if mounts.is_empty() {
+        bail!("No mounts provided");
+    }
+
+    let (root_mounts, targeted_mounts): (Vec<&Mount>, Vec<&Mount>) =
+        mounts.iter().partition(|m| m.is_root());
+
+    if root_mounts.is_empty() {
+        bail!("No root mounts provided (at least one required)");
+    }
+
+    // Resolve all root mounts to CIDs.
+    let mut cids = Vec::with_capacity(root_mounts.len());
+    for mount in &root_mounts {
+        if ipfs::is_ipfs_path(&mount.source) {
+            let cid = mount
+                .source
+                .strip_prefix("/ipfs/")
+                .context("IPFS path must start with /ipfs/")?;
+            cids.push(cid.to_string());
+        } else {
+            // Add local directory to IPFS.
+            let cid = ipfs_client
+                .add_dir(Path::new(&mount.source))
+                .await
+                .with_context(|| format!("Failed to add local layer to IPFS: {}", mount.source))?;
+            cids.push(cid);
+        }
+    }
+
+    // DAG merge to produce a single root CID.
+    let root_cid = dag_merge(&cids, ipfs_client).await?;
+    tracing::info!(cid = %root_cid, layers = cids.len(), "Virtual DAG merge complete");
+
+    // Collect targeted mounts as local overrides.
+    let mut overrides = std::collections::HashMap::new();
+    for mount in &targeted_mounts {
+        let guest_path = mount
+            .target
+            .strip_prefix("/")
+            .unwrap_or(&mount.target)
+            .to_path_buf();
+
+        if guest_path.as_os_str().is_empty() {
+            continue; // skip empty target
+        }
+
+        if ipfs::is_ipfs_path(&mount.source) {
+            // IPFS targeted mounts are not supported in virtual mode.
+            // They would need to be added to the CID tree, which conflicts
+            // with the design goal of keeping private mounts off IPFS.
+            bail!(
+                "IPFS targeted mounts not supported in virtual mode: {} -> {}",
+                mount.source,
+                mount.target.display()
+            );
+        }
+
+        let src = Path::new(&mount.source);
+        if !src.exists() {
+            bail!("Mount source does not exist: {}", mount.source);
+        }
+
+        let ovr = if src.is_dir() {
+            LocalOverride::Dir(src.to_path_buf())
+        } else {
+            LocalOverride::File(src.to_path_buf())
+        };
+        overrides.insert(guest_path, ovr);
+    }
+
+    Ok((root_cid, overrides))
+}
+
 // ── Keep the old API as a thin wrapper for backward compatibility ──
 
 /// Resolve and merge N image layers into a single FHS root.

@@ -136,6 +136,10 @@ pub struct ComponentRunStates {
     /// The staging directory for IPFS content is owned by the cache mode itself:
     /// host-wide shared dir for `Shared`, per-process dir for `Isolated`.
     pub cache_mode: Option<cache::CacheMode>,
+    /// Virtual filesystem tree (lazy CID-based resolution).
+    /// When `Some`, the guest filesystem is backed by a CidTree
+    /// instead of a preopened host directory.
+    pub cid_tree: Option<std::sync::Arc<crate::vfs::CidTree>>,
     /// AIMD fuel scheduler, refuels at host call boundaries.
     pub fuel_scheduler: FuelScheduler,
 }
@@ -168,6 +172,7 @@ struct ProcInit {
     data_streams: Option<tokio::io::DuplexStream>,
     image_root: Option<PathBuf>,
     cache_mode: Option<cache::CacheMode>,
+    cid_tree: Option<std::sync::Arc<crate::vfs::CidTree>>,
 }
 
 /// Builder for constructing a Proc configuration
@@ -184,6 +189,7 @@ pub struct Builder {
     data_streams: Option<tokio::io::DuplexStream>,
     image_root: Option<PathBuf>,
     cache_mode: Option<cache::CacheMode>,
+    cid_tree: Option<std::sync::Arc<crate::vfs::CidTree>>,
 }
 
 /// Handles for accessing the host-side of data streams.
@@ -226,6 +232,7 @@ impl Builder {
             data_streams: None,
             image_root: None,
             cache_mode: None,
+            cid_tree: None,
         }
     }
 
@@ -338,6 +345,12 @@ impl Builder {
         self
     }
 
+    /// Set the CidTree for virtual filesystem resolution.
+    pub fn with_cid_tree(mut self, tree: std::sync::Arc<crate::vfs::CidTree>) -> Self {
+        self.cid_tree = Some(tree);
+        self
+    }
+
     /// Build a Proc instance. All required parameters must be supplied first.
     pub async fn build(self) -> Result<Proc> {
         let bytecode = self
@@ -365,6 +378,7 @@ impl Builder {
             data_streams: self.data_streams,
             image_root: self.image_root,
             cache_mode: self.cache_mode,
+            cid_tree: self.cid_tree,
         })
         .await
     }
@@ -402,6 +416,7 @@ impl Proc {
             data_streams,
             image_root,
             cache_mode,
+            cid_tree,
         } = init;
 
         let stdin_stream = AsyncStdinStream::new(stdin);
@@ -425,8 +440,10 @@ impl Proc {
         let mut linker = Linker::new(&engine);
         add_to_linker_async(&mut linker)?;
 
-        // Override filesystem bindings with IPFS interceptor when cache is active
-        if cache_mode.is_some() {
+        // Override filesystem bindings when CidTree or cache is active.
+        // CidTree mode: ALL filesystem ops resolve through the virtual tree.
+        // Cache-only mode: only `/ipfs/` paths are intercepted.
+        if cid_tree.is_some() || cache_mode.is_some() {
             crate::fs_intercept::override_filesystem_linker(&mut linker)?;
         }
 
@@ -448,11 +465,16 @@ impl Proc {
             .args(&args);
 
         // Mount the merged FHS image root read-only at `/` in the guest.
-        if let Some(ref root) = image_root {
-            wasi_builder
-                .preopened_dir(root, "/", DirPerms::READ, FilePerms::READ)
-                .context("failed to preopen image root at /")?;
-            tracing::debug!(root = %root.display(), "Mounted image root at /");
+        // Skip when CidTree is present — the virtual FS handles all paths.
+        if cid_tree.is_none() {
+            if let Some(ref root) = image_root {
+                wasi_builder
+                    .preopened_dir(root, "/", DirPerms::READ, FilePerms::READ)
+                    .context("failed to preopen image root at /")?;
+                tracing::debug!(root = %root.display(), "Mounted image root at /");
+            }
+        } else {
+            tracing::debug!("CidTree active — skipping preopened_dir, virtual FS handles paths");
         }
 
         let wasi = wasi_builder.build();
@@ -471,6 +493,7 @@ impl Proc {
             loader,
             data_stream,
             cache_mode,
+            cid_tree,
             fuel_scheduler: FuelScheduler::new(INITIAL_FUEL),
         };
 

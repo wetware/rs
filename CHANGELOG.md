@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.0.4.0] - 2026-04-02
+
+### Added
+- Lazy virtual filesystem (`CidTree`) resolves guest paths through IPFS directory DAGs on demand
+- 3-tier directory listing cache: in-memory LRU → staging disk → IPFS daemon
+- `resolve_mounts_virtual()` produces a merged root CID without materializing files
+- Atomic root-CID swap via `ArcSwap` for epoch updates (FS swap happens-before capability death)
+- Pre-warm root directory listing before epoch swap
+
 ## [0.0.3.3] - 2026-04-02
 
 ### Fixed

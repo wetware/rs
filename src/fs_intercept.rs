@@ -1,10 +1,17 @@
-//! WASI filesystem interceptor for `/ipfs/` paths.
+//! WASI filesystem interceptor for `/ipfs/` paths and CidTree-backed virtual FS.
 //!
-//! Intercepts `open_at` calls for paths under `/ipfs/<CID>/…` and resolves them
-//! lazily through the pinset cache, materializing content to a staging directory.
-//! All other filesystem operations delegate to the standard wasmtime-wasi impl.
+//! When a `CidTree` is present (virtual mode), ALL filesystem operations resolve
+//! paths lazily through the content-addressed tree. File content is materialized
+//! to a staging directory on demand, then opened as a real `cap-std` file
+//! descriptor so all subsequent reads delegate to wasmtime-wasi's standard impl.
+//!
+//! When no CidTree is present, falls back to the original behavior: intercepts
+//! only explicit `/ipfs/<CID>/…` paths via the pinset cache.
+
+use std::sync::Arc;
 
 use crate::cell::proc::ComponentRunStates;
+use crate::vfs::{CidTree, ResolvedNode};
 use anyhow::Result;
 use wasmtime::component::{HasData, Linker, Resource};
 use wasmtime_wasi::filesystem::{WasiFilesystemCtx, WasiFilesystemCtxView};
@@ -20,12 +27,13 @@ impl HasData for IpfsFilesystem {
     type Data<'a> = IpfsFilesystemView<'a>;
 }
 
-// ── View type: wraps WasiFilesystemCtxView + cache ─────────────────
+// ── View type: wraps WasiFilesystemCtxView + cache + CidTree ──────
 
 pub(crate) struct IpfsFilesystemView<'a> {
     pub ctx: &'a mut WasiFilesystemCtx,
     pub table: &'a mut wasmtime::component::ResourceTable,
     pub cache_mode: &'a Option<cache::CacheMode>,
+    pub cid_tree: &'a Option<Arc<CidTree>>,
 }
 
 impl IpfsFilesystemView<'_> {
@@ -42,12 +50,11 @@ impl IpfsFilesystemView<'_> {
 
 fn ipfs_filesystem(state: &mut ComponentRunStates) -> IpfsFilesystemView<'_> {
     // Split borrow across distinct fields of ComponentRunStates.
-    // wasi_ctx.filesystem() borrows wasi_ctx; resource_table and cache_mode
-    // are separate fields.
     IpfsFilesystemView {
         ctx: state.wasi_ctx.filesystem(),
         table: &mut state.resource_table,
         cache_mode: &state.cache_mode,
+        cid_tree: &state.cid_tree,
     }
 }
 
@@ -81,7 +88,166 @@ pub(crate) fn parse_ipfs_path(path: &str) -> Option<IpfsCidPath> {
     })
 }
 
-// ── open_at interception ───────────────────────────────────────────
+// ── CidTree-backed open ───────────────────────────────────────────
+
+impl IpfsFilesystemView<'_> {
+    /// Handle an `open_at` for a path resolved through the CidTree.
+    ///
+    /// Resolves the path to a CID (or local override), fetches the content
+    /// to staging if needed, and opens a real cap-std file descriptor.
+    async fn open_via_cid_tree(
+        &mut self,
+        cid_tree: &CidTree,
+        path: &str,
+        flags: types::DescriptorFlags,
+    ) -> FsResult<Resource<types::Descriptor>> {
+        use wasmtime_wasi::{DirPerms, FilePerms, OpenMode};
+
+        // Reject writes — CidTree is immutable
+        if flags.contains(types::DescriptorFlags::WRITE) {
+            return Err(types::ErrorCode::NotPermitted.into());
+        }
+
+        let resolved = cid_tree.resolve_path(path).await.map_err(|e| {
+            tracing::debug!(path = %path, err = %e, "CidTree path resolution failed");
+            FsError::from(types::ErrorCode::NoEntry)
+        })?;
+
+        match resolved {
+            ResolvedNode::LocalFile(host_path) => {
+                let file = cap_std::fs::Dir::open_ambient_dir(
+                    host_path.parent().unwrap_or(&host_path),
+                    cap_std::ambient_authority(),
+                )
+                .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?
+                .open(host_path.file_name().unwrap_or_default())
+                .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
+
+                let wasi_file = wasmtime_wasi::filesystem::File::new(
+                    file,
+                    FilePerms::READ,
+                    OpenMode::READ,
+                    false,
+                );
+                let descriptor = wasmtime_wasi::filesystem::Descriptor::File(wasi_file);
+                self.table
+                    .push(descriptor)
+                    .map_err(|_| -> FsError { types::ErrorCode::Io.into() })
+            }
+            ResolvedNode::LocalDir(host_path) => {
+                let dir =
+                    cap_std::fs::Dir::open_ambient_dir(&host_path, cap_std::ambient_authority())
+                        .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
+                let wasi_dir = wasmtime_wasi::filesystem::Dir::new(
+                    dir,
+                    DirPerms::READ,
+                    FilePerms::READ,
+                    OpenMode::READ,
+                    false,
+                );
+                let descriptor = wasmtime_wasi::filesystem::Descriptor::Dir(wasi_dir);
+                self.table
+                    .push(descriptor)
+                    .map_err(|_| -> FsError { types::ErrorCode::Io.into() })
+            }
+            ResolvedNode::CidFile { cid, .. } => {
+                // Materialize file content to staging via PinsetCache, then open real FD.
+                let cache = self
+                    .cache_mode
+                    .as_ref()
+                    .ok_or_else(|| -> FsError { types::ErrorCode::Io.into() })?;
+
+                let cid_parsed: cid::Cid = cid
+                    .parse()
+                    .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
+
+                cache.ensure(&cid_parsed).await.map_err(|e| {
+                    tracing::warn!(cid = %cid, err = %e, "CidTree cache ensure failed");
+                    FsError::from(types::ErrorCode::Io)
+                })?;
+
+                let staging_path = cache.staging_dir().join(&cid);
+                if !staging_path.exists() {
+                    let bytes = cache.fetch(&cid_parsed).await.map_err(|e| {
+                        tracing::warn!(cid = %cid, err = %e, "CidTree fetch failed");
+                        FsError::from(types::ErrorCode::Io)
+                    })?;
+
+                    if let Some(parent) = staging_path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
+                    }
+                    std::fs::write(&staging_path, &bytes)
+                        .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
+                }
+
+                let file = cap_std::fs::Dir::open_ambient_dir(
+                    staging_path.parent().unwrap_or(&staging_path),
+                    cap_std::ambient_authority(),
+                )
+                .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?
+                .open(staging_path.file_name().unwrap_or_default())
+                .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
+
+                let wasi_file = wasmtime_wasi::filesystem::File::new(
+                    file,
+                    FilePerms::READ,
+                    OpenMode::READ,
+                    false,
+                );
+                let descriptor = wasmtime_wasi::filesystem::Descriptor::File(wasi_file);
+                self.table
+                    .push(descriptor)
+                    .map_err(|_| -> FsError { types::ErrorCode::Io.into() })
+            }
+            ResolvedNode::CidDir { cid } => {
+                // For CID-backed directories, we need to materialize the directory
+                // structure to staging so wasmtime-wasi can operate on a real dir.
+                // We create an empty dir and populate it with the listing entries
+                // as empty files / subdirs — enough for readdir to work.
+                // Actual file content is fetched lazily when opened.
+                let staging_dir = cid_tree.staging_dir().join(format!("dir-{cid}"));
+                if !staging_dir.exists() {
+                    std::fs::create_dir_all(&staging_dir)
+                        .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
+
+                    // Populate with stub entries from the directory listing
+                    if let Ok(entries) = cid_tree.ls_dir(&cid).await {
+                        for entry in &entries {
+                            let entry_path = staging_dir.join(&entry.name);
+                            match &entry.entry_type {
+                                crate::vfs::EntryType::Dir => {
+                                    let _ = std::fs::create_dir_all(&entry_path);
+                                }
+                                _ => {
+                                    // Create empty stub file — content fetched on open
+                                    let _ = std::fs::write(&entry_path, b"");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let dir =
+                    cap_std::fs::Dir::open_ambient_dir(&staging_dir, cap_std::ambient_authority())
+                        .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
+                let wasi_dir = wasmtime_wasi::filesystem::Dir::new(
+                    dir,
+                    DirPerms::READ,
+                    FilePerms::READ,
+                    OpenMode::READ,
+                    false,
+                );
+                let descriptor = wasmtime_wasi::filesystem::Descriptor::Dir(wasi_dir);
+                self.table
+                    .push(descriptor)
+                    .map_err(|_| -> FsError { types::ErrorCode::Io.into() })
+            }
+        }
+    }
+}
+
+// ── open_at interception (original IPFS path handler) ─────────────
 
 impl IpfsFilesystemView<'_> {
     /// Handle an `open_at` for an IPFS path.
@@ -316,10 +482,17 @@ impl types::HostDescriptor for IpfsFilesystemView<'_> {
         oflags: types::OpenFlags,
         flags: types::DescriptorFlags,
     ) -> FsResult<Resource<types::Descriptor>> {
-        // Intercept /ipfs/ paths
+        // Intercept explicit /ipfs/ paths (works in all modes)
         if let Some(ipfs_path) = parse_ipfs_path(&path) {
             tracing::debug!(cid = %ipfs_path.cid, subpath = %ipfs_path.subpath, "Intercepting IPFS open_at");
             return self.open_ipfs(ipfs_path, oflags, flags).await;
+        }
+
+        // CidTree mode: resolve ALL paths through the virtual filesystem
+        if let Some(ref cid_tree) = self.cid_tree {
+            let cid_tree = Arc::clone(cid_tree);
+            tracing::debug!(path = %path, "CidTree open_at");
+            return self.open_via_cid_tree(&cid_tree, &path, flags).await;
         }
 
         // Delegate to standard filesystem
@@ -581,6 +754,7 @@ mod tests {
         wasi_ctx: wasmtime_wasi::WasiCtx,
         resource_table: wasmtime::component::ResourceTable,
         cache_mode: Option<cache::CacheMode>,
+        cid_tree: Option<Arc<CidTree>>,
     }
 
     impl TestHarness {
@@ -589,6 +763,7 @@ mod tests {
                 wasi_ctx: wasmtime_wasi::WasiCtxBuilder::new().build(),
                 resource_table: wasmtime::component::ResourceTable::new(),
                 cache_mode,
+                cid_tree: None,
             }
         }
 
@@ -597,6 +772,7 @@ mod tests {
                 ctx: self.wasi_ctx.filesystem(),
                 table: &mut self.resource_table,
                 cache_mode: &self.cache_mode,
+                cid_tree: &self.cid_tree,
             }
         }
     }

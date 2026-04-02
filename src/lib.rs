@@ -30,6 +30,8 @@ pub mod mount;
 pub mod rpc;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runtime;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod vfs;
 
 // Re-export capnp schema modules from the membrane crate so host code can
 // use `crate::system_capnp`, `crate::ipfs_capnp`, `crate::routing_capnp`, `crate::stem_capnp`.

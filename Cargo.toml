@@ -73,6 +73,8 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 axum = "0.8"
 dirs = "5"
 cap-std = "3.4"
+arc-swap = "1"
+lru = "0.12"
 wasmparser = "0.243"
 
 [[bin]]
