@@ -159,6 +159,27 @@ fn read_leb128(data: &[u8]) -> Option<(usize, usize)> {
     None // unterminated
 }
 
+/// Load schema bytes, preferring boot/main.schema over WASM custom sections.
+///
+/// Tries to read `boot/main.schema` from the WASI virtual filesystem first
+/// (the new typed-bytecode layout). Falls back to extracting from the WASM
+/// binary's "cell.capnp" custom section for backwards compatibility.
+fn load_schema_bytes(wasm: &[u8]) -> Result<Vec<u8>, Val> {
+    // New path: boot/main.schema in the FHS image.
+    if let Ok(bytes) = std::fs::read("/boot/main.schema") {
+        if !bytes.is_empty() {
+            log::info!(
+                "schema: loaded from boot/main.schema ({} bytes)",
+                bytes.len()
+            );
+            return Ok(bytes);
+        }
+    }
+    // Fallback: extract from WASM custom section.
+    log::info!("schema: falling back to cell.capnp custom section");
+    extract_capnp_schema(wasm)
+}
+
 /// Extract canonical schema.Node bytes from a WASM binary's "cell.capnp" section.
 ///
 /// The section must contain a Cell::capnp variant. Returns the re-canonicalized
@@ -536,10 +557,9 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                     .get_bound()
                                     .map_err(|e| Val::from(e.to_string()))?;
 
-                                // Extract schema bytes from the WASM "cell.capnp" section.
-                                // The kernel still reads the custom section to get schema
-                                // bytes for the explicit schema param.
-                                let schema_bytes = extract_capnp_schema(&wasm)?;
+                                // Load schema bytes: prefers boot/main.schema from the
+                                // FHS image, falls back to WASM custom section.
+                                let schema_bytes = load_schema_bytes(&wasm)?;
 
                                 let network_resp = host
                                     .network_request()
