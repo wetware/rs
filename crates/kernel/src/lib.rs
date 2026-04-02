@@ -86,7 +86,6 @@ fn init_logging() {
 struct Session {
     host: system_capnp::host::Client,
     executor: system_capnp::executor::Client,
-    ipfs: ipfs_capnp::client::Client,
     routing: routing_capnp::routing::Client,
     /// Host-side node identity hub for this session.
     ///
@@ -641,11 +640,15 @@ fn make_executor_handler(executor: system_capnp::executor::Client) -> Val {
     }
 }
 
-fn make_ipfs_handler(ipfs: ipfs_capnp::client::Client) -> Val {
+/// Build the `ipfs` effect handler that reads content through the WASI virtual FS.
+///
+/// All IPFS content access goes through the WASI filesystem — the host-side CidTree
+/// resolves paths lazily through the IPFS DAG. `cat` reads files, `ls` lists dirs.
+/// `add` is not supported (content publishing goes through the stem contract).
+fn make_ipfs_handler() -> Val {
     Val::AsyncNativeFn {
         name: "ipfs-handler".into(),
         func: Rc::new(move |args: Vec<Val>| {
-            let ipfs = ipfs.clone();
             Box::pin(async move {
                 let (method, rest) = extract_method(&args[0])?;
                 let resume = &args[1];
@@ -656,30 +659,9 @@ fn make_ipfs_handler(ipfs: ipfs_capnp::client::Client) -> Val {
                             _ => return Err(Val::from("ipfs :cat — expected string path")),
                         };
                         let path = resolve_ipfs_path(&raw_path);
-                        let unixfs_resp = ipfs
-                            .unixfs_request()
-                            .send()
-                            .promise
-                            .await
-                            .map_err(|e| Val::from(e.to_string()))?;
-                        let unixfs = unixfs_resp
-                            .get()
-                            .map_err(|e| Val::from(e.to_string()))?
-                            .get_api()
-                            .map_err(|e| Val::from(e.to_string()))?;
-                        let mut req = unixfs.cat_request();
-                        req.get().set_path(&path);
-                        let resp = req
-                            .send()
-                            .promise
-                            .await
-                            .map_err(|e| Val::from(e.to_string()))?;
-                        let data = resp
-                            .get()
-                            .map_err(|e| Val::from(e.to_string()))?
-                            .get_data()
-                            .map_err(|e| Val::from(e.to_string()))?;
-                        Val::Bytes(data.to_vec())
+                        let data = std::fs::read(&path)
+                            .map_err(|e| Val::from(format!("ipfs :cat {path}: {e}")))?;
+                        Val::Bytes(data)
                     }
                     "ls" => {
                         let raw_path = match rest.first() {
@@ -687,75 +669,22 @@ fn make_ipfs_handler(ipfs: ipfs_capnp::client::Client) -> Val {
                             _ => return Err(Val::from("ipfs :ls — expected string path")),
                         };
                         let path = resolve_ipfs_path(&raw_path);
-                        let unixfs_resp = ipfs
-                            .unixfs_request()
-                            .send()
-                            .promise
-                            .await
-                            .map_err(|e| Val::from(e.to_string()))?;
-                        let unixfs = unixfs_resp
-                            .get()
-                            .map_err(|e| Val::from(e.to_string()))?
-                            .get_api()
-                            .map_err(|e| Val::from(e.to_string()))?;
-                        let mut req = unixfs.ls_request();
-                        req.get().set_path(&path);
-                        let resp = req
-                            .send()
-                            .promise
-                            .await
-                            .map_err(|e| Val::from(e.to_string()))?;
-                        let entries = resp
-                            .get()
-                            .map_err(|e| Val::from(e.to_string()))?
-                            .get_entries()
-                            .map_err(|e| Val::from(e.to_string()))?;
-                        let items: Vec<Val> = (0..entries.len())
-                            .filter_map(|i| {
-                                let e = entries.get(i);
-                                let name = e.get_name().ok()?.to_str().ok()?;
-                                let size = e.get_size();
-                                Some(Val::List(vec![
-                                    Val::Str(name.to_string()),
-                                    Val::Sym(size.to_string()),
-                                ]))
+                        let entries = std::fs::read_dir(&path)
+                            .map_err(|e| Val::from(format!("ipfs :ls {path}: {e}")))?;
+                        let items: Vec<Val> = entries
+                            .filter_map(|entry| {
+                                let entry = entry.ok()?;
+                                let name = entry.file_name().to_str()?.to_string();
+                                let size = entry.metadata().ok()?.len();
+                                Some(Val::List(vec![Val::Str(name), Val::Sym(size.to_string())]))
                             })
                             .collect();
                         Val::List(items)
                     }
                     "add" => {
-                        let data = match rest.first() {
-                            Some(Val::Bytes(b)) => b.clone(),
-                            _ => return Err(Val::from("ipfs :add — expected bytes")),
-                        };
-                        let unixfs_resp = ipfs
-                            .unixfs_request()
-                            .send()
-                            .promise
-                            .await
-                            .map_err(|e| Val::from(e.to_string()))?;
-                        let unixfs = unixfs_resp
-                            .get()
-                            .map_err(|e| Val::from(e.to_string()))?
-                            .get_api()
-                            .map_err(|e| Val::from(e.to_string()))?;
-                        let mut req = unixfs.add_request();
-                        req.get().set_data(&data);
-                        let resp = req
-                            .send()
-                            .promise
-                            .await
-                            .map_err(|e| Val::from(e.to_string()))?;
-                        let cid = resp
-                            .get()
-                            .map_err(|e| Val::from(e.to_string()))?
-                            .get_cid()
-                            .map_err(|e| Val::from(e.to_string()))?;
-                        Val::Str(
-                            cid.to_str()
-                                .map_err(|e| Val::from(e.to_string()))?
-                                .to_string(),
-                        )
+                        return Err(Val::from(
+                            "ipfs :add is no longer supported — content publishing goes through the stem contract",
+                        ));
                     }
                     _ => return Err(Val::from(format!("ipfs: unknown method :{method}"))),
                 };
@@ -1129,39 +1058,27 @@ async fn run_initd(
     }
     let root = ww_root.trim_end_matches('/');
 
-    // Get the UnixFS API.
-    let unixfs_req = ctx.borrow().ipfs.unixfs_request().send().promise;
-    let unixfs_resp = unixfs_req.await.map_err(|e| Val::from(e.to_string()))?;
-    let unixfs = unixfs_resp
-        .get()
-        .map_err(|e| Val::from(e.to_string()))?
-        .get_api()
-        .map_err(|e| Val::from(e.to_string()))?;
-
-    // ls $WW_ROOT/etc/init.d — gracefully return empty on error
-    // (no /etc or no /etc/init.d = nothing configured).
+    // Read init.d scripts via WASI virtual filesystem.
+    // The host-side CidTree resolves these paths lazily through the IPFS DAG.
     let initd_path = format!("{root}/etc/init.d");
-    let mut ls_req = unixfs.ls_request();
-    ls_req.get().set_path(&initd_path);
-    let entries = match ls_req.send().promise.await {
-        Ok(resp) => {
-            let reader = resp.get().map_err(|e| Val::from(e.to_string()))?;
-            let list = reader.get_entries().map_err(|e| Val::from(e.to_string()))?;
-            let mut names = Vec::new();
-            for i in 0..list.len() {
-                let entry = list.get(i);
-                if let Ok(name) = entry.get_name() {
-                    if let Ok(s) = name.to_str() {
-                        if s.ends_with(".glia") {
-                            names.push(s.to_string());
-                        }
+    let entries = match std::fs::read_dir(&initd_path) {
+        Ok(dir) => {
+            let mut names: Vec<String> = dir
+                .filter_map(|entry| {
+                    let entry = entry.ok()?;
+                    let name = entry.file_name().to_str()?.to_string();
+                    if name.ends_with(".glia") {
+                        Some(name)
+                    } else {
+                        None
                     }
-                }
-            }
+                })
+                .collect();
+            names.sort(); // lexicographic order for SysV init
             names
         }
         Err(e) => {
-            log::debug!("init.d: ls {initd_path} failed ({e}), skipping");
+            log::debug!("init.d: readdir {initd_path} failed ({e}), skipping");
             return Ok(false);
         }
     };
@@ -1179,19 +1096,11 @@ async fn run_initd(
     for name in &entries {
         let script_path = format!("{initd_path}/{name}");
 
-        // cat the glia script — failure skips this script.
-        let mut cat_req = unixfs.cat_request();
-        cat_req.get().set_path(&script_path);
-        let data = match cat_req.send().promise.await {
-            Ok(resp) => match resp.get().and_then(|r| r.get_data()) {
-                Ok(d) => d.to_vec(),
-                Err(e) => {
-                    log::error!("init.d: {name}: failed to read response: {e}");
-                    continue;
-                }
-            },
+        // Read the glia script via WASI FS — failure skips this script.
+        let data = match std::fs::read(&script_path) {
+            Ok(d) => d,
             Err(e) => {
-                log::error!("init.d: {name}: cat failed: {e}");
+                log::error!("init.d: {name}: read failed: {e}");
                 continue;
             }
         };
@@ -1337,7 +1246,6 @@ fn run_impl() {
         let ctx = RefCell::new(Session {
             host: results.get_host()?,
             executor: results.get_executor()?,
-            ipfs: results.get_ipfs()?,
             routing: results.get_routing()?,
             identity: results.get_identity()?,
             cwd: "/".to_string(),
@@ -1366,10 +1274,13 @@ fn run_impl() {
                     make_executor_handler(s.executor.clone()),
                 ),
                 (
+                    // ipfs handler now reads through WASI virtual FS, not RPC.
+                    // The capability value is a placeholder — all actual I/O
+                    // goes through std::fs calls intercepted by the host CidTree.
                     "ipfs",
                     schema_ids::IPFS_CID,
-                    Rc::new(s.ipfs.clone()),
-                    make_ipfs_handler(s.ipfs.clone()),
+                    Rc::new(()),
+                    make_ipfs_handler(),
                 ),
                 (
                     "routing",

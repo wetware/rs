@@ -13,6 +13,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Atomic root-CID swap via `ArcSwap` for epoch updates (FS swap happens-before capability death)
 - Pre-warm root directory listing before epoch swap
 
+### Changed
+- Kernel ipfs handler reads through WASI virtual FS instead of Cap'n Proto RPC
+- `(perform ipfs :cat path)` and `(perform ipfs :ls path)` now use `std::fs`
+- `(perform ipfs :add)` returns error (deferred to stem contract)
+- Kernel boot sequence (`run_initd`) uses WASI `read_dir` + `read` instead of IPFS ls/cat
+
 ## [0.0.3.3] - 2026-04-02
 
 ### Fixed
