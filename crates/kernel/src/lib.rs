@@ -372,7 +372,12 @@ fn make_host_handler(
                         // Cell-based registration:
                         //   (perform host :listen <cell>)          → VatListener
                         //   (perform host :listen <cell> "/path")  → HttpListener
-                        if let Some(Val::Cell { wasm, schema, caps: _caps }) = rest.first() {
+                        if let Some(Val::Cell {
+                            wasm,
+                            schema,
+                            caps: _caps,
+                        }) = rest.first()
+                        {
                             let mut load_req = runtime.load_request();
                             load_req.get().set_wasm(wasm);
                             let executor = load_req.send().pipeline.get_executor();
@@ -383,9 +388,8 @@ fn make_host_handler(
                                 .promise
                                 .await
                                 .map_err(|e| Val::from(e.to_string()))?;
-                            let network = network_resp
-                                .get()
-                                .map_err(|e| Val::from(e.to_string()))?;
+                            let network =
+                                network_resp.get().map_err(|e| Val::from(e.to_string()))?;
 
                             match rest.get(1) {
                                 None => {
@@ -1968,7 +1972,8 @@ mod tests {
     async fn test_host_id_returns_bs58() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let result = call_handler(&handler, "id", &[]).await.unwrap();
             let expected = bs58::encode(STUB_PEER_ID).into_string();
             assert_eq!(result, Val::Str(expected));
@@ -1980,7 +1985,8 @@ mod tests {
     async fn test_host_addrs_returns_multiaddr_strings() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let result = call_handler(&handler, "addrs", &[]).await.unwrap();
             match result {
                 Val::List(addrs) => {
@@ -1997,7 +2003,8 @@ mod tests {
     async fn test_host_peers_returns_map_format() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let result = call_handler(&handler, "peers", &[]).await.unwrap();
             match result {
                 Val::List(peers) => {
@@ -2023,7 +2030,8 @@ mod tests {
     async fn test_host_unknown_method_returns_error() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let err = call_handler(&handler, "bogus", &[]).await.unwrap_err();
             let msg = format!("{err}");
             assert!(msg.contains("unknown method"), "got: {msg}");
@@ -2037,7 +2045,8 @@ mod tests {
     async fn test_host_listen_vat_passes_runtime() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let runtime_cap = Val::Cap {
                 name: "runtime".into(),
                 schema_cid: "test-runtime-cid".into(),
@@ -2062,7 +2071,8 @@ mod tests {
     async fn test_host_listen_stream_passes_runtime() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let runtime_cap = Val::Cap {
                 name: "runtime".into(),
                 schema_cid: "test-runtime-cid".into(),
@@ -2091,7 +2101,8 @@ mod tests {
     async fn test_host_listen_missing_runtime_errors() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let err = call_handler(&handler, "listen", &[Val::Bytes(b"wasm".to_vec())]).await;
             assert!(err.is_err(), "should require runtime capability");
         })
@@ -2102,7 +2113,8 @@ mod tests {
     async fn test_host_listen_wrong_cap_type_errors() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let bad_cap = Val::Cap {
                 name: "not-runtime".into(),
                 schema_cid: "test-not-runtime-cid".into(),
@@ -2124,7 +2136,8 @@ mod tests {
     async fn test_host_listen_forged_runtime_cap_wrong_inner_type() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let forged_cap = Val::Cap {
                 name: "runtime".into(),
                 schema_cid: "test-runtime-cid".into(),
@@ -2147,7 +2160,8 @@ mod tests {
     async fn test_host_listen_string_instead_of_cap_errors() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let err = call_handler(
                 &handler,
                 "listen",
@@ -2165,7 +2179,8 @@ mod tests {
     async fn test_host_listen_nil_instead_of_cap_errors() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let err = call_handler(
                 &handler,
                 "listen",
@@ -2181,7 +2196,8 @@ mod tests {
     async fn test_host_listen_stream_wrong_cap_type_errors() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let bad_cap = Val::Cap {
                 name: "imposter".into(),
                 schema_cid: "test-imposter-cid".into(),
@@ -2211,7 +2227,8 @@ mod tests {
     async fn test_host_listen_stream_missing_runtime_errors() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             let err = call_handler(
                 &handler,
                 "listen",
@@ -2227,7 +2244,8 @@ mod tests {
     async fn test_host_listen_wrong_arity_returns_error() {
         run_local(async {
             let s = test_session();
-            let handler = make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
             // 0 args after :listen — should error
             assert!(call_handler(&handler, "listen", &[]).await.is_err());
             // 4 args after :listen — should error
@@ -2415,7 +2433,11 @@ mod tests {
                 "host",
                 "test-host-cid",
                 Rc::new(session.host.clone()),
-                make_host_handler(session.host.clone(), session.runtime.clone(), session.http_client.clone()),
+                make_host_handler(
+                    session.host.clone(),
+                    session.runtime.clone(),
+                    session.http_client.clone(),
+                ),
             ),
             (
                 "runtime",

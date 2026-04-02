@@ -208,7 +208,9 @@ impl core::fmt::Debug for Val {
                 f,
                 "Cell({} bytes, schema={}, {} caps)",
                 wasm.len(),
-                schema.as_ref().map_or("none".to_string(), |s| format!("{} bytes", s.len())),
+                schema
+                    .as_ref()
+                    .map_or("none".to_string(), |s| format!("{} bytes", s.len())),
                 caps.len()
             ),
         }
@@ -266,8 +268,16 @@ impl PartialEq for Val {
             (Val::Cap { schema_cid: a, .. }, Val::Cap { schema_cid: b, .. }) => a == b,
             // Cells are equal if wasm and schema match (caps are opaque).
             (
-                Val::Cell { wasm: wa, schema: sa, .. },
-                Val::Cell { wasm: wb, schema: sb, .. },
+                Val::Cell {
+                    wasm: wa,
+                    schema: sa,
+                    ..
+                },
+                Val::Cell {
+                    wasm: wb,
+                    schema: sb,
+                    ..
+                },
             ) => wa == wb && sa == sb,
             // Recur, Effect, and Resume are internal sentinels — never equal.
             (Val::Recur(_), _) | (_, Val::Recur(_)) => false,

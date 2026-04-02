@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- Dual-transport cell registration: one binary can serve both vat RPC (libp2p) and HTTP/WAGI from a single init.d script
+- `with` prelude macro for capability grant bindings in glia scripts
+- `Val::Cell` type: bundles wasm + schema + captured capabilities from lexical scope
+- `cell` builtin: constructs Cell values, scanning the environment for `Val::Cap` bindings
+- `(perform host :http-client)` returns an HttpClient capability to glia scripts
+- `(perform host :listen <cell>)` for VatListener and `(perform host :listen <cell> "/path")` for HttpListener
+- Oracle example HTTP mode: stateless per-request JSON endpoint via `curl`
+
 ## [0.0.2.0] - 2026-04-02
 
 ### Added
