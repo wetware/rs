@@ -34,10 +34,15 @@ pub mod cell_capnp {
     include!(concat!(env!("OUT_DIR"), "/capnp/cell_capnp.rs"));
 }
 
+#[allow(unused_parens, clippy::match_single_binding)]
+pub mod http_capnp {
+    include!(concat!(env!("OUT_DIR"), "/capnp/http_capnp.rs"));
+}
+
 pub mod epoch;
 pub mod membrane;
 pub mod terminal;
 
 pub use epoch::{Epoch, EpochGuard};
 pub use membrane::{membrane_client, GraftBuilder, MembraneServer, NoExtension};
-pub use terminal::TerminalServer;
+pub use terminal::{AllowAllPolicy, AuthPolicy, TerminalServer, VerifyingKeyPolicy};

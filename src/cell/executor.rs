@@ -71,6 +71,7 @@ pub struct CellBuilder {
     content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
     epoch_rx: Option<watch::Receiver<Epoch>>,
     signing_key: Option<Arc<SigningKey>>,
+    route_registry: Option<crate::dispatcher::server::RouteRegistry>,
 }
 
 impl CellBuilder {
@@ -93,7 +94,17 @@ impl CellBuilder {
             content_store: None,
             epoch_rx: None,
             signing_key: None,
+            route_registry: None,
         }
+    }
+
+    /// Set the HTTP route registry for WAGI integration.
+    pub fn with_route_registry(
+        mut self,
+        registry: crate::dispatcher::server::RouteRegistry,
+    ) -> Self {
+        self.route_registry = Some(registry);
+        self
     }
 
     /// Set the loader used to resolve `<image>/bin/main.wasm` to bytes.
@@ -210,6 +221,7 @@ impl CellBuilder {
             }),
             epoch_rx: self.epoch_rx,
             signing_key: self.signing_key,
+            route_registry: self.route_registry,
         }
     }
 }
@@ -236,6 +248,7 @@ pub struct Cell {
     pub content_store: Arc<dyn crate::ipfs::ContentStore>,
     pub epoch_rx: Option<watch::Receiver<Epoch>>,
     pub signing_key: Option<Arc<SigningKey>>,
+    pub route_registry: Option<crate::dispatcher::server::RouteRegistry>,
 }
 
 /// Result of spawning a cell with RPC: exit code, guest membrane, and optional epoch sender.
@@ -289,6 +302,7 @@ impl Cell {
             content_store: _,
             epoch_rx: _,
             signing_key: _,
+            route_registry: _,
         } = self;
 
         crate::config::init_tracing();
@@ -407,6 +421,7 @@ impl Cell {
         // Terminal-gated network accept loop.
         let terminal_signing_key = signing_key.clone();
         let pre_epoch_rx = self.epoch_rx.take();
+        let route_registry = self.route_registry.take();
         let initial_epoch = self.initial_epoch.clone().unwrap_or(Epoch {
             seq: 0,
             head: vec![],
@@ -446,6 +461,7 @@ impl Cell {
             content_store,
             signing_key,
             membrane_stream_control,
+            route_registry,
         );
 
         tracing::debug!("Starting streams RPC server for guest");

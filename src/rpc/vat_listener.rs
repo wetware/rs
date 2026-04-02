@@ -1,19 +1,20 @@
 //! VatListener capability: guest-exported subprotocols via Cap'n Proto RPC.
 //!
 //! The `VatListener` capability lets a guest register a libp2p subprotocol cell
-//! that exports a typed capability. For each incoming connection, the host spawns a
-//! cell process (via the guest-provided `Executor`), captures the cell's
-//! `system::serve()` exported bootstrap capability, and serves it to the
-//! connecting peer via Cap'n Proto RPC bootstrapping.
+//! that exports a typed capability. Two modes are supported:
 //!
-//! **Stdin semantics for RPC cells:** stdin is a shutdown signal channel, not a
-//! data transport. The host never writes bytes — it only closes stdin to signal
-//! the cell to drain gracefully (equivalent to Go's `<-chan struct{}`). All I/O
-//! goes through the WIT data_streams side-channel.
+//! **Spawn mode** (VatHandler::spawn): for each incoming connection, spawn a fresh
+//! cell process via the BoundExecutor, capture its `system::serve()` exported
+//! bootstrap capability, and serve it to the connecting peer via Cap'n Proto RPC.
+//!
+//! **Serve mode** (VatHandler::serve): bootstrap each connection with a persistent
+//! capability — no cell spawning. One capability serves all connections.
+//!
+//! **Stdin semantics for RPC cells (spawn mode):** stdin is a shutdown signal
+//! channel, not a data transport. The host never writes bytes — it only closes
+//! stdin to signal the cell to drain gracefully (equivalent to Go's `<-chan struct{}`).
 //!
 //! This is the capability-mode counterpart of `StreamListener` (byte-stream mode).
-
-use std::sync::Arc;
 
 use capnp::capability::Promise;
 use capnp_rpc::pry;
@@ -50,26 +51,14 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
         pry!(self.guard.check());
 
         let params = pry!(params.get());
-        let executor: system_capnp::executor::Client = pry!(params.get_executor());
-        let wasm: Arc<[u8]> = pry!(params.get_wasm()).into();
 
-        // Decode the Cell type tag from the "cell.capnp" custom section.
-        let schema_bytes = match pry!(super::decode_cell_section(&wasm)) {
-            Some(super::CellType::Capnp(bytes)) => bytes,
-            Some(other) => {
-                return Promise::err(capnp::Error::failed(format!(
-                    "VatListener requires Cell::capnp variant, got {:?}",
-                    std::mem::discriminant(&other)
-                )));
-            }
-            None => {
-                return Promise::err(capnp::Error::failed(
-                    "WASM binary does not contain a 'cell.capnp' custom section \
-                     (VatListener requires Cell::capnp)"
-                        .into(),
-                ));
-            }
-        };
+        // Read schema bytes from the explicit param.
+        let schema_bytes: Vec<u8> = pry!(params.get_schema()).to_vec();
+        if schema_bytes.is_empty() {
+            return Promise::err(capnp::Error::failed(
+                "schema bytes must not be empty".into(),
+            ));
+        }
 
         let protocol_cid = super::schema_cid(&schema_bytes);
         let stream_protocol = pry!(super::schema_protocol(&protocol_cid));
@@ -84,83 +73,123 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
 
         tracing::info!(protocol = %stream_protocol, "Registered vat subprotocol cell");
 
-        // Accept loop: for each incoming connection, spawn a cell and bridge RPC.
-        // Watches the epoch guard so we stop accepting when capabilities are revoked.
-        let mut epoch_rx = self.guard.receiver.clone();
-        let issued_seq = self.guard.issued_seq;
-        tokio::task::spawn_local(async move {
-            loop {
-                tokio::select! {
-                    conn = incoming.next() => {
-                        let Some((peer_id, stream)) = conn else {
-                            tracing::warn!(protocol = %stream_protocol, "Vat accept loop ended unexpectedly");
-                            break;
-                        };
-                        tracing::debug!(
-                            peer = %peer_id,
-                            protocol = %stream_protocol,
-                            "Incoming vat connection"
-                        );
-                        let executor = executor.clone();
-                        let wasm = Arc::clone(&wasm);
-                        let protocol_cid = protocol_cid.clone();
-                        tokio::task::spawn_local(async move {
-                            if let Err(e) =
-                                handle_vat_connection(executor, &wasm, stream, &protocol_cid).await
-                            {
-                                tracing::error!(protocol = protocol_cid, "Vat cell connection error: {e}");
+        // Read the VatHandler union to determine mode.
+        let handler = pry!(params.get_handler());
+        let handler_which = pry!(handler.which());
+
+        match handler_which {
+            system_capnp::vat_handler::Which::Spawn(bound_executor) => {
+                let bound_executor: system_capnp::bound_executor::Client = pry!(bound_executor);
+
+                // Accept loop: for each incoming connection, spawn a cell and bridge RPC.
+                let mut epoch_rx = self.guard.receiver.clone();
+                let issued_seq = self.guard.issued_seq;
+                tokio::task::spawn_local(async move {
+                    loop {
+                        tokio::select! {
+                            conn = incoming.next() => {
+                                let Some((peer_id, stream)) = conn else {
+                                    tracing::warn!(protocol = %stream_protocol, "Vat accept loop ended unexpectedly");
+                                    break;
+                                };
+                                tracing::debug!(
+                                    peer = %peer_id,
+                                    protocol = %stream_protocol,
+                                    "Incoming vat connection (spawn mode)"
+                                );
+                                let bound_executor = bound_executor.clone();
+                                let protocol_cid = protocol_cid.clone();
+                                tokio::task::spawn_local(async move {
+                                    if let Err(e) =
+                                        handle_vat_connection_spawn(bound_executor, stream, &protocol_cid).await
+                                    {
+                                        tracing::error!(protocol = protocol_cid, "Vat cell connection error: {e}");
+                                    }
+                                });
                             }
-                        });
-                    }
-                    _ = epoch_rx.changed() => {
-                        if epoch_rx.borrow().seq != issued_seq {
-                            tracing::warn!(
-                                protocol = %stream_protocol,
-                                "Epoch became stale, closing vat accept loop"
-                            );
-                            break;
+                            _ = epoch_rx.changed() => {
+                                if epoch_rx.borrow().seq != issued_seq {
+                                    tracing::warn!(
+                                        protocol = %stream_protocol,
+                                        "Epoch became stale, closing vat accept loop"
+                                    );
+                                    break;
+                                }
+                            }
                         }
                     }
-                }
+                });
             }
-        });
+            system_capnp::vat_handler::Which::Serve(cap_ptr) => {
+                let bootstrap_cap: capnp::capability::Client = pry!(cap_ptr.get_as_capability());
+
+                // Accept loop: for each incoming connection, bootstrap with the persistent cap.
+                let mut epoch_rx = self.guard.receiver.clone();
+                let issued_seq = self.guard.issued_seq;
+                tokio::task::spawn_local(async move {
+                    loop {
+                        tokio::select! {
+                            conn = incoming.next() => {
+                                let Some((peer_id, stream)) = conn else {
+                                    tracing::warn!(protocol = %stream_protocol, "Vat accept loop ended unexpectedly");
+                                    break;
+                                };
+                                tracing::debug!(
+                                    peer = %peer_id,
+                                    protocol = %stream_protocol,
+                                    "Incoming vat connection (serve mode)"
+                                );
+                                let cap = bootstrap_cap.clone();
+                                let protocol_cid = protocol_cid.clone();
+                                tokio::task::spawn_local(async move {
+                                    if let Err(e) =
+                                        handle_vat_connection_serve(cap, stream, &protocol_cid).await
+                                    {
+                                        tracing::error!(protocol = protocol_cid, "Vat serve connection error: {e}");
+                                    }
+                                });
+                            }
+                            _ = epoch_rx.changed() => {
+                                if epoch_rx.borrow().seq != issued_seq {
+                                    tracing::warn!(
+                                        protocol = %stream_protocol,
+                                        "Epoch became stale, closing vat accept loop"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
 
         Promise::ok(())
     }
 }
 
-/// Spawn a cell process for a single connection and bridge its
+/// Spawn mode: spawn a cell process for a single connection and bridge its
 /// exported bootstrap capability to the connecting peer via Cap'n Proto RPC.
 ///
 /// Architecture (two-RPC-system bridge):
 ///
 /// ```text
-/// Remote peer  ←──[libp2p stream]──→  Host bridge  ←──[WASI bidi]──→  Cell
+/// Remote peer  <──[libp2p stream]──>  Host bridge  <──[WASI bidi]──>  Cell
 ///                  RPC system B                        RPC system A
 ///                  (Side::Server)                      (Side::Server)
 ///                  bootstrap =                         bootstrap = Membrane
-///                  cell_cap ←── captures ←───────── cell exports via serve()
+///                  cell_cap <── captures <───────── cell exports via serve()
 /// ```
 ///
 /// Generic over stream type so integration tests can substitute an in-memory
 /// duplex for the libp2p stream. Production callers pass `libp2p::Stream`.
-pub async fn handle_vat_connection(
-    executor: system_capnp::executor::Client,
-    cell_wasm: &[u8],
+pub async fn handle_vat_connection_spawn(
+    bound_executor: system_capnp::bound_executor::Client,
     stream: impl AsyncRead + AsyncWrite + 'static,
     protocol_cid: &str,
 ) -> Result<(), capnp::Error> {
-    // 1. Spawn cell process via executor.runBytes.
-    let mut req = executor.run_bytes_request();
-    req.get().set_wasm(cell_wasm);
-    req.get().init_args(0);
-    {
-        let mut env = req.get().init_env(3);
-        env.set(0, "WW_CELL=1");
-        env.set(1, format!("WW_PROTOCOL={protocol_cid}"));
-        env.set(2, "PATH=/bin");
-    }
-    let response = req.send().promise.await?;
+    // 1. Spawn cell process via BoundExecutor.spawn().
+    let response = bound_executor.spawn_request().send().promise.await?;
     let process = response.get()?.get_process()?;
 
     // 2. Get stdin handle. For RPC cells, stdin is a shutdown signal:
@@ -232,6 +261,26 @@ pub async fn handle_vat_connection(
             // errors on subsequent calls since the bootstrap cap is dead.
         }
     }
+
+    Ok(())
+}
+
+/// Serve mode: bootstrap each connection with a persistent capability.
+/// No cell spawning — one capability serves all connections.
+///
+/// Generic over stream type for testability.
+pub async fn handle_vat_connection_serve(
+    bootstrap_cap: capnp::capability::Client,
+    stream: impl AsyncRead + AsyncWrite + 'static,
+    protocol_cid: &str,
+) -> Result<(), capnp::Error> {
+    let (reader, writer) = Box::pin(stream).split();
+    let network = VatNetwork::new(reader, writer, Side::Server, Default::default());
+    let peer_rpc = RpcSystem::new(Box::new(network), Some(bootstrap_cap));
+
+    // Drive the RPC system until the peer disconnects.
+    let _ = peer_rpc.await;
+    tracing::debug!(protocol = protocol_cid, "Serve-mode peer disconnected");
 
     Ok(())
 }

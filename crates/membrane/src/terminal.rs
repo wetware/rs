@@ -16,6 +16,51 @@ use capnp_rpc::pry;
 use ed25519_dalek::VerifyingKey;
 use libp2p_core::SignedEnvelope;
 
+/// Policy for Terminal authentication decisions.
+///
+/// Called after signature verification and nonce check succeed.
+/// The policy decides authorization (is this key allowed?),
+/// not authentication (is the signature valid?).
+pub trait AuthPolicy: Send + 'static {
+    /// Check whether the authenticated key is authorized.
+    fn check(&self, verifying_key: &VerifyingKey) -> Result<(), capnp::Error>;
+}
+
+/// Accept only a specific verifying key. This is the pre-refactor behavior.
+pub struct VerifyingKeyPolicy {
+    pub expected: VerifyingKey,
+}
+
+impl AuthPolicy for VerifyingKeyPolicy {
+    fn check(&self, vk: &VerifyingKey) -> Result<(), capnp::Error> {
+        if vk.to_bytes() != self.expected.to_bytes() {
+            return Err(capnp::Error::failed(
+                "login auth failed: signing key does not match expected identity".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Accept any valid signature. Logs the verifying key for audit.
+pub struct AllowAllPolicy;
+
+impl AuthPolicy for AllowAllPolicy {
+    fn check(&self, vk: &VerifyingKey) -> Result<(), capnp::Error> {
+        tracing::info!(
+            peer_key = hex::encode(vk.to_bytes()),
+            "access granted (allow-all policy)"
+        );
+        Ok(())
+    }
+}
+
+/// Convert a libp2p ed25519 public key to an ed25519-dalek VerifyingKey.
+fn to_verifying_key(pk: libp2p_identity::ed25519::PublicKey) -> Result<VerifyingKey, capnp::Error> {
+    VerifyingKey::from_bytes(&pk.to_bytes())
+        .map_err(|_| capnp::Error::failed("login auth failed: invalid ed25519 key bytes".into()))
+}
+
 /// Authentication gate that guards access to a capability via challenge-response.
 ///
 /// Generic over the session type — typically `Terminal<membrane::Owned>`, but
@@ -30,7 +75,7 @@ use libp2p_core::SignedEnvelope;
 ///    and checks the signing key matches the expected `verifying_key`
 /// 5. On success, returns the guarded `session` capability
 pub struct TerminalServer<Session: capnp::traits::Owned> {
-    verifying_key: VerifyingKey,
+    policy: Box<dyn AuthPolicy>,
     session: <Session as capnp::traits::Owned>::Reader<'static>,
     domain: SigningDomain,
 }
@@ -42,6 +87,8 @@ where
 {
     /// Create a new Terminal guarding the given session capability.
     ///
+    /// Uses `VerifyingKeyPolicy` — only the given key is accepted.
+    ///
     /// The `domain` determines the signing context for challenge-response auth.
     /// Different guarded capabilities should use different domains to prevent
     /// cross-protocol signature replay.
@@ -50,8 +97,21 @@ where
         session: <Session as capnp::traits::Owned>::Reader<'static>,
         domain: SigningDomain,
     ) -> Self {
+        Self::with_policy(
+            Box::new(VerifyingKeyPolicy { expected: vk }),
+            session,
+            domain,
+        )
+    }
+
+    /// Create a new Terminal with a custom auth policy.
+    pub fn with_policy(
+        policy: Box<dyn AuthPolicy>,
+        session: <Session as capnp::traits::Owned>::Reader<'static>,
+        domain: SigningDomain,
+    ) -> Self {
         Self {
-            verifying_key: vk,
+            policy,
             session,
             domain,
         }
@@ -74,7 +134,6 @@ where
             Err(_) => return Promise::err(Error::failed("missing signer".into())),
         };
 
-        let vk = self.verifying_key;
         let session = self.session.clone();
         let domain = self.domain.clone();
 
@@ -102,16 +161,13 @@ where
                 return Err(Error::failed("login auth failed: nonce mismatch".into()));
             }
 
-            // Check the signing key matches the expected verifying key.
+            // Extract the ed25519 key and delegate authorization to the policy.
             let envelope_ed = pubkey
                 .clone()
                 .try_into_ed25519()
                 .map_err(|_| Error::failed("login auth failed: not an ed25519 key".into()))?;
-            if envelope_ed.to_bytes() != vk.to_bytes() {
-                return Err(Error::failed(
-                    "login auth failed: signing key does not match expected identity".into(),
-                ));
-            }
+            let vk = to_verifying_key(envelope_ed)?;
+            self.policy.check(&vk)?;
 
             results.get().set_session(session)?;
             Ok(())
@@ -145,10 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_server_verifying_key_is_stored() {
-        let sk = SigningKey::generate(&mut rand::rngs::OsRng);
-        let vk = sk.verifying_key();
-
+    fn terminal_server_constructs_with_custom_policy() {
         let (_tx, rx) = tokio::sync::watch::channel(crate::epoch::Epoch {
             seq: 1,
             head: vec![],
@@ -156,11 +209,10 @@ mod tests {
         });
         let membrane: stem_capnp::membrane::Client = crate::membrane::membrane_client(rx);
 
-        let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(
-            vk,
+        let _terminal = TerminalServer::<stem_capnp::membrane::Owned>::with_policy(
+            Box::new(AllowAllPolicy),
             membrane,
             SigningDomain::terminal_membrane(),
         );
-        assert_eq!(terminal.verifying_key, vk);
     }
 }

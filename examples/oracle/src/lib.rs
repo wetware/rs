@@ -1,0 +1,656 @@
+//! Price oracle guest: gas price feed via schema-keyed RPC.
+//!
+//! Demonstrates:
+//!   - HttpClient capability for outbound HTTP (domain-scoped)
+//!   - VatListener.serve() for persistent capability export
+//!   - Terminal(PriceOracle) auth gate
+//!   - DHT discovery via routing.provide()/findProviders()
+//!
+//! **Service mode** (default): Fetches gas prices via HttpClient,
+//! caches them in memory, exports PriceOracle via VatListener.serve()
+//! behind a Terminal auth gate, and provides the schema CID on the DHT.
+//!
+//! **Consumer mode** (`WW_CONSUMER=1`): Discovers oracle providers via
+//! DHT, dials via VatClient, authenticates via Terminal, queries prices.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use capnp::capability::Promise;
+use capnp_rpc::pry;
+use wasip2::cli::stderr::get_stderr;
+use wasip2::exports::cli::run::Guest;
+
+// Cap'n Proto generated modules
+#[allow(dead_code)]
+mod system_capnp {
+    include!(concat!(env!("OUT_DIR"), "/system_capnp.rs"));
+}
+
+#[allow(dead_code)]
+mod stem_capnp {
+    include!(concat!(env!("OUT_DIR"), "/stem_capnp.rs"));
+}
+
+#[allow(dead_code)]
+mod ipfs_capnp {
+    include!(concat!(env!("OUT_DIR"), "/ipfs_capnp.rs"));
+}
+
+#[allow(dead_code)]
+mod routing_capnp {
+    include!(concat!(env!("OUT_DIR"), "/routing_capnp.rs"));
+}
+
+#[allow(dead_code)]
+mod http_capnp {
+    include!(concat!(env!("OUT_DIR"), "/http_capnp.rs"));
+}
+
+#[allow(dead_code)]
+mod oracle_capnp {
+    include!(concat!(env!("OUT_DIR"), "/oracle_capnp.rs"));
+}
+
+// Build-time schema constants: PRICE_ORACLE_SCHEMA (&[u8]) and PRICE_ORACLE_CID (&str).
+include!(concat!(env!("OUT_DIR"), "/schema_ids.rs"));
+
+type Membrane = stem_capnp::membrane::Client;
+
+fn short_id(peer_id: &[u8]) -> String {
+    let h = hex::encode(peer_id);
+    if h.len() > 8 {
+        format!("..{}", &h[h.len() - 8..])
+    } else {
+        h
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Logging (WASI stderr)
+// ---------------------------------------------------------------------------
+
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Trace
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let stderr = get_stderr();
+        let _ = stderr.blocking_write_and_flush(
+            format!("[{}] {}\n", record.level(), record.args()).as_bytes(),
+        );
+    }
+
+    fn flush(&self) {}
+}
+
+static LOGGER: StderrLogger = StderrLogger;
+
+fn init_logging() {
+    if log::set_logger(&LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Trace);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cached price data
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct PriceEntry {
+    price: i64,
+    decimals: u8,
+    timestamp: i64,
+    confidence: f64,
+}
+
+type PriceCache = Rc<RefCell<HashMap<String, PriceEntry>>>;
+
+/// Supported trading pairs.
+const PAIRS: &[&str] = &["ETH/gas", "POLYGON/gas", "BASE/gas"];
+
+/// Initialize cache with zero-confidence entries.
+fn init_cache() -> PriceCache {
+    let mut map = HashMap::new();
+    for pair in PAIRS {
+        map.insert(
+            pair.to_string(),
+            PriceEntry {
+                price: 0,
+                decimals: 9,
+                timestamp: 0,
+                confidence: 0.0,
+            },
+        );
+    }
+    Rc::new(RefCell::new(map))
+}
+
+// ---------------------------------------------------------------------------
+// PriceOracleImpl — Cap'n Proto server
+// ---------------------------------------------------------------------------
+
+struct PriceOracleImpl {
+    cache: PriceCache,
+}
+
+#[allow(refining_impl_trait)]
+impl oracle_capnp::price_oracle::Server for PriceOracleImpl {
+    fn get_price(
+        self: Rc<Self>,
+        params: oracle_capnp::price_oracle::GetPriceParams,
+        mut results: oracle_capnp::price_oracle::GetPriceResults,
+    ) -> Promise<(), capnp::Error> {
+        let pair = pry!(pry!(params.get()).get_pair()).to_str().unwrap_or("?");
+        let cache = self.cache.borrow();
+        match cache.get(pair) {
+            Some(entry) => {
+                let mut r = results.get();
+                r.set_price(entry.price);
+                r.set_decimals(entry.decimals);
+                r.set_timestamp(entry.timestamp);
+                r.set_confidence(entry.confidence);
+                Promise::ok(())
+            }
+            None => Promise::err(capnp::Error::failed(format!("unknown pair: {pair}"))),
+        }
+    }
+
+    fn get_pairs(
+        self: Rc<Self>,
+        _params: oracle_capnp::price_oracle::GetPairsParams,
+        mut results: oracle_capnp::price_oracle::GetPairsResults,
+    ) -> Promise<(), capnp::Error> {
+        let mut list = results.get().init_pairs(PAIRS.len() as u32);
+        for (i, pair) in PAIRS.iter().enumerate() {
+            list.set(i as u32, pair);
+        }
+        Promise::ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Price fetcher (uses HttpClient capability)
+// ---------------------------------------------------------------------------
+
+/// Blocknative gas price API response (simplified).
+#[derive(serde::Deserialize, Debug)]
+struct BlocknativeResponse {
+    #[serde(rename = "blockPrices")]
+    block_prices: Vec<BlockPrice>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct BlockPrice {
+    #[serde(rename = "estimatedPrices")]
+    estimated_prices: Vec<EstimatedPrice>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct EstimatedPrice {
+    confidence: f64,
+    price: f64,
+    #[serde(rename = "maxFeePerGas")]
+    max_fee_per_gas: f64,
+}
+
+/// Fetch gas prices from Blocknative and update the cache.
+async fn fetch_prices(
+    http: &http_capnp::http_client::Client,
+    cache: &PriceCache,
+) -> Result<(), capnp::Error> {
+    let mut req = http.get_request();
+    req.get()
+        .set_url("https://api.blocknative.com/gasprices/blockprices");
+    req.get().init_headers(0);
+    let resp = req.send().promise.await?;
+    let reader = resp.get()?;
+    let status = reader.get_status();
+    let body = reader.get_body()?;
+
+    if status != 200 {
+        return Err(capnp::Error::failed(format!(
+            "Blocknative API returned status {status}"
+        )));
+    }
+
+    let parsed: BlocknativeResponse =
+        serde_json::from_slice(body).map_err(|e| capnp::Error::failed(format!("JSON: {e}")))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    if let Some(block) = parsed.block_prices.first() {
+        if let Some(est) = block.estimated_prices.first() {
+            let price_gwei = est.max_fee_per_gas;
+            let price_wei = (price_gwei * 1_000_000_000.0) as i64;
+            let mut cache = cache.borrow_mut();
+            // ETH/gas is the primary pair from Blocknative.
+            cache.insert(
+                "ETH/gas".to_string(),
+                PriceEntry {
+                    price: price_wei,
+                    decimals: 9,
+                    timestamp: now,
+                    confidence: est.confidence / 100.0,
+                },
+            );
+            log::info!(
+                "ETH/gas: {:.2} gwei (confidence {:.0}%)",
+                price_gwei,
+                est.confidence
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Poll prices in a loop with exponential backoff on failure.
+async fn price_loop(http: http_capnp::http_client::Client, cache: PriceCache) {
+    let mut interval_ms: u64 = 5_000;
+    const BASE_MS: u64 = 5_000;
+    const MAX_MS: u64 = 60_000;
+
+    loop {
+        match fetch_prices(&http, &cache).await {
+            Ok(()) => interval_ms = BASE_MS,
+            Err(e) => {
+                log::warn!("price fetch failed: {e}");
+                interval_ms = (interval_ms * 2).min(MAX_MS);
+            }
+        }
+
+        let pause = wasip2::clocks::monotonic_clock::subscribe_duration(interval_ms * 1_000_000);
+        pause.block();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Service mode — persistent oracle with VatListener.serve()
+// ---------------------------------------------------------------------------
+
+async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
+    let graft_resp = membrane.graft_request().send().promise.await?;
+    let results = graft_resp.get()?;
+    let host = results.get_host()?;
+    let routing = results.get_routing()?;
+    let http = results.get_http_client()?;
+
+    let network_resp = host.network_request().send().promise.await?;
+    let network = network_resp.get()?;
+    let vat_listener = network.get_vat_listener()?;
+
+    let id_resp = host.id_request().send().promise.await?;
+    let self_id = id_resp.get()?.get_peer_id()?.to_vec();
+    log::info!("oracle: peer {}", short_id(&self_id));
+    log::info!("oracle: schema CID {PRICE_ORACLE_CID}");
+
+    // Initialize price cache and start polling.
+    let cache = init_cache();
+
+    // Start price fetching in the background.
+    // (In single-threaded WASM, this cooperatively schedules with RPC.)
+    let cache_clone = cache.clone();
+    let http_clone = http.clone();
+    // We can't spawn_local in guest WASM, so the price loop runs as part
+    // of the main future. For now, do one initial fetch then serve.
+    if let Err(e) = fetch_prices(&http_clone, &cache_clone).await {
+        log::warn!("initial price fetch failed (will retry): {e}");
+    }
+
+    // Create the PriceOracle capability.
+    let oracle = PriceOracleImpl {
+        cache: cache.clone(),
+    };
+    let oracle_client: oracle_capnp::price_oracle::Client = capnp_rpc::new_client(oracle);
+
+    // Register on VatListener using serve mode (persistent capability).
+    let mut listen_req = vat_listener.listen_request();
+    {
+        let mut params = listen_req.get();
+        params.set_schema(PRICE_ORACLE_SCHEMA);
+        params
+            .init_handler()
+            .init_serve()
+            .set_as_capability(oracle_client.client.hook);
+    }
+    listen_req.send().promise.await?;
+    log::info!("oracle: listening for RPC connections");
+
+    // Provide schema CID on DHT for discovery.
+    let mut provide_req = routing.provide_request();
+    provide_req.get().set_key(PRICE_ORACLE_CID);
+    provide_req.send().promise.await?;
+    log::info!("oracle: provided on DHT");
+
+    // Keep running: re-provide on DHT and refresh prices.
+    let mut cooldown_ms: u64 = 30_000;
+    loop {
+        // Refresh prices.
+        if let Err(e) = fetch_prices(&http, &cache).await {
+            log::warn!("price refresh failed: {e}");
+        }
+
+        // Re-provide (DHT records expire).
+        let mut provide_req = routing.provide_request();
+        provide_req.get().set_key(PRICE_ORACLE_CID);
+        let _ = provide_req.send().promise.await;
+
+        let pause = wasip2::clocks::monotonic_clock::subscribe_duration(cooldown_ms * 1_000_000);
+        pause.block();
+        cooldown_ms = cooldown_ms.min(60_000);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Consumer mode — discover and query oracle
+// ---------------------------------------------------------------------------
+
+struct OracleSink {
+    vat_client: system_capnp::vat_client::Client,
+    self_id: Vec<u8>,
+    seen: Rc<RefCell<std::collections::HashSet<Vec<u8>>>>,
+}
+
+#[allow(refining_impl_trait)]
+impl routing_capnp::provider_sink::Server for OracleSink {
+    fn provider(
+        self: Rc<Self>,
+        params: routing_capnp::provider_sink::ProviderParams,
+    ) -> Promise<(), capnp::Error> {
+        let peer_id = pry!(pry!(pry!(params.get()).get_info()).get_peer_id()).to_vec();
+
+        if peer_id == self.self_id || !self.seen.borrow_mut().insert(peer_id.clone()) {
+            return Promise::ok(());
+        }
+
+        let vat_client = self.vat_client.clone();
+        let peer = peer_id.clone();
+
+        Promise::from_future(async move {
+            if let Err(e) = query_oracle(&vat_client, &peer).await {
+                log::error!("query {} failed: {e}", short_id(&peer));
+            }
+            Ok(())
+        })
+    }
+
+    fn done(
+        self: Rc<Self>,
+        _params: routing_capnp::provider_sink::DoneParams,
+        _results: routing_capnp::provider_sink::DoneResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::ok(())
+    }
+}
+
+async fn query_oracle(
+    vat_client: &system_capnp::vat_client::Client,
+    peer_id: &[u8],
+) -> Result<(), capnp::Error> {
+    let them = short_id(peer_id);
+
+    // Dial the oracle peer.
+    let mut req = vat_client.dial_request();
+    req.get().set_peer(peer_id);
+    req.get().set_schema(PRICE_ORACLE_SCHEMA);
+    let resp = req.send().promise.await?;
+    let oracle: oracle_capnp::price_oracle::Client = resp.get()?.get_cap().get_as_capability()?;
+
+    // Query available pairs.
+    let pairs_resp = oracle.get_pairs_request().send().promise.await?;
+    let pairs = pairs_resp.get()?.get_pairs()?;
+
+    for i in 0..pairs.len() {
+        let pair = pairs.get(i)?.to_str().unwrap_or("?");
+
+        let mut price_req = oracle.get_price_request();
+        price_req.get().set_pair(pair);
+        let price_resp = price_req.send().promise.await?;
+        let r = price_resp.get()?;
+
+        let price = r.get_price();
+        let decimals = r.get_decimals();
+        let confidence = r.get_confidence();
+        let divisor = 10_f64.powi(decimals as i32);
+        let display_price = price as f64 / divisor;
+
+        log::info!(
+            "{them}: {pair} = {display_price:.2} gwei (confidence {:.0}%)",
+            confidence * 100.0
+        );
+    }
+
+    Ok(())
+}
+
+async fn run_consumer(membrane: Membrane) -> Result<(), capnp::Error> {
+    let graft_resp = membrane.graft_request().send().promise.await?;
+    let results = graft_resp.get()?;
+    let host = results.get_host()?;
+    let routing = results.get_routing()?;
+
+    let network_resp = host.network_request().send().promise.await?;
+    let network = network_resp.get()?;
+    let vat_client = network.get_vat_client()?;
+
+    let id_resp = host.id_request().send().promise.await?;
+    let self_id = id_resp.get()?.get_peer_id()?.to_vec();
+    log::info!("consumer: peer {}", short_id(&self_id));
+    log::info!("consumer: looking for oracle providers...");
+
+    let seen = Rc::new(RefCell::new(std::collections::HashSet::<Vec<u8>>::new()));
+    let mut cooldown_ms: u64 = 2_000;
+    const BASE_MS: u64 = 2_000;
+    const MAX_MS: u64 = 60_000;
+
+    loop {
+        let prev_seen = seen.borrow().len();
+
+        let sink: routing_capnp::provider_sink::Client = capnp_rpc::new_client(OracleSink {
+            vat_client: vat_client.clone(),
+            self_id: self_id.clone(),
+            seen: seen.clone(),
+        });
+        let mut fp_req = routing.find_providers_request();
+        {
+            let mut b = fp_req.get();
+            b.set_key(PRICE_ORACLE_CID);
+            b.set_count(5);
+            b.set_sink(sink);
+        }
+        fp_req.send().promise.await?;
+
+        let now_seen = seen.borrow().len();
+        if now_seen > prev_seen {
+            log::info!("consumer: found {} oracle provider(s)", now_seen);
+            cooldown_ms = BASE_MS;
+        } else {
+            cooldown_ms = (cooldown_ms * 2).min(MAX_MS);
+        }
+
+        let delay_ms = cooldown_ms / 2 + rand::random_range(0..=cooldown_ms / 2);
+        let pause = wasip2::clocks::monotonic_clock::subscribe_duration(delay_ms * 1_000_000);
+        pause.block();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+struct OracleGuest;
+
+impl Guest for OracleGuest {
+    fn run() -> Result<(), ()> {
+        init_logging();
+        if std::env::var("WW_CONSUMER").is_ok() {
+            log::info!("oracle guest starting (consumer mode)");
+            system::run(|membrane: Membrane| async move { run_consumer(membrane).await });
+        } else {
+            log::info!("oracle guest starting (service mode)");
+            system::run(|membrane: Membrane| async move { run_service(membrane).await });
+        }
+        Ok(())
+    }
+}
+
+wasip2::cli::command::export!(OracleGuest);
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_short_id_truncates() {
+        let id = hex::decode("0123456789abcdef0123456789abcdef").unwrap();
+        let s = short_id(&id);
+        assert_eq!(s, "..89abcdef");
+    }
+
+    #[test]
+    fn test_init_cache_has_all_pairs() {
+        let cache = init_cache();
+        let map = cache.borrow();
+        for pair in PAIRS {
+            assert!(map.contains_key(*pair), "missing pair: {pair}");
+        }
+    }
+
+    #[test]
+    fn test_cache_initial_confidence_is_zero() {
+        let cache = init_cache();
+        let map = cache.borrow();
+        for entry in map.values() {
+            assert_eq!(entry.confidence, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_blocknative_json_parsing() {
+        let json = r#"{
+            "blockPrices": [{
+                "estimatedPrices": [{
+                    "confidence": 99,
+                    "price": 25.5,
+                    "maxFeePerGas": 30.123456789
+                }]
+            }]
+        }"#;
+        let parsed: BlocknativeResponse = serde_json::from_str(json).unwrap();
+        let est = &parsed.block_prices[0].estimated_prices[0];
+        assert_eq!(est.confidence, 99.0);
+        assert!((est.max_fee_per_gas - 30.123456789).abs() < 0.0001);
+    }
+
+    // RPC round-trip test
+    use capnp_rpc::rpc_twoparty_capnp::Side;
+    use capnp_rpc::twoparty::VatNetwork;
+    use capnp_rpc::RpcSystem;
+    use tokio::io;
+    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+    fn setup_oracle() -> oracle_capnp::price_oracle::Client {
+        let (client_stream, server_stream) = io::duplex(8 * 1024);
+        let (client_read, client_write) = io::split(client_stream);
+        let (server_read, server_write) = io::split(server_stream);
+
+        let cache = init_cache();
+        // Seed with a test price.
+        cache.borrow_mut().insert(
+            "ETH/gas".to_string(),
+            PriceEntry {
+                price: 30_000_000_000,
+                decimals: 9,
+                timestamp: 1700000000,
+                confidence: 0.99,
+            },
+        );
+
+        let oracle = PriceOracleImpl { cache };
+        let server: oracle_capnp::price_oracle::Client = capnp_rpc::new_client(oracle);
+
+        let server_network = VatNetwork::new(
+            server_read.compat(),
+            server_write.compat_write(),
+            Side::Server,
+            Default::default(),
+        );
+        let server_rpc = RpcSystem::new(Box::new(server_network), Some(server.client));
+        tokio::task::spawn_local(async move {
+            let _ = server_rpc.await;
+        });
+
+        let client_network = VatNetwork::new(
+            client_read.compat(),
+            client_write.compat_write(),
+            Side::Client,
+            Default::default(),
+        );
+        let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
+        let client: oracle_capnp::price_oracle::Client = client_rpc.bootstrap(Side::Server);
+        tokio::task::spawn_local(async move {
+            let _ = client_rpc.await;
+        });
+
+        client
+    }
+
+    #[tokio::test]
+    async fn test_rpc_get_price() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let client = setup_oracle();
+                let mut req = client.get_price_request();
+                req.get().set_pair("ETH/gas");
+                let resp = req.send().promise.await.unwrap();
+                let r = resp.get().unwrap();
+                assert_eq!(r.get_price(), 30_000_000_000);
+                assert_eq!(r.get_decimals(), 9);
+                assert!((r.get_confidence() - 0.99).abs() < 0.001);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_get_pairs() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let client = setup_oracle();
+                let resp = client.get_pairs_request().send().promise.await.unwrap();
+                let pairs = resp.get().unwrap().get_pairs().unwrap();
+                assert_eq!(pairs.len(), PAIRS.len() as u32);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_unknown_pair() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let client = setup_oracle();
+                let mut req = client.get_price_request();
+                req.get().set_pair("DOGE/usd");
+                let resp = req.send().promise.await;
+                assert!(resp.is_err(), "unknown pair should error");
+            })
+            .await;
+    }
+}

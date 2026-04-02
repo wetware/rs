@@ -16,6 +16,7 @@ members = [
 exclude = [
     "examples/echo",     # WASI guest — targets wasm32-wasip2, not host
     "examples/counter",  # WASI guest — targets wasm32-wasip2, not host
+    "examples/oracle",   # WASI guest — targets wasm32-wasip2, not host
 ]
 
 [package]
@@ -69,6 +70,7 @@ blake3 = "1"
 cid = "0.11"
 hex = "0.4"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+axum = "0.8"
 dirs = "5"
 cap-std = "3.4"
 wasmparser = "0.243"

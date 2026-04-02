@@ -11,6 +11,7 @@ capnpc = "0.23.3"
 capnp = "0.23.2"
 capnp-rpc = "0.23.0"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+hex = "0.4"
 libp2p-core = "0.43"
 libp2p-identity = { version = "0.2", features = ["ed25519"] }
 rand = "0.8"

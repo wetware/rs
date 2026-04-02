@@ -58,6 +58,40 @@ only do what the capabilities it holds allow. If you don't hand it the
 `Executor` capability, it can't spawn children. If you don't hand it a
 `connect` method, it can't dial peers.
 
+## Comparison: Cloudflare Workers
+
+Cloudflare Workers is the closest prior art for sandboxed, instruction-metered
+guest execution at the edge.  The table below maps the two models side by side.
+
+| Dimension | Cloudflare Workers | Wetware |
+|---|---|---|
+| Isolation unit | V8 Isolate | WASM Component (Cell) |
+| Runtime | JavaScript / V8 | WASM / Wasmtime |
+| OS threads | Shared pool across isolates | Dedicated OS thread per executor worker |
+| Task scheduling | V8 event loop per isolate | `tokio::task::spawn_local` on a `LocalSet` per worker |
+| Multiplexing | Many isolates per thread (V8-managed) | M:N — many cells per worker (AIMD fuel scheduler) |
+| Preemption mechanism | V8 interrupt API (time-based) | Wasmtime fuel counter (instruction-based, deterministic) |
+| CPU-bound guest behavior | Isolate interrupted after CPU time budget | Cell yields every `YIELD_INTERVAL` instructions via `fuel_async_yield_interval` |
+| Cold start | ~0ms (isolate reuse within process) | Per-cell WASM compilation; `Engine` is shared across cells |
+| Authority model | Ambient — `fetch`, KV, R2 via binding config | Zero ambient — all capabilities granted via `membrane.graft()` |
+| Inter-cell communication | Service bindings (HTTP), Durable Object RPC | Cap'n Proto RPC over in-process or libp2p transport |
+| Shared state | Durable Objects (single-writer actor) | Capabilities are the unit of shared state; epoch lifecycle for revocation |
+| Memory isolation | Separate V8 heap per isolate | Separate Wasmtime `Store` per cell |
+| Send-safety | N/A (JavaScript) | `Store` is `!Send` — cells are pinned to their worker's `LocalSet` |
+
+The sharpest differences:
+
+**Preemption.** Workers uses time-based interrupts external to V8.  Wetware's
+preemption is instruction-count-based and baked into Wasmtime — the same binary
+consumes the same fuel regardless of host CPU speed, making scheduling behavior
+deterministic and independently verifiable.
+
+**Authority.** Workers still grants ambient authority: you configure which
+services a Worker can reach, but inside those bounds it calls `fetch()` freely.
+Wetware has no ambient authority at all.  Every capability is an unforgeable
+object reference.  If the `Executor` capability is not in scope, a cell cannot
+spawn children — there is no configuration flag to bypass this.
+
 ## Layers
 
 ```

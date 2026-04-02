@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.0.2.0] - 2026-04-01
+
+### Added
+- Price oracle demo — end-to-end multi-agent example with capability-scoped HTTP, Cap'n Proto RPC, and DHT discovery (#171)
+  - `HttpClient` capability for domain-scoped outbound HTTP
+  - `WagiService` — axum HTTP server on dedicated OS thread with channel-based CGI dispatch
+  - `VatListener.serve()` for persistent capability export (no per-connection cell spawning)
+  - `VatHandler` union: `spawn` (BoundExecutor) vs `serve` (AnyPointer) in system.capnp
+  - `HttpListener` with `RouteRegistry` bridging axum threads to Cap'n Proto event loops
+  - `--http-listen` CLI flag for enabling the HTTP server
+  - Oracle example guest: dual-mode WASM binary (service + consumer), Blocknative gas price feed, schema CID pipeline, 7 unit tests
+  - `AuthPolicy` trait stub for pluggable authentication (Terminal challenge-response)
+
 ## [0.0.1.1] - 2026-04-01
 
 ### Changed

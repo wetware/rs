@@ -14,10 +14,11 @@ fn main() {
         .file(capnp_dir.join("routing.capnp"))
         .file(capnp_dir.join("stem.capnp"))
         .file(capnp_dir.join("cell.capnp"))
+        .file(capnp_dir.join("http.capnp"))
         .run()
         .expect("capnp compile schemas");
 
-    for schema in &["system", "ipfs", "routing", "stem", "cell"] {
+    for schema in &["system", "ipfs", "routing", "stem", "cell", "http"] {
         println!(
             "cargo:rerun-if-changed={}",
             capnp_dir.join(format!("{schema}.capnp")).display()

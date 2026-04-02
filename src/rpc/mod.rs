@@ -4,6 +4,8 @@
 //! streams (no TCP listener). See [`build_peer_rpc`] for the entry point.
 #![cfg(not(target_arch = "wasm32"))]
 
+pub mod http_client;
+pub mod http_listener;
 pub mod membrane;
 pub mod routing;
 pub mod stream_dialer;
@@ -54,6 +56,8 @@ pub(crate) fn schema_protocol(cid: &str) -> Result<StreamProtocol, capnp::Error>
 /// Extract a custom section from a WASM binary (component or module).
 ///
 /// Returns the section data if found, or `None` if the section doesn't exist.
+/// Used by tooling (schema-inject, `ww inspect`). Listeners use explicit params.
+#[allow(dead_code)]
 pub(crate) fn extract_wasm_custom_section<'a>(
     wasm_bytes: &'a [u8],
     section_name: &str,
@@ -93,6 +97,8 @@ pub(crate) enum CellType {
 /// Returns `Ok(Some(CellType))` if the section is present and valid,
 /// `Ok(None)` if the section is absent (pid0 mode), or `Err` if the
 /// section data is malformed.
+/// Used by tooling. Listeners use explicit params; custom sections are optional hints.
+#[allow(dead_code)]
 pub(crate) fn decode_cell_section(wasm_bytes: &[u8]) -> Result<Option<CellType>, capnp::Error> {
     let section_data = match extract_wasm_custom_section(wasm_bytes, "cell.capnp")? {
         Some(data) if !data.is_empty() => data,
@@ -464,6 +470,7 @@ pub struct HostImpl {
     wasm_debug: bool,
     guard: Option<EpochGuard>,
     stream_control: Option<libp2p_stream::Control>,
+    route_registry: Option<crate::dispatcher::server::RouteRegistry>,
 }
 
 impl HostImpl {
@@ -480,7 +487,17 @@ impl HostImpl {
             wasm_debug,
             guard,
             stream_control,
+            route_registry: None,
         }
+    }
+
+    /// Set the HTTP route registry for WAGI service integration.
+    pub fn with_route_registry(
+        mut self,
+        registry: crate::dispatcher::server::RouteRegistry,
+    ) -> Self {
+        self.route_registry = Some(registry);
+        self
     }
 
     fn check_epoch(&self) -> Result<(), capnp::Error> {
@@ -593,12 +610,20 @@ impl system_capnp::host::Server for HostImpl {
         let vat_listener: system_capnp::vat_listener::Client = capnp_rpc::new_client(
             vat_listener::VatListenerImpl::new(stream_control.clone(), guard.clone()),
         );
-        let vat_client: system_capnp::vat_client::Client =
-            capnp_rpc::new_client(vat_client::VatClientImpl::new(stream_control, guard));
+        let vat_client: system_capnp::vat_client::Client = capnp_rpc::new_client(
+            vat_client::VatClientImpl::new(stream_control, guard.clone()),
+        );
+        let registry = self
+            .route_registry
+            .clone()
+            .unwrap_or_else(crate::dispatcher::server::new_registry);
+        let http_listener: system_capnp::http_listener::Client =
+            capnp_rpc::new_client(http_listener::HttpListenerImpl::new(guard, registry));
         results.get().set_stream_listener(stream_listener);
         results.get().set_stream_dialer(stream_dialer);
         results.get().set_vat_listener(vat_listener);
         results.get().set_vat_client(vat_client);
+        results.get().set_http_listener(http_listener);
         Promise::ok(())
     }
 }
@@ -814,6 +839,7 @@ impl system_capnp::executor::Server for ExecutorImpl {
                     ic,
                     signing_key,
                     sc,
+                    None, // route_registry: child cells don't get HTTP routes
                 );
                 (rpc, Some(guest.client))
             } else {
@@ -988,6 +1014,7 @@ impl system_capnp::bound_executor::Server for BoundExecutorImpl {
                     ic,
                     signing_key,
                     sc,
+                    None, // route_registry: spawned cells don't get HTTP routes
                 );
                 bootstrap_cap = Some(guest.client);
                 rpc
@@ -1965,7 +1992,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_vat_listener_missing_schema_section_errors() {
+    async fn test_vat_listener_empty_schema_param_errors() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -1978,45 +2005,27 @@ mod tests {
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
 
-                // Cell WASM without schema.capnp section
-                let cell = wasm_without_custom_section();
+                // Bind an executor to get a BoundExecutor for the handler.
+                let mut bind_req = executor.bind_request();
+                bind_req.get().set_wasm(&wasm_without_custom_section());
+                let bind_resp = bind_req.send().promise.await.unwrap();
+                let bound = bind_resp.get().unwrap().get_bound().unwrap();
 
                 let mut req = listener.listen_request();
-                req.get().set_executor(executor);
-                req.get().set_wasm(&cell);
+                {
+                    let mut handler = req.get().init_handler();
+                    handler.set_spawn(bound);
+                }
+                req.get().set_schema(&[]); // empty schema
 
                 let result = req.send().promise.await;
-                assert!(result.is_err(), "missing schema section should error");
+                assert!(result.is_err(), "empty schema param should error");
             })
             .await;
     }
 
-    #[tokio::test]
-    async fn test_vat_listener_empty_schema_section_errors() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let (_tx, guard) = test_epoch_guard(1);
-                let listener_impl =
-                    vat_listener::VatListenerImpl::new(dummy_stream_control(), guard);
-                let listener: system_capnp::vat_listener::Client =
-                    capnp_rpc::new_client(listener_impl);
-
-                let (host, _server, _rx) = setup_rpc();
-                let executor = host.executor_request().send().pipeline.get_executor();
-
-                // Cell WASM with empty schema.capnp section
-                let cell = wasm_with_custom_section("schema.capnp", &[]);
-
-                let mut req = listener.listen_request();
-                req.get().set_executor(executor);
-                req.get().set_wasm(&cell);
-
-                let result = req.send().promise.await;
-                assert!(result.is_err(), "empty schema section should error");
-            })
-            .await;
-    }
+    // (test_vat_listener_empty_schema_section_errors removed — schema is now
+    // an explicit param, tested by test_vat_listener_empty_schema_param_errors)
 
     #[tokio::test]
     async fn test_vat_client_empty_schema_errors() {
@@ -2081,10 +2090,18 @@ mod tests {
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
 
-                let cell = wasm_with_custom_section("schema.capnp", b"some schema");
+                // Bind an executor to get a BoundExecutor for the handler.
+                let mut bind_req = executor.bind_request();
+                bind_req.get().set_wasm(&wasm_without_custom_section());
+                let bind_resp = bind_req.send().promise.await.unwrap();
+                let bound = bind_resp.get().unwrap().get_bound().unwrap();
+
                 let mut req = listener.listen_request();
-                req.get().set_executor(executor);
-                req.get().set_wasm(&cell);
+                {
+                    let mut handler = req.get().init_handler();
+                    handler.set_spawn(bound);
+                }
+                req.get().set_schema(b"some schema");
 
                 let result = req.send().promise.await;
                 assert!(result.is_err(), "stale epoch should error");
@@ -2142,13 +2159,22 @@ mod tests {
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
 
-                // Both cells have the same schema → same protocol CID.
-                let cell = wasm_with_cell_capnp_section(0xdeadbeef12345678);
+                // Bind an executor to get a BoundExecutor for the handler.
+                let mut bind_req = executor.bind_request();
+                bind_req.get().set_wasm(&wasm_without_custom_section());
+                let bind_resp = bind_req.send().promise.await.unwrap();
+                let bound = bind_resp.get().unwrap().get_bound().unwrap();
+
+                // Both registrations use the same schema → same protocol CID.
+                let schema = b"some schema bytes";
 
                 // First registration should succeed.
                 let mut req1 = client1.listen_request();
-                req1.get().set_executor(executor.clone());
-                req1.get().set_wasm(&cell);
+                {
+                    let mut handler = req1.get().init_handler();
+                    handler.set_spawn(bound.clone());
+                }
+                req1.get().set_schema(schema);
                 req1.send()
                     .promise
                     .await
@@ -2156,8 +2182,11 @@ mod tests {
 
                 // Second registration with same schema should fail (same protocol CID).
                 let mut req2 = client2.listen_request();
-                req2.get().set_executor(executor);
-                req2.get().set_wasm(&cell);
+                {
+                    let mut handler = req2.get().init_handler();
+                    handler.set_spawn(bound);
+                }
+                req2.get().set_schema(schema);
                 let result = req2.send().promise.await;
                 assert!(
                     result.is_err(),
@@ -2270,11 +2299,10 @@ mod tests {
         assert_eq!(schema, b"schema");
     }
 
-    /// End-to-end: build a WASM with an embedded schema section, hand it to
-    /// a VatListener, and verify it successfully registers a protocol.
-    /// This tests the full path from injection through to protocol registration.
+    /// End-to-end: pass schema bytes and a BoundExecutor to VatListener,
+    /// and verify it successfully registers a protocol.
     #[tokio::test]
-    async fn test_vat_listener_accepts_wasm_with_schema_section() {
+    async fn test_vat_listener_accepts_valid_schema_and_handler() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -2287,17 +2315,23 @@ mod tests {
                 let (host, _server, _rx) = setup_rpc();
                 let executor = host.executor_request().send().pipeline.get_executor();
 
-                // Build a WASM with a valid Cell::capnp section.
-                let cell = wasm_with_cell_capnp_section(0xe3c2dfb1868218d1);
+                // Bind an executor to get a BoundExecutor for the handler.
+                let mut bind_req = executor.bind_request();
+                bind_req.get().set_wasm(&wasm_without_custom_section());
+                let bind_resp = bind_req.send().promise.await.unwrap();
+                let bound = bind_resp.get().unwrap().get_bound().unwrap();
 
                 let mut req = listener.listen_request();
-                req.get().set_executor(executor);
-                req.get().set_wasm(&cell);
+                {
+                    let mut handler = req.get().init_handler();
+                    handler.set_spawn(bound);
+                }
+                req.get().set_schema(b"valid schema bytes");
 
                 let result = req.send().promise.await;
                 assert!(
                     result.is_ok(),
-                    "WASM with valid schema section should be accepted: {:?}",
+                    "valid schema + handler should be accepted: {:?}",
                     result.err()
                 );
             })
@@ -2629,126 +2663,10 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn test_vat_listener_rejects_raw_variant() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let (_tx, guard) = test_epoch_guard(1);
-                let listener_impl =
-                    vat_listener::VatListenerImpl::new(dummy_stream_control(), guard);
-                let listener: system_capnp::vat_listener::Client =
-                    capnp_rpc::new_client(listener_impl);
+    // (test_vat_listener_rejects_raw_variant removed — VatListener no longer
+    // inspects WASM custom sections; schema is an explicit param)
 
-                let (host, _server, _rx) = setup_rpc();
-                let executor = host.executor_request().send().pipeline.get_executor();
-
-                // Cell::raw WASM passed to VatListener (expects Cell::capnp)
-                let cell = wasm_with_cell_raw_section("echo");
-
-                let mut req = listener.listen_request();
-                req.get().set_executor(executor);
-                req.get().set_wasm(&cell);
-
-                let result = req.send().promise.await;
-                assert!(
-                    result.is_err(),
-                    "VatListener should reject Cell::raw variant"
-                );
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn test_stream_listener_rejects_capnp_variant() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let (_tx, guard) = test_epoch_guard(1);
-                let listener_impl =
-                    stream_listener::StreamListenerImpl::new(dummy_stream_control(), guard);
-                let listener: system_capnp::stream_listener::Client =
-                    capnp_rpc::new_client(listener_impl);
-
-                let (host, _server, _rx) = setup_rpc();
-                let executor = host.executor_request().send().pipeline.get_executor();
-
-                // Cell::capnp WASM passed to StreamListener (expects Cell::raw)
-                let cell = wasm_with_cell_capnp_section(0xdeadbeef12345678);
-
-                let mut req = listener.listen_request();
-                req.get().set_executor(executor);
-                req.get().set_protocol("echo");
-                req.get().set_wasm(&cell);
-
-                let result = req.send().promise.await;
-                assert!(
-                    result.is_err(),
-                    "StreamListener should reject Cell::capnp variant"
-                );
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn test_stream_listener_rejects_absent_section() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let (_tx, guard) = test_epoch_guard(1);
-                let listener_impl =
-                    stream_listener::StreamListenerImpl::new(dummy_stream_control(), guard);
-                let listener: system_capnp::stream_listener::Client =
-                    capnp_rpc::new_client(listener_impl);
-
-                let (host, _server, _rx) = setup_rpc();
-                let executor = host.executor_request().send().pipeline.get_executor();
-
-                // WASM without cell.capnp section
-                let cell = wasm_without_custom_section();
-
-                let mut req = listener.listen_request();
-                req.get().set_executor(executor);
-                req.get().set_protocol("echo");
-                req.get().set_wasm(&cell);
-
-                let result = req.send().promise.await;
-                assert!(
-                    result.is_err(),
-                    "StreamListener should reject WASM without cell.capnp section"
-                );
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn test_stream_listener_rejects_protocol_mismatch() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let (_tx, guard) = test_epoch_guard(1);
-                let listener_impl =
-                    stream_listener::StreamListenerImpl::new(dummy_stream_control(), guard);
-                let listener: system_capnp::stream_listener::Client =
-                    capnp_rpc::new_client(listener_impl);
-
-                let (host, _server, _rx) = setup_rpc();
-                let executor = host.executor_request().send().pipeline.get_executor();
-
-                // Cell::raw("echo") but listen protocol is "bitswap"
-                let cell = wasm_with_cell_raw_section("echo");
-
-                let mut req = listener.listen_request();
-                req.get().set_executor(executor);
-                req.get().set_protocol("bitswap");
-                req.get().set_wasm(&cell);
-
-                let result = req.send().promise.await;
-                assert!(
-                    result.is_err(),
-                    "StreamListener should reject protocol mismatch"
-                );
-            })
-            .await;
-    }
+    // (test_stream_listener_rejects_capnp_variant, test_stream_listener_rejects_absent_section,
+    // and test_stream_listener_rejects_protocol_mismatch removed — StreamListener no longer
+    // inspects WASM custom sections; cell type validation is optional hints now)
 }

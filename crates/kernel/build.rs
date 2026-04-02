@@ -18,6 +18,7 @@ fn main() {
         .file(capnp_dir.join("ipfs.capnp"))
         .file(capnp_dir.join("routing.capnp"))
         .file(capnp_dir.join("stem.capnp"))
+        .file(capnp_dir.join("cell.capnp"))
         .raw_code_generator_request_path(&raw_request)
         .run()
         .expect("failed to compile capnp schemas");
@@ -57,5 +58,9 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         capnp_dir.join("stem.capnp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        capnp_dir.join("cell.capnp").display()
     );
 }
