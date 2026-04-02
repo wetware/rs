@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.0.5.0] - 2026-04-02
+
+### Added
+- `Runtime` capability with system-wide WASM compilation caching (BLAKE3-keyed, shared across all cells)
+- `--runtime-cache-policy` CLI flag (`shared`/`isolated`, default `shared`, env `WW_RUNTIME_CACHE_POLICY`)
+- `Executor.spawn(args, env)` now accepts per-request arguments and environment variables
+- WAGI cells receive proper CGI env vars (`REQUEST_METHOD`, `PATH_INFO`, etc.) at spawn time
+
+### Removed
+- Old `Executor` interface (runBytes, echo, bind)
+- `BoundExecutor` interface (collapsed into new `Executor`)
+- `Host.executor` method (Runtime comes from membrane graft, not Host)
+- Glia shell `(perform executor :echo ...)` command
+
+### Changed
+- Membrane graft returns `runtime :Runtime` instead of `executor :Executor`
+- `Runtime.load(wasm)` is the OCAP attenuation boundary: returns a scoped `Executor` bound to one binary
+- One RuntimeImpl per worker thread, shared across all cells via client cloning
+- Listeners (StreamListener, VatListener, HttpListener) take `Executor` instead of `BoundExecutor`
+- Kernel `:run` and `:listen` handlers use two-step `runtime.load()` → `executor.spawn()` pattern
+- Cap'n Proto pipelining resolves `load()` → `spawn()` in one round-trip
+
 ## [0.0.4.0] - 2026-04-02
 
 ### Added

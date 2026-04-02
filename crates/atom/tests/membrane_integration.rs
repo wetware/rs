@@ -1,4 +1,4 @@
-//! Integration test: Epoch → Terminal → Membrane → graft → executor.echo (epoch-guarded).
+//! Integration test: Epoch → Terminal → Membrane → graft → runtime.shutdown (epoch-guarded).
 //! All local: servers and clients are in-process (capnp-rpc local dispatch).
 //!
 //! Terminal = authentication gate (challenge-response).
@@ -84,9 +84,11 @@ fn terminal_membrane(
 }
 
 #[tokio::test]
-async fn test_membrane_graft_echo_against_anvil() {
+async fn test_membrane_graft_runtime_against_anvil() {
     if !common::foundry_available() {
-        eprintln!("skipping test_membrane_graft_echo_against_anvil: anvil/forge/cast not in PATH");
+        eprintln!(
+            "skipping test_membrane_graft_runtime_against_anvil: anvil/forge/cast not in PATH"
+        );
         return;
     }
     let _ = tracing_subscriber::fmt()
@@ -160,7 +162,7 @@ async fn test_membrane_graft_echo_against_anvil() {
     let terminal = terminal_membrane(rx, vk);
     let signer_client: stem_capnp::signer::Client = new_client(TestSigner::from_ed25519(&sk));
 
-    // Login via Terminal → get Membrane → graft → echo → Ok
+    // Login via Terminal → get Membrane → graft → runtime.shutdown → Ok
     let mut login_req = terminal.login_request();
     login_req.get().set_signer(signer_client);
     let login_resp = login_req.send().promise.await.expect("login RPC");
@@ -177,24 +179,20 @@ async fn test_membrane_graft_echo_against_anvil() {
         .await
         .expect("graft RPC");
     let graft_response = graft_rpc_response.get().expect("graft results");
-    let executor = graft_response.get_executor().expect("executor");
+    let runtime = graft_response.get_runtime().expect("runtime");
 
-    let mut echo_req = executor.echo_request();
-    echo_req.get().set_message("hello");
-    let echo_resp = echo_req.send().promise.await.expect("echo RPC");
-    let response = echo_resp
-        .get()
-        .expect("echo results")
-        .get_response()
-        .expect("response");
-    assert_eq!(response.to_str().unwrap(), "pong");
+    // Verify runtime works under current epoch (shutdown succeeds).
+    runtime
+        .shutdown_request()
+        .send()
+        .promise
+        .await
+        .expect("shutdown RPC");
 
-    // Advance epoch → same executor.echo → staleEpoch error
+    // Advance epoch → same runtime.shutdown → staleEpoch error
     tx.send(epoch2).unwrap();
-    let mut echo_req2 = executor.echo_request();
-    echo_req2.get().set_message("hello");
-    match echo_req2.send().promise.await {
-        Ok(_) => panic!("echo should fail with RPC error after epoch advance"),
+    match runtime.shutdown_request().send().promise.await {
+        Ok(_) => panic!("shutdown should fail with RPC error after epoch advance"),
         Err(e) => assert!(
             e.to_string().contains("staleEpoch"),
             "error should mention staleEpoch, got: {e}"
@@ -222,20 +220,18 @@ async fn test_membrane_graft_no_auth() {
         .await
         .expect("graft RPC");
     let results = graft_resp.get().expect("graft results");
-    let executor = results.get_executor().expect("executor");
+    let runtime = results.get_runtime().expect("runtime");
 
-    let mut echo_req = executor.echo_request();
-    echo_req.get().set_message("ping");
-    let echo_resp = echo_req.send().promise.await.expect("echo RPC");
-    let response = echo_resp
-        .get()
-        .expect("echo results")
-        .get_response()
-        .expect("response");
-    assert_eq!(response.to_str().unwrap(), "pong");
+    // Verify runtime works (shutdown succeeds under current epoch).
+    runtime
+        .shutdown_request()
+        .send()
+        .promise
+        .await
+        .expect("shutdown RPC");
 }
 
-/// No-chain: echo fails with staleEpoch after epoch advance, then re-graft recovers.
+/// No-chain: runtime.shutdown fails with staleEpoch after epoch advance, then re-graft recovers.
 #[tokio::test]
 async fn test_membrane_stale_epoch_then_recovery_no_chain() {
     let epoch1 = Epoch {
@@ -252,71 +248,55 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
     let (tx, rx) = watch::channel(epoch1.clone());
     let membrane = stub_membrane(rx);
 
-    // Graft → echo → Ok
+    // Graft → runtime.shutdown → Ok
     let graft_resp = membrane
         .graft_request()
         .send()
         .promise
         .await
         .expect("graft RPC");
-    let executor = graft_resp
+    let runtime = graft_resp
         .get()
         .expect("graft results")
-        .get_executor()
-        .expect("executor");
+        .get_runtime()
+        .expect("runtime");
 
-    let mut echo_req = executor.echo_request();
-    echo_req.get().set_message("ping");
-    let echo_resp = echo_req.send().promise.await.expect("echo RPC");
-    let response = echo_resp
-        .get()
-        .expect("echo results")
-        .get_response()
-        .expect("response");
-    assert_eq!(
-        response.to_str().unwrap(),
-        "pong",
-        "graft should be ok under current epoch"
-    );
+    runtime
+        .shutdown_request()
+        .send()
+        .promise
+        .await
+        .expect("shutdown should succeed under current epoch");
 
-    // Advance epoch → same executor.echo → staleEpoch
+    // Advance epoch → same runtime.shutdown → staleEpoch
     tx.send(epoch2).unwrap();
-    let mut echo_req2 = executor.echo_request();
-    echo_req2.get().set_message("ping");
-    match echo_req2.send().promise.await {
-        Ok(_) => panic!("echo should fail with RPC error after epoch advance"),
+    match runtime.shutdown_request().send().promise.await {
+        Ok(_) => panic!("shutdown should fail with RPC error after epoch advance"),
         Err(e) => assert!(
             e.to_string().contains("staleEpoch"),
             "error should mention staleEpoch, got: {e}"
         ),
     }
 
-    // Re-graft → new executor.echo → Ok
+    // Re-graft → new runtime.shutdown → Ok
     let graft_resp2 = membrane
         .graft_request()
         .send()
         .promise
         .await
         .expect("re-graft RPC");
-    let executor2 = graft_resp2
+    let runtime2 = graft_resp2
         .get()
         .expect("re-graft results")
-        .get_executor()
-        .expect("executor");
+        .get_runtime()
+        .expect("runtime");
 
-    let mut echo_req3 = executor2.echo_request();
-    echo_req3.get().set_message("ping");
-    let echo_resp3 = echo_req3
+    runtime2
+        .shutdown_request()
         .send()
         .promise
         .await
-        .expect("echo after re-graft RPC");
-    let response3 = echo_resp3
-        .get()
-        .expect("echo results")
-        .get_response()
-        .expect("response");
-    assert_eq!(response3.to_str().unwrap(), "pong", "re-graft should be ok");
+        .expect("shutdown after re-graft should succeed");
 }
 
 /// Terminal login with wrong key should fail authentication.
@@ -392,7 +372,7 @@ fn full_stub_membrane(rx: watch::Receiver<Epoch>) -> stem_capnp::membrane::Clien
     new_client(MembraneServer::new(rx, FullStubSessionBuilder))
 }
 
-/// Verify that graft() returns all 5 capabilities: identity, host, executor, ipfs, routing.
+/// Verify that graft() returns all 5 capabilities: identity, host, runtime, routing, httpClient.
 #[tokio::test]
 async fn test_graft_returns_all_five_capabilities() {
     let epoch = Epoch {
@@ -420,33 +400,30 @@ async fn test_graft_returns_all_five_capabilities() {
         .get_host()
         .expect("host capability should be present");
     results
-        .get_executor()
-        .expect("executor capability should be present");
-    results
-        .get_ipfs()
-        .expect("ipfs capability should be present");
+        .get_runtime()
+        .expect("runtime capability should be present");
     results
         .get_routing()
         .expect("routing capability should be present");
+    results
+        .get_http_client()
+        .expect("httpClient capability should be present");
 
-    // Verify executor actually works (echo).
-    let executor = results.get_executor().expect("executor");
-    let mut echo_req = executor.echo_request();
-    echo_req.get().set_message("all-caps");
-    let echo_resp = echo_req.send().promise.await.expect("echo RPC");
-    let response = echo_resp
-        .get()
-        .expect("echo results")
-        .get_response()
-        .expect("response");
-    assert_eq!(response.to_str().unwrap(), "pong");
+    // Verify runtime actually works (shutdown succeeds).
+    let runtime = results.get_runtime().expect("runtime");
+    runtime
+        .shutdown_request()
+        .send()
+        .promise
+        .await
+        .expect("shutdown RPC");
 }
 
 /// Test Terminal-gated Membrane over a VatNetwork stream pair (simulates the
 /// libp2p `/ww/0.1.0` path from `serve_one_terminal_stream` in executor.rs).
 ///
 /// Server side: bootstrap = Terminal(Membrane).
-/// Client side: bootstrap Terminal → login(signer) → get Membrane → graft → echo.
+/// Client side: bootstrap Terminal → login(signer) → get Membrane → graft → runtime.shutdown.
 #[tokio::test]
 async fn test_terminal_over_stream_pair() {
     use capnp_rpc::rpc_twoparty_capnp::Side;
@@ -498,7 +475,7 @@ async fn test_terminal_over_stream_pair() {
                 let _ = client_rpc.await;
             });
 
-            // Login with correct signer → get Membrane → graft → echo.
+            // Login with correct signer → get Membrane → graft → runtime.shutdown.
             let signer_client: stem_capnp::signer::Client =
                 new_client(TestSigner::from_ed25519(&sk));
             let mut login_req = remote_terminal.login_request();
@@ -524,19 +501,14 @@ async fn test_terminal_over_stream_pair() {
             .expect("graft RPC");
 
             let results = graft_resp.get().expect("graft results");
-            let executor = results.get_executor().expect("executor");
-            let mut echo_req = executor.echo_request();
-            echo_req.get().set_message("over-the-wire");
-            let echo_resp = timeout(Duration::from_secs(5), echo_req.send().promise)
-                .await
-                .expect("echo timed out")
-                .expect("echo RPC");
-            let response = echo_resp
-                .get()
-                .expect("echo results")
-                .get_response()
-                .expect("response");
-            assert_eq!(response.to_str().unwrap(), "pong");
+            let runtime = results.get_runtime().expect("runtime");
+            timeout(
+                Duration::from_secs(5),
+                runtime.shutdown_request().send().promise,
+            )
+            .await
+            .expect("shutdown timed out")
+            .expect("shutdown RPC");
         })
         .await;
 }

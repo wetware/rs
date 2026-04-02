@@ -1,11 +1,11 @@
-//! End-to-end integration test: HttpServer + BoundExecutor + echo cell.
+//! End-to-end integration test: HttpServer + Runtime/Executor + echo cell.
 //!
 //! Validates the full pipeline:
 //!   1. Load echo WASM binary
 //!   2. Set up Cap'n Proto RPC (in-memory, no network)
-//!   3. Get Executor from Host
-//!   4. Executor.bind(wasm) → BoundExecutor
-//!   5. BoundExecutor.spawn() → Process
+//!   3. Get Runtime from membrane graft
+//!   4. Runtime.load(wasm) → Executor
+//!   5. Executor.spawn(args, env) → Process
 //!   6. Write to Process.stdin, read from Process.stdout
 //!   7. Verify echo round-trip
 //!
@@ -13,50 +13,28 @@
 //!
 //! Run: cargo run --example echo_handler_e2e
 
-use capnp_rpc::rpc_twoparty_capnp::Side;
-use capnp_rpc::twoparty::VatNetwork;
-use capnp_rpc::RpcSystem;
-use tokio::io;
 use tokio::sync::mpsc;
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-// Re-use the host RPC infrastructure
-use ww::rpc::{build_peer_rpc, NetworkState};
+use ww::rpc::{create_runtime_client, CachePolicy, NetworkState};
 use ww::system_capnp;
 
 const ECHO_WASM: &[u8] = include_bytes!("echo/bin/echo.wasm");
 
-/// Set up an in-memory RPC system (same pattern as rpc::tests::setup_rpc)
-fn setup_rpc() -> (
-    system_capnp::host::Client,
-    mpsc::Receiver<ww::host::SwarmCommand>,
-) {
-    let (client_stream, server_stream) = io::duplex(8 * 1024);
-    let (client_read, client_write) = io::split(client_stream);
-    let (server_read, server_write) = io::split(server_stream);
+/// Create a Runtime client for testing (no network, no epoch guard).
+fn setup_runtime() -> system_capnp::runtime::Client {
+    let network_state = NetworkState::new();
+    let (swarm_tx, _swarm_rx) = mpsc::channel(16);
 
-    let peer_id = vec![1, 2, 3, 4];
-    let network_state = NetworkState::from_peer_id(peer_id);
-    let (swarm_tx, swarm_rx) = mpsc::channel(16);
-
-    let server_rpc = build_peer_rpc(server_read, server_write, network_state, swarm_tx, false);
-    tokio::task::spawn_local(async move {
-        let _ = server_rpc.await;
-    });
-
-    let client_network = VatNetwork::new(
-        client_read.compat(),
-        client_write.compat_write(),
-        Side::Client,
-        Default::default(),
-    );
-    let mut client_rpc = RpcSystem::new(Box::new(client_network), None);
-    let host: system_capnp::host::Client = client_rpc.bootstrap(Side::Server);
-    tokio::task::spawn_local(async move {
-        let _ = client_rpc.await;
-    });
-
-    (host, swarm_rx)
+    create_runtime_client(
+        network_state,
+        swarm_tx,
+        false,
+        None,
+        None,
+        None,
+        None,
+        CachePolicy::Shared,
+    )
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -73,27 +51,25 @@ async fn main() {
             println!("Echo Cell E2E Test");
             println!("=====================\n");
 
-            let (host, _rx) = setup_rpc();
+            let runtime = setup_runtime();
 
-            // Get executor from host
-            let executor = host.executor_request().send().pipeline.get_executor();
+            // Load echo WASM via runtime.load() → Executor
+            let mut load_req = runtime.load_request();
+            load_req.get().set_wasm(ECHO_WASM);
+            let load_resp = load_req.send().promise.await.unwrap();
+            let executor = load_resp.get().unwrap().get_executor().unwrap();
 
-            // ─── Test 1: Direct spawn via Executor.runBytes ───
-            println!("--- Test 1: Direct spawn (runBytes) ---");
+            // ─── Test 1: Executor.spawn() ───
+            println!("--- Test 1: Executor.spawn() ---");
             {
-                let mut req = executor.run_bytes_request();
-                {
-                    let mut b = req.get();
-                    b.set_wasm(ECHO_WASM);
-                }
-                let resp = req.send().promise.await.unwrap();
-                let process = resp.get().unwrap().get_process().unwrap();
+                let spawn_resp = executor.spawn_request().send().promise.await.unwrap();
+                let process = spawn_resp.get().unwrap().get_process().unwrap();
 
                 // Write to stdin
                 let stdin_resp = process.stdin_request().send().promise.await.unwrap();
                 let stdin = stdin_resp.get().unwrap().get_stream().unwrap();
                 let mut write_req = stdin.write_request();
-                write_req.get().set_data(b"hello from runBytes");
+                write_req.get().set_data(b"hello from spawn");
                 write_req.send().promise.await.unwrap();
                 stdin.close_request().send().promise.await.unwrap();
 
@@ -105,8 +81,8 @@ async fn main() {
                 let read_resp = read_req.send().promise.await.unwrap();
                 let data = read_resp.get().unwrap().get_data().unwrap();
 
-                assert_eq!(data, b"hello from runBytes", "runBytes echo failed");
-                println!("  [OK] Echo round-trip: 'hello from runBytes'");
+                assert_eq!(data, b"hello from spawn", "spawn echo failed");
+                println!("  [OK] Echo round-trip: 'hello from spawn'");
 
                 // Wait for exit
                 let wait_resp = process.wait_request().send().promise.await.unwrap();
@@ -115,25 +91,17 @@ async fn main() {
                 println!("  [OK] Exit code: {exit_code}");
             }
 
-            // ─── Test 2: BoundExecutor.bind() + spawn() ───
-            println!("\n--- Test 2: BoundExecutor (bind + spawn) ---");
+            // ─── Test 2: Executor is reusable (multiple spawns) ───
+            println!("\n--- Test 2: Executor (multiple spawns) ---");
             {
-                let mut bind_req = executor.bind_request();
-                {
-                    let mut b = bind_req.get();
-                    b.set_wasm(ECHO_WASM);
-                }
-                let bind_resp = bind_req.send().promise.await.unwrap();
-                let bound = bind_resp.get().unwrap().get_bound().unwrap();
-
                 // Spawn first instance
-                let spawn_resp = bound.spawn_request().send().promise.await.unwrap();
+                let spawn_resp = executor.spawn_request().send().promise.await.unwrap();
                 let process = spawn_resp.get().unwrap().get_process().unwrap();
 
                 let stdin_resp = process.stdin_request().send().promise.await.unwrap();
                 let stdin = stdin_resp.get().unwrap().get_stream().unwrap();
                 let mut write_req = stdin.write_request();
-                write_req.get().set_data(b"hello from BoundExecutor");
+                write_req.get().set_data(b"hello from Executor");
                 write_req.send().promise.await.unwrap();
                 stdin.close_request().send().promise.await.unwrap();
 
@@ -144,15 +112,15 @@ async fn main() {
                 let read_resp = read_req.send().promise.await.unwrap();
                 let data = read_resp.get().unwrap().get_data().unwrap();
 
-                assert_eq!(data, b"hello from BoundExecutor");
-                println!("  [OK] Echo round-trip: 'hello from BoundExecutor'");
+                assert_eq!(data, b"hello from Executor");
+                println!("  [OK] Echo round-trip: 'hello from Executor'");
 
                 let wait_resp = process.wait_request().send().promise.await.unwrap();
                 assert_eq!(wait_resp.get().unwrap().get_exit_code(), 0);
                 println!("  [OK] Exit code: 0");
 
-                // Spawn second instance (verifies BoundExecutor is reusable)
-                let spawn_resp2 = bound.spawn_request().send().promise.await.unwrap();
+                // Spawn second instance (verifies Executor is reusable)
+                let spawn_resp2 = executor.spawn_request().send().promise.await.unwrap();
                 let process2 = spawn_resp2.get().unwrap().get_process().unwrap();
 
                 let stdin_resp2 = process2.stdin_request().send().promise.await.unwrap();
@@ -180,12 +148,7 @@ async fn main() {
             // ─── Test 3: HttpServer.handle() (Mode A) ───
             println!("\n--- Test 3: HttpServer.handle() (per-request spawn) ---");
             {
-                let mut bind_req = executor.bind_request();
-                bind_req.get().set_wasm(ECHO_WASM);
-                let bind_resp = bind_req.send().promise.await.unwrap();
-                let bound = bind_resp.get().unwrap().get_bound().unwrap();
-
-                let server = ww::dispatcher::HttpServer::new(bound);
+                let server = ww::dispatcher::HttpServer::new(executor.clone());
 
                 let (response, exit_code) = server
                     .handle(b"hello via HttpServer".to_vec())

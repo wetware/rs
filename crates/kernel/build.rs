@@ -28,6 +28,7 @@ fn main() {
         &raw_request,
         &[
             ("HOST", 0x9ea7_0c8c_9aef_b70c),
+            ("RUNTIME", 0x8738_4748_df10_173c),
             ("EXECUTOR", 0xbfa3_7c1e_99b4_a492),
             ("IPFS", 0xd74f_0585_ce16_3b98),
             ("ROUTING", 0xc033_44a7_b0a3_17be),

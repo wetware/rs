@@ -73,6 +73,7 @@ pub struct CellBuilder {
     epoch_rx: Option<watch::Receiver<Epoch>>,
     signing_key: Option<Arc<SigningKey>>,
     route_registry: Option<crate::dispatcher::server::RouteRegistry>,
+    cache_policy: crate::rpc::CachePolicy,
 }
 
 impl CellBuilder {
@@ -97,6 +98,7 @@ impl CellBuilder {
             epoch_rx: None,
             signing_key: None,
             route_registry: None,
+            cache_policy: crate::rpc::CachePolicy::default(),
         }
     }
 
@@ -207,6 +209,14 @@ impl CellBuilder {
         self
     }
 
+    /// Set the cache policy for the Runtime created on this cell's worker thread.
+    ///
+    /// Default is `Shared` — same WASM bytes produce the same Executor server.
+    pub fn with_cache_policy(mut self, policy: crate::rpc::CachePolicy) -> Self {
+        self.cache_policy = policy;
+        self
+    }
+
     /// Build the Cell.
     ///
     /// # Panics
@@ -231,6 +241,7 @@ impl CellBuilder {
             epoch_rx: self.epoch_rx,
             signing_key: self.signing_key,
             route_registry: self.route_registry,
+            cache_policy: self.cache_policy,
         }
     }
 }
@@ -259,6 +270,7 @@ pub struct Cell {
     pub epoch_rx: Option<watch::Receiver<Epoch>>,
     pub signing_key: Option<Arc<SigningKey>>,
     pub route_registry: Option<crate::dispatcher::server::RouteRegistry>,
+    pub cache_policy: crate::rpc::CachePolicy,
 }
 
 /// Result of spawning a cell with RPC: exit code, guest membrane, and optional epoch sender.
@@ -314,6 +326,7 @@ impl Cell {
             epoch_rx: _,
             signing_key: _,
             route_registry: _,
+            cache_policy: _,
         } = self;
 
         crate::config::init_tracing();
@@ -435,6 +448,7 @@ impl Cell {
         let terminal_signing_key = signing_key.clone();
         let pre_epoch_rx = self.epoch_rx.take();
         let route_registry = self.route_registry.take();
+        let cache_policy = self.cache_policy;
         let initial_epoch = self.initial_epoch.clone().unwrap_or(Epoch {
             seq: 0,
             head: vec![],
@@ -464,6 +478,20 @@ impl Cell {
             libp2p_stream::Behaviour::new().new_control()
         });
 
+        // Create the Runtime singleton for this cell's worker thread.
+        // The same client is cloned into every membrane graft on this worker,
+        // so all child cells share the same compilation/executor cache.
+        let runtime_client = crate::rpc::create_runtime_client(
+            network_state.clone(),
+            swarm_cmd_tx.clone(),
+            wasm_debug,
+            None,
+            Some(epoch_rx.clone()),
+            signing_key.clone(),
+            Some(membrane_stream_control.clone()),
+            cache_policy,
+        );
+
         let (rpc_system, guest_membrane) = crate::rpc::membrane::build_membrane_rpc(
             reader,
             writer,
@@ -474,6 +502,7 @@ impl Cell {
             signing_key,
             membrane_stream_control,
             route_registry,
+            runtime_client,
         );
 
         tracing::debug!("Starting streams RPC server for guest");

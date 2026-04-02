@@ -608,10 +608,11 @@ where
 /// # Example
 ///
 /// ```no_run
-/// wetware_guest::run(|host| async move {
-///     let executor = host.executor_request().send().pipeline.get_executor();
-///     let resp = executor.echo_request().send().promise.await?;
-///     let text = resp.get()?.get_response()?.to_str()?;
+/// wetware_guest::run(|membrane| async move {
+///     let graft = membrane.graft_request().send().promise.await?;
+///     let runtime = graft.get()?.get_runtime()?;
+///     let load_resp = runtime.load_request().send().promise.await?;
+///     let executor = load_resp.get()?.get_executor()?;
 ///     Ok(())
 /// });
 /// ```

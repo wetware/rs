@@ -22,10 +22,7 @@ interface Host {
   peers @2 () -> (peers :List(PeerInfo));
   # List currently connected peers.
 
-  executor @3 () -> (executor :Executor);
-  # Obtain an Executor scoped to the same epoch as this Host.
-
-  network @4 () -> (streamListener :StreamListener, streamDialer :StreamDialer,
+  network @3 () -> (streamListener :StreamListener, streamDialer :StreamDialer,
                     vatListener :VatListener, vatClient :VatClient,
                     httpListener :HttpListener);
   # Obtain StreamListener/StreamDialer (libp2p byte-stream mode),
@@ -33,17 +30,41 @@ interface Host {
   # HttpListener (WAGI/CGI mode) for subprotocol I/O.
 }
 
+interface Runtime {
+  load @0 (wasm :Data) -> (executor :Executor);
+  # Compile (or cache-hit) the WASM bytes and return an Executor bound
+  # to that binary.
+  #
+  # Cache policy is set at the Runtime level (--runtime-cache-policy),
+  # not per-call. Default is "shared": if the same bytes were loaded
+  # before, return a clone of the existing Executor client (same
+  # underlying server object, same spawn bookkeeping).
+  #
+  # "isolated" policy: always create a fresh Executor server, even for
+  # previously-loaded bytes.
+
+  shutdown @1 () -> ();
+  # Terminate all tasks spawned through this Runtime.
+}
+
+interface Executor {
+  spawn @0 (args :List(Text), env :List(Text)) -> (process :Process);
+  # Spawn a new instance of the bound WASM binary with the given
+  # args and env.  Late-binding args/env is required for WAGI, which
+  # injects per-request CGI env vars (REQUEST_METHOD, PATH_INFO, etc.).
+}
+
 interface StreamListener {
-  listen @0 (executor :BoundExecutor, protocol :Text) -> ();
+  listen @0 (executor :Executor, protocol :Text) -> ();
   # Accept incoming libp2p streams on /ww/0.1.0/stream/{protocol}.
-  # For each stream, spawn a cell process via BoundExecutor
+  # For each stream, spawn a cell process via Executor
   # and wire stdin/stdout to the stream.
 }
 
 interface HttpListener {
-  listen @0 (executor :BoundExecutor, prefix :Text) -> ();
+  listen @0 (executor :Executor, prefix :Text) -> ();
   # Accept HTTP requests matching the path prefix.
-  # For each request, spawn a cell process via BoundExecutor.
+  # For each request, spawn a cell process via Executor.
   # CGI env vars are passed as environment, request body to stdin,
   # CGI response read from stdout.
 }
@@ -53,28 +74,6 @@ interface StreamDialer {
   # Open a libp2p stream to peer on /ww/0.1.0/stream/{protocol}.
   # Returns a bidirectional ByteStream: read() pulls from the remote,
   # write() pushes to the remote, close() shuts down both directions.
-}
-
-interface Executor {
-  runBytes @0 (wasm :Data, args :List(Text), env :List(Text)) -> (process :Process);
-  # Instantiate a WASM component from raw bytes and return a handle to
-  # its running process.
-
-  echo @1 (message :Text) -> (response :Text);
-  # Diagnostic echo — returns the message unmodified.
-
-  bind @2 (wasm :Data, args :List(Text), env :List(Text)) -> (bound :BoundExecutor);
-  # Store WASM bytes and bind args/env. Returns a BoundExecutor
-  # that can only spawn instances of the bound binary.
-  #
-  # Capability attenuation: the caller can scale a pool of identical
-  # workers but cannot spawn arbitrary code.
-}
-
-interface BoundExecutor {
-  spawn @0 () -> (process :Process);
-  # Spawn a new instance of the bound WASM binary.
-  # Each call creates a fresh process with its own stdin/stdout/stderr.
 }
 
 interface Process {
@@ -101,7 +100,7 @@ interface Process {
 
 struct VatHandler {
   union {
-    spawn @0 :BoundExecutor;
+    spawn @0 :Executor;
     # Stateless: spawn a fresh cell per connection.
     serve @1 :AnyPointer;
     # Stateful: bootstrap all connections with this persistent capability.
@@ -113,7 +112,7 @@ interface VatListener {
   # Accept incoming Cap'n Proto RPC connections on /ww/0.1.0/rpc/{cid}
   # where cid = CIDv1(raw, BLAKE3(schema)).
   #
-  # handler.spawn: for each connection, spawn a cell via the BoundExecutor.
+  # handler.spawn: for each connection, spawn a cell via the Executor.
   # The cell calls system::serve() to export a bootstrap capability.
   #
   # handler.serve: bootstrap each connection with the provided capability.

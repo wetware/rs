@@ -12,42 +12,59 @@ use tokio::time::sleep;
 
 use atom::system_capnp;
 use atom::{EpochGuard, GraftBuilder};
-use membrane::ipfs_capnp;
+use membrane::http_capnp;
 use membrane::routing_capnp;
 use membrane::stem_capnp;
 
 // ---------------------------------------------------------------------------
-// Stub executor + session builder for epoch-guarded capability tests
+// Stub runtime + executor + session builder for epoch-guarded capability tests
 // ---------------------------------------------------------------------------
 
-/// Minimal executor that checks epoch guard on echo, returns "pong".
+/// Minimal runtime that checks epoch guard on load/shutdown.
 /// Used by membrane integration tests to verify epoch-staleness semantics.
-pub struct StubExecutor {
+pub struct StubRuntime {
     guard: EpochGuard,
 }
 
 #[allow(refining_impl_trait)]
-impl system_capnp::executor::Server for StubExecutor {
-    fn echo(
+impl system_capnp::runtime::Server for StubRuntime {
+    fn load(
         self: capnp::capability::Rc<Self>,
-        _params: system_capnp::executor::EchoParams,
-        mut results: system_capnp::executor::EchoResults,
+        _params: system_capnp::runtime::LoadParams,
+        mut results: system_capnp::runtime::LoadResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
-        results.get().set_response("pong");
+        results
+            .get()
+            .set_executor(capnp_rpc::new_client(StubExecutor));
         Promise::ok(())
     }
 
-    fn run_bytes(
+    fn shutdown(
         self: capnp::capability::Rc<Self>,
-        _params: system_capnp::executor::RunBytesParams,
-        _results: system_capnp::executor::RunBytesResults,
+        _params: system_capnp::runtime::ShutdownParams,
+        _results: system_capnp::runtime::ShutdownResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.guard.check());
+        Promise::ok(())
+    }
+}
+
+/// Minimal executor stub: spawn returns unimplemented (no real WASM in tests).
+pub struct StubExecutor;
+
+#[allow(refining_impl_trait)]
+impl system_capnp::executor::Server for StubExecutor {
+    fn spawn(
+        self: capnp::capability::Rc<Self>,
+        _params: system_capnp::executor::SpawnParams,
+        _results: system_capnp::executor::SpawnResults,
     ) -> Promise<(), capnp::Error> {
         Promise::err(capnp::Error::unimplemented("stub".into()))
     }
 }
 
-/// GraftBuilder that populates graft results with a StubExecutor.
+/// GraftBuilder that populates graft results with a StubRuntime.
 pub struct StubSessionBuilder;
 
 impl GraftBuilder for StubSessionBuilder {
@@ -56,16 +73,16 @@ impl GraftBuilder for StubSessionBuilder {
         guard: &EpochGuard,
         mut builder: atom::stem_capnp::membrane::graft_results::Builder<'_>,
     ) -> std::result::Result<(), capnp::Error> {
-        let executor: system_capnp::executor::Client = capnp_rpc::new_client(StubExecutor {
+        let runtime: system_capnp::runtime::Client = capnp_rpc::new_client(StubRuntime {
             guard: guard.clone(),
         });
-        builder.set_executor(executor);
+        builder.set_runtime(runtime);
         Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Stub servers for all 5 graft capabilities (Identity, Host, Executor, IPFS, Routing)
+// Stub servers for all 5 graft capabilities (Identity, Host, Runtime, Routing, HttpClient)
 // ---------------------------------------------------------------------------
 
 /// Stub Identity: returns unimplemented for all methods.
@@ -111,14 +128,6 @@ impl system_capnp::host::Server for StubHost {
         Promise::err(capnp::Error::unimplemented("stub host".into()))
     }
 
-    fn executor(
-        self: capnp::capability::Rc<Self>,
-        _params: system_capnp::host::ExecutorParams,
-        _results: system_capnp::host::ExecutorResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("stub host".into()))
-    }
-
     fn network(
         self: capnp::capability::Rc<Self>,
         _params: system_capnp::host::NetworkParams,
@@ -128,105 +137,17 @@ impl system_capnp::host::Server for StubHost {
     }
 }
 
-/// Stub IPFS Client: returns unimplemented for all methods.
-pub struct StubIpfsClient;
+/// Stub HttpClient: returns unimplemented for all methods.
+pub struct StubHttpClient;
 
 #[allow(refining_impl_trait)]
-impl ipfs_capnp::client::Server for StubIpfsClient {
-    fn unixfs(
+impl http_capnp::http_client::Server for StubHttpClient {
+    fn get(
         self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::UnixfsParams,
-        _results: ipfs_capnp::client::UnixfsResults,
+        _params: http_capnp::http_client::GetParams,
+        _results: http_capnp::http_client::GetResults,
     ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("stub ipfs".into()))
-    }
-
-    fn block(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::BlockParams,
-        _results: ipfs_capnp::client::BlockResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("stub ipfs".into()))
-    }
-
-    fn dag(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::DagParams,
-        _results: ipfs_capnp::client::DagResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("stub ipfs".into()))
-    }
-
-    fn name(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::NameParams,
-        _results: ipfs_capnp::client::NameResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("stub ipfs".into()))
-    }
-
-    fn key(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::KeyParams,
-        _results: ipfs_capnp::client::KeyResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("stub ipfs".into()))
-    }
-
-    fn pin(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::PinParams,
-        _results: ipfs_capnp::client::PinResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("stub ipfs".into()))
-    }
-
-    fn object(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::ObjectParams,
-        _results: ipfs_capnp::client::ObjectResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("stub ipfs".into()))
-    }
-
-    fn swarm(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::SwarmParams,
-        _results: ipfs_capnp::client::SwarmResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("stub ipfs".into()))
-    }
-
-    fn pub_sub(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::PubSubParams,
-        _results: ipfs_capnp::client::PubSubResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("stub ipfs".into()))
-    }
-
-    fn routing(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::RoutingParams,
-        _results: ipfs_capnp::client::RoutingResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("stub ipfs".into()))
-    }
-
-    fn resolve_path(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::ResolvePathParams,
-        _results: ipfs_capnp::client::ResolvePathResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("stub ipfs".into()))
-    }
-
-    fn resolve_node(
-        self: capnp::capability::Rc<Self>,
-        _params: ipfs_capnp::client::ResolveNodeParams,
-        _results: ipfs_capnp::client::ResolveNodeResults,
-    ) -> Promise<(), capnp::Error> {
-        Promise::err(capnp::Error::unimplemented("stub ipfs".into()))
+        Promise::err(capnp::Error::unimplemented("stub http client".into()))
     }
 }
 
@@ -276,16 +197,16 @@ impl GraftBuilder for FullStubSessionBuilder {
         let host: system_capnp::host::Client = capnp_rpc::new_client(StubHost);
         builder.set_host(host);
 
-        let executor: system_capnp::executor::Client = capnp_rpc::new_client(StubExecutor {
+        let runtime: system_capnp::runtime::Client = capnp_rpc::new_client(StubRuntime {
             guard: guard.clone(),
         });
-        builder.set_executor(executor);
-
-        let ipfs: ipfs_capnp::client::Client = capnp_rpc::new_client(StubIpfsClient);
-        builder.set_ipfs(ipfs);
+        builder.set_runtime(runtime);
 
         let routing: routing_capnp::routing::Client = capnp_rpc::new_client(StubRouting);
         builder.set_routing(routing);
+
+        let http_client: http_capnp::http_client::Client = capnp_rpc::new_client(StubHttpClient);
+        builder.set_http_client(http_client);
 
         Ok(())
     }
