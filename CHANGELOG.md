@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.0.3.0] - 2026-04-02
+
+### Added
+- `fs` capability for capability-gated filesystem access: `(perform fs :read "path")`
+- `ipfs :add` handler: `(perform ipfs :add <bytes>)` returns CID
+- `ww init <name>` scaffolds typed cell guest projects (capnp schema, build.rs, boot/main.capnp symlink)
+- `ww build` produces `boot/main.schema` alongside `boot/main.wasm`
+- `capnp/fs.capnp` schema for the Fs capability interface
+- Oracle example README
+
+### Changed
+- Kernel loads schema from `boot/main.schema` instead of WASM custom sections
+- Example Makefiles produce `boot/main.schema` instead of running `schema-inject`
+
+### Removed
+- `schema-inject` binary and `inject` feature from schema-id crate
+- WASM custom section extraction from kernel
+- Cell-building functions from schema-id (build_cell_capnp_message, etc.)
+- ~900 lines of custom section infrastructure and tests
+
 ## [0.0.2.0] - 2026-04-01
 
 ### Added
