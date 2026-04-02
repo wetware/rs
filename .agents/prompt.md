@@ -149,20 +149,24 @@ they can only do what they've been explicitly granted capabilities
 to do.
 
 **Cells** are the unit of computation.  Each Cell is a WASM binary
-with an optional type tag stored as a separate file in the FHS
-image layout.  The tag tells the host what plumbing to wire up:
+whose stdio is wired to a transport by the host.  The `WW_CELL_MODE`
+envvar tells the guest what plumbing it's running under:
 
-| Cell type | FHS layout | Host wires up |
-|-----------|-----------|---------------|
-| `capnp` | `boot/main.wasm` + `boot/main.schema` + `boot/main.capnp` | `/ww/0.1.0/rpc/{cid}` listener |
-| `raw` | `boot/main.wasm` (protocol via envvar) | `/ww/0.1.0/stream/{protocol}` listener |
-| `http` | `boot/main.wasm` (prefix via envvar) | WAGI (CGI for WASM) |
-| pid0 | `boot/main.wasm` only | full Membrane graft |
+| `WW_CELL_MODE` | stdio carries | Host wires up |
+|----------------|--------------|---------------|
+| `vat` | Cap'n Proto RPC | `/ww/0.1.0/rpc/{cid}` listener |
+| `raw` | raw libp2p stream bytes | `/ww/0.1.0/stream/{protocol}` listener |
+| `http` | CGI env vars + stdin/stdout | WAGI (CGI for WASM) |
+| absent | Cap'n Proto RPC (host channel) | pid0 — full Membrane graft |
 
-For capnp cells, `main.schema` contains canonical `schema.Node`
-bytes (compiled from the `.capnp` source), and `main.capnp` is
-a symlink to the source schema for human inspection.  `ww init`
-scaffolds this layout; `ww build` produces all artifacts.
+The kernel (`boot/main.wasm`) is pid0 — a raw cell whose stdio
+is the host's Cap'n Proto RPC channel, not a libp2p stream.  It
+grafts the full Membrane and spawns all other cells.  `WW_CELL_MODE`
+is absent for pid0.
+
+Schema bytes for capnp cells are compiled at build time and passed
+explicitly to `VatListener.listen()` via init.d scripts.  `ww init`
+scaffolds a complete cell project; `ww build` produces all artifacts.
 
 Architecture (three layers):
 - **Host** (`ww` binary): boots a libp2p swarm, loads the kernel
