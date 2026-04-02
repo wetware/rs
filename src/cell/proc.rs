@@ -70,6 +70,11 @@ pub struct FuelEstimator {
     avg_ratio: u64,
     /// False until the first on_host_return observation.
     initialized: bool,
+    /// Host calls observed since the last epoch tick.  The epoch callback
+    /// only updates the EWMA when this is zero (genuinely compute-bound).
+    /// Cells that make host calls are already handled by the call_hook,
+    /// so the epoch callback just refuels without double-observing.
+    host_calls_this_epoch: u32,
 }
 
 impl FuelEstimator {
@@ -78,6 +83,7 @@ impl FuelEstimator {
             budget: initial,
             avg_ratio: RATIO_SCALE / 2,
             initialized: false,
+            host_calls_this_epoch: 0,
         }
     }
 
@@ -527,12 +533,18 @@ impl Proc {
         // the call_hook below).  For compute-bound cells, this is the only
         // refueling path — without it, fuel exhaustion causes Trap::OutOfFuel.
         store.epoch_deadline_callback(|mut ctx| {
-            // Observe full consumption (remaining=0) so the EWMA learns this
-            // cell is compute-bound.  Without this, a cell that never makes
-            // host calls would keep its stale budget forever.
-            let new_budget = ctx.data_mut().fuel_estimator.on_host_return(0);
-            ctx.set_fuel(new_budget)?;
-            tracing::trace!(new_budget, "fuel.epoch_refuel");
+            let est = &mut ctx.data_mut().fuel_estimator;
+            if est.host_calls_this_epoch == 0 {
+                // No host calls this epoch — cell is compute-bound.
+                // Observe full consumption so EWMA converges toward MIN_FUEL.
+                est.on_host_return(0);
+            }
+            // I/O cells: the call_hook already updated the EWMA.
+            // Just refuel, don't double-observe.
+            est.host_calls_this_epoch = 0;
+            let budget = est.budget();
+            ctx.set_fuel(budget)?;
+            tracing::trace!(budget, "fuel.epoch_refuel");
             Ok(wasmtime::UpdateDeadline::Continue(1))
         });
         store.set_epoch_deadline(1);
@@ -546,10 +558,11 @@ impl Proc {
         // host call (WASI import, etc.).
         //
         // Compute-bound cells that don't make host calls are refueled by the
-        // epoch_deadline_callback (Phase 3) to prevent Trap::OutOfFuel.
+        // epoch_deadline_callback above to prevent Trap::OutOfFuel.
         store.call_hook(|mut ctx, hook| {
             if matches!(hook, CallHook::ReturningFromHost) {
                 let remaining = ctx.get_fuel().unwrap_or(0);
+                ctx.data_mut().fuel_estimator.host_calls_this_epoch += 1;
                 let new_budget = ctx.data_mut().fuel_estimator.on_host_return(remaining);
                 ctx.set_fuel(new_budget)?;
                 tracing::debug!(
