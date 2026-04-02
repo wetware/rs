@@ -2,16 +2,19 @@
 //!
 //! Demonstrates:
 //!   - HttpClient capability for outbound HTTP (domain-scoped)
-//!   - VatListener.serve() for persistent capability export
-//!   - Terminal(PriceOracle) auth gate
+//!   - Cell mode with system::serve() for RPC capability export
 //!   - DHT discovery via routing.provide()/findProviders()
 //!
-//! **Service mode** (default): Fetches gas prices via HttpClient,
-//! caches them in memory, exports PriceOracle via VatListener.serve()
-//! behind a Terminal auth gate, and provides the schema CID on the DHT.
+//! **Cell mode** (`WW_CELL=1`): An RPC capability cell spawned by
+//! VatListener. Creates a PriceOracle, fetches prices via HttpClient,
+//! and exports it via `system::serve()`.
+//!
+//! **Service mode** (default): Provides schema CID on the DHT and
+//! re-provides periodically. The init.d script registers the cell
+//! first, then runs this service loop.
 //!
 //! **Consumer mode** (`WW_CONSUMER=1`): Discovers oracle providers via
-//! DHT, dials via VatClient, authenticates via Terminal, queries prices.
+//! DHT, dials via VatClient, queries prices.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -255,7 +258,47 @@ async fn fetch_prices(
 }
 
 // ---------------------------------------------------------------------------
-// Service mode — persistent oracle with VatListener.serve()
+// Cell mode — RPC capability export via system::serve()
+// ---------------------------------------------------------------------------
+
+/// RPC cell for VatListener-spawned processes.
+///
+/// Creates a PriceOracle and exports it as the bootstrap capability.
+/// Fetches prices via HttpClient in the background. The process stays
+/// alive until the host drops the RPC connection.
+fn run_cell() {
+    let cache = init_cache();
+    let oracle = PriceOracleImpl {
+        cache: cache.clone(),
+    };
+    let client: oracle_capnp::price_oracle::Client = capnp_rpc::new_client(oracle);
+    log::info!("cell: exporting PriceOracle via RPC");
+    system::serve(client.client, |membrane: Membrane| async move {
+        // Fetch prices using HttpClient from the membrane.
+        let graft_resp = membrane.graft_request().send().promise.await?;
+        let http = graft_resp.get()?.get_http_client()?;
+
+        if let Err(e) = fetch_prices(&http, &cache).await {
+            log::warn!("cell: initial price fetch failed: {e}");
+        }
+
+        // Keep fetching prices while the RPC connection is alive.
+        let mut cooldown_ms: u64 = 30_000;
+        loop {
+            let pause =
+                wasip2::clocks::monotonic_clock::subscribe_duration(cooldown_ms * 1_000_000);
+            pause.block();
+
+            if let Err(e) = fetch_prices(&http, &cache).await {
+                log::warn!("cell: price refresh failed: {e}");
+            }
+            cooldown_ms = cooldown_ms.min(60_000);
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Service mode — DHT registration and discovery
 // ---------------------------------------------------------------------------
 
 async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
@@ -263,48 +306,11 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
     let results = graft_resp.get()?;
     let host = results.get_host()?;
     let routing = results.get_routing()?;
-    let http = results.get_http_client()?;
-
-    let network_resp = host.network_request().send().promise.await?;
-    let network = network_resp.get()?;
-    let vat_listener = network.get_vat_listener()?;
 
     let id_resp = host.id_request().send().promise.await?;
     let self_id = id_resp.get()?.get_peer_id()?.to_vec();
     log::info!("oracle: peer {}", short_id(&self_id));
     log::info!("oracle: schema CID {PRICE_ORACLE_CID}");
-
-    // Initialize price cache and start polling.
-    let cache = init_cache();
-
-    // Start price fetching in the background.
-    // (In single-threaded WASM, this cooperatively schedules with RPC.)
-    let cache_clone = cache.clone();
-    let http_clone = http.clone();
-    // We can't spawn_local in guest WASM, so the price loop runs as part
-    // of the main future. For now, do one initial fetch then serve.
-    if let Err(e) = fetch_prices(&http_clone, &cache_clone).await {
-        log::warn!("initial price fetch failed (will retry): {e}");
-    }
-
-    // Create the PriceOracle capability.
-    let oracle = PriceOracleImpl {
-        cache: cache.clone(),
-    };
-    let oracle_client: oracle_capnp::price_oracle::Client = capnp_rpc::new_client(oracle);
-
-    // Register on VatListener using serve mode (persistent capability).
-    let mut listen_req = vat_listener.listen_request();
-    {
-        let mut params = listen_req.get();
-        params.set_schema(PRICE_ORACLE_SCHEMA);
-        params
-            .init_handler()
-            .init_serve()
-            .set_as_capability(oracle_client.client.hook);
-    }
-    listen_req.send().promise.await?;
-    log::info!("oracle: listening for RPC connections");
 
     // Provide schema CID on DHT for discovery.
     let mut provide_req = routing.provide_request();
@@ -312,15 +318,9 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
     provide_req.send().promise.await?;
     log::info!("oracle: provided on DHT");
 
-    // Keep running: re-provide on DHT and refresh prices.
+    // Keep running: re-provide on DHT (records expire).
     let mut cooldown_ms: u64 = 30_000;
     loop {
-        // Refresh prices.
-        if let Err(e) = fetch_prices(&http, &cache).await {
-            log::warn!("price refresh failed: {e}");
-        }
-
-        // Re-provide (DHT records expire).
         let mut provide_req = routing.provide_request();
         provide_req.get().set_key(PRICE_ORACLE_CID);
         let _ = provide_req.send().promise.await;
@@ -473,12 +473,19 @@ struct OracleGuest;
 impl Guest for OracleGuest {
     fn run() -> Result<(), ()> {
         init_logging();
-        if std::env::var("WW_CONSUMER").is_ok() {
-            log::info!("oracle guest starting (consumer mode)");
-            system::run(|membrane: Membrane| async move { run_consumer(membrane).await });
-        } else {
-            log::info!("oracle guest starting (service mode)");
-            system::run(|membrane: Membrane| async move { run_service(membrane).await });
+        match std::env::var("WW_CELL_MODE").as_deref() {
+            Ok("vat") => {
+                log::info!("oracle guest starting (vat cell mode)");
+                run_cell();
+            }
+            _ if std::env::var("WW_CONSUMER").is_ok() => {
+                log::info!("oracle guest starting (consumer mode)");
+                system::run(|membrane: Membrane| async move { run_consumer(membrane).await });
+            }
+            _ => {
+                log::info!("oracle guest starting (service mode)");
+                system::run(|membrane: Membrane| async move { run_service(membrane).await });
+            }
         }
         Ok(())
     }

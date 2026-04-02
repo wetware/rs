@@ -54,7 +54,7 @@ the directory onto the kernel.
 
 Two execution modes, selected by the init.d script:
 
-- **Cell** (`WW_CELL`): per-connection RPC cell spawned by
+- **Cell** (`WW_CELL_MODE=vat`): per-connection RPC cell spawned by
   `VatListener`. Creates a `ChessEngineImpl` and exports it via
   `system::serve()`. The host bridges the capability to the connecting
   peer via Cap'n Proto RPC bootstrapping.

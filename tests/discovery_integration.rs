@@ -1,7 +1,7 @@
 //! Integration test: discovery cell spawn + Greeter RPC round-trip.
 //!
 //! Validates the host-side chain that VatListener uses internally:
-//!   executor.runBytes(wasm, WW_CELL=1) → process.bootstrap() → Greeter cap → greet()
+//!   executor.runBytes(wasm, WW_CELL_MODE=vat) → process.bootstrap() → Greeter cap → greet()
 //!
 //! No libp2p networking required. Uses in-memory RPC over duplex streams.
 //!
@@ -63,7 +63,7 @@ async fn spawn_greeter_cell(
     req.get().set_wasm(wasm);
     {
         let mut env = req.get().init_env(2);
-        env.set(0, "WW_CELL=1");
+        env.set(0, "WW_CELL_MODE=vat");
         env.set(1, "WW_PEER_ID=deadbeefcafebabe");
     }
     let resp = req.send().promise.await.expect("runBytes failed");

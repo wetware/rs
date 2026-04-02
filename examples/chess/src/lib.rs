@@ -3,7 +3,7 @@
 //! This binary serves two roles, selected by env vars set in the
 //! init.d script (`etc/init.d/chess.glia`):
 //!
-//! **Cell mode** (`WW_CELL=1`): An RPC capability cell spawned
+//! **Cell mode** (`WW_CELL_MODE=vat`): An RPC capability cell spawned
 //! by VatListener. Creates a ChessEngine and exports it via
 //! `system::serve()`. The host bridges the capability to the connecting
 //! peer via Cap'n Proto RPC bootstrapping.
@@ -563,13 +563,16 @@ struct ChessGuest;
 impl Guest for ChessGuest {
     fn run() -> Result<(), ()> {
         init_logging();
-        if std::env::var("WW_CELL").is_ok() {
-            // Cell mode: export ChessEngine via RPC.
-            run_cell();
-        } else {
-            // Service mode: discovery loop with VatClient.
-            log::info!("chess guest starting (service mode)");
-            system::run(|membrane: Membrane| async move { run_service(membrane).await });
+        match std::env::var("WW_CELL_MODE").as_deref() {
+            Ok("vat") => {
+                log::info!("chess guest starting (vat cell mode)");
+                run_cell();
+            }
+            _ => {
+                // Service mode: discovery loop with VatClient.
+                log::info!("chess guest starting (service mode)");
+                system::run(|membrane: Membrane| async move { run_service(membrane).await });
+            }
         }
         Ok(())
     }

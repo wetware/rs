@@ -4,7 +4,7 @@
 //!   build → schema-inject → IPFS push → provide on DHT →
 //!   findProviders → dial via VatClient → typed RPC call
 //!
-//! **Cell mode** (`WW_CELL=1`): An RPC capability cell spawned by
+//! **Cell mode** (`WW_CELL_MODE=vat`): An RPC capability cell spawned by
 //! VatListener. Creates a Greeter and exports it via `system::serve()`.
 //!
 //! **Service mode** (default): Provides the schema CID on the DHT,
@@ -285,11 +285,15 @@ struct DiscoveryGuest;
 impl Guest for DiscoveryGuest {
     fn run() -> Result<(), ()> {
         init_logging();
-        if std::env::var("WW_CELL").is_ok() {
-            run_cell();
-        } else {
-            log::info!("discovery guest starting (service mode)");
-            system::run(|membrane: Membrane| async move { run_service(membrane).await });
+        match std::env::var("WW_CELL_MODE").as_deref() {
+            Ok("vat") => {
+                log::info!("discovery guest starting (vat cell mode)");
+                run_cell();
+            }
+            _ => {
+                log::info!("discovery guest starting (service mode)");
+                system::run(|membrane: Membrane| async move { run_service(membrane).await });
+            }
         }
         Ok(())
     }

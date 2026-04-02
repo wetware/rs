@@ -159,7 +159,7 @@ async fn test_vat_connection_closes_stdin_on_peer_disconnect() {
                 bind_req.get().init_args(0);
                 {
                     let mut env = bind_req.get().init_env(3);
-                    env.set(0, "WW_CELL=1");
+                    env.set(0, "WW_CELL_MODE=vat");
                     env.set(1, "WW_PROTOCOL=test-protocol-cid");
                     env.set(2, "PATH=/bin");
                 }
