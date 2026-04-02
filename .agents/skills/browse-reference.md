@@ -26,8 +26,8 @@ If they want to browse, show the menu:
 > 6. **CLI** — flags, subcommands, env vars (`doc/cli.md`)
 > 7. **Shell** — Glia REPL syntax, built-ins (`doc/shell.md`)
 > 8. **RPC transport** — duplex streams, scheduling (`doc/rpc-transport.md`)
-> 9. **schema-inject** — post-build cell type injection
->    (`crates/schema-id/src/bin/schema-inject.rs`)
+> 9. **Typed bytecode layout** — `boot/main.wasm` + `boot/main.schema`
+>    (`doc/architecture.md`, `capnp/cell.capnp`)
 > 10. **Effects** — `perform`, `with-effect-handler`,
 >     `resume` (`crates/glia/src/effect.rs`)
 > 11. **Signing & keys** — Signer interface, key derivation
@@ -46,16 +46,18 @@ When walking through a `.capnp` file:
 - Then show the schema definition
 - One interface at a time — don't dump the whole file
 
-For `schema-inject`, run `cargo run -p schema-id --bin schema-inject -- --help`
-yourself and show the user the actual CLI output.  Then walk through
-the three modes with examples:
-- `--raw bitswap` — raw libp2p streams
-- `--http /api/v1` — HTTP/FastCGI routing
-- `--capnp schema.bytes [--no-ipfs]` — typed Cap'n Proto RPC
+For the **typed bytecode layout**, explain how cell type is
+determined by the FHS image structure:
+- `boot/main.wasm` — the WASM component (all cell types)
+- `boot/main.schema` — canonical `schema.Node` bytes (capnp cells)
+- `boot/main.capnp` — symlink to source `.capnp` for human inspection
 
-Note: `--no-ipfs` (capnp only) skips pushing canonical schema bytes
-to IPFS via Kubo.  Useful offline or when Kubo isn't running.
-Protocol IDs for raw cells must not contain `/` (host prefixes
+Walk through the tooling:
+- `ww init <name>` — scaffolds a typed cell guest project
+- `ww build` — compiles and produces all artifacts (main.wasm + main.schema)
+- The kernel reads schema from `boot/main.schema` at load time
+
+Note: protocol IDs for raw cells must not contain `/` (host prefixes
 `/ww/0.1.0/stream/` automatically).
 
 For effects, walk through the three forms:

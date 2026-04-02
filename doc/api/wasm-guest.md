@@ -223,7 +223,7 @@ Full interface reference for the capabilities available to guests.
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `listen` | `(executor: Executor, wasm: Data) -> ()` | Accept connections on `/ww/0.1.0/rpc/{cid}`. Cell type extracted from WASM binary's `cell.capnp` custom section (Cell::capnp variant). Per-connection: spawn handler, bridge bootstrap cap to peer. |
+| `listen` | `(executor: Executor, wasm: Data) -> ()` | Accept connections on `/ww/0.1.0/rpc/{cid}`. Cell type determined by `boot/main.schema` in the FHS image (canonical `schema.Node` bytes). Per-connection: spawn handler, bridge bootstrap cap to peer. |
 
 ### VatClient (capability mode)
 
@@ -231,22 +231,26 @@ Full interface reference for the capabilities available to guests.
 |--------|-----------|-------------|
 | `dial` | `(peer: Data, schema: Data) -> (cap: AnyPointer)` | Open connection to peer on `/ww/0.1.0/rpc/{cid}`. Bootstrap RPC, return remote's capability. Type-erased. |
 
-## WASM Custom Sections
+## Typed Bytecode Layout
 
-Custom sections embedded in the WASM binary carry metadata that the host
-inspects before instantiation.
+Cell type is determined by the FHS image layout, not by WASM custom sections.
+The kernel reads schema from `boot/main.schema` at load time.
 
-| Section Name | Contents | Purpose |
-|--------------|----------|---------|
-| `cell.capnp` | Cap'n Proto `Cell` union message | Identifies the binary as a service cell. Variant determines plumbing: `raw` (libp2p stream), `http` (FastCGI), `capnp` (typed RPC). |
+| File | Contents | Purpose |
+|------|----------|---------|
+| `boot/main.wasm` | WASI P2 component | The cell binary (all cell types). |
+| `boot/main.schema` | Canonical `schema.Node` bytes | Identifies capnp cells. CID = `CIDv1(raw, BLAKE3(canonical schema bytes))`. Registers RPC at `/ww/0.1.0/rpc/{cid}`. |
+| `boot/main.capnp` | Symlink to source `.capnp` | Human-readable schema source for inspection. |
 
-**Cell variants:**
-- `Cell::raw(Text)` — registers a libp2p stream protocol at `/ww/0.1.0/stream/{name}`. stdin/stdout carry raw bytes.
-- `Cell::http(Text)` — registers at HTTP path prefix. stdin/stdout carry FastCGI records.
-- `Cell::capnp(Schema.Node)` — registers RPC protocol at `/ww/0.1.0/rpc/{cid}`. CID = `CIDv1(raw, BLAKE3(canonical schema bytes))`.
+**Cell types by layout:**
+- **capnp** — `boot/main.wasm` + `boot/main.schema` + `boot/main.capnp`. Typed RPC, schema-addressed discovery.
+- **raw** — `boot/main.wasm` only (protocol via environment). Registers at `/ww/0.1.0/stream/{protocol}`. stdin/stdout carry raw bytes.
+- **http** — `boot/main.wasm` only (prefix via environment). Registers at HTTP path prefix. stdin/stdout carry FastCGI records.
+- **pid0** — `boot/main.wasm` only (no schema). Kernel mode, full Membrane graft.
 
-**Absence**: If `cell.capnp` is not present, the binary is a pid0 process (kernel/WIT mode).
-It is not a service cell and cannot be passed to any listener.
+**Tooling:**
+- `ww init <name>` — scaffolds a typed cell guest project with the correct layout.
+- `ww build` — compiles and produces all artifacts (`main.wasm` + `main.schema`).
 
 ## Implementation Constraints
 

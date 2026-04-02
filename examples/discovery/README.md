@@ -12,20 +12,23 @@ No configuration, no service registry, no hardcoded addresses.
 make discovery
 ```
 
-This compiles the WASM guest, injects the `cell.capnp` custom section
-(schema bytes for the Greeter interface), and pushes the schema to IPFS
-if Kubo is running.
+This compiles the WASM guest and produces `boot/main.schema` (canonical
+schema bytes for the Greeter interface) alongside `boot/main.wasm`.
 
 ## Run
 
-Open two terminals:
+Boot two nodes, each stacking the discovery layer on the kernel.
+The init.d script registers the Greeter RPC cell automatically.
+Then start the discovery service from the Glia shell:
 
 ```bash
-# Terminal A — boots Agent A, provides Greeter on DHT
-cargo run -- run examples/discovery
+# Terminal A — boot node, then start discovery service
+cargo run -- run --port=2025 crates/kernel examples/discovery
+/ > (executor run (load "bin/discovery.wasm"))
 
-# Terminal B — boots Agent B, discovers A, calls greet()
-cargo run -- run examples/discovery
+# Terminal B — boot node, then start discovery service
+cargo run -- run --port=2026 crates/kernel examples/discovery
+/ > (executor run (load "bin/discovery.wasm"))
 ```
 
 Expected output on Agent B:
@@ -42,10 +45,8 @@ Expected output on Agent B:
 
 ```
 BUILD TIME:
-  greeter.capnp --> capnpc --> greeter_schema.bin --> schema-inject --> discovery.wasm
-                                                          |
-                                                          +-- cell.capnp section injected
-                                                          +-- ipfs block put (if Kubo)
+  greeter.capnp --> capnpc --> greeter_schema.bin --> boot/main.schema
+  src/lib.rs    --> cargo  --> discovery.wasm      --> boot/main.wasm
 
 AGENT A (service mode):                    AGENT B (service mode):
   membrane.graft()                           membrane.graft()

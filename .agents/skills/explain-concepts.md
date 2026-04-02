@@ -36,12 +36,15 @@ Wetware addresses it.  One concept at a time.
 Key files: `capnp/cell.capnp`, `doc/architecture.md` section
 "Cell types"
 
-A Cell is a WASM binary with a type tag stored in a **WASM custom
-section** named `"cell.capnp"`.  The tag is a Cap'n Proto union
-injected post-build by `schema-inject` — the WASM itself doesn't
-know about it.  When the host loads a Cell, it reads the custom
-section to decide what plumbing to wire up (network listeners,
-protocol bridges, etc.).  No section = pid0.
+A Cell is a WASM binary with an optional type determined by the
+**typed bytecode layout** in the FHS image.  For capnp cells, the
+schema lives in `boot/main.schema` (canonical `schema.Node` bytes)
+alongside `boot/main.wasm`, with `boot/main.capnp` as a symlink
+to the source schema for human inspection.  `ww init` scaffolds
+this layout; `ww build` produces all artifacts.  When the host
+loads a Cell, it reads `boot/main.schema` to decide what plumbing
+to wire up (network listeners, protocol bridges, etc.).  No schema
+file = pid0.
 
 Read `capnp/cell.capnp` and show the actual schema.  Then walk
 through the four variants **one at a time**, checking in between
