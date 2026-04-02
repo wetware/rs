@@ -5,10 +5,10 @@ After grafting onto the Membrane, an agent holds references to:
 | Capability | What it does |
 |------------|-------------|
 | **Host** | Peer identity, listen addresses, connected peers, network access |
-| **Executor** | Spawn child WASM processes |
-| **IPFS** | Content-addressed storage (cat, ls, add) |
+| **Runtime** | Load WASM binaries and obtain scoped Executors (with compilation caching) |
 | **Routing** | Kademlia DHT: publish and discover content/services |
 | **Identity** | Host-side signing (private key never enters WASM) |
+| **HttpClient** | Outbound HTTP requests (domain-scoped) |
 | **StreamListener / StreamDialer** | Open and accept libp2p byte streams for custom subprotocols |
 | **VatListener / VatClient** | Serve and consume Cap'n Proto RPC capabilities over the network |
 
@@ -27,7 +27,7 @@ on-chain head advances, forcing a re-graft.
 
 Schema definitions live in `capnp/`:
 
-- **`system.capnp`** — Host, Executor, Process, ByteStream, StreamListener, StreamDialer, VatListener, VatClient
+- **`system.capnp`** — Host, Runtime, Executor, Process, ByteStream, StreamListener, StreamDialer, VatListener, VatClient, HttpListener
 - **`stem.capnp`** — Terminal, Membrane, Epoch, Signer, Identity
 - **`ipfs.capnp`** — IPFS CoreAPI (UnixFS, Block, Pin, ...)
 - **`routing.capnp`** — Kademlia DHT (provide, findProviders, hash)

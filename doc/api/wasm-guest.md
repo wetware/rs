@@ -151,8 +151,8 @@ session-scoped capabilities:
 
 | Capability | Interface | Description |
 |------------|-----------|-------------|
-| Host | `system_capnp::host` | Node identity, network interfaces, executor access. |
-| Executor | `system_capnp::executor` | Spawn WASM processes. |
+| Host | `system_capnp::host` | Node identity, network interfaces. |
+| Runtime | `system_capnp::runtime` | Load WASM binaries and obtain Executors. |
 | IPFS | `ipfs_capnp::client` | Content-addressed storage (add/cat/pin). |
 | Routing | `routing_capnp::routing` | DHT operations (provide/find_providers). |
 | Identity | `stem_capnp::identity` | Host-side signing (private key never leaves host). |
@@ -172,22 +172,20 @@ Full interface reference for the capabilities available to guests.
 | `id` | `() -> (peerId: Data)` | This node's libp2p peer ID. |
 | `addrs` | `() -> (addrs: List(Data))` | Multiaddrs this node listens on. |
 | `peers` | `() -> (peers: List(PeerInfo))` | Currently connected peers. |
-| `executor` | `() -> (executor: Executor)` | Get an epoch-scoped Executor. |
-| `network` | `() -> (streamListener, streamDialer, vatListener, vatClient)` | Get network interfaces (byte-stream + RPC modes). |
+| `network` | `() -> (streamListener, streamDialer, vatListener, vatClient, httpListener)` | Get network interfaces (byte-stream + RPC + HTTP modes). |
+
+### Runtime
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `load` | `(wasm: Data) -> (executor: Executor)` | Compile (or cache-hit) WASM bytes and return an Executor bound to that binary. |
+| `shutdown` | `() -> ()` | Terminate all tasks spawned through this Runtime. |
 
 ### Executor
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `runBytes` | `(wasm: Data, args: List(Text), env: List(Text)) -> (process: Process)` | Spawn a WASM component from raw bytes. |
-| `echo` | `(message: Text) -> (response: Text)` | Diagnostic echo. Returns message unmodified. |
-| `bind` | `(wasm: Data, args: List(Text), env: List(Text)) -> (bound: BoundExecutor)` | Create a reusable executor bound to specific WASM + args + env. |
-
-### BoundExecutor
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `spawn` | `() -> (process: Process)` | Spawn a new instance of the bound binary. |
+| `spawn` | `(args: List(Text), env: List(Text)) -> (process: Process)` | Spawn a new instance of the bound WASM binary with the given args and env. |
 
 ### Process
 
@@ -211,7 +209,7 @@ Full interface reference for the capabilities available to guests.
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `listen` | `(executor: Executor, protocol: Text, wasm: Data) -> ()` | Accept streams on `/ww/0.1.0/stream/{protocol}`. Per-stream: spawn handler, wire stdin/stdout. |
+| `listen` | `(executor: Executor, protocol: Text) -> ()` | Accept streams on `/ww/0.1.0/stream/{protocol}`. Per-stream: spawn handler via Executor, wire stdin/stdout. |
 
 ### StreamDialer (byte-stream mode)
 
@@ -223,7 +221,7 @@ Full interface reference for the capabilities available to guests.
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `listen` | `(executor: Executor, wasm: Data) -> ()` | Accept connections on `/ww/0.1.0/rpc/{cid}`. Cell type extracted from WASM binary's `cell.capnp` custom section (Cell::capnp variant). Per-connection: spawn handler, bridge bootstrap cap to peer. |
+| `listen` | `(handler: VatHandler, schema: Data) -> ()` | Accept connections on `/ww/0.1.0/rpc/{cid}` where cid = CIDv1(raw, BLAKE3(schema)). VatHandler is a union: `spawn` (Executor) for stateless per-connection cells, or `serve` (AnyPointer) for a persistent bootstrap capability. |
 
 ### VatClient (capability mode)
 

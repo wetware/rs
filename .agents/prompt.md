@@ -173,7 +173,7 @@ Architecture (three layers):
 - **Host** (`ww` binary): boots a libp2p swarm, loads the kernel
   WASM, serves a Membrane over Cap'n Proto RPC.
 - **Kernel** (pid0): calls `membrane.graft()` to obtain capabilities
-  (Host, Executor, IPFS, Routing, Identity).  Interprets the FHS
+  (Host, Runtime, Routing, Identity, HttpClient).  Interprets the FHS
   image layout.  All policy lives here.
 - **Children**: spawned by pid0 with attenuated capabilities.
 
@@ -219,10 +219,10 @@ Capabilities after grafting:
 | Capability | Purpose |
 |------------|---------|
 | Host | Peer identity, addresses, peer management |
-| Executor | Spawn child WASM processes |
-| IPFS | Content-addressed storage (cat, ls, add) |
+| Runtime | Load WASM binaries, obtain scoped Executors |
 | Routing | Kademlia DHT (provide, findProviders) |
 | Identity | Host-side signing (private key never enters WASM) |
+| HttpClient | Outbound HTTP requests |
 | StreamListener / StreamDialer | P2P byte streams for raw cells |
 | VatListener / VatClient | Cap'n Proto RPC for capnp cells |
 
@@ -250,7 +250,7 @@ Once in the shell:
 / > (perform host :id)           ;; peer identity
 / > (perform host :peers)        ;; connected peers
 / > (perform host :addrs)        ;; listen addresses
-/ > (perform executor :echo "hello")  ;; RPC round-trip
+/ > (perform runtime :run (load "bin/my-tool.wasm"))  ;; load + spawn a WASM binary
 / > (help)                       ;; available capabilities
 / > (exit)                       ;; quit
 ```

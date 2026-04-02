@@ -5,9 +5,9 @@
 ; via system::serve().
 ;
 ; To start the discovery service from the shell:
-;   (executor run (load "bin/discovery.wasm") "serve")
+;   (perform runtime :run (load "bin/discovery.wasm") "serve")
 
 (def discovery-wasm (load "bin/discovery.wasm"))
 (def discovery-schema (load "bin/discovery.schema"))
 
-(perform host :listen executor discovery-wasm discovery-schema)
+(perform host :listen runtime discovery-wasm discovery-schema)

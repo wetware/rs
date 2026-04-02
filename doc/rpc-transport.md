@@ -13,7 +13,7 @@ Primary code references:
 
 At runtime there are two RPC links:
 - Host <-> pid0 (kernel agent)
-- Host <-> child (agent spawned by pid0 via `runBytes`)
+- Host <-> child (agent spawned by pid0 via `runtime.load()` + `executor.spawn()`)
 
 Both links use the same transport mechanism: Cap'n Proto RPC over a
 bidirectional in-memory duplex stream exposed to agents as WASI
@@ -27,7 +27,7 @@ io/streams resources.
 │  - VatNetwork + RpcSystem │           │  - RpcDriver poll loop     │
 └───────────────────────────┘           └───────────────────────────┘
            ^                                            |
-           | runBytes (spawn child)                     | Cap'n Proto RPC
+           | runtime.load + spawn (child)               | Cap'n Proto RPC
            |                                            v
 ┌───────────────────────────┐           ┌───────────────────────────┐
 │        Host (ww)          │           │        child agent         │
@@ -84,7 +84,7 @@ guest_stream
 
 ### 3) Wiring Cap'n Proto RPC over the host side
 
-`runBytes` in the host sets up the child process and builds a Cap'n Proto
+`ExecutorImpl::spawn()` in the host sets up the child process and builds a Cap'n Proto
 `VatNetwork` over the host's stream halves:
 
 - `handles.take_host_split()` yields `(reader, writer)`.
@@ -166,20 +166,21 @@ loop:
 pid0 (kernel)               host                        child agent
 ─────────────              ──────                      ─────────────
 graft() -> Session
-runBytes RPC  ───────────> spawn child Proc + RpcSystem
+load+spawn    ───────────> spawn child Proc + RpcSystem
                            return Process cap
 wait RPC     <──────────── ProcessImpl::wait
 ```
 
-### Flow B: child calls echo
+### Flow B: child loads + spawns a grandchild
 
 ```
 child agent                 host
 ───────────                ──────
 graft() -> Session
-echo RPC #1  ──────────── > ExecutorImpl::echo
-echo RPC #2  ──────────── > ExecutorImpl::echo
-responses    <──────────── results
+runtime.load(wasm) ──────> RuntimeImpl::load (cache lookup or compile)
+  -> Executor client <──── return pipelined Executor
+executor.spawn()   ──────> ExecutorImpl::spawn
+  -> Process client <───── return Process cap
 ```
 
 ## Transport diagram (host/guest boundary)
@@ -256,7 +257,7 @@ to move data.
 ### Deadlock causes
 
 1) **Host stops driving the child RPC system.**
-   In `runBytes`, the host spawns a local task to run the child's `RpcSystem`.
+   In `ExecutorImpl::spawn()`, the host spawns a local task to run the child's `RpcSystem`.
    If that task is never scheduled (or exits early), the guest will block in
    `wasi_poll::poll` waiting for read/write readiness that never comes.
 

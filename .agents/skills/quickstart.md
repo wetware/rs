@@ -29,7 +29,7 @@ shell.
 ```clojure
 (perform host :id)              ;; your peer identity
 (perform host :peers)           ;; connected peers
-(perform executor :echo "hello") ;; round-trip RPC — this is an effect crossing the process boundary
+(perform host :addrs)           ;; listen addresses — round-trip RPC through the Membrane
 (exit)                          ;; done
 ```
 

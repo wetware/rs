@@ -54,7 +54,7 @@ Each terminal drops you into a Glia shell.
 From each Glia shell, run the chess demo in service mode:
 
 ```clojure
-/ > (perform executor :run (load "bin/chess-demo.wasm") "serve")
+/ > (perform runtime :run (load "bin/chess-demo.wasm") "serve")
 ```
 
 Both nodes bootstrap into the DHT, exchange provider records,

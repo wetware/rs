@@ -48,7 +48,7 @@ This drops you into the Glia shell.
 From the Glia shell, run the echo cell interactively:
 
 ```clojure
-/ > (perform executor :run (load "bin/echo.wasm"))
+/ > (perform runtime :run (load "bin/echo.wasm"))
 ```
 
 The cell reads all of stdin, writes it to stdout unchanged, then
@@ -62,8 +62,8 @@ any protocol-specific logic.
     │
     ▼
 ┌──────────┐     stdin: raw bytes
-│ Executor │ ──────────────────────► ┌───────────┐
-│          │ ◄────────────────────── │ Echo Cell │
+│ Runtime  │ ──────────────────────► ┌───────────┐
+│ +Executor│ ◄────────────────────── │ Echo Cell │
 └──────────┘     stdout: same bytes  │ (WASI P2) │
                                      └───────────┘
 ```
@@ -85,14 +85,15 @@ output.
 ```clojure
 ; Register the echo cell as a raw stream handler.
 ; StreamListener spawns a cell per connection.
-(perform host :listen executor "echo" (load "bin/echo.wasm"))
+(perform host :listen runtime "echo" (load "bin/echo.wasm"))
 ```
 
-The script registers the echo binary with the host's
+The script uses `runtime.load()` to compile the binary, then
+registers the resulting `Executor` with the host's
 `StreamListener` under the protocol name `"echo"`. Each
-incoming stream connection spawns a fresh echo cell. The
-executor capability is passed explicitly -- no ambient
-authority.
+incoming stream connection spawns a fresh echo cell via
+`executor.spawn()`. The capability is passed explicitly -- no
+ambient authority.
 
 ## Tests
 
@@ -102,7 +103,7 @@ The echo cell is used by the end-to-end integration test:
 cargo run --example echo_handler_e2e
 ```
 
-This exercises `Executor.bind()` -> `BoundExecutor.spawn()` ->
+This exercises `Runtime.load()` -> `Executor.spawn()` ->
 stdin/stdout round-trip.
 
 ## Files

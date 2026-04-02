@@ -58,7 +58,7 @@ Each terminal drops you into a Glia shell.
 From each Glia shell, run the discovery demo in service mode:
 
 ```clojure
-/ > (perform executor :run (load "bin/discovery.wasm") "serve")
+/ > (perform runtime :run (load "bin/discovery.wasm") "serve")
 ```
 
 Expected output on Agent B:

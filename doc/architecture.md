@@ -42,7 +42,7 @@ Traditional process:        Wetware guest:
   network      -> yes         network      -> no
   syscalls     -> yes         syscalls     -> WASI subset only
   ambient auth -> yes         ambient auth -> none
-                              graft caps   -> the only authority (Host + Executor + IPFS)
+                              graft caps   -> the only authority (Host + Runtime + Routing + Identity)
 ```
 
 **There is no native filesystem on the guest side.** The WASI sandbox does
@@ -129,9 +129,9 @@ services from `svc/`, apply configuration from `etc/`. pid0 is where
 policy lives.
 
 **Children** are agents spawned by pid0 (or by other children) via
-`executor.runBytes(wasm)`. Each child gets its own set of capabilities
-over its own RPC connection. pid0 can scope these capabilities,
-giving a child a restricted view of the host.
+`runtime.load(wasm)` followed by `executor.spawn()`. Each child gets
+its own set of capabilities over its own RPC connection. pid0 can scope
+these capabilities, giving a child a restricted view of the host.
 
 ## Capability flow
 
@@ -142,10 +142,10 @@ Cap'n Proto RPC. pid0 calls `membrane.graft()` to obtain epoch-guarded
 capabilities as flat return fields:
 
 - **identity** (`Identity`) — host-side signing (maps domains → Signers)
-- **host** (`Peer.Host`) — network identity and peer management
-- **executor** (`Peer.Executor`) — child process execution, diagnostic echo
-- **ipfs** (`Ipfs.Client`) — IPFS CoreAPI (UnixFS, Block, Dag, ...)
+- **host** (`Host`) — network identity and peer management
+- **runtime** (`Runtime`) — load WASM binaries, obtain scoped Executors
 - **routing** (`Routing`) — Kademlia DHT (provide, findProviders)
+- **httpClient** (`HttpClient`) — outbound HTTP requests
 
 All capabilities are epoch-guarded: they become stale when the on-chain
 head advances. The guest must re-graft to obtain fresh capabilities.
@@ -161,13 +161,13 @@ Host                             pid0
 create Membrane
   with GraftBuilder
     Host (network state)
-    Executor (engine, loader)
-    IPFS Client (Kubo HTTP)
-serve via RpcSystem ──────────> membrane.graft() -> (identity, host, executor, ipfs, routing)
+    Runtime (engine, cache)
+    Routing (DHT)
+serve via RpcSystem ──────────> membrane.graft() -> (identity, host, runtime, routing, httpClient)
                                   host.id()
                                   host.addrs()
-                                  executor.echo("hello")
-                                  ipfs.unixfs().cat("/ipfs/Qm...")
+                                  runtime.load(wasm) -> executor
+                                  executor.spawn(args, env) -> process
 ```
 
 ### Outbound: guest to host
@@ -205,7 +205,7 @@ a new **Membrane**: an object that controls what the outside world can do.
 
 ```
 1. Host hands pid0 a Membrane reference
-2. pid0 calls graft(), receives capabilities (identity, host, executor, ipfs, routing)
+2. pid0 calls graft(), receives capabilities (identity, host, runtime, routing, httpClient)
 3. pid0 wraps capabilities into an attenuated Membrane (adds policy, filters methods)
 4. pid0 exports the attenuated Membrane back to the host (optionally wrapped in Terminal)
 5. Host serves the exported capability on a libp2p stream protocol
@@ -374,6 +374,6 @@ resolve in a single round-trip.
 - [shell.md](shell.md) — kernel shell reference (interactive + daemon modes)
 - [cli.md](cli.md) — CLI flags and usage
 - [rpc-transport.md](rpc-transport.md) — transport plumbing, scheduling model, deadlock analysis
-- [../capnp/system.capnp](../capnp/system.capnp) — Host, Executor, Process, ByteStream interfaces
+- [../capnp/system.capnp](../capnp/system.capnp) — Host, Runtime, Executor, Process, ByteStream interfaces
 - [../capnp/ipfs.capnp](../capnp/ipfs.capnp) — IPFS Client capability schema
 - [../README.md](../README.md) — image layout, build instructions, usage

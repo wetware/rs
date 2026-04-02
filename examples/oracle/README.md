@@ -54,7 +54,7 @@ From the Glia shell, run the oracle in service mode. This provides
 the schema CID on the DHT and re-provides periodically:
 
 ```clojure
-/ > (perform executor :run (load "bin/oracle.wasm") "serve")
+/ > (perform runtime :run (load "bin/oracle.wasm") "serve")
 ```
 
 ### Step 3: Query from a consumer (optional)
@@ -69,7 +69,7 @@ WW_CONSUMER=1 ww run --port=2026 crates/kernel examples/oracle
 From the consumer's Glia shell:
 
 ```clojure
-/ > (perform executor :run (load "bin/oracle.wasm") "consume")
+/ > (perform runtime :run (load "bin/oracle.wasm") "consume")
 ```
 
 The consumer discovers the oracle provider via DHT, dials it with
