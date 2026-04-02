@@ -429,7 +429,6 @@ impl Cell {
         let wasm_debug = self.wasm_debug;
         let network_state = self.network_state.clone();
         let swarm_cmd_tx = self.swarm_cmd_tx.clone();
-        let content_store = self.content_store.clone();
         let signing_key = self.signing_key.take();
         // Clone before build_membrane_rpc consumes it — we need it for the
         // Terminal-gated network accept loop.
@@ -472,7 +471,6 @@ impl Cell {
             swarm_cmd_tx,
             wasm_debug,
             epoch_rx,
-            content_store,
             signing_key,
             membrane_stream_control,
             route_registry,
