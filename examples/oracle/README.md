@@ -1,17 +1,19 @@
 # Oracle -- Gas Price Feed
 
-Decentralized gas price oracle over schema-keyed RPC. Fetches live
-gas prices from Blocknative via `HttpClient`, serves them over typed
-Cap'n Proto RPC, and advertises on the DHT for peer discovery.
+Decentralized gas price oracle over schema-keyed RPC and HTTP.
+Fetches live gas prices from Blocknative via `HttpClient`, serves
+them over typed Cap'n Proto RPC **and** HTTP/JSON, and advertises
+on the DHT for peer discovery.
 
 ## What it demonstrates
 
+- **Dual transport** -- one binary, two transports (vat RPC + HTTP)
 - **Cap'n Proto cell** (`WW_CELL_MODE=vat`) -- schema-keyed RPC
-- `VatListener.serve()` for persistent capability cells
+- **HTTP cell** (`WW_CELL_MODE=http`) -- WAGI/CGI, curl-friendly JSON
 - `HttpClient` capability for outbound HTTP (domain-scoped)
+- `with`/`cell`/`listen` DX for capability-scoped cell definitions
 - Schema-keyed DHT discovery via `routing.provide()` / `findProviders()`
-- Three-mode binary: cell mode (RPC server), service mode (DHT provider), consumer mode (price querier)
-- Periodic background price refresh within a long-lived cell
+- Four-mode binary: vat cell, HTTP cell, service (DHT), consumer (query)
 
 ## Prerequisites
 
@@ -39,16 +41,45 @@ explicitly via RPC at runtime -- no custom sections.
 ### Step 1: Boot the oracle node
 
 Stack the oracle layer on top of the kernel. The init.d script
-registers the oracle cell with the host's `VatListener`.
+registers the oracle cell on both transports.
 
 ```sh
 # Terminal 1 -- oracle provider
-ww run --port=2025 crates/kernel examples/oracle
+ww run --http-listen 127.0.0.1:8080 --port=2025 crates/kernel examples/oracle
 ```
 
-This drops you into a Glia shell.
+This drops you into a Glia shell. The oracle is now serving on:
+- **RPC** (libp2p, schema-keyed) -- for peer-to-peer typed queries
+- **HTTP** at `http://localhost:8080/oracle` -- for curl/browser
 
-### Step 2: Start the oracle service
+### Step 2: Query via curl
+
+```sh
+# All pairs
+curl http://localhost:8080/oracle
+
+# Single pair
+curl 'http://localhost:8080/oracle?pair=ETH%2Fgas'
+```
+
+Example response:
+
+```json
+{
+  "pairs": {
+    "ETH/gas": {
+      "price": 30.12,
+      "unit": "gwei",
+      "confidence": 0.99,
+      "timestamp": 1700000000
+    },
+    "POLYGON/gas": { ... },
+    "BASE/gas": { ... }
+  }
+}
+```
+
+### Step 3: Start the DHT service (optional)
 
 From the Glia shell, run the oracle in service mode. This provides
 the schema CID on the DHT and re-provides periodically:
@@ -57,7 +88,7 @@ the schema CID on the DHT and re-provides periodically:
 / > (perform runtime :run (load "bin/oracle.wasm") "serve")
 ```
 
-### Step 3: Query from a consumer (optional)
+### Step 4: Query from a consumer (optional)
 
 Open a second terminal and boot a consumer node:
 
@@ -87,35 +118,51 @@ The consumer discovers the oracle provider via DHT, dials it with
 ### Architecture
 
 ```
-ORACLE NODE:                          CONSUMER NODE:
-  init.d registers cell                 init.d registers cell
-  service mode:                         consumer mode:
-    membrane.graft()                      membrane.graft()
-    routing.provide(CID)  --DHT-->       routing.find_providers(CID)
-    re-provide loop                       |
-                                         vat_client.dial(oracle, schema)
-  VatListener accepts   <--libp2p--      |
-  spawns cell (cell mode)                bootstrap --> PriceOracle cap
-    membrane.graft()                     oracle.get_pairs() -> ["ETH/gas", ...]
-    http_client.get(blocknative)         oracle.get_price("ETH/gas")
-    cache prices                          |
-    serve PriceOracle     --RPC-->       display prices
+ORACLE NODE:                            CURL CLIENT:
+  init.d registers cell on              curl http://localhost:8080/oracle
+  two transports (vat + http)              |
+                                           v
+  HttpListener accepts     <---HTTP---  axum server
+  spawns cell (http mode)               routes by prefix
+    membrane.graft()                       |
+    http_client.get(blocknative)           v
+    build JSON response                 CGI response -> JSON
+    write to stdout
+
+                                        CONSUMER NODE:
+  VatListener accepts      <--libp2p--  vat_client.dial(oracle, schema)
+  spawns cell (cell mode)               bootstrap --> PriceOracle cap
+    membrane.graft()                    oracle.get_pairs() -> ["ETH/gas", ...]
+    http_client.get(blocknative)        oracle.get_price("ETH/gas")
+    cache prices                           |
+    serve PriceOracle       --RPC-->    display prices
     refresh loop (30s)
 ```
 
-### Three execution modes
+### Four execution modes
 
-- **Cell mode** (`WW_CELL_MODE=vat`): spawned by `VatListener`
+The same binary serves all modes. Detection:
+
+| Mode | Trigger | Transport |
+|------|---------|-----------|
+| **Vat cell** | No args, no `REQUEST_METHOD` | Cap'n Proto RPC over libp2p |
+| **HTTP cell** | `REQUEST_METHOD` env var present | WAGI/CGI over stdin/stdout |
+| **Service** | `serve` subcommand | DHT provide loop |
+| **Consumer** | `consume` subcommand | DHT discover + RPC query |
+
+- **Vat cell mode** (`WW_CELL_MODE=vat`): spawned by `VatListener`
   per incoming RPC connection. Creates a `PriceOracleImpl`, grafts
   to obtain `HttpClient`, fetches prices from Blocknative, and
   exports the oracle as the bootstrap capability. Refreshes prices
   every 30-60 seconds while the connection is alive.
-- **Service mode** (default): long-running DHT provider loop.
-  Provides the schema CID on the DHT and re-provides periodically
-  (DHT records expire).
-- **Consumer mode** (`WW_CONSUMER=1`): discovers oracle providers
-  via DHT, dials them with `VatClient`, queries available pairs
-  and prices. Exponential backoff (2 s to 60 s).
+- **HTTP cell mode** (`WW_CELL_MODE=http`): spawned by `HttpListener`
+  per HTTP request. Grafts the membrane over `wetware:streams`
+  (side-channel), fetches prices via `HttpClient`, writes a JSON
+  response to stdout via CGI. Stateless -- one cell per request.
+- **Service mode**: long-running DHT provider loop. Provides the
+  schema CID on the DHT and re-provides periodically (records expire).
+- **Consumer mode**: discovers oracle providers via DHT, dials them
+  with `VatClient`, queries prices. Exponential backoff (2 s to 60 s).
 
 ### Schema
 
@@ -142,20 +189,25 @@ RPC. Confidence decays toward 0.0 if data goes stale.
 `etc/init.d/oracle.glia`:
 
 ```clojure
-; Register RPC cell for the PriceOracle capability.
-; VatListener spawns a cell per connection; the cell exports
-; a PriceOracle capability via system::serve().
-(def oracle-wasm (load "bin/oracle.wasm"))
-(def oracle-schema (load "bin/oracle.schema"))
+;; Grant an HttpClient capability and define the cell.
+(def oracle
+  (with [(http (perform host :http-client))]
+    (cell (load "bin/oracle.wasm")
+          (load "bin/oracle.schema"))))
 
-(perform host :listen executor oracle-wasm oracle-schema)
+;; Mount on both transports.
+(perform host :listen oracle)              ;; vat RPC
+(perform host :listen oracle "/oracle")    ;; HTTP/WAGI
 ```
 
-The script registers the oracle binary with the host's
-`VatListener`. The schema is read from `bin/oracle.schema`
-(adjacent to the WASM binary). Each incoming RPC connection spawns
-a fresh cell that exports a `PriceOracle` capability, fetches
-prices via `HttpClient`, and refreshes them in the background.
+**`with`** creates local capability bindings (sugar over `let`).
+**`cell`** bundles wasm + schema + all capabilities from scope.
+**`(perform host :listen ...)`** registers the cell with the host:
+- Cell alone → VatListener (schema-keyed RPC over libp2p)
+- Cell + path → HttpListener (WAGI at the given prefix)
+
+The same binary handles both transports. It detects HTTP mode via
+the `REQUEST_METHOD` CGI env var (injected by HttpListener).
 
 The service and consumer modes are started interactively from the
 Glia shell -- not from the init.d script.
@@ -163,12 +215,12 @@ Glia shell -- not from the init.d script.
 ## Tests
 
 ```sh
-cargo test -p oracle
+cargo test --manifest-path examples/oracle/Cargo.toml
 ```
 
-Runs unit tests for cache initialization, JSON parsing, and RPC
-round-trip tests over in-memory Cap'n Proto duplex (get_price,
-get_pairs, unknown pair error).
+Runs unit tests for cache initialization, JSON parsing, JSON
+response building, and RPC round-trip tests over in-memory Cap'n
+Proto duplex (get_price, get_pairs, unknown pair error).
 
 ## Files
 
@@ -183,7 +235,7 @@ examples/oracle/
 │   └── oracle.schema     # compiled schema bytes
 ├── etc/
 │   └── init.d/
-│       └── oracle.glia   # cell registration
+│       └── oracle.glia   # cell registration (dual transport)
 └── src/
     └── lib.rs            # guest implementation
 ```
