@@ -575,16 +575,17 @@ wasip2::cli::command::export!({iface_name}Guest);
         // etc/init.d/<name>.glia — skeleton init script
         let glia = format!(
             r#"; {name} init.d script — evaluated by the kernel at boot.
+;
+; Registers the RPC cell. VatListener spawns a cell per connection;
+; each cell exports its capability via system::serve().
+;
+; To run the service from the shell:
+;   (executor run (load "bin/{name}.wasm"))
 
-; Load the WASM binary and its schema.
 (def {snake_name}-wasm (load "bin/{name}.wasm"))
 (def {snake_name}-schema (load "bin/{name}.schema"))
 
-; Register RPC cell — VatListener spawns a cell per connection.
 (perform host :listen executor {snake_name}-wasm {snake_name}-schema)
-
-; Run the service — blocks until exit.
-(perform executor :run {snake_name}-wasm)
 "#,
             snake_name = name.replace('-', "_"),
         );

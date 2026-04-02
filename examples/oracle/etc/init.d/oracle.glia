@@ -1,16 +1,16 @@
 ; Oracle init.d script — evaluated by the kernel at boot.
 ;
-; Registers a PriceOracle RPC cell and runs the service loop.
+; Registers the PriceOracle RPC cell. VatListener spawns an oracle
+; cell per connection; each cell exports PriceOracle via system::serve()
+; and fetches prices via HttpClient.
+;
+; To run the service (DHT registration + price fetching):
+;   (executor run (load "bin/oracle.wasm"))
+;
+; To run a consumer:
+;   (executor run (load "bin/oracle.wasm") :env {"WW_CONSUMER" "1"})
 
-; Load the oracle WASM binary and its schema.
 (def oracle-wasm (load "bin/oracle.wasm"))
 (def oracle-schema (load "bin/oracle.schema"))
 
-; Register RPC cell — VatListener spawns an oracle cell per connection.
-; Each cell exports PriceOracle via system::serve() and fetches prices
-; via HttpClient.
 (perform host :listen executor oracle-wasm oracle-schema)
-
-; Run the oracle service — provides schema CID on DHT, re-provides
-; periodically. Blocks until exit.
-(perform executor :run oracle-wasm)

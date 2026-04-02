@@ -1,21 +1,12 @@
 ; Chess init.d script — evaluated by the kernel at boot.
 ;
-; Each form is wrapped in cap handlers + effect handlers by the kernel,
-; so capabilities are invoked via (perform cap :method args...).
+; Registers the ChessEngine RPC cell. VatListener spawns a cell per
+; connection; each cell exports ChessEngine via system::serve().
+;
+; To run the discovery/game service from the shell:
+;   (executor run (load "bin/chess-demo.wasm"))
 
-; Load the chess WASM binary and its schema.
 (def chess-wasm (load "bin/chess-demo.wasm"))
 (def chess-schema (load "bin/chess-demo.schema"))
 
-; Register RPC cell for the ChessEngine capability.
-; VatListener spawns a cell process per connection; the cell exports
-; a ChessEngine capability via system::serve().
-;
-; The executor is the spawn authority. The schema bytes identify the
-; protocol on the network (CID derived from canonical schema.Node).
 (perform host :listen executor chess-wasm chess-schema)
-
-; Run the chess demo in service mode — blocks until exit.
-; The service process discovers peers via DHT and dials them with VatClient
-; to get typed ChessEngine capabilities.
-(perform executor :run chess-wasm)
