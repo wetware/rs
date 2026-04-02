@@ -201,17 +201,16 @@ impl IpfsFilesystemView<'_> {
                     .map_err(|_| -> FsError { types::ErrorCode::Io.into() })
             }
             ResolvedNode::CidDir { cid } => {
-                // For CID-backed directories, we need to materialize the directory
-                // structure to staging so wasmtime-wasi can operate on a real dir.
-                // We create an empty dir and populate it with the listing entries
-                // as empty files / subdirs — enough for readdir to work.
-                // Actual file content is fetched lazily when opened.
+                // Create a staging directory populated with stub entries from
+                // CidTree::ls_dir(). Directories are real subdirs. Files are
+                // sparse stubs with correct size (truncate to reported size)
+                // so stat() and readdir() return accurate metadata.
+                // Actual file content is fetched lazily on open_at.
                 let staging_dir = cid_tree.staging_dir().join(format!("dir-{cid}"));
                 if !staging_dir.exists() {
                     std::fs::create_dir_all(&staging_dir)
                         .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
 
-                    // Populate with stub entries from the directory listing
                     if let Ok(entries) = cid_tree.ls_dir(&cid).await {
                         for entry in &entries {
                             let entry_path = staging_dir.join(&entry.name);
@@ -220,8 +219,13 @@ impl IpfsFilesystemView<'_> {
                                     let _ = std::fs::create_dir_all(&entry_path);
                                 }
                                 _ => {
-                                    // Create empty stub file — content fetched on open
-                                    let _ = std::fs::write(&entry_path, b"");
+                                    // Create stub file with correct size via truncate.
+                                    // The file is sparse (no disk blocks allocated for
+                                    // zeroes on most filesystems).
+                                    let f = std::fs::File::create(&entry_path)
+                                        .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
+                                    f.set_len(entry.size)
+                                        .map_err(|_| -> FsError { types::ErrorCode::Io.into() })?;
                                 }
                             }
                         }

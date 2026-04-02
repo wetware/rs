@@ -126,11 +126,24 @@ impl CidTree {
     /// are CID-keyed and thus immutable, so they persist across swaps).
     pub fn swap_root(&self, new_cid: String) {
         self.root.store(Arc::new(new_cid));
-        // Clear LRU — old CID entries are stale in the sense that they
-        // may no longer be reachable from the new root (though their
-        // content is still correct if re-accessed by CID).
+
+        // Clear in-memory dir listing cache.
         if let Ok(mut cache) = self.dir_cache.lock() {
             cache.clear();
+        }
+
+        // Clean up stub directories from the old root. Stub dirs are named
+        // `dir-{cid}` and only relevant while that CID is the active root.
+        // Content-addressed file staging (bare CID files) is managed by
+        // PinsetCache and left alone.
+        if let Ok(entries) = std::fs::read_dir(&self.staging_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with("dir-") {
+                        let _ = std::fs::remove_dir_all(entry.path());
+                    }
+                }
+            }
         }
     }
 
