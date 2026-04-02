@@ -38,11 +38,6 @@
 //! // Now available: CHESS_ENGINE_SCHEMA, CHESS_ENGINE_CID
 //! ```
 
-#[allow(unused_parens, clippy::match_single_binding)]
-pub mod cell_capnp {
-    include!(concat!(env!("OUT_DIR"), "/capnp/cell_capnp.rs"));
-}
-
 use std::path::Path;
 
 /// A named schema with its canonical bytes and derived CID.
@@ -203,146 +198,6 @@ pub fn write_schema_bytes(output_path: &Path, entry: &SchemaEntry) -> std::io::R
     std::fs::write(output_path, &entry.canonical_bytes)
 }
 
-/// The well-known custom section name for Cell type tags.
-pub const CELL_SECTION_NAME: &str = "cell.capnp";
-
-/// Build a serialized Cell::capnp message from canonical schema bytes.
-///
-/// The schema bytes are the canonical encoding of a `schema.Node` as produced
-/// by `extract_schemas()`. They are embedded directly into the `capnp` variant
-/// of the Cell union.
-pub fn build_cell_capnp_message(schema_bytes: &[u8]) -> Vec<u8> {
-    use capnp::serialize;
-
-    // The canonical bytes from extract_schemas/canonicalize_node are a raw
-    // single segment (no framing header). Wrap them with Cap'n Proto framing
-    // so read_message can parse them.
-    // TODO: consider using capnp::message::Reader::new() with a segment slice
-    // instead of hand-rolling the segment table, if the capnp crate exposes
-    // a cleaner API for constructing a Reader from raw segment bytes.
-    let word_count = schema_bytes.len().div_ceil(8);
-    let mut framed = Vec::with_capacity(8 + schema_bytes.len());
-    // Segment table: 1 segment, length in words
-    framed.extend_from_slice(&0u32.to_le_bytes()); // segment count - 1 = 0
-    framed.extend_from_slice(&(word_count as u32).to_le_bytes());
-    framed.extend_from_slice(schema_bytes);
-    // Pad to word boundary
-    let padding = (8 - (schema_bytes.len() % 8)) % 8;
-    framed.extend(std::iter::repeat_n(0u8, padding));
-
-    let schema_reader = serialize::read_message_from_flat_slice(
-        &mut framed.as_slice(),
-        capnp::message::ReaderOptions::default(),
-    )
-    .expect("valid canonical schema bytes");
-
-    let schema_node: capnp::schema_capnp::node::Reader =
-        schema_reader.get_root().expect("valid schema.Node root");
-
-    let mut message = capnp::message::Builder::new_default();
-    {
-        let mut cell = message.init_root::<cell_capnp::cell::Builder>();
-        cell.set_capnp(schema_node).expect("set schema node");
-    }
-
-    let mut buf = Vec::new();
-    serialize::write_message(&mut buf, &message).expect("serialize Cell message");
-    buf
-}
-
-/// Build a serialized Cell::raw message from a protocol ID string.
-pub fn build_cell_raw_message(protocol_id: &str) -> Vec<u8> {
-    use capnp::serialize;
-
-    let mut message = capnp::message::Builder::new_default();
-    {
-        let mut cell = message.init_root::<cell_capnp::cell::Builder>();
-        cell.set_raw(protocol_id);
-    }
-
-    let mut buf = Vec::new();
-    serialize::write_message(&mut buf, &message).expect("serialize Cell message");
-    buf
-}
-
-/// Build a serialized Cell::http message from a path prefix.
-pub fn build_cell_http_message(path_prefix: &str) -> Vec<u8> {
-    use capnp::serialize;
-
-    let mut message = capnp::message::Builder::new_default();
-    {
-        let mut cell = message.init_root::<cell_capnp::cell::Builder>();
-        cell.set_http(path_prefix);
-    }
-
-    let mut buf = Vec::new();
-    serialize::write_message(&mut buf, &message).expect("serialize Cell message");
-    buf
-}
-
-/// Inject a custom section into a WASM binary (idempotent).
-///
-/// Strips any existing custom section with the same name, then appends a
-/// new custom section with the given name and data. This makes repeated
-/// invocations safe (no duplicate sections).
-///
-/// Requires the `inject` feature.
-#[cfg(feature = "inject")]
-pub fn inject_custom_section(wasm_bytes: &[u8], section_name: &str, data: &[u8]) -> Vec<u8> {
-    use wasm_encoder::ComponentSection;
-
-    let stripped = strip_custom_section(wasm_bytes, section_name);
-
-    let custom = wasm_encoder::CustomSection {
-        name: std::borrow::Cow::Borrowed(section_name),
-        data: std::borrow::Cow::Borrowed(data),
-    };
-
-    let mut output = stripped;
-    custom.append_to_component(&mut output);
-    output
-}
-
-/// Remove all custom sections with the given name from a WASM binary.
-///
-/// Rebuilds the binary via `wasm_encoder::Module`, copying every section
-/// except those matching `section_name`. Returns the input unchanged if
-/// no matching section exists.
-#[cfg(feature = "inject")]
-fn strip_custom_section(wasm_bytes: &[u8], section_name: &str) -> Vec<u8> {
-    use wasmparser::{Parser, Payload};
-
-    // Quick check: if no matching section exists, return input as-is.
-    let has_match = Parser::new(0).parse_all(wasm_bytes).any(|payload| {
-        matches!(
-            payload,
-            Ok(Payload::CustomSection(ref reader)) if reader.name() == section_name
-        )
-    });
-    if !has_match {
-        return wasm_bytes.to_vec();
-    }
-
-    // Rebuild: copy every section except matching custom sections.
-    let mut module = wasm_encoder::Module::new();
-    for payload in Parser::new(0).parse_all(wasm_bytes) {
-        let payload = payload.expect("already validated WASM");
-        match &payload {
-            Payload::Version { .. } => {} // handled by Module::new()
-            Payload::CustomSection(reader) if reader.name() == section_name => {}
-            _ => {
-                if let Some((id, range)) = payload.as_section() {
-                    module.section(&wasm_encoder::RawSection {
-                        id,
-                        data: &wasm_bytes[range],
-                    });
-                }
-            }
-        }
-    }
-    module.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,22 +261,6 @@ mod tests {
             &get.stdout,
             data.as_slice(),
             "bytes mismatch after roundtrip"
-        );
-    }
-
-    /// Injecting the same section twice produces identical output to injecting once.
-    #[test]
-    #[cfg(feature = "inject")]
-    fn test_inject_custom_section_is_idempotent() {
-        let wasm = b"\x00asm\x01\x00\x00\x00";
-        let data = b"test payload";
-
-        let once = inject_custom_section(wasm, "test.section", data);
-        let twice = inject_custom_section(&once, "test.section", data);
-
-        assert_eq!(
-            once, twice,
-            "double injection should produce identical output"
         );
     }
 }

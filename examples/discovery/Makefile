@@ -5,23 +5,19 @@
 WASM_TARGET := wasm32-wasip2
 ROOT := ../..
 
-.PHONY: all schema-inject clean
+.PHONY: all clean
 
-all: schema-inject
+all:
 	cargo build -p discovery --target $(WASM_TARGET) --release
 	@mkdir -p bin
 	cp $(ROOT)/target/$(WASM_TARGET)/release/discovery.wasm bin/discovery.wasm
-	@# Inject cell.capnp custom section into the WASM binary.
+	@# Copy compiled schema bytes next to the WASM binary.
 	@GREETER_OUT=$$(find $(ROOT)/target/$(WASM_TARGET)/release/build -path '*/discovery-*/out/greeter_schema.bin' | head -1) && \
 		if [ -n "$$GREETER_OUT" ]; then \
-			cargo run --bin schema-inject -p schema-id --features inject -- \
-				bin/discovery.wasm --capnp "$$GREETER_OUT"; \
+			cp "$$GREETER_OUT" bin/discovery.schema; \
 		else \
-			echo "WARNING: greeter_schema.bin not found; skipping schema injection"; \
+			echo "WARNING: greeter_schema.bin not found"; \
 		fi
 
-schema-inject:
-	cargo build --bin schema-inject -p schema-id --features inject
-
 clean:
-	rm -f bin/discovery.wasm
+	rm -f bin/discovery.wasm bin/discovery.schema

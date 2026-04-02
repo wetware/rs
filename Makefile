@@ -5,7 +5,7 @@
 
 WASM_TARGET := wasm32-wasip2
 
-.PHONY: all host std kernel shell examples chess echo counter discovery oracle schema-inject clean run-kernel
+.PHONY: all host std kernel shell examples chess echo counter discovery oracle clean run-kernel
 .PHONY: container-build container-run container-dev container-clean
 
 all: std examples host
@@ -47,9 +47,6 @@ discovery:
 
 oracle:
 	$(MAKE) -C examples/oracle
-
-schema-inject:
-	cargo build --bin schema-inject -p schema-id --features inject
 
 # --- Run ---------------------------------------------------------------------
 
