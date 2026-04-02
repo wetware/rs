@@ -12,17 +12,13 @@
 //! Both tests require pre-built WASM binaries:
 //!   make echo discovery
 
-use std::sync::Arc;
-
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
-use membrane::Epoch;
-use ww::ipfs::MemoryStore;
-use ww::rpc::{ExecutorImpl, NetworkState};
+use ww::rpc::{create_runtime_client, CachePolicy, NetworkState};
 use ww::system_capnp;
 
 const ECHO_WASM_PATH: &str = "examples/echo/bin/echo.wasm";
@@ -32,32 +28,21 @@ fn load_wasm(path: &str) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
-/// Create an Executor with full membrane support.
-/// Same setup as discovery_integration.rs.
-fn setup_executor() -> system_capnp::executor::Client {
+/// Create a Runtime client for testing (no epoch guard, no network).
+fn setup_runtime() -> system_capnp::runtime::Client {
     let network_state = NetworkState::new();
     let (swarm_tx, _swarm_rx) = mpsc::channel(16);
-    let epoch = Epoch {
-        seq: 1,
-        head: Vec::new(),
-        adopted_block: 0,
-    };
-    let (_epoch_tx, epoch_rx) = watch::channel(epoch);
-    let content_store: Arc<dyn ww::ipfs::ContentStore> = Arc::new(MemoryStore::new());
-    let stream_control = libp2p_stream::Behaviour::new().new_control();
 
-    let executor = ExecutorImpl::new_full(
+    create_runtime_client(
         network_state,
         swarm_tx,
         false,
         None,
-        Some(epoch_rx),
-        Some(content_store),
         None,
-        Some(stream_control),
-    );
-
-    capnp_rpc::new_client(executor)
+        None,
+        None,
+        CachePolicy::Shared,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -83,14 +68,22 @@ async fn test_stdin_close_exits_echo_cell() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let executor = setup_executor();
+            let runtime = setup_runtime();
 
-            // Spawn echo cell via executor.runBytes.
-            let mut req = executor.run_bytes_request();
-            req.get().set_wasm(&wasm);
-            req.get().init_args(0);
-            req.get().init_env(0);
-            let resp = req.send().promise.await.expect("runBytes failed");
+            // Load echo WASM via runtime.load() → Executor, then spawn.
+            let mut load_req = runtime.load_request();
+            load_req.get().set_wasm(&wasm);
+            let load_resp = load_req.send().promise.await.expect("runtime.load failed");
+            let executor = load_resp.get().unwrap().get_executor().unwrap();
+
+            let mut spawn_req = executor.spawn_request();
+            spawn_req.get().init_args(0);
+            spawn_req.get().init_env(0);
+            let resp = spawn_req
+                .send()
+                .promise
+                .await
+                .expect("executor.spawn failed");
             let process = resp.get().unwrap().get_process().unwrap();
 
             // Get stdin handle.
@@ -143,30 +136,23 @@ async fn test_vat_connection_closes_stdin_on_peer_disconnect() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let executor = setup_executor();
+            let runtime = setup_runtime();
 
             // Create an in-memory duplex: one end for handle_vat_connection
             // (the "host bridge"), the other for the simulated peer.
             let (peer_stream, bridge_stream) = tokio::io::duplex(8 * 1024);
 
-            // Bind the executor to get a BoundExecutor, then spawn via the new API.
+            // Load WASM via runtime.load() → Executor, then spawn via handle_vat_connection.
             let wasm_clone = wasm.clone();
-            let executor_clone = executor.clone();
+            let runtime_clone = runtime.clone();
             let bridge_handle = tokio::task::spawn_local(async move {
-                // Bind executor with wasm + env vars.
-                let mut bind_req = executor_clone.bind_request();
-                bind_req.get().set_wasm(&wasm_clone);
-                bind_req.get().init_args(0);
-                {
-                    // No args = cell mode (default). No WW_CELL envvar needed.
-                    let mut env = bind_req.get().init_env(2);
-                    env.set(0, "WW_PROTOCOL=test-protocol-cid");
-                    env.set(1, "PATH=/bin");
-                }
-                let bind_resp = bind_req.send().promise.await.unwrap();
-                let bound = bind_resp.get().unwrap().get_bound().unwrap();
+                // Load wasm via runtime.load() to get an Executor.
+                let mut load_req = runtime_clone.load_request();
+                load_req.get().set_wasm(&wasm_clone);
+                let load_resp = load_req.send().promise.await.unwrap();
+                let executor = load_resp.get().unwrap().get_executor().unwrap();
                 ww::rpc::vat_listener::handle_vat_connection_spawn(
-                    bound,
+                    executor,
                     // Convert tokio duplex → futures-io via compat layer.
                     bridge_stream.compat(),
                     "test-protocol-cid",

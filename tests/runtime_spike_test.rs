@@ -13,11 +13,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
-use membrane::Epoch;
-use ww::ipfs::MemoryStore;
-use ww::rpc::{ExecutorImpl, NetworkState};
+use ww::rpc::{create_runtime_client, CachePolicy, NetworkState};
 use ww::system_capnp;
 
 const ECHO_WASM_PATH: &str = "examples/echo/bin/echo.wasm";
@@ -26,45 +24,41 @@ fn load_echo_wasm() -> Option<Vec<u8>> {
     std::fs::read(ECHO_WASM_PATH).ok()
 }
 
-fn setup_executor() -> system_capnp::executor::Client {
+fn setup_runtime() -> system_capnp::runtime::Client {
     let network_state = NetworkState::new();
     let (swarm_tx, _swarm_rx) = mpsc::channel(16);
-    let epoch = Epoch {
-        seq: 1,
-        head: Vec::new(),
-        adopted_block: 0,
-    };
-    let (_epoch_tx, epoch_rx) = watch::channel(epoch);
-    let content_store: Arc<dyn ww::ipfs::ContentStore> = Arc::new(MemoryStore::new());
-    let stream_control = libp2p_stream::Behaviour::new().new_control();
 
-    let executor = ExecutorImpl::new_full(
+    create_runtime_client(
         network_state,
         swarm_tx,
         false,
         None,
-        Some(epoch_rx),
-        Some(content_store),
         None,
-        Some(stream_control),
-    );
-
-    capnp_rpc::new_client(executor)
+        None,
+        None,
+        CachePolicy::Shared,
+    )
 }
 
-/// Spawn an echo cell via the executor and return its Process capability.
+/// Load echo WASM via runtime.load() and spawn a cell, returning its Process capability.
 async fn spawn_echo_cell(
-    executor: &system_capnp::executor::Client,
+    runtime: &system_capnp::runtime::Client,
     wasm: &[u8],
     label: &str,
 ) -> system_capnp::process::Client {
-    let mut req = executor.run_bytes_request();
-    req.get().set_wasm(wasm);
+    // runtime.load(wasm) → Executor
+    let mut load_req = runtime.load_request();
+    load_req.get().set_wasm(wasm);
+    let load_resp = load_req.send().promise.await.expect("runtime.load failed");
+    let executor = load_resp.get().unwrap().get_executor().unwrap();
+
+    // executor.spawn(args, env) → Process
+    let mut req = executor.spawn_request();
     {
         let mut env = req.get().init_env(1);
         env.set(0, format!("WW_LABEL={label}").as_str());
     }
-    let resp = req.send().promise.await.expect("runBytes failed");
+    let resp = req.send().promise.await.expect("executor.spawn failed");
     resp.get().unwrap().get_process().unwrap()
 }
 
@@ -119,11 +113,11 @@ async fn spike1_two_cells_interleave_on_shared_localset() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let executor = setup_executor();
+            let runtime = setup_runtime();
 
             // Spawn two echo cells on the same LocalSet.
-            let cell_a = spawn_echo_cell(&executor, &wasm, "cell-A").await;
-            let cell_b = spawn_echo_cell(&executor, &wasm, "cell-B").await;
+            let cell_a = spawn_echo_cell(&runtime, &wasm, "cell-A").await;
+            let cell_b = spawn_echo_cell(&runtime, &wasm, "cell-B").await;
 
             // Write to both cells concurrently. If one cell blocked the
             // LocalSet without yielding, the other would never receive
@@ -170,12 +164,12 @@ async fn spike2_two_rpc_systems_on_shared_localset() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let executor = setup_executor();
+            let runtime = setup_runtime();
 
             // Spawn two cells — each gets its own RPC system (VatNetwork +
             // RpcSystem) running on the same outer LocalSet.
-            let cell_a = spawn_echo_cell(&executor, &wasm, "rpc-A").await;
-            let cell_b = spawn_echo_cell(&executor, &wasm, "rpc-B").await;
+            let cell_a = spawn_echo_cell(&runtime, &wasm, "rpc-A").await;
+            let cell_b = spawn_echo_cell(&runtime, &wasm, "rpc-B").await;
 
             // Interleave RPC calls to both cells. Each call goes through
             // Cap'n Proto promise pipelining on the shared LocalSet.
@@ -316,10 +310,10 @@ fn spike_bonus_executor_worker_thread_model() {
         let local = tokio::task::LocalSet::new();
 
         rt.block_on(local.run_until(async {
-            let executor = setup_executor();
+            let runtime = setup_runtime();
 
-            let cell_a = spawn_echo_cell(&executor, &wasm, "worker-A").await;
-            let cell_b = spawn_echo_cell(&executor, &wasm, "worker-B").await;
+            let cell_a = spawn_echo_cell(&runtime, &wasm, "worker-A").await;
+            let cell_b = spawn_echo_cell(&runtime, &wasm, "worker-B").await;
 
             let msg_a = b"worker thread A";
             let msg_b = b"worker thread B";
