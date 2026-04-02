@@ -48,7 +48,7 @@ This drops you into the Glia shell.
 From the Glia shell, run the echo cell interactively:
 
 ```clojure
-/ > (executor run (load "bin/echo.wasm"))
+/ > (perform executor :run (load "bin/echo.wasm"))
 ```
 
 The cell reads all of stdin, writes it to stdout unchanged, then
@@ -85,7 +85,7 @@ output.
 ```clojure
 ; Register the echo cell as a raw stream handler.
 ; StreamListener spawns a cell per connection.
-(host :listen executor "echo" (load "bin/echo.wasm"))
+(perform host :listen executor "echo" (load "bin/echo.wasm"))
 ```
 
 The script registers the echo binary with the host's

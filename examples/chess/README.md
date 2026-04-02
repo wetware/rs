@@ -54,7 +54,7 @@ Each terminal drops you into a Glia shell.
 From each Glia shell, run the chess demo in service mode:
 
 ```clojure
-/ > (executor run (load "bin/chess-demo.wasm"))
+/ > (perform executor :run (load "bin/chess-demo.wasm") "serve")
 ```
 
 Both nodes bootstrap into the DHT, exchange provider records,
@@ -90,14 +90,14 @@ the merged image via the WASI filesystem interceptor.
 ### Architecture
 
 ```
-              kernel boot
-                  |
-          chess.glia evaluated
-             ┌────┴────┐
-   (host :listen)  (executor run)
-          |              |
-      cell mode      service mode
-    (per-connection) (discovery loop)
+                 kernel boot
+                      |
+             chess.glia evaluated
+                      |
+         (perform host :listen ...)
+                      |
+                  cell mode
+               (per-connection)
 ```
 
 Two execution modes, selected by the init.d script:
@@ -147,23 +147,20 @@ interface ChessEngine {
 ; Register RPC cell for the ChessEngine capability.
 ; VatListener spawns a cell process per connection; the cell exports
 ; a ChessEngine capability via system::serve().
-(host :listen executor (load "bin/chess-demo.wasm"))
+(def chess-wasm (load "bin/chess-demo.wasm"))
+(def chess-schema (load "bin/chess-demo.schema"))
 
-; Run the chess demo in service mode -- blocks until exit.
-; The service discovers peers via DHT and dials them with VatClient
-; to get typed ChessEngine capabilities.
-(executor run (load "bin/chess-demo.wasm"))
+(perform host :listen executor chess-wasm chess-schema)
 ```
 
-The first form registers the chess binary with the host's
-`VatListener`. The schema is read from `bin/chess-demo.schema`
-(adjacent to the WASM binary). Each incoming RPC connection spawns
-a fresh cell that exports a `ChessEngine` capability.
+The script registers the chess binary with the host's `VatListener`.
+The schema is read from `bin/chess-demo.schema` (adjacent to the
+WASM binary). Each incoming RPC connection spawns a fresh cell that
+exports a `ChessEngine` capability.
 
-The second form runs the same binary in service mode. It provides
-the schema CID on the DHT, discovers peers, and plays random games.
-
-The executor capability is passed explicitly -- no ambient authority.
+The service mode is started interactively from the Glia shell --
+not from the init.d script. The executor capability is passed
+explicitly -- no ambient authority.
 
 ## Tests
 

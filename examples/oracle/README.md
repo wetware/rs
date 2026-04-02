@@ -54,7 +54,7 @@ From the Glia shell, run the oracle in service mode. This provides
 the schema CID on the DHT and re-provides periodically:
 
 ```clojure
-/ > (executor run (load "bin/oracle.wasm"))
+/ > (perform executor :run (load "bin/oracle.wasm") "serve")
 ```
 
 ### Step 3: Query from a consumer (optional)
@@ -69,7 +69,7 @@ WW_CONSUMER=1 ww run --port=2026 crates/kernel examples/oracle
 From the consumer's Glia shell:
 
 ```clojure
-/ > (executor run (load "bin/oracle.wasm"))
+/ > (perform executor :run (load "bin/oracle.wasm") "consume")
 ```
 
 The consumer discovers the oracle provider via DHT, dials it with
@@ -145,7 +145,10 @@ RPC. Confidence decays toward 0.0 if data goes stale.
 ; Register RPC cell for the PriceOracle capability.
 ; VatListener spawns a cell per connection; the cell exports
 ; a PriceOracle capability via system::serve().
-(host :listen executor (load "bin/oracle.wasm"))
+(def oracle-wasm (load "bin/oracle.wasm"))
+(def oracle-schema (load "bin/oracle.schema"))
+
+(perform host :listen executor oracle-wasm oracle-schema)
 ```
 
 The script registers the oracle binary with the host's

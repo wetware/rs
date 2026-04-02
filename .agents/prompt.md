@@ -187,7 +187,7 @@ Key abstractions:
 - **FHS images**: layers are stacked with per-file union.  Later
   layers override earlier ones.  `ww run --stem 0xABC /ipfs/QmX ./local`
 - **Glia shell**: Clojure-inspired REPL where capabilities are
-  first-class values.  `(host id)`, `(ipfs cat "/ipfs/Qm...")`.
+  first-class values.  `(perform host :id)`, `(perform ipfs :cat "/ipfs/Qm...")`.
 - **Cap'n Proto RPC**: bidirectional — both host and guest can serve
   and consume capabilities.
 
@@ -245,12 +245,12 @@ make           # rebuild everything
 
 Once in the shell:
 ```clojure
-/ > (host id)           ;; peer identity
-/ > (host peers)        ;; connected peers
-/ > (host addrs)        ;; listen addresses
-/ > (executor echo "hello")  ;; RPC round-trip
-/ > (help)              ;; available capabilities
-/ > (exit)              ;; quit
+/ > (perform host :id)           ;; peer identity
+/ > (perform host :peers)        ;; connected peers
+/ > (perform host :addrs)        ;; listen addresses
+/ > (perform executor :echo "hello")  ;; RPC round-trip
+/ > (help)                       ;; available capabilities
+/ > (exit)                       ;; quit
 ```
 
 Concurrency model (E-ordering):
