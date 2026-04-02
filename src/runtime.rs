@@ -5,7 +5,7 @@
 //! supervisor owns all threads and coordinates shutdown.
 //!
 //! Executor threads use `current_thread` + `LocalSet` because `wasmtime::Store`
-//! is `!Send`.  M:N cell scheduling comes from the AIMD fuel scheduler
+//! is `!Send`.  M:N cell scheduling comes from the EWMA fuel estimator
 //! (`src/cell/proc.rs`), not tokio work stealing.
 
 use std::future::Future;
@@ -137,7 +137,7 @@ pub struct SpawnRequest {
 ///
 /// Each worker is an OS thread with a `current_thread` tokio runtime and a
 /// `LocalSet`.  Cells are assigned to workers and cooperatively scheduled
-/// via the AIMD fuel scheduler.
+/// via the EWMA fuel estimator.
 /// Channel depth per worker. Matches the connection rate limit TODO (64
 /// concurrent cells per protocol). Prevents OOM under spawn bursts.
 const SPAWN_CHANNEL_DEPTH: usize = 64;
@@ -322,14 +322,21 @@ fn worker_loop(
         // Epoch tick task: bumps the Engine epoch counter every EPOCH_TICK_MS.
         // This triggers epoch_deadline_callback in every Store on this Engine,
         // refueling compute-bound cells that would otherwise Trap::OutOfFuel.
-        let tick_engine = engine.clone();
-        tokio::task::spawn_local(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(EPOCH_TICK_MS));
-            loop {
-                interval.tick().await;
-                tick_engine.increment_epoch();
-            }
-        });
+        //
+        // Only worker 0 runs the tick task because all workers share the same
+        // Arc<Engine>.  increment_epoch() is a global atomic bump, so running
+        // it on N workers would advance the epoch N times per tick.
+        if id == 0 {
+            let tick_engine = engine.clone();
+            tokio::task::spawn_local(async move {
+                let mut interval = tokio::time::interval(Duration::from_millis(EPOCH_TICK_MS));
+                interval.tick().await; // skip immediate first tick
+                loop {
+                    interval.tick().await;
+                    tick_engine.increment_epoch();
+                }
+            });
+        }
 
         let mut rx = rx;
         let mut shutdown = shutdown;

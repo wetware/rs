@@ -527,9 +527,12 @@ impl Proc {
         // the call_hook below).  For compute-bound cells, this is the only
         // refueling path — without it, fuel exhaustion causes Trap::OutOfFuel.
         store.epoch_deadline_callback(|mut ctx| {
-            let budget = ctx.data().fuel_estimator.budget();
-            ctx.set_fuel(budget)?;
-            tracing::trace!(budget, "fuel.epoch_refuel");
+            // Observe full consumption (remaining=0) so the EWMA learns this
+            // cell is compute-bound.  Without this, a cell that never makes
+            // host calls would keep its stale budget forever.
+            let new_budget = ctx.data_mut().fuel_estimator.on_host_return(0);
+            ctx.set_fuel(new_budget)?;
+            tracing::trace!(new_budget, "fuel.epoch_refuel");
             Ok(wasmtime::UpdateDeadline::Continue(1))
         });
         store.set_epoch_deadline(1);

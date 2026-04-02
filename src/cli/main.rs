@@ -1276,7 +1276,8 @@ wasip2::cli::command::export!({iface_name}Guest);
             .with_image_root(merged.path().into())
             .with_content_store(content_store.clone())
             .with_signing_key(std::sync::Arc::new(sk))
-            .with_cache_policy(cache_policy);
+            .with_cache_policy(cache_policy)
+            .with_wasmtime_engine(executor_pool.engine());
 
         if let Some(registry) = route_registry {
             builder = builder.with_route_registry(registry);
