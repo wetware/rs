@@ -17,6 +17,16 @@ fn main() {
             .expect("failed to compile greeter.capnp");
         println!("cargo:rerun-if-changed={}", greeter_schema.display());
     }
+
+    let oracle_schema = manifest_path.join("capnp/oracle.capnp");
+    if oracle_schema.exists() {
+        capnpc::CompilerCommand::new()
+            .src_prefix(manifest_path.join("capnp"))
+            .file(&oracle_schema)
+            .run()
+            .expect("failed to compile oracle.capnp");
+        println!("cargo:rerun-if-changed={}", oracle_schema.display());
+    }
     let cid_file = target_dir.join("default-config.cid");
 
     // Read CID from the generated .cid file in target directory

@@ -52,6 +52,11 @@ pub use membrane::system_capnp;
 pub mod greeter_capnp {
     include!(concat!(env!("OUT_DIR"), "/greeter_capnp.rs"));
 }
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+pub mod oracle_capnp {
+    include!(concat!(env!("OUT_DIR"), "/oracle_capnp.rs"));
+}
 
 // Modules available for both host and guest
 pub mod config;
