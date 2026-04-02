@@ -196,7 +196,6 @@ struct BlockPrice {
 #[derive(serde::Deserialize, Debug)]
 struct EstimatedPrice {
     confidence: f64,
-    price: f64,
     #[serde(rename = "maxFeePerGas")]
     max_fee_per_gas: f64,
 }
@@ -253,26 +252,6 @@ async fn fetch_prices(
     }
 
     Ok(())
-}
-
-/// Poll prices in a loop with exponential backoff on failure.
-async fn price_loop(http: http_capnp::http_client::Client, cache: PriceCache) {
-    let mut interval_ms: u64 = 5_000;
-    const BASE_MS: u64 = 5_000;
-    const MAX_MS: u64 = 60_000;
-
-    loop {
-        match fetch_prices(&http, &cache).await {
-            Ok(()) => interval_ms = BASE_MS,
-            Err(e) => {
-                log::warn!("price fetch failed: {e}");
-                interval_ms = (interval_ms * 2).min(MAX_MS);
-            }
-        }
-
-        let pause = wasip2::clocks::monotonic_clock::subscribe_duration(interval_ms * 1_000_000);
-        pause.block();
-    }
 }
 
 // ---------------------------------------------------------------------------

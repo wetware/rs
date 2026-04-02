@@ -25,18 +25,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new wetware environment.
+    /// Initialize a new typed cell guest project.
     ///
-    /// Creates a boot/ directory for the WASM artifact. Other FHS
-    /// directories are created lazily as needed.
+    /// Scaffolds a complete Rust project for a Wetware guest with
+    /// Cap'n Proto schema, build script, and FHS boot layout.
     Init {
-        /// Optional subdirectory to initialize
-        #[arg(value_name = "SUBDIR")]
-        subdir: Option<PathBuf>,
-
-        /// Optional template to scaffold (e.g., 'rust')
-        #[arg(long, value_name = "TEMPLATE")]
-        template: Option<String>,
+        /// Project name (e.g., 'oracle', 'greeter')
+        #[arg(value_name = "NAME")]
+        name: String,
     },
 
     /// Build a guest project, placing the compiled WASM at boot/main.wasm.
@@ -258,7 +254,7 @@ fn parse_contract_address(s: &str) -> Result<[u8; 20]> {
 impl Commands {
     async fn run(self) -> Result<()> {
         match self {
-            Commands::Init { subdir, template } => Self::init(subdir, template).await,
+            Commands::Init { name } => Self::init(name).await,
             Commands::Build { path } => Self::build(path).await,
             Commands::Run {
                 mounts: mount_args,
@@ -330,111 +326,276 @@ impl Commands {
         }
     }
 
-    /// Initialize a new wetware environment with FHS skeleton
-    async fn init(subdir: Option<PathBuf>, template: Option<String>) -> Result<()> {
-        let target_dir = match subdir {
-            Some(dir) => dir,
-            None => PathBuf::from("."),
-        };
+    /// Initialize a new typed cell guest project.
+    async fn init(name: String) -> Result<()> {
+        let target_dir = PathBuf::from(&name);
 
-        // Expand "." to the current directory path for better error messages
-        let target_dir = if target_dir == Path::new(".") {
-            std::env::current_dir()?
-        } else {
-            target_dir
-        };
-
-        // Check if the environment already exists
-        let boot_dir = target_dir.join("boot");
-        if boot_dir.exists() {
-            bail!(
-                "Wetware environment already exists at: {}",
-                target_dir.display()
-            );
+        if target_dir.exists() {
+            bail!("Directory already exists: {}", target_dir.display());
         }
 
-        // Create boot/ — the only required directory.
-        // Other FHS dirs (etc/, usr/, var/, etc.) are created lazily as needed.
-        std::fs::create_dir_all(target_dir.join("boot"))
-            .context("Failed to create boot directory")?;
+        // Create directory structure
+        std::fs::create_dir_all(target_dir.join("boot"))?;
+        std::fs::create_dir_all(target_dir.join("src"))?;
 
-        // Handle template scaffolding if requested
-        if let Some(template_name) = template {
-            match template_name.as_str() {
-                "rust" => Self::scaffold_rust_template(&target_dir)?,
-                _ => bail!(
-                    "Unknown template: '{}'. Supported templates: rust",
-                    template_name
-                ),
-            }
-        }
+        // foo.capnp — skeleton interface
+        let iface_name = to_pascal_case(&name);
+        let file_id: u64 = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            name.hash(&mut h);
+            h.finish() | (1u64 << 63)
+        };
+        let capnp_content = format!(
+            r#"# {name} capability interface.
 
-        println!(
-            "Initialized wetware environment at: {}",
-            target_dir.display()
+@0x{file_id:016x};
+
+interface {iface_name} {{
+  hello @0 (name :Text) -> (greeting :Text);
+  # Replace with your methods.
+}}
+"#,
         );
-        Ok(())
-    }
+        std::fs::write(target_dir.join(format!("{name}.capnp")), capnp_content)?;
 
-    /// Scaffold a Rust guest template with Cargo.toml and src/lib.rs
-    fn scaffold_rust_template(target_dir: &std::path::Path) -> Result<()> {
-        // Create src directory
-        let src_dir = target_dir.join("src");
-        std::fs::create_dir_all(&src_dir).context("Failed to create src directory")?;
+        // boot/main.capnp → ../foo.capnp
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            format!("../{name}.capnp"),
+            target_dir.join("boot/main.capnp"),
+        )?;
+        #[cfg(not(unix))]
+        std::fs::copy(
+            target_dir.join(format!("{name}.capnp")),
+            target_dir.join("boot/main.capnp"),
+        )?;
 
-        // Create Cargo.toml
-        let cargo_toml_content = r#"[package]
-name = "my-guest"
+        // Cargo.toml
+        let cargo_toml = format!(
+            r#"[package]
+name = "{name}"
 version = "0.1.0"
 edition = "2021"
 
-# Wetware guest runtime - adjust the path if running outside the repo
+[workspace]  # standalone — not part of the host workspace
+
 [dependencies]
-system = { path = "../../std/system" }
-capnp = "0.23.2"
+capnp     = "0.23.2"
 capnp-rpc = "0.23.0"
+log       = "0.4"
+wasip2    = "1.0.2"
+system    = {{ path = "../../std/system" }}
 
 [lib]
 crate-type = ["cdylib"]
 
 [build-dependencies]
-capnpc = "0.23.3"
-"#;
+capnpc    = "0.23.3"
+capnp     = "0.23.2"
+schema-id = {{ path = "../../crates/schema-id" }}
+"#
+        );
+        std::fs::write(target_dir.join("Cargo.toml"), cargo_toml)?;
 
-        let cargo_toml_path = target_dir.join("Cargo.toml");
-        std::fs::write(&cargo_toml_path, cargo_toml_content)
-            .context("Failed to write Cargo.toml")?;
+        // build.rs — compiles schema, extracts CID
+        let build_rs = format!(
+            r#"use std::env;
+use std::path::{{Path, PathBuf}};
 
-        // Create src/lib.rs - WASM guest entry point
-        let lib_rs_content = r#"/// Simple Wetware guest that runs an async task.
-///
-/// The `system::run()` function bootstraps the RPC connection to the host,
-/// then executes the provided async closure.
-///
-/// Example with host communication:
-/// ```no_run
-/// system::run::<capnp::capability::Client, _, _>(|host| async move {
-///     let executor = host.executor_request().send().pipeline.get_executor();
-///     executor.echo_request().send().promise.await?;
-///     Ok(())
-/// });
-/// ```
+fn main() {{
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let manifest_path = Path::new(&manifest_dir);
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-#[no_mangle]
-pub extern "C" fn _start() {
-    system::run::<capnp::capability::Client, _, _>(|_host| async move {
-        println!("Hello from Wetware!");
+    let capnp_dir = manifest_path
+        .join("../..")
+        .join("capnp")
+        .canonicalize()
+        .expect("capnp dir not found");
+
+    let local_schema = manifest_path
+        .join("{name}.capnp")
+        .canonicalize()
+        .expect("{name}.capnp not found next to Cargo.toml");
+
+    // Pass 1: shared schemas
+    capnpc::CompilerCommand::new()
+        .src_prefix(&capnp_dir)
+        .file(capnp_dir.join("system.capnp"))
+        .file(capnp_dir.join("ipfs.capnp"))
+        .file(capnp_dir.join("routing.capnp"))
+        .file(capnp_dir.join("stem.capnp"))
+        .file(capnp_dir.join("http.capnp"))
+        .run()
+        .expect("failed to compile shared capnp schemas");
+
+    // Pass 2: local schema + schema CID
+    let raw_request = out_dir.join("{name}_request.bin");
+    capnpc::CompilerCommand::new()
+        .src_prefix(manifest_path)
+        .file(&local_schema)
+        .raw_code_generator_request_path(&raw_request)
+        .run()
+        .expect("failed to compile {name}.capnp");
+
+    let iface_id = find_interface_id(&raw_request, "{iface_name}")
+        .expect("{iface_name} interface not found in CodeGeneratorRequest");
+
+    let schemas = schema_id::extract_schemas(
+        &raw_request,
+        &[("{const_name}", iface_id)],
+    )
+    .expect("extract schema");
+
+    schema_id::emit_schema_consts(&out_dir.join("schema_ids.rs"), &schemas)
+        .expect("emit schema consts");
+
+    schema_id::write_schema_bytes(&out_dir.join("{name}_schema.bin"), &schemas[0])
+        .expect("write schema bytes");
+
+    for schema in &["system", "ipfs", "routing", "stem", "http"] {{
+        println!(
+            "cargo:rerun-if-changed={{}}",
+            capnp_dir.join(format!("{{schema}}.capnp")).display()
+        );
+    }}
+    println!("cargo:rerun-if-changed={{}}", local_schema.display());
+}}
+
+fn find_interface_id(raw_request_path: &Path, name: &str) -> Option<u64> {{
+    let data = std::fs::read(raw_request_path).ok()?;
+    let reader =
+        capnp::serialize::read_message(&mut data.as_slice(), capnp::message::ReaderOptions::new())
+            .ok()?;
+    let request: capnp::schema_capnp::code_generator_request::Reader = reader.get_root().ok()?;
+    for node in request.get_nodes().ok()?.iter() {{
+        if let Ok(n) = node.get_display_name() {{
+            if n.to_str().ok()?.ends_with(&format!(":{{}}", name)) || n.to_str().ok()? == name {{
+                if matches!(
+                    node.which(),
+                    Ok(capnp::schema_capnp::node::Which::Interface(_))
+                ) {{
+                    return Some(node.get_id());
+                }}
+            }}
+        }}
+    }}
+    None
+}}
+"#,
+            const_name = name.to_uppercase().replace('-', "_"),
+        );
+        std::fs::write(target_dir.join("build.rs"), build_rs)?;
+
+        // src/lib.rs — guest entry point
+        let lib_rs = format!(
+            r#"use std::rc::Rc;
+
+use capnp::capability::Promise;
+use wasip2::exports::cli::run::Guest;
+
+#[allow(dead_code)]
+mod system_capnp {{
+    include!(concat!(env!("OUT_DIR"), "/system_capnp.rs"));
+}}
+
+#[allow(dead_code)]
+mod stem_capnp {{
+    include!(concat!(env!("OUT_DIR"), "/stem_capnp.rs"));
+}}
+
+#[allow(dead_code)]
+mod ipfs_capnp {{
+    include!(concat!(env!("OUT_DIR"), "/ipfs_capnp.rs"));
+}}
+
+#[allow(dead_code)]
+mod routing_capnp {{
+    include!(concat!(env!("OUT_DIR"), "/routing_capnp.rs"));
+}}
+
+#[allow(dead_code)]
+mod http_capnp {{
+    include!(concat!(env!("OUT_DIR"), "/http_capnp.rs"));
+}}
+
+#[allow(dead_code)]
+mod {name}_capnp {{
+    include!(concat!(env!("OUT_DIR"), "/{name}_capnp.rs"));
+}}
+
+include!(concat!(env!("OUT_DIR"), "/schema_ids.rs"));
+
+type Membrane = stem_capnp::membrane::Client;
+
+// ---------------------------------------------------------------------------
+// {iface_name} implementation
+// ---------------------------------------------------------------------------
+
+struct {iface_name}Impl;
+
+#[allow(refining_impl_trait)]
+impl {name}_capnp::{snake_name}::Server for {iface_name}Impl {{
+    fn hello(
+        self: Rc<Self>,
+        params: {name}_capnp::{snake_name}::HelloParams,
+        mut results: {name}_capnp::{snake_name}::HelloResults,
+    ) -> Promise<(), capnp::Error> {{
+        let name = capnp_rpc::pry!(capnp_rpc::pry!(params.get()).get_name())
+            .to_str()
+            .unwrap_or("world");
+        results
+            .get()
+            .set_greeting(&format!("Hello, {{name}}!"));
+        Promise::ok(())
+    }}
+}}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+struct {iface_name}Guest;
+
+impl Guest for {iface_name}Guest {{
+    fn run() -> Result<(), ()> {{
+        system::run(|membrane: Membrane| async move {{
+            let graft_resp = membrane.graft_request().send().promise.await?;
+            let results = graft_resp.get()?;
+            let host = results.get_host()?;
+
+            let id_resp = host.id_request().send().promise.await?;
+            let peer_id = id_resp.get()?.get_peer_id()?;
+            log::info!("{name}: peer {{:?}}", peer_id);
+
+            // TODO: export your capability via VatListener, register on DHT, etc.
+
+            Ok(())
+        }});
         Ok(())
-    });
-}
-"#;
+    }}
+}}
 
-        let lib_rs_path = src_dir.join("lib.rs");
-        std::fs::write(&lib_rs_path, lib_rs_content).context("Failed to write src/lib.rs")?;
+wasip2::cli::command::export!({iface_name}Guest);
+"#,
+            snake_name = name.replace('-', "_"),
+        );
+        std::fs::write(target_dir.join("src/lib.rs"), lib_rs)?;
 
-        println!("Scaffolded Rust template:");
-        println!("  Cargo.toml - Guest project configuration");
-        println!("  src/lib.rs - Guest entry point with example");
+        println!("Initialized cell project: {name}/");
+        println!("  {name}.capnp       — capability interface (edit this)");
+        println!("  Cargo.toml         — project configuration");
+        println!("  build.rs           — schema compilation");
+        println!("  src/lib.rs         — guest entry point");
+        println!("  boot/main.capnp    → ../{name}.capnp");
+        println!();
+        println!("Next steps:");
+        println!("  1. Edit {name}.capnp with your interface methods");
+        println!("  2. Implement the server in src/lib.rs");
+        println!("  3. ww build {name}");
+        println!("  4. ww run crates/kernel {name}");
         Ok(())
     }
 
@@ -518,8 +679,65 @@ pub extern "C" fn _start() {
             dst_wasm.display()
         ))?;
 
-        println!("Successfully built: {}", dst_wasm.display());
+        println!("  boot/main.wasm");
+
+        // If boot/main.capnp exists (or a symlink to the schema source),
+        // find the compiled schema bytes from the build output and write
+        // boot/main.schema.
+        let main_capnp = boot_dir.join("main.capnp");
+        if main_capnp.exists() {
+            // Find *_schema.bin in the build output directory.
+            // The project's build.rs writes it to OUT_DIR.
+            let build_dir = path.join("target/wasm32-wasip2/release/build");
+            let schema_bin = Self::find_schema_bin(&build_dir, &path)?;
+            let dst_schema = boot_dir.join("main.schema");
+            std::fs::copy(&schema_bin, &dst_schema).context(format!(
+                "Failed to copy {} to {}",
+                schema_bin.display(),
+                dst_schema.display(),
+            ))?;
+            println!("  boot/main.schema");
+        }
+
+        println!("Build complete: {}", path.display());
         Ok(())
+    }
+
+    /// Find the `*_schema.bin` file in the cargo build output.
+    ///
+    /// The project's build.rs writes `{name}_schema.bin` to OUT_DIR during
+    /// compilation. We search the build directory for it, matching against
+    /// the project name from Cargo.toml.
+    fn find_schema_bin(build_dir: &Path, project_dir: &Path) -> Result<PathBuf> {
+        // Get the crate name from the project directory name.
+        let project_name = project_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .context("Invalid project directory name")?
+            .replace('-', "_");
+
+        let pattern = format!("{project_name}_schema.bin");
+
+        // Walk the build dir looking for the schema.bin file.
+        // It's at: target/wasm32-wasip2/release/build/{crate}-{hash}/out/{name}_schema.bin
+        if build_dir.exists() {
+            for entry in std::fs::read_dir(build_dir)? {
+                let entry = entry?;
+                let out_dir = entry.path().join("out");
+                let candidate = out_dir.join(&pattern);
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+            }
+        }
+
+        bail!(
+            "Schema binary not found: {pattern}\n\
+             \n\
+             The project's build.rs should produce this file.\n\
+             Make sure boot/main.capnp exists and the build.rs calls\n\
+             schema_id::write_schema_bytes()."
+        )
     }
 
     /// Resolve the node's Ed25519 signing key from `/etc/identity` in the FHS.
@@ -1182,4 +1400,19 @@ mod tests {
         assert_eq!(source, "/etc/identity");
         assert_eq!(ww::keys::encode(&loaded_sk), encoded);
     }
+}
+
+/// Convert a kebab-case or snake_case name to PascalCase.
+/// "price-oracle" → "PriceOracle", "foo_bar" → "FooBar", "foo" → "Foo"
+fn to_pascal_case(s: &str) -> String {
+    s.split(|c| c == '-' || c == '_')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
 }

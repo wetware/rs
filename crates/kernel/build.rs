@@ -19,6 +19,8 @@ fn main() {
         .file(capnp_dir.join("routing.capnp"))
         .file(capnp_dir.join("stem.capnp"))
         .file(capnp_dir.join("cell.capnp"))
+        .file(capnp_dir.join("fs.capnp"))
+        .file(capnp_dir.join("http.capnp"))
         .raw_code_generator_request_path(&raw_request)
         .run()
         .expect("failed to compile capnp schemas");
@@ -36,6 +38,7 @@ fn main() {
             ("VAT_LISTENER", 0xd64b_e194_6f81_a365),
             ("VAT_CLIENT", 0xa08a_8e8f_90a8_2679),
             ("IDENTITY", 0xa7c2_00e5_b472_6d89),
+            ("FS", 0x8772_4cbb_30a7_c463),
         ],
     )
     .expect("extract schemas");
@@ -62,5 +65,9 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         capnp_dir.join("cell.capnp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        capnp_dir.join("fs.capnp").display()
     );
 }
