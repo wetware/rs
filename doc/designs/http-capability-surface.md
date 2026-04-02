@@ -114,10 +114,10 @@ HTTP request arrives (Phase 2: axum, Phase 1: ww test http)
     +-- 1. build_cgi_env("GET", "/counter", "", headers, ...)
     |       -> ["REQUEST_METHOD=GET", "PATH_INFO=/counter", ...]
     |
-    +-- 2. executor.bind(wasm_bytes, args, env=cgi_env)
-    |       -> BoundExecutor (Arc<bytecode> clone + new config)
+    +-- 2. runtime.load(wasm_bytes) -> Executor
+    |       (Arc<bytecode> clone, cached by BLAKE3 hash)
     |
-    +-- 3. bound.spawn() [lightweight path]
+    +-- 3. executor.spawn(args, env=cgi_env) [lightweight path]
     |       -> Creates duplex pipes (stdin/stdout/stderr)
     |       -> Skips membrane, skips RPC system
     |       -> tokio::task::spawn_local(proc.run())
@@ -190,7 +190,7 @@ HttpClientBuilder added to graft() return. HttpServer null without
 - [x] WagiAdapter: `build_cgi_env()`, `parse_cgi_response()`, 16 unit tests
 - [x] wagi-guest crate: env var helpers + CGI response formatting
 - [x] Counter example rewritten as WAGI cell (306 -> 32 lines)
-- [x] Lightweight spawn path in `BoundExecutorImpl::spawn()`
+- [x] Lightweight spawn path in `ExecutorImpl::spawn()`
 - [x] AIMD fuel scheduler (call-hook refueling at host boundaries, 10 unit tests)
 - [x] Process.kill() via watch channel + tokio::select!
 - [ ] Per-request timeout (30s)

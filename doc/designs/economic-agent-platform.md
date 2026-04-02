@@ -30,7 +30,7 @@ The shell is the primary UX surface for capability-based thinking.
 ┌────────────────────────────────────────────────────────────────┐
 │  LAYER 3: std/ WASM agents  (like /usr/bin)                    │
 │  Heavy data transformation operations.                         │
-│  Called: PATH lookup → executor.runBytes → child process        │
+│  Called: PATH lookup → runtime.load → executor.spawn → child   │
 ├────────────────────────────────────────────────────────────────┤
 │  LAYER 2: Capability verbs  (shell built-ins)                  │
 │  discover, grant, attenuate, connect, inspect                  │

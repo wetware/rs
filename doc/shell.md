@@ -11,8 +11,8 @@ environment. The kernel starts a Clojure-inspired Lisp REPL:
 ```
 / ❯ (perform host :id)
 "00240801122025c7ea..."
-/ ❯ (perform executor :echo "hello")
-"hello"
+/ ❯ (perform runtime :run (load "bin/my-tool.wasm"))
+...
 / ❯ (exit)
 ```
 
@@ -40,11 +40,11 @@ Strings are double-quoted. Symbols are bare words. Comments start with
 | `peers` | `(perform host :peers)` | Connected peers with addresses |
 | `connect` | `(perform host :connect "/ip4/1.2.3.4/tcp/2025/p2p/12D3...")` | Dial a peer |
 
-#### executor
+#### runtime
 
 | Method | Example | Description |
 |--------|---------|-------------|
-| `echo` | `(perform executor :echo "hello")` | Diagnostic echo (round-trips through RPC) |
+| `run` | `(perform runtime :run (load "bin/my-tool.wasm"))` | Load WASM, spawn a process, capture stdout |
 
 #### ipfs
 
@@ -73,8 +73,9 @@ two candidates in order:
 1. `<dir>/<cmd>.wasm` — flat single-file binary
 2. `<dir>/<cmd>/main.wasm` — image-style nested binary
 
-The first match wins. The bytes are passed to `executor.runBytes()`.
-Standard output is captured and printed; the exit code is reported on error.
+The first match wins. The bytes are loaded via `runtime.load()` to obtain
+an `Executor`, then `executor.spawn()` runs the process. Standard output
+is captured and printed; the exit code is reported on error.
 
 ```
 / ❯ (my-tool "arg1" "arg2")

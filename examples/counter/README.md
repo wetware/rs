@@ -42,7 +42,7 @@ This drops you into the Glia shell.
 From the Glia shell, run the counter cell interactively:
 
 ```clojure
-/ > (perform executor :run (load "bin/counter.wasm") "serve")
+/ > (perform runtime :run (load "bin/counter.wasm") "serve")
 ```
 
 Then test with curl:
@@ -152,7 +152,8 @@ from stdout:
 
 ```rust
 // Pseudocode: spawn counter.wasm, send FastCGI request, read response
-let process = executor.run_bytes(counter_wasm).await;
+let executor = runtime.load(counter_wasm).await;
+let process = executor.spawn(args, env).await;
 
 // Send FCGI_BEGIN_REQUEST (type=1, role=RESPONDER, flags=0)
 process.stdin.write(&fcgi_header(1, 1, 8));  // type=BEGIN, id=1, len=8

@@ -75,7 +75,7 @@ Present one row at a time, explain each, check in.
 | Unix | Wetware | Key difference |
 |------|---------|---------------|
 | process | Cell | Cell = WASM binary in a sandbox.  No ambient env, no fs, no sockets.  A process can do anything the OS allows; a Cell can only do what its capabilities permit. |
-| fork/exec | `executor.runBytes(wasm)` | Parent explicitly passes capabilities to child.  No inheritance of open fds, env vars, or fs access — you grant exactly what the child needs. |
+| fork/exec | `runtime.load(wasm)` → `executor.spawn()` | Parent explicitly passes capabilities to child.  No inheritance of open fds, env vars, or fs access — you grant exactly what the child needs. |
 | file descriptor | Cap'n Proto client | Both are opaque handles.  But Unix fds live in a global namespace (paths) — any process can `open("/etc/passwd")`.  A capnp client is unforgeable and can only be obtained by explicit handoff. |
 | syscall table | Membrane → `graft()` | Both are the interface to kernel services.  But the syscall table is fixed and ambient — every process gets all of them.  `graft()` returns *only* the capabilities you were granted, and they can differ per Cell. |
 | `ioctl(fd, ...)` | method call on cap | Both operate on a handle.  But capnp calls are typed, async, and pipelined — not a bag-of-bytes command code.  `ipfs.unixfs().cat(path)` resolves in one round-trip via pipelining. |

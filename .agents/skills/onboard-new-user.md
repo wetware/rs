@@ -79,8 +79,8 @@ one at a time:
 1. `(perform host :id)` — "That's your peer identity.  Unique to this node."
 2. `(perform host :peers)` — "Connected peers.  Probably empty since you're
    running solo."
-3. `(perform executor :echo "hello")` — "Round-trip RPC through the kernel.
-   If this works, the whole stack is live."
+3. `(perform host :addrs)` — "Your listen addresses. If this works, the
+   whole stack is live: host, Membrane, kernel, shell."
 4. `(exit)` — done.
 
 **Name the win**: "⚗️ You just booted a p2p capability-secured OS.
