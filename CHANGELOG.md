@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - All documentation uses correct `(perform cap :method ...)` Glia syntax
+- Removed last stale references to schema-inject and custom sections from embedded context
 - Example READMEs match actual init.d scripts (schema arg, subcommands)
 
 ## [0.0.3.2] - 2026-04-02
