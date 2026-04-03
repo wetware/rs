@@ -118,6 +118,31 @@ fn resolve_ipfs_path(path: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Cap extraction — get type-erased capnp Client from Val::Cap.inner
+// ---------------------------------------------------------------------------
+
+/// Extract the type-erased `capnp::capability::Client` from a `Val::Cap`.
+///
+/// Tries each known capnp client type and returns the inner `.client` field.
+/// Returns `None` if the inner type doesn't match any known cap.
+fn extract_capnp_client(inner: &std::rc::Rc<dyn std::any::Any>) -> Option<capnp::capability::Client> {
+    macro_rules! try_downcast {
+        ($ty:ty) => {
+            if let Some(c) = inner.downcast_ref::<$ty>() {
+                return Some(c.client.clone());
+            }
+        };
+    }
+    try_downcast!(system_capnp::host::Client);
+    try_downcast!(system_capnp::runtime::Client);
+    try_downcast!(routing_capnp::routing::Client);
+    try_downcast!(stem_capnp::identity::Client);
+    try_downcast!(http_capnp::http_client::Client);
+    try_downcast!(system_capnp::executor::Client);
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch table — builtins that don't go through the effect system
 // ---------------------------------------------------------------------------
 
@@ -375,7 +400,7 @@ fn make_host_handler(
                         if let Some(Val::Cell {
                             wasm,
                             schema,
-                            caps: _caps,
+                            caps,
                         }) = rest.first()
                         {
                             let mut load_req = runtime.load_request();
@@ -405,7 +430,27 @@ fn make_host_handler(
                                     if let Some(s) = schema {
                                         req.get().set_schema(s);
                                     }
-                                    // TODO: thread _caps into spawned cells' membranes (Step 6)
+                                    // Forward captured caps from the `with` block.
+                                    if !caps.is_empty() {
+                                        let mut caps_builder =
+                                            req.get().init_caps(caps.len() as u32);
+                                        for (i, (name, val)) in caps.iter().enumerate() {
+                                            if let Val::Cap { inner, .. } = val {
+                                                if let Some(client) = extract_capnp_client(inner) {
+                                                    let mut entry =
+                                                        caps_builder.reborrow().get(i as u32);
+                                                    entry.set_name(name);
+                                                    entry
+                                                        .init_cap()
+                                                        .set_as_capability(client.hook);
+                                                } else {
+                                                    log::warn!(
+                                                        "host :listen — cap '{name}' has unknown inner type, skipping"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
                                     req.send()
                                         .promise
                                         .await
@@ -421,7 +466,7 @@ fn make_host_handler(
                                     let mut req = listener.listen_request();
                                     req.get().set_executor(executor);
                                     req.get().set_prefix(prefix);
-                                    // TODO: thread _caps into spawned cells' membranes (Step 6)
+                                    // TODO: thread _caps into HTTP cells' membranes (HttpListener schema needs caps param)
                                     req.send()
                                         .promise
                                         .await

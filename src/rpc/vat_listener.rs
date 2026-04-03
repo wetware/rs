@@ -77,6 +77,23 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
         let handler = pry!(params.get_handler());
         let handler_which = pry!(handler.which());
 
+        // Read optional caps from the listen request (init.d `with` block grants).
+        // Collect as type-erased (name, client) pairs for forwarding to spawned cells.
+        let extra_caps: Vec<(String, capnp::capability::Client)> = {
+            let mut caps_vec = Vec::new();
+            if let Ok(caps_reader) = params.get_caps() {
+                for entry in caps_reader.iter() {
+                    if let (Ok(name), Ok(cap)) = (
+                        entry.get_name().map(|n| n.to_string().unwrap_or_default()),
+                        entry.get_cap().get_as_capability(),
+                    ) {
+                        caps_vec.push((name, cap));
+                    }
+                }
+            }
+            caps_vec
+        };
+
         match handler_which {
             system_capnp::vat_handler::Which::Spawn(executor) => {
                 let executor: system_capnp::executor::Client = pry!(executor);
@@ -99,9 +116,10 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
                                 );
                                 let executor = executor.clone();
                                 let protocol_cid = protocol_cid.clone();
+                                let caps = extra_caps.clone();
                                 tokio::task::spawn_local(async move {
                                     if let Err(e) =
-                                        handle_vat_connection_spawn(executor, stream, &protocol_cid).await
+                                        handle_vat_connection_spawn(executor, caps, stream, &protocol_cid).await
                                     {
                                         tracing::error!(protocol = protocol_cid, "Vat cell connection error: {e}");
                                     }
@@ -185,11 +203,21 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
 /// duplex for the libp2p stream. Production callers pass `libp2p::Stream`.
 pub async fn handle_vat_connection_spawn(
     executor: system_capnp::executor::Client,
+    caps: Vec<(String, capnp::capability::Client)>,
     stream: impl AsyncRead + AsyncWrite + 'static,
     protocol_cid: &str,
 ) -> Result<(), capnp::Error> {
-    // 1. Spawn cell process via Executor.spawn().
-    let response = executor.spawn_request().send().promise.await?;
+    // 1. Spawn cell process via Executor.spawn(), forwarding caps.
+    let mut spawn_req = executor.spawn_request();
+    if !caps.is_empty() {
+        let mut caps_builder = spawn_req.get().init_caps(caps.len() as u32);
+        for (i, (name, client)) in caps.iter().enumerate() {
+            let mut entry = caps_builder.reborrow().get(i as u32);
+            entry.set_name(name);
+            entry.init_cap().set_as_capability(client.hook.clone());
+        }
+    }
+    let response = spawn_req.send().promise.await?;
     let process = response.get()?.get_process()?;
 
     // 2. Get stdin handle. For RPC cells, stdin is a shutdown signal:
