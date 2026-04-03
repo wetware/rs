@@ -77,11 +77,17 @@ FROM gcr.io/distroless/static-debian12
 
 COPY --from=builder /usr/src/app/target/release/ww /usr/local/bin/ww
 
-# Default kernel + shell images (FHS: <path>/bin/main.wasm)
+# Kernel layer (FHS: bin/main.wasm)
 COPY --from=builder /usr/src/app/crates/kernel/bin/main.wasm \
      /usr/share/wetware/kernel/bin/main.wasm
-COPY --from=builder /usr/src/app/std/shell/boot/main.wasm \
-     /usr/share/wetware/shell/boot/main.wasm
+
+# Shell layer (WASM + schema + init.d)
+COPY --from=builder /usr/src/app/std/shell/bin/shell.wasm \
+     /usr/share/wetware/shell/bin/shell.wasm
+COPY --from=builder /usr/src/app/std/shell/bin/shell.schema \
+     /usr/share/wetware/shell/bin/shell.schema
+COPY --from=builder /usr/src/app/std/shell/etc/init.d/50-shell.glia \
+     /usr/share/wetware/shell/etc/init.d/50-shell.glia
 
 USER 1000:1000
 EXPOSE 8080
