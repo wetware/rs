@@ -1322,18 +1322,14 @@ async fn run_shell(
 }
 
 // ---------------------------------------------------------------------------
-// Daemon mode (non-TTY) — block on stdin
+// Daemon mode (non-TTY) — keep alive until host terminates
 // ---------------------------------------------------------------------------
 
 async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
-    let stdin = get_stdin();
-    loop {
-        match stdin.blocking_read(4096) {
-            Ok(b) if b.is_empty() => break,
-            Err(_) => break,
-            Ok(_) => {} // Discard input in daemon mode.
-        }
-    }
+    // Yield forever. The host keeps us alive by holding our process handle
+    // and terminates us on shutdown (SIGTERM → close pipe → store drop).
+    // Unlike blocking_read(), this doesn't pin a worker thread doing nothing.
+    std::future::pending::<()>().await;
     Ok(())
 }
 
