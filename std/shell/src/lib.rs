@@ -55,13 +55,9 @@ type Membrane = stem_capnp::membrane::Client;
 // Session — capability context for the shell cell
 // ---------------------------------------------------------------------------
 
-// TODO: populate from membrane.graft() when cap handlers are wired.
-#[allow(dead_code)]
 struct ShellSession {
     host: Option<system_capnp::host::Client>,
-    runtime: Option<system_capnp::runtime::Client>,
     routing: Option<routing_capnp::routing::Client>,
-    http_client: Option<http_capnp::http_client::Client>,
     initialized: bool,
 }
 
@@ -157,10 +153,8 @@ fn eval_load(args: &[Val]) -> Result<Val, Val> {
 
 // ---------------------------------------------------------------------------
 // Cap handlers — same pattern as kernel, adapted for ShellSession.
-// TODO: wire into dispatch table + membrane graft.
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 fn call_resume(resume: &Val, val: Val) -> Result<Val, Val> {
     match resume {
         Val::NativeFn { func, .. } => func(&[val]),
@@ -168,7 +162,6 @@ fn call_resume(resume: &Val, val: Val) -> Result<Val, Val> {
     }
 }
 
-#[allow(dead_code)]
 fn extract_method(data: &Val) -> Result<(String, Vec<Val>), Val> {
     let items = match data {
         Val::List(items) => items,
@@ -185,23 +178,6 @@ fn extract_method(data: &Val) -> Result<(String, Vec<Val>), Val> {
     Ok((method, items[1..].to_vec()))
 }
 
-#[allow(dead_code)]
-fn get_host(ctx: &RefCell<ShellSession>) -> Result<system_capnp::host::Client, Val> {
-    ctx.borrow()
-        .host
-        .clone()
-        .ok_or_else(|| Val::from("host: not initialized (graft not complete)"))
-}
-
-#[allow(dead_code)]
-fn get_routing(ctx: &RefCell<ShellSession>) -> Result<routing_capnp::routing::Client, Val> {
-    ctx.borrow()
-        .routing
-        .clone()
-        .ok_or_else(|| Val::from("routing: not initialized (graft not complete)"))
-}
-
-#[allow(dead_code)]
 fn make_host_handler(host: system_capnp::host::Client) -> Val {
     Val::AsyncNativeFn {
         name: "host-handler".into(),
@@ -295,7 +271,6 @@ fn make_host_handler(host: system_capnp::host::Client) -> Val {
     }
 }
 
-#[allow(dead_code)]
 fn make_routing_handler(routing: routing_capnp::routing::Client) -> Val {
     Val::AsyncNativeFn {
         name: "routing-handler".into(),
@@ -349,7 +324,6 @@ fn make_routing_handler(routing: routing_capnp::routing::Client) -> Val {
     }
 }
 
-#[allow(dead_code)]
 fn make_ipfs_handler() -> Val {
     Val::AsyncNativeFn {
         name: "ipfs-handler".into(),
@@ -554,9 +528,7 @@ fn run_impl() {
     let env = Rc::new(RefCell::new(Env::new()));
     let ctx = Rc::new(RefCell::new(ShellSession {
         host: None,
-        runtime: None,
         routing: None,
-        http_client: None,
         initialized: false,
     }));
     let ready = Rc::new(std::cell::Cell::new(false));
@@ -569,8 +541,36 @@ fn run_impl() {
     };
     let client: shell_capnp::shell::Client = capnp_rpc::new_client(shell_impl);
 
-    system::serve(client.client, |_membrane: Membrane| async move {
-        // Load the prelude synchronously (macro definitions only, no capability calls).
+    system::serve(client.client, |membrane: Membrane| async move {
+        // 1. Graft the membrane to obtain capabilities.
+        let graft_resp = membrane.graft_request().send().promise.await?;
+        let results = graft_resp.get()?;
+        let host = results.get_host()?;
+        let routing = results.get_routing()?;
+
+        // Populate session so cap handlers can access capabilities.
+        {
+            let mut s = ctx.borrow_mut();
+            s.host = Some(host.clone());
+            s.routing = Some(routing.clone());
+            s.initialized = true;
+        }
+
+        // 2. Bind cap values + effect handlers into the environment.
+        {
+            let mut env = env.borrow_mut();
+            let caps: [(&str, Val); 3] = [
+                ("host", make_host_handler(host)),
+                ("ipfs", make_ipfs_handler()),
+                ("routing", make_routing_handler(routing)),
+            ];
+            for (name, handler) in caps {
+                env.set(name.to_string(), Val::Nil);
+                env.set(format!("{name}-handler"), handler);
+            }
+        }
+
+        // 3. Load the prelude (macro definitions only, no capability calls).
         {
             let mut env = env.borrow_mut();
             let prelude_forms = glia::read_many(glia::PRELUDE).expect("prelude: parse error");
@@ -588,7 +588,6 @@ fn run_impl() {
             }
             let noop = NoopDispatch;
             for form in &prelude_forms {
-                // Prelude macros (defmacro) don't make async calls — single poll suffices.
                 let mut fut = Box::pin(eval::eval_toplevel(form, &mut env, &noop));
                 let waker = std::task::Waker::noop();
                 let mut cx = std::task::Context::from_waker(&waker);

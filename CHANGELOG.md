@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - Counter example: remove stale schema-inject step (removed in #313)
+- Shell cell: zero warnings (fix unused mut, duplicate build_dispatch call, allow dead_code on scaffolding)
 
 ## [0.0.4.1] - 2026-04-03
 
