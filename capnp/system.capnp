@@ -48,10 +48,15 @@ interface Runtime {
 }
 
 interface Executor {
-  spawn @0 (args :List(Text), env :List(Text)) -> (process :Process);
+  spawn @0 (args :List(Text), env :List(Text),
+            caps :List(import "stem.capnp".NamedCap)) -> (process :Process);
   # Spawn a new instance of the bound WASM binary with the given
   # args and env.  Late-binding args/env is required for WAGI, which
   # injects per-request CGI env vars (REQUEST_METHOD, PATH_INFO, etc.).
+  #
+  # caps: optional named capabilities to inject into the child's
+  # membrane graft as extras.  Forwarded from init.d `with` blocks
+  # via VatListener.listen().
 }
 
 interface StreamListener {
@@ -108,7 +113,8 @@ struct VatHandler {
 }
 
 interface VatListener {
-  listen @0 (handler :VatHandler, schema :Data) -> ();
+  listen @0 (handler :VatHandler, schema :Data,
+             caps :List(import "stem.capnp".NamedCap)) -> ();
   # Accept incoming Cap'n Proto RPC connections on /ww/0.1.0/rpc/{cid}
   # where cid = CIDv1(raw, BLAKE3(schema)).
   #
@@ -119,6 +125,10 @@ interface VatListener {
   # No cell spawning — one persistent capability serves all connections.
   #
   # Schema param is authoritative. WASM custom sections are optional hints.
+  #
+  # caps: optional named capabilities from the init.d `with` block.
+  # Forwarded into spawned cells' membranes as graft extras.
+  # Empty list (default) = no extra caps.
 }
 
 interface VatClient {
