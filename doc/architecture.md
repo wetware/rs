@@ -2,7 +2,9 @@
 
 This document covers the design principles and capability flow of Wetware.
 For transport plumbing (duplex streams, WASI bindings, scheduling, deadlocks),
-see [rpc-transport.md](rpc-transport.md).
+see [rpc-transport.md](rpc-transport.md).  For the guest-side async runtime
+(poll loop, effect system, oneshot channels), see
+[guest-runtime.md](guest-runtime.md).
 
 ## Overview
 

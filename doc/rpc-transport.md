@@ -24,14 +24,14 @@ io/streams resources.
 ┌───────────────────────────┐           ┌───────────────────────────┐
 │        Host (ww)          │           │        pid0 (kernel)      │
 │  - serves Membrane        │<=========>│  - grafts, obtains Session │
-│  - VatNetwork + RpcSystem │           │  - RpcDriver poll loop     │
+│  - VatNetwork + RpcSystem │           │  - poll_loop event loop    │
 └───────────────────────────┘           └───────────────────────────┘
            ^                                            |
            | runtime.load + spawn (child)               | Cap'n Proto RPC
            |                                            v
 ┌───────────────────────────┐           ┌───────────────────────────┐
 │        Host (ww)          │           │        child agent         │
-│  - serves Session         │<=========>│  - RpcDriver poll loop     │
+│  - serves Session         │<=========>│  - poll_loop event loop    │
 │  - VatNetwork + RpcSystem │           │                            │
 └───────────────────────────┘           └───────────────────────────┘
 ```
@@ -129,8 +129,8 @@ StreamReader/StreamWriter -> VatNetwork -> RpcSystem -> client
 
 ## Scheduling model and CPU behavior
 
-Agents are not busy-spinning when idle. They run a cooperative loop in
-`RpcDriver::drive_until`:
+Agents are not busy-spinning when idle. They run a cooperative event
+loop in `poll_loop`:
 
 1) Poll the RPC system and any application futures/promises.
 2) If no progress is made, block in `wasi_poll::poll` on stream readiness
@@ -143,10 +143,10 @@ Key points:
   blocks on `wasi_poll::poll`, yielding to the host runtime.
 - **Asynchronous on the host**: the host side uses Tokio async I/O and a
   spawned `RpcSystem` to process messages without blocking the host thread.
-- **Double-poll pattern**: `run_with_session` must call `rpc_system.poll_unpin`
-  twice per iteration — once before and once after `future.poll` — to flush
-  RPC writes the future queued before blocking in `wasi_poll`. Missing the
-  second poll causes deadlock: calls queued during `future.poll` are never
+- **Double-poll pattern**: `poll_loop` calls `rpc_system.poll`
+  twice per iteration — once before and once after `poll_work` — to flush
+  RPC writes the user future queued before blocking in `wasi_poll`. Missing
+  the second poll causes deadlock: calls queued during `poll_work` are never
   sent, and the host never responds.
 
 ```
@@ -262,9 +262,9 @@ to move data.
    `wasi_poll::poll` waiting for read/write readiness that never comes.
 
 2) **Guest waits on RPC promises without driving the poll loop.**
-   Cap'n Proto RPC futures only make progress when `rpc_system.poll_unpin`
+   Cap'n Proto RPC futures only make progress when `rpc_system.poll`
    is driven. If user code blocks or returns without continuing the
-   `drive_until` loop, responses will never be delivered.
+   `poll_loop`, responses will never be delivered.
 
 3) **Missing flush poll (the double-poll requirement).**
    If the poll loop only calls `poll_rpc` once (before `poll_future`), RPC
@@ -289,16 +289,16 @@ to move data.
 
 1) **Ensure both RPC systems are continuously driven.**
    Host: keep the child's `RpcSystem` alive for the lifetime of the guest
-   process. Guest: keep `drive_until` running whenever promises are
+   process. Guest: keep the poll loop running whenever promises are
    outstanding.
 
 2) **Use the double-poll pattern.**
-   Always call `poll_rpc` both before and after `poll_future` in the
-   driver loop. This is the single most common deadlock fix.
+   Always call `poll_rpc` both before and after `poll_work` in the
+   poll loop. This is the single most common deadlock fix.
 
 3) **Use timeouts on long-lived RPC calls.**
-   On the guest, wrap `drive_until` or higher-level workflows with
-   timeouts and error if no progress is made for a window. On the host,
+   On the guest, wrap poll-driven workflows with timeouts and error
+   if no progress is made for a window. On the host,
    bound guest process execution (`tokio::time::timeout`).
 
 4) **Add explicit yield points in agents.**

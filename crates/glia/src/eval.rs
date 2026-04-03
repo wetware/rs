@@ -1819,28 +1819,18 @@ pub fn eval_expr<'a, D: Dispatch>(
                             }
                             HandlerState::Handling(handler_fut) => {
                                 match handler_fut.as_mut().poll(cx) {
-                                    Poll::Ready(Ok(val)) => {
-                                        hs.borrow_mut().push(ctx.clone());
-                                        return Poll::Ready(Ok(val));
-                                    }
-                                    Poll::Ready(Err(Val::Resume(_))) => {
-                                        hs.borrow_mut().push(ctx.clone());
-                                        state = HandlerState::Polling;
-                                        cx.waker().wake_by_ref();
-                                        return Poll::Pending;
-                                    }
-                                    Poll::Ready(Err(Val::Effect { effect_type, data })) => {
-                                        hs.borrow_mut().push(ctx.clone());
-                                        return Poll::Ready(Err(Val::Effect {
-                                            effect_type,
-                                            data,
-                                        }));
-                                    }
-                                    Poll::Ready(Err(other)) => {
-                                        hs.borrow_mut().push(ctx.clone());
-                                        return Poll::Ready(Err(other));
-                                    }
                                     Poll::Pending => return Poll::Pending,
+                                    Poll::Ready(result) => {
+                                        hs.borrow_mut().push(ctx.clone());
+                                        match result {
+                                            Err(Val::Resume(_)) => {
+                                                state = HandlerState::Polling;
+                                                cx.waker().wake_by_ref();
+                                                return Poll::Pending;
+                                            }
+                                            other => return Poll::Ready(other),
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1857,10 +1847,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                 }
                 drop(stack);
 
-                match &result {
-                    Err(Val::Resume(_)) => result,
-                    _ => result,
-                }
+                result
             }
 
             Expr::DefMacro { name, raw_args } => {

@@ -142,7 +142,6 @@ all connection setup automatically:
 | `system::run` | `(f: FnOnce(C) -> Future) -> ()` | Bootstrap host cap, run closure, drive RPC. |
 | `system::serve` | `(bootstrap: Client, f: FnOnce(C) -> Future) -> ()` | Same as `run`, but also exports `bootstrap` to host. |
 | `system::serve_stdio` | `(bootstrap: Client) -> ()` | Export cap over stdin/stdout (no Membrane). For byte-stream handlers. |
-| `system::block_on` | `(session: &mut RpcSession, future: F) -> Option<T>` | Drive RPC alongside a future. Returns `None` if RPC closes first. |
 
 ### Membrane Capabilities
 

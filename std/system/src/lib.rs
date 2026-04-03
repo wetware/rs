@@ -2,8 +2,6 @@ use capnp::capability::FromClientHook;
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
-use futures::task::noop_waker;
-use futures::FutureExt;
 use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
@@ -280,144 +278,43 @@ impl<C: FromClientHook> RpcSession<C> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct DriveOutcome {
-    pub done: bool,
-    pub progressed: bool,
-}
-
-impl DriveOutcome {
-    pub fn done() -> Self {
-        Self {
-            done: true,
-            progressed: true,
-        }
-    }
-
-    pub fn progress() -> Self {
-        Self {
-            done: false,
-            progressed: true,
-        }
-    }
-
-    pub fn pending() -> Self {
-        Self {
-            done: false,
-            progressed: false,
-        }
-    }
-}
-
-pub struct RpcDriver {
-    waker: Waker,
-}
-
-impl Default for RpcDriver {
-    fn default() -> Self {
-        Self {
-            waker: noop_waker(),
-        }
-    }
-}
-
-impl RpcDriver {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn drive_until<F>(
-        &self,
-        rpc_system: &mut RpcSystem<Side>,
-        pollables: &StreamPollables,
-        mut poll: F,
-    ) where
-        F: FnMut(&mut Context<'_>) -> DriveOutcome,
-    {
-        let mut idle_timeout = new_idle_timeout();
-        loop {
-            let mut made_progress = false;
-            let mut cx = Context::from_waker(&self.waker);
-            WRITE_OCCURRED.with(|f| f.set(false));
-
-            match rpc_system.poll_unpin(&mut cx) {
-                Poll::Ready(Ok(())) | Poll::Ready(Err(_)) => {
-                    made_progress = true;
-                }
-                Poll::Pending => {}
-            }
-
-            let outcome = poll(&mut cx);
-            made_progress |= outcome.progressed;
-
-            if outcome.done {
-                break;
-            }
-
-            // Flush any writes queued by the poll closure before blocking.
-            match rpc_system.poll_unpin(&mut cx) {
-                Poll::Ready(Ok(())) | Poll::Ready(Err(_)) => {
-                    made_progress = true;
-                }
-                Poll::Pending => {}
-            }
-
-            let wrote = WRITE_OCCURRED.with(|f| f.get());
-
-            if wrote || made_progress {
-                if !pollables.writer.ready() {
-                    wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
-                }
-            } else {
-                wasi_poll::poll(&[&pollables.reader, &idle_timeout]);
-                if idle_timeout.ready() {
-                    idle_timeout = new_idle_timeout();
-                }
-            }
-        }
-    }
-}
-
-/// Drive the RPC system and poll a single future to completion.
+/// Core poll loop: drive RPC alongside user work until one side finishes.
 ///
-/// Returns `Some(value)` if the future resolves, or `None` if the
-/// RPC system terminates before the future completes.
-pub fn block_on<C, F>(session: &mut RpcSession<C>, mut future: F) -> Option<F::Output>
-where
-    C: FromClientHook,
-    F: Future + Unpin,
-{
-    let waker = noop_waker();
+/// Each iteration: reset write flag → poll RPC → poll user work → flush
+/// RPC writes → block on WASI I/O.
+///
+/// Returns `Some(value)` when `poll_work` returns `Poll::Ready(value)`.
+/// Returns `None` if the RPC connection closes first.
+fn poll_loop<T>(
+    rpc_system: &mut RpcSystem<Side>,
+    pollables: &StreamPollables,
+    mut poll_work: impl FnMut(&mut Context<'_>) -> Poll<T>,
+) -> Option<T> {
     let mut rpc_done = false;
     let mut idle_timeout = new_idle_timeout();
     loop {
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         let mut made_progress = false;
         WRITE_OCCURRED.with(|f| f.set(false));
 
+        // Drive RPC state machine (process inbound messages).
         if !rpc_done {
-            match session.rpc_system.poll_unpin(&mut cx) {
-                Poll::Ready(_) => {
-                    rpc_done = true;
-                    made_progress = true;
-                }
-                Poll::Pending => {}
+            if let Poll::Ready(_) = Pin::new(&mut *rpc_system).poll(&mut cx) {
+                rpc_done = true;
+                made_progress = true;
             }
         }
 
-        match Pin::new(&mut future).poll(&mut cx) {
-            Poll::Ready(value) => return Some(value),
-            Poll::Pending => {}
+        // Drive user work.
+        if let Poll::Ready(val) = poll_work(&mut cx) {
+            return Some(val);
         }
 
-        // Flush any writes queued by the future before blocking in wasi_poll.
+        // Flush any writes queued by user work before blocking on WASI poll.
         if !rpc_done {
-            match session.rpc_system.poll_unpin(&mut cx) {
-                Poll::Ready(_) => {
-                    rpc_done = true;
-                    made_progress = true;
-                }
-                Poll::Pending => {}
+            if let Poll::Ready(_) = Pin::new(&mut *rpc_system).poll(&mut cx) {
+                rpc_done = true;
+                made_progress = true;
             }
         }
 
@@ -428,11 +325,11 @@ where
         let wrote = WRITE_OCCURRED.with(|f| f.get());
 
         if wrote || made_progress {
-            if !session.pollables.writer.ready() {
-                wasi_poll::poll(&[&session.pollables.reader, &session.pollables.writer]);
+            if !pollables.writer.ready() {
+                wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
             }
         } else {
-            wasi_poll::poll(&[&session.pollables.reader, &idle_timeout]);
+            wasi_poll::poll(&[&pollables.reader, &idle_timeout]);
             if idle_timeout.ready() {
                 idle_timeout = new_idle_timeout();
             }
@@ -474,101 +371,12 @@ pub fn serve_stdio(bootstrap: capnp::capability::Client) {
     let network = VatNetwork::new(reader, writer, Side::Server, Default::default());
     let mut rpc_system = RpcSystem::new(Box::new(network), Some(bootstrap));
 
-    drive_rpc_only(&mut rpc_system, &pollables);
+    // Drive RPC only (no user future) — poll_loop returns None when RPC closes.
+    let _: Option<()> = poll_loop(&mut rpc_system, &pollables, |_| Poll::Pending);
 
     // Forget resources to avoid WASI cleanup errors.
     std::mem::forget(rpc_system);
     std::mem::forget(pollables);
-}
-
-/// Drive an RPC system until the connection closes (no user future).
-fn drive_rpc_only(rpc_system: &mut RpcSystem<Side>, pollables: &StreamPollables) {
-    let waker = noop_waker();
-    let mut idle_timeout = new_idle_timeout();
-    loop {
-        WRITE_OCCURRED.with(|f| f.set(false));
-        let mut cx = Context::from_waker(&waker);
-        match rpc_system.poll_unpin(&mut cx) {
-            Poll::Ready(_) => break,
-            Poll::Pending => {}
-        }
-
-        let wrote = WRITE_OCCURRED.with(|f| f.get());
-
-        if wrote {
-            if !pollables.writer.ready() {
-                wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
-            }
-        } else {
-            wasi_poll::poll(&[&pollables.reader, &idle_timeout]);
-            if idle_timeout.ready() {
-                idle_timeout = new_idle_timeout();
-            }
-        }
-    }
-}
-
-/// Drive an RPC system alongside a user future until the future completes
-/// or the RPC connection closes.
-fn drive_rpc_with_future(
-    rpc_system: &mut RpcSystem<Side>,
-    pollables: &StreamPollables,
-    future: &mut Pin<Box<impl Future<Output = Result<(), capnp::Error>> + ?Sized>>,
-) {
-    let waker = noop_waker();
-    let mut rpc_done = false;
-    let mut idle_timeout = new_idle_timeout();
-    loop {
-        let mut cx = Context::from_waker(&waker);
-        let mut made_progress = false;
-        WRITE_OCCURRED.with(|f| f.set(false));
-
-        if !rpc_done {
-            match rpc_system.poll_unpin(&mut cx) {
-                Poll::Ready(_) => {
-                    rpc_done = true;
-                    made_progress = true;
-                }
-                Poll::Pending => {}
-            }
-        }
-
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(_) => return,
-            Poll::Pending => {}
-        }
-
-        // Flush any writes queued by the future before blocking in wasi_poll.
-        // Without this, an RPC call queued during future.poll (e.g. echo after
-        // graft resolves) is never sent, and wasi_poll blocks forever waiting
-        // for a response that the host never received.
-        if !rpc_done {
-            match rpc_system.poll_unpin(&mut cx) {
-                Poll::Ready(_) => {
-                    rpc_done = true;
-                    made_progress = true;
-                }
-                Poll::Pending => {}
-            }
-        }
-
-        if rpc_done {
-            return;
-        }
-
-        let wrote = WRITE_OCCURRED.with(|f| f.get());
-
-        if wrote || made_progress {
-            if !pollables.writer.ready() {
-                wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
-            }
-        } else {
-            wasi_poll::poll(&[&pollables.reader, &idle_timeout]);
-            if idle_timeout.ready() {
-                idle_timeout = new_idle_timeout();
-            }
-        }
-    }
 }
 
 /// Run a guest program with an async entry point, exporting a bootstrap capability.
@@ -632,10 +440,11 @@ where
     Fut: Future<Output = Result<(), capnp::Error>>,
 {
     let client = session.client.clone();
-    let future = f(client);
-    let mut future = Box::pin(future);
+    let mut future = Box::pin(f(client));
 
-    drive_rpc_with_future(&mut session.rpc_system, &session.pollables, &mut future);
+    let _ = poll_loop(&mut session.rpc_system, &session.pollables, |cx| {
+        future.as_mut().poll(cx)
+    });
 
     // Forget to avoid dropping Cap'n Proto objects which would trigger
     // WASI resource cleanup errors.
