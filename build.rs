@@ -81,13 +81,13 @@ fn find_interface_id(raw_request_path: &Path, name: &str) -> Option<u64> {
     let request: capnp::schema_capnp::code_generator_request::Reader = reader.get_root().ok()?;
     for node in request.get_nodes().ok()?.iter() {
         if let Ok(n) = node.get_display_name() {
-            if n.to_str().ok()?.ends_with(&format!(":{name}")) || n.to_str().ok()? == name {
-                if matches!(
+            if (n.to_str().ok()?.ends_with(&format!(":{name}")) || n.to_str().ok()? == name)
+                && matches!(
                     node.which(),
                     Ok(capnp::schema_capnp::node::Which::Interface(_))
-                ) {
-                    return Some(node.get_id());
-                }
+                )
+            {
+                return Some(node.get_id());
             }
         }
     }
