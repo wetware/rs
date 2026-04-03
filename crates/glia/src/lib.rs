@@ -117,16 +117,20 @@ pub enum Val {
     /// Produced by evaluating expressions like `(ipfs cat "...")`.
     Bytes(Vec<u8>),
     /// A closure: one or more arities + captured environment snapshot.
+    ///
+    /// The env is `Rc`-shared to avoid infinite recursion when cloning closures
+    /// that capture their own scope (e.g., `defn` puts the function in the env,
+    /// then `fn` captures that env). Cloning an `Rc<Env>` is O(1).
     Fn {
         arities: Vec<FnArity>,
-        env: eval::Env,
+        env: std::rc::Rc<eval::Env>,
     },
     /// Internal sentinel returned by `recur` — never escapes `loop`.
     Recur(Vec<Val>),
     /// A macro: like a fn but receives unevaluated args and its result is re-evaluated.
     Macro {
         arities: Vec<FnArity>,
-        env: eval::Env,
+        env: std::rc::Rc<eval::Env>,
     },
     /// Internal sentinel returned by `perform` — caught by `with-handler`.
     /// Propagates up the eval stack until a matching handler is found.

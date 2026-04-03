@@ -138,6 +138,28 @@ impl Env {
             handler_stack: self.handler_stack.clone(),
         }
     }
+
+    /// Create a new Env for function invocation.
+    ///
+    /// Instead of cloning the captured env (which recurses infinitely when
+    /// closures capture their own scope), this creates a new Env that COPIES
+    /// only the captured snapshot's single frame (no deep clone of Val::Fn envs).
+    /// The captured frame's Val::Fn values keep their Rc<Env> references shared.
+    pub fn for_call(captured: &Rc<Env>) -> Self {
+        // The captured env is a snapshot (single frame).
+        // Copy its bindings into a new env's root frame.
+        // Val::Fn values inside are Rc-wrapped, so cloning them is O(1).
+        let mut root = Frame::new();
+        for frame in &captured.frames {
+            for (k, v) in frame {
+                root.insert(k.clone(), v.clone());
+            }
+        }
+        Self {
+            frames: vec![root, Frame::new()], // root + param frame
+            handler_stack: captured.handler_stack.clone(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -433,14 +455,14 @@ fn eval_fn(args: &[Val], env: &Env) -> Result<Val, Val> {
 
     Ok(Val::Fn {
         arities,
-        env: env.snapshot(),
+        env: Rc::new(env.snapshot()),
     })
 }
 
 /// Invoke a Val::Fn with evaluated arguments. Matches arity and evaluates body.
 async fn invoke_fn<'a, D: Dispatch>(
     arities: &'a [FnArity],
-    captured_env: &'a Env,
+    captured_env: &'a Rc<Env>,
     args: &[Val],
     dispatch: &'a D,
 ) -> Result<Val, Val> {
@@ -473,9 +495,10 @@ async fn invoke_fn<'a, D: Dispatch>(
             )
         })?;
 
-    // Build fn environment: captured env + new frame with param bindings
-    let mut fn_env = captured_env.clone();
-    fn_env.push_frame();
+    // Build fn environment: captured env + new frame with param bindings.
+    // Uses Env::for_call to avoid infinite recursion from Env::clone when
+    // closures capture their own scope.
+    let mut fn_env = Env::for_call(captured_env);
 
     // Bind positional params
     for (name, val) in arity.params.iter().zip(args.iter()) {
@@ -612,7 +635,7 @@ async fn eval_defmacro(args: &[Val], env: &mut Env) -> Result<Val, Val> {
     let arities = parse_macro_arities(fn_args)?;
     let val = Val::Macro {
         arities,
-        env: env.snapshot(),
+        env: Rc::new(env.snapshot()),
     };
     env.set_root(name, val.clone());
     Ok(val)
@@ -844,7 +867,7 @@ async fn eval_hof<'a, D: Dispatch>(
 }
 
 /// Extract a `Val::Fn` into its arities and captured env, or error.
-fn extract_fn(caller: &str, val: &Val) -> Result<(Vec<FnArity>, Env), Val> {
+fn extract_fn(caller: &str, val: &Val) -> Result<(Vec<FnArity>, Rc<Env>), Val> {
     match val {
         Val::Fn {
             arities,
@@ -1468,7 +1491,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                     .collect();
                 Ok(Val::Fn {
                     arities: fn_arities,
-                    env: env.snapshot(),
+                    env: Rc::new(env.snapshot()),
                 })
             }
 
@@ -1845,7 +1868,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                 let arities = parse_macro_arities(raw_args)?;
                 let val = Val::Macro {
                     arities,
-                    env: env.snapshot(),
+                    env: Rc::new(env.snapshot()),
                 };
                 env.set_root(name.clone(), val.clone());
                 Ok(val)

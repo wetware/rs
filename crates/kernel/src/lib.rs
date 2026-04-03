@@ -1181,7 +1181,7 @@ async fn run_initd(
             names
         }
         Err(e) => {
-            log::debug!("init.d: readdir {initd_path} failed ({e}), skipping");
+            log::warn!("init.d: {initd_path} not found, skipping");
             return Ok(false);
         }
     };
