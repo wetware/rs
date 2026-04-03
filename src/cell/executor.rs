@@ -529,7 +529,14 @@ impl Cell {
 
         let exit_code = match join.await {
             Ok(Ok(())) => 0,
-            Ok(Err(_)) | Err(_) => 1,
+            Ok(Err(ref e)) => {
+                tracing::error!("Guest process error: {e:#}");
+                1
+            }
+            Err(ref e) => {
+                tracing::error!("Guest task join error: {e}");
+                1
+            }
         };
         tracing::debug!(code = exit_code, "Guest exited (streams RPC)");
 
