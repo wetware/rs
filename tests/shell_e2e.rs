@@ -1,218 +1,327 @@
-//! Integration tests for the shell cell's eval logic.
+//! E2E tests for the shell cell using the ExecutorPool.
 //!
-//! NOTE: Full E2E tests (WASM cell via handle_vat_connection_spawn) are
-//! blocked by a pre-existing issue where cells using system::serve() exit
-//! prematurely in the test harness (the host-side membrane RPC disconnects
-//! before the cell can process eval requests). This affects ALL serve()-based
-//! cells, not just the shell. See also: test_vat_connection_closes_stdin_on_peer_disconnect
-//! in stdin_shutdown_integration.rs which has the same failure mode.
+//! Spawns a real shell cell WASM on a worker thread (matching prod topology),
+//! communicates via Cap'n Proto RPC over an in-memory duplex. No deadlocks
+//! because the cell's membrane RPC runs on the worker's own tokio runtime.
 //!
-//! These tests exercise the Glia eval pipeline directly (parse → wrap → eval)
-//! with the same dispatch and handler code the shell cell uses.
+//! Requires pre-built WASM: `make shell`
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
-use std::rc::Rc;
+use anyhow::Result;
+use capnp_rpc::rpc_twoparty_capnp::Side;
+use capnp_rpc::twoparty::VatNetwork;
+use capnp_rpc::RpcSystem;
+use tokio::sync::{mpsc, watch};
+use tokio_util::compat::TokioAsyncReadCompatExt;
 
-use glia::eval::{self, Dispatch, Env};
-use glia::Val;
+use ww::rpc::{CachePolicy, NetworkState};
+use ww::runtime::{ExecutorPool, SpawnRequest};
+use ww::shell_capnp;
 
-// ---------------------------------------------------------------------------
-// Minimal dispatch for testing (no capabilities, just builtins)
-// ---------------------------------------------------------------------------
+const SHELL_IMAGE_PATH: &str = "std/shell";
 
-type HandlerFn =
-    for<'a> fn(&'a [Val], &'a RefCell<()>) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>>;
-
-struct TestDispatch {
-    table: HashMap<&'static str, HandlerFn>,
+fn shell_wasm_exists() -> bool {
+    std::path::Path::new("std/shell/boot/main.wasm").exists()
 }
 
-impl Dispatch for TestDispatch {
-    fn call<'a>(
-        &'a self,
-        name: &'a str,
-        args: &'a [Val],
-    ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
-        let ctx = RefCell::new(());
-        Box::pin(async move {
-            match self.table.get(name) {
-                Some(handler) => handler(args, &ctx).await,
-                None => Err(Val::from(format!("{name}: command not found"))),
+/// Spawn a shell cell on the executor pool and return a Shell client.
+///
+/// Creates a duplex stream: one end goes to the cell (via
+/// handle_vat_connection_spawn on the worker thread), the other end
+/// stays on the test thread for the capnp client.
+async fn spawn_shell_on_pool(pool: &ExecutorPool) -> Result<shell_capnp::shell::Client> {
+    // Duplex: cell_end goes to the worker, test_end stays here.
+    let (test_end, cell_end) = tokio::io::duplex(64 * 1024);
+
+    // Read the WASM bytes (Send) to move into the factory.
+    let wasm = std::fs::read("std/shell/boot/main.wasm")
+        .map_err(|e| anyhow::anyhow!("failed to read shell WASM: {e}"))?;
+
+    pool.spawn(SpawnRequest {
+        name: "shell-test".into(),
+        factory: Box::new(move |_shutdown| {
+            Box::pin(async move {
+                // Create runtime on the worker thread (capnp clients are !Send).
+                let network_state = NetworkState::new();
+                let (swarm_tx, _swarm_rx) = mpsc::channel(16);
+                let epoch = membrane::Epoch {
+                    seq: 1,
+                    head: vec![],
+                    adopted_block: 0,
+                };
+                let (_epoch_tx, epoch_rx) = watch::channel(epoch);
+                let guard = membrane::EpochGuard {
+                    issued_seq: 1,
+                    receiver: epoch_rx.clone(),
+                };
+                let stream_control = libp2p_stream::Behaviour::new().new_control();
+
+                let runtime = ww::rpc::create_runtime_client(
+                    network_state,
+                    swarm_tx,
+                    false,
+                    Some(guard),
+                    Some(epoch_rx),
+                    None,
+                    Some(stream_control),
+                    CachePolicy::Shared,
+                );
+
+                eprintln!("  [worker] loading WASM ({} bytes)", wasm.len());
+                // Load WASM via runtime to get an Executor.
+                let mut load_req = runtime.load_request();
+                load_req.get().set_wasm(&wasm);
+                let load_resp = load_req.send().promise.await.unwrap();
+                let executor = load_resp.get().unwrap().get_executor().unwrap();
+                eprintln!("  [worker] executor obtained, spawning cell");
+
+                // Spawn the cell via executor.spawn()
+                let spawn_resp = executor.spawn_request().send().promise.await.unwrap();
+                let process = spawn_resp.get().unwrap().get_process().unwrap();
+                eprintln!("  [worker] process spawned, waiting for bootstrap");
+
+                let bootstrap_resp = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    process.bootstrap_request().send().promise,
+                )
+                .await;
+                eprintln!("  [worker] bootstrap result: {:?}", bootstrap_resp.is_ok());
+
+                match bootstrap_resp {
+                    Ok(Ok(resp)) => {
+                        let cap: capnp::capability::Client =
+                            resp.get().unwrap().get_cap().get_as_capability().unwrap();
+                        eprintln!("  [worker] got bootstrap cap, bridging to duplex");
+
+                        let (reader, writer) = tokio::io::split(cell_end);
+                        let network = VatNetwork::new(
+                            reader.compat(),
+                            tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(writer),
+                            Side::Server,
+                            Default::default(),
+                        );
+                        let rpc = RpcSystem::new(Box::new(network), Some(cap));
+                        let _ = rpc.await;
+                        eprintln!("  [worker] bridge ended");
+                    }
+                    _ => {
+                        eprintln!("  [worker] bootstrap failed/timed out");
+                    }
+                }
+            })
+        }),
+        result_tx: None,
+    })
+    .map_err(|_| anyhow::anyhow!("pool rejected spawn"))?;
+
+    // Set up the test-side capnp client over the duplex.
+    let (test_read, test_write) = tokio::io::split(test_end);
+    let test_network = VatNetwork::new(
+        test_read.compat(),
+        tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(test_write),
+        Side::Client,
+        Default::default(),
+    );
+    let mut test_rpc = RpcSystem::new(Box::new(test_network), None);
+    let shell: shell_capnp::shell::Client = test_rpc.bootstrap(Side::Server);
+
+    // Drive the test-side RPC in the background.
+    // RpcSystem is !Send so must use spawn_local.
+    tokio::task::spawn_local(async move {
+        eprintln!("  [test] RPC system started");
+        match test_rpc.await {
+            Ok(_) => eprintln!("  [test] RPC system ended cleanly"),
+            Err(e) => eprintln!("  [test] RPC system error: {e}"),
+        }
+    });
+
+    // Yield to let the RPC task start.
+    tokio::task::yield_now().await;
+
+    Ok(shell)
+}
+
+/// Helper: eval a Glia expression via the Shell RPC.
+async fn eval(shell: &shell_capnp::shell::Client, text: &str) -> (String, bool) {
+    let mut req = shell.eval_request();
+    req.get().set_text(text);
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(15), req.send().promise)
+        .await
+        .expect("eval timed out")
+        .expect("eval RPC failed");
+    let result: shell_capnp::shell::eval_results::Reader<'_> = resp.get().unwrap();
+    let text = result
+        .get_result()
+        .unwrap()
+        .to_str()
+        .unwrap_or("(invalid UTF-8)")
+        .to_string();
+    let is_error = result.get_is_error();
+    (text, is_error)
+}
+
+/// Wait for shell to be ready by polling with eval("nil").
+async fn wait_ready(shell: &shell_capnp::shell::Client) {
+    for i in 0..100 {
+        let mut req = shell.eval_request();
+        req.get().set_text("nil");
+        match tokio::time::timeout(std::time::Duration::from_secs(5), req.send().promise).await {
+            Ok(Ok(resp)) => {
+                let result: shell_capnp::shell::eval_results::Reader<'_> = resp.get().unwrap();
+                let text = result.get_result().unwrap().to_str().unwrap_or("");
+                if !result.get_is_error() || !text.contains("not ready") {
+                    return;
+                }
             }
-        })
+            Ok(Err(_)) | Err(_) => {}
+        }
+        if i > 0 && i % 10 == 0 {
+            eprintln!("  waiting for shell to initialize... ({i} polls)");
+        }
     }
-}
-
-fn test_dispatch() -> TestDispatch {
-    let mut table: HashMap<&'static str, HandlerFn> = HashMap::new();
-    table.insert("help", |_, _| {
-        Box::pin(std::future::ready(Ok(Val::Str("help text".to_string()))))
-    });
-    table.insert("exit", |_, _| {
-        Box::pin(std::future::ready(Ok(Val::Keyword("exit".into()))))
-    });
-    TestDispatch { table }
-}
-
-/// Wrap a form in the :load effect handler (same pattern as shell cell).
-fn wrap_with_load(form: &Val) -> Val {
-    Val::List(vec![
-        Val::Sym("with-effect-handler".into()),
-        Val::Keyword("load".into()),
-        Val::List(vec![
-            Val::Sym("fn".into()),
-            Val::Vector(vec![Val::Sym("path".into()), Val::Sym("resume".into())]),
-            Val::List(vec![
-                Val::Sym("resume".into()),
-                Val::Str("load-not-available-in-test".into()),
-            ]),
-        ]),
-        form.clone(),
-    ])
-}
-
-async fn eval_text(env: &mut Env, dispatch: &TestDispatch, text: &str) -> (String, bool) {
-    if text.trim().is_empty() {
-        return (String::new(), false);
-    }
-
-    let expr = match glia::read(text) {
-        Ok(expr) => expr,
-        Err(e) => return (format!("parse error: {e}"), true),
-    };
-
-    let wrapped = wrap_with_load(&expr);
-    match eval::eval_toplevel(&wrapped, env, dispatch).await {
-        Ok(Val::Nil) => (String::new(), false),
-        Ok(Val::Keyword(ref k)) if k == "exit" => (":exit".to_string(), false),
-        Ok(result) => (format!("{result}"), false),
-        Err(e) => (format!("{e}"), true),
-    }
+    panic!("shell cell never became ready");
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn test_eval_arithmetic() {
-    let mut dispatch = test_dispatch();
-    let mut env = Env::new();
-    glia::load_prelude(&mut env, &mut dispatch).await;
+#[tokio::test(flavor = "current_thread")]
+async fn test_shell_eval_arithmetic() {
+    if !shell_wasm_exists() {
+        eprintln!("SKIP: shell WASM not built (run `make shell`)");
+        return;
+    }
 
-    let (result, is_error) = eval_text(&mut env, &dispatch, "(+ 1 2)").await;
-    assert!(!is_error, "arithmetic should not error: {result}");
-    assert_eq!(result, "3");
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_shutdown_tx, shutdown_rx) = watch::channel(());
+            let pool = ExecutorPool::new(1, shutdown_rx);
+            let shell = spawn_shell_on_pool(&pool).await.expect("spawn shell");
+
+            wait_ready(&shell).await;
+
+            let (result, is_error) = eval(&shell, "(+ 1 2)").await;
+            assert!(!is_error, "arithmetic should not error: {result}");
+            assert_eq!(result, "3");
+        })
+        .await;
 }
 
 #[tokio::test]
-async fn test_eval_state_persistence() {
-    let mut dispatch = test_dispatch();
-    let mut env = Env::new();
-    glia::load_prelude(&mut env, &mut dispatch).await;
+async fn test_shell_eval_state_persistence() {
+    if !shell_wasm_exists() {
+        eprintln!("SKIP: shell WASM not built (run `make shell`)");
+        return;
+    }
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_shutdown_tx, shutdown_rx) = watch::channel(());
+            let pool = ExecutorPool::new(1, shutdown_rx);
+            let shell = spawn_shell_on_pool(&pool).await.expect("spawn shell");
+            wait_ready(&shell).await;
 
-    let (_, is_error) = eval_text(&mut env, &dispatch, "(def x 42)").await;
-    assert!(!is_error, "def should not error");
+            let (_, is_error) = eval(&shell, "(def x 42)").await;
+            assert!(!is_error, "def should not error");
 
-    let (result, is_error) = eval_text(&mut env, &dispatch, "x").await;
-    assert!(!is_error, "x lookup should not error: {result}");
-    assert_eq!(result, "42");
+            let (result, is_error) = eval(&shell, "x").await;
+            assert!(!is_error, "x lookup should not error: {result}");
+            assert_eq!(result, "42");
+        })
+        .await;
 }
 
 #[tokio::test]
-async fn test_eval_parse_error() {
-    let mut dispatch = test_dispatch();
-    let mut env = Env::new();
+async fn test_shell_eval_parse_error() {
+    if !shell_wasm_exists() {
+        eprintln!("SKIP: shell WASM not built (run `make shell`)");
+        return;
+    }
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_shutdown_tx, shutdown_rx) = watch::channel(());
+            let pool = ExecutorPool::new(1, shutdown_rx);
+            let shell = spawn_shell_on_pool(&pool).await.expect("spawn shell");
+            wait_ready(&shell).await;
 
-    let (result, is_error) = eval_text(&mut env, &dispatch, "(+ 1").await;
-    assert!(is_error, "unmatched paren should be a parse error");
-    assert!(
-        result.contains("parse error"),
-        "should mention parse: {result}"
-    );
+            let (result, is_error) = eval(&shell, "(+ 1").await;
+            assert!(is_error, "unmatched paren should be a parse error");
+            assert!(
+                result.contains("parse error"),
+                "should mention parse: {result}"
+            );
+        })
+        .await;
 }
 
 #[tokio::test]
-async fn test_eval_unknown_symbol() {
-    let mut dispatch = test_dispatch();
-    let mut env = Env::new();
-    glia::load_prelude(&mut env, &mut dispatch).await;
+async fn test_shell_eval_exit_sentinel() {
+    if !shell_wasm_exists() {
+        eprintln!("SKIP: shell WASM not built (run `make shell`)");
+        return;
+    }
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_shutdown_tx, shutdown_rx) = watch::channel(());
+            let pool = ExecutorPool::new(1, shutdown_rx);
+            let shell = spawn_shell_on_pool(&pool).await.expect("spawn shell");
+            wait_ready(&shell).await;
 
-    // Glia: unbound symbols dispatch to the external handler.
-    // Without a matching handler, the dispatch returns an error.
-    let (result, is_error) = eval_text(&mut env, &dispatch, "nonexistent_symbol").await;
-    // Could be an error (dispatch miss) or nil depending on eval semantics.
-    // Just verify it doesn't panic.
-    let _ = (result, is_error);
+            let (result, is_error) = eval(&shell, "(exit)").await;
+            assert!(!is_error, "(exit) should not be an error");
+            assert!(result.contains("exit"), "(exit) result: {result}");
+        })
+        .await;
 }
 
 #[tokio::test]
-async fn test_eval_exit_sentinel() {
-    let mut dispatch = test_dispatch();
-    let mut env = Env::new();
-    glia::load_prelude(&mut env, &mut dispatch).await;
+async fn test_shell_eval_prelude_macros() {
+    if !shell_wasm_exists() {
+        eprintln!("SKIP: shell WASM not built (run `make shell`)");
+        return;
+    }
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_shutdown_tx, shutdown_rx) = watch::channel(());
+            let pool = ExecutorPool::new(1, shutdown_rx);
+            let shell = spawn_shell_on_pool(&pool).await.expect("spawn shell");
+            wait_ready(&shell).await;
 
-    let (result, is_error) = eval_text(&mut env, &dispatch, "(exit)").await;
-    assert!(!is_error, "(exit) should not be an error");
-    assert_eq!(result, ":exit");
+            let (result, is_error) = eval(&shell, "(when true 42)").await;
+            assert!(!is_error, "when macro should work: {result}");
+            assert_eq!(result, "42");
+
+            let (_, is_error) = eval(&shell, "(defn double [x] (* x 2))").await;
+            assert!(!is_error, "defn should not error");
+
+            let (result, is_error) = eval(&shell, "(double 21)").await;
+            assert!(!is_error, "calling defn'd function: {result}");
+            assert_eq!(result, "42");
+        })
+        .await;
 }
 
 #[tokio::test]
-async fn test_eval_empty_input() {
-    let mut dispatch = test_dispatch();
-    let mut env = Env::new();
+async fn test_shell_eval_empty_input() {
+    if !shell_wasm_exists() {
+        eprintln!("SKIP: shell WASM not built (run `make shell`)");
+        return;
+    }
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_shutdown_tx, shutdown_rx) = watch::channel(());
+            let pool = ExecutorPool::new(1, shutdown_rx);
+            let shell = spawn_shell_on_pool(&pool).await.expect("spawn shell");
+            wait_ready(&shell).await;
 
-    let (result, is_error) = eval_text(&mut env, &dispatch, "").await;
-    assert!(!is_error, "empty input should not error");
-    assert!(result.is_empty(), "empty input should return empty result");
-}
-
-#[tokio::test]
-async fn test_eval_prelude_macros() {
-    let mut dispatch = test_dispatch();
-    let mut env = Env::new();
-    glia::load_prelude(&mut env, &mut dispatch).await;
-
-    let (result, is_error) = eval_text(&mut env, &dispatch, "(when true 42)").await;
-    assert!(!is_error, "when macro should work: {result}");
-    assert_eq!(result, "42");
-
-    let (_, is_error) = eval_text(&mut env, &dispatch, "(defn double [x] (* x 2))").await;
-    assert!(!is_error, "defn should not error");
-
-    let (result, is_error) = eval_text(&mut env, &dispatch, "(double 21)").await;
-    assert!(!is_error, "calling defn'd function should work: {result}");
-    assert_eq!(result, "42");
-}
-
-#[tokio::test]
-async fn test_eval_help_builtin() {
-    let mut dispatch = test_dispatch();
-    let mut env = Env::new();
-    glia::load_prelude(&mut env, &mut dispatch).await;
-
-    let (result, is_error) = eval_text(&mut env, &dispatch, "(help)").await;
-    assert!(!is_error, "help should not error");
-    assert!(result.contains("help text"), "help output: {result}");
-}
-
-#[tokio::test]
-async fn test_eval_def_then_function() {
-    let mut dispatch = test_dispatch();
-    let mut env = Env::new();
-    glia::load_prelude(&mut env, &mut dispatch).await;
-
-    eval_text(&mut env, &dispatch, "(def greeting \"hello\")").await;
-    eval_text(
-        &mut env,
-        &dispatch,
-        "(defn greet [name] (str greeting \" \" name))",
-    )
-    .await;
-    // str isn't a builtin so this will error, but def+defn should work
-    let (_, is_error) = eval_text(&mut env, &dispatch, "greeting").await;
-    assert!(!is_error);
+            let (result, is_error) = eval(&shell, "").await;
+            assert!(!is_error, "empty input should not error");
+            assert!(result.is_empty(), "empty input result: '{result}'");
+        })
+        .await;
 }
