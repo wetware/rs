@@ -1075,3 +1075,96 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Client-mode swarm — minimal libp2p for dialing only (ww shell)
+// ---------------------------------------------------------------------------
+
+/// Minimal network behaviour for client-only operation.
+/// Identify for peer info exchange + libp2p_stream for VatClient dialing.
+/// No Kademlia, no mDNS, no listeners.
+#[derive(libp2p::swarm::NetworkBehaviour)]
+pub struct ClientBehaviour {
+    identify: libp2p::identify::Behaviour,
+    stream: libp2p_stream::Behaviour,
+}
+
+/// A lightweight libp2p swarm for dialing peers and consuming vat services.
+/// Used by `ww shell` to connect to a running node without booting a full host.
+pub struct ClientSwarm {
+    swarm: libp2p::swarm::Swarm<ClientBehaviour>,
+    local_peer_id: PeerId,
+    stream_control: libp2p_stream::Control,
+}
+
+impl ClientSwarm {
+    /// Build a client-mode swarm with TCP + Noise + Yamux (same stack as host).
+    /// No listeners are registered — this swarm only dials outgoing connections.
+    pub fn new(keypair: libp2p::identity::Keypair) -> Result<Self> {
+        let peer_id = keypair.public().to_peer_id();
+
+        let stream_behaviour = libp2p_stream::Behaviour::new();
+        let stream_control = stream_behaviour.new_control();
+
+        let behaviour = ClientBehaviour {
+            identify: libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
+                "wetware-shell/0.1.0".to_string(),
+                keypair.public(),
+            )),
+            stream: stream_behaviour,
+        };
+
+        let swarm = SwarmBuilder::with_existing_identity(keypair)
+            .with_tokio()
+            .with_tcp(
+                Default::default(),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )?
+            .with_behaviour(|_| behaviour)?
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .build();
+
+        Ok(Self {
+            swarm,
+            local_peer_id: peer_id,
+            stream_control,
+        })
+    }
+
+    pub fn local_peer_id(&self) -> PeerId {
+        self.local_peer_id
+    }
+
+    pub fn stream_control(&self) -> libp2p_stream::Control {
+        self.stream_control.clone()
+    }
+
+    /// Add a known address for a peer (for direct dial via --addr).
+    pub fn add_peer_addr(&mut self, peer_id: PeerId, addr: Multiaddr) {
+        self.swarm.add_peer_address(peer_id, addr);
+    }
+
+    /// Drive the swarm event loop. Spawn this as a background task.
+    pub async fn run(mut self) {
+        use libp2p::swarm::SwarmEvent;
+        loop {
+            match self.swarm.next().await {
+                Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
+                    tracing::debug!(peer = %peer_id, "Client connection established");
+                }
+                Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
+                    tracing::debug!(peer = %peer_id, "Client connection closed");
+                }
+                Some(SwarmEvent::OutgoingConnectionError { peer_id, error, .. }) => {
+                    tracing::warn!(
+                        peer = ?peer_id,
+                        "Client outgoing connection error: {error}"
+                    );
+                }
+                Some(_) => {} // Ignore other events
+                None => break,
+            }
+        }
+    }
+}
