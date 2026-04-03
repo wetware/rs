@@ -65,7 +65,7 @@ pattern section).
 - Schemas match implementation?
 - Streams registered and discovered correctly?
 - RPC bidirectionality used appropriately?
-- HTTP cells handle all expected methods?  Error codes correct?
+- WAGI cells handle all expected methods?  Error codes correct?
 
 ### 6. Effect hygiene
 

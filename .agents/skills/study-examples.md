@@ -12,9 +12,9 @@ Don't just present a list — ask what they're after:
 >
 > 1. **Echo** — simplest possible cell.  Good if you want to see
 >    the bare minimum.  *(~5 min walkthrough)*
-> 2. **Counter** — HTTP cell with FastCGI.  Good if you're building
+> 2. **Counter** — WAGI cell with FastCGI.  Good if you're building
 >    a web service.  *(~10 min walkthrough)*
-> 3. **Chess** — full Cap'n Proto RPC over libp2p.  Good if you want
+> 3. **Chess** — full Cap'n Proto vat cell over libp2p.  Good if you want
 >    to see a real multi-node app.  *(~15 min walkthrough)*
 >
 > Or tell me what you're trying to build and I'll pick the most
@@ -80,7 +80,7 @@ Walk through together:
    resets — that's expected for the demo.
 
 ⚗️ **Name the win**: "You've seen the full build pipeline: compile
-WASM, inject cell type, host routes traffic.  That's how HTTP cells
+WASM, inject cell type, host routes traffic.  That's how WAGI cells
 work."
 
 Check in: "Ready for the big one (Chess), or want to dig into
@@ -88,7 +88,7 @@ something here first?"
 
 ---
 
-## 3. Chess (Cap'n Proto RPC cell) — ~15 min
+## 3. Chess (Cap'n Proto vat cell) — ~15 min
 
 Read files from `examples/chess/`.
 

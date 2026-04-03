@@ -1,4 +1,4 @@
-# Discovery — Greeter RPC cell with schema-keyed peer discovery
+# Discovery — Greeter vat cell with schema-keyed peer discovery
 #
 # Usage: make -C examples/discovery
 

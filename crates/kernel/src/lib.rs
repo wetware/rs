@@ -474,7 +474,7 @@ fn make_host_handler(
                                     let mut req = listener.listen_request();
                                     req.get().set_executor(executor);
                                     req.get().set_prefix(prefix);
-                                    // TODO: thread _caps into HTTP cells' membranes (HttpListener schema needs caps param)
+                                    // TODO: thread _caps into WAGI cells' membranes (HttpListener schema needs caps param)
                                     req.send()
                                         .promise
                                         .await

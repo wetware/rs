@@ -9,11 +9,11 @@ on the DHT for peer discovery.
 
 - **Dual transport** -- one binary, two transports (vat RPC + HTTP)
 - **Cap'n Proto cell** (`WW_CELL_MODE=vat`) -- schema-keyed RPC
-- **HTTP cell** (`WW_CELL_MODE=http`) -- WAGI/CGI, curl-friendly JSON
+- **WAGI cell** (`WW_CELL_MODE=http`) -- CGI, curl-friendly JSON
 - `HttpClient` capability for outbound HTTP (domain-scoped)
 - `with`/`cell`/`listen` DX for capability-scoped cell definitions
 - Schema-keyed DHT discovery via `routing.provide()` / `findProviders()`
-- Four-mode binary: vat cell, HTTP cell, service (DHT), consumer (query)
+- Four-mode binary: vat cell, WAGI cell, service (DHT), consumer (query)
 
 ## Prerequisites
 
@@ -146,7 +146,7 @@ The same binary serves all modes. Detection:
 | Mode | Trigger | Transport |
 |------|---------|-----------|
 | **Vat cell** | No args, no `REQUEST_METHOD` | Cap'n Proto RPC over libp2p |
-| **HTTP cell** | `REQUEST_METHOD` env var present | WAGI/CGI over stdin/stdout |
+| **WAGI cell** | `REQUEST_METHOD` env var present | CGI over stdin/stdout |
 | **Service** | `serve` subcommand | DHT provide loop |
 | **Consumer** | `consume` subcommand | DHT discover + RPC query |
 
@@ -155,7 +155,7 @@ The same binary serves all modes. Detection:
   to obtain `HttpClient`, fetches prices from Blocknative, and
   exports the oracle as the bootstrap capability. Refreshes prices
   every 30-60 seconds while the connection is alive.
-- **HTTP cell mode** (`WW_CELL_MODE=http`): spawned by `HttpListener`
+- **WAGI cell mode** (`WW_CELL_MODE=http`): spawned by `HttpListener`
   per HTTP request. Grafts the membrane over `wetware:streams`
   (side-channel), fetches prices via `HttpClient`, writes a JSON
   response to stdout via CGI. Stateless -- one cell per request.

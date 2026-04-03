@@ -1,4 +1,4 @@
-# Chess engine — Cap'n Proto RPC cell with schema-keyed discovery
+# Chess engine — Cap'n Proto vat cell with schema-keyed discovery
 #
 # Usage: make -C examples/chess
 

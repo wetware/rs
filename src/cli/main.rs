@@ -621,7 +621,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         let glia = format!(
             r#"; {name} init.d script — evaluated by the kernel at boot.
 ;
-; Registers the RPC cell. VatListener spawns a cell per connection;
+; Registers the vat cell. VatListener spawns a cell per connection;
 ; each cell exports its capability via system::serve().
 ;
 ; To run the service from the shell:

@@ -119,7 +119,7 @@ The same binary serves both roles:
 `etc/init.d/discovery.glia`:
 
 ```clojure
-; Register RPC cell for the Greeter capability.
+; Register vat cell for the Greeter capability.
 ; VatListener spawns a cell per connection; the cell exports
 ; a Greeter capability via system::serve().
 (def discovery-wasm (load "bin/discovery.wasm"))

@@ -221,13 +221,13 @@ Full interface reference for the capabilities available to guests.
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `listen` | `(handler: VatHandler, schema: Data) -> ()` | Accept connections on `/ww/0.1.0/rpc/{cid}` where cid = CIDv1(raw, BLAKE3(schema)). VatHandler is a union: `spawn` (Executor) for stateless per-connection cells, or `serve` (AnyPointer) for a persistent bootstrap capability. |
+| `listen` | `(handler: VatHandler, schema: Data) -> ()` | Accept connections on `/ww/0.1.0/vat/{cid}` where cid = CIDv1(raw, BLAKE3(schema)). VatHandler is a union: `spawn` (Executor) for stateless per-connection cells, or `serve` (AnyPointer) for a persistent bootstrap capability. |
 
 ### VatClient (capability mode)
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `dial` | `(peer: Data, schema: Data) -> (cap: AnyPointer)` | Open connection to peer on `/ww/0.1.0/rpc/{cid}`. Bootstrap RPC, return remote's capability. Type-erased. |
+| `dial` | `(peer: Data, schema: Data) -> (cap: AnyPointer)` | Open connection to peer on `/ww/0.1.0/vat/{cid}`. Bootstrap RPC, return remote's capability. Type-erased. |
 
 ## WASM Custom Sections
 
@@ -241,7 +241,7 @@ inspects before instantiation.
 **Cell variants:**
 - `Cell::raw(Text)` — registers a libp2p stream protocol at `/ww/0.1.0/stream/{name}`. stdin/stdout carry raw bytes.
 - `Cell::http(Text)` — registers at HTTP path prefix. stdin/stdout carry FastCGI records.
-- `Cell::capnp(Schema.Node)` — registers RPC protocol at `/ww/0.1.0/rpc/{cid}`. CID = `CIDv1(raw, BLAKE3(canonical schema bytes))`.
+- `Cell::capnp(Schema.Node)` — registers vat protocol at `/ww/0.1.0/vat/{cid}`. CID = `CIDv1(raw, BLAKE3(canonical schema bytes))`.
 
 **Absence**: If `cell.capnp` is not present, the binary is a pid0 process (kernel/WIT mode).
 It is not a service cell and cannot be passed to any listener.
