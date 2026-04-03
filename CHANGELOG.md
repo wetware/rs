@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Kernel daemon mode uses `std::future::pending()` instead of blocking stdin read, freeing the worker thread for cell work
+
 ## [0.0.4.0] - 2026-04-03
 
 ### Added
