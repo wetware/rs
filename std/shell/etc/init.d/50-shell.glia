@@ -1,0 +1,7 @@
+;; Register shell cell for remote REPL access.
+;; VatListener spawns a fresh cell per connection.
+
+(def shell-wasm (load "bin/shell.wasm"))
+(def shell-schema (load "bin/shell.schema"))
+
+(perform host :listen runtime shell-wasm shell-schema)
