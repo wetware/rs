@@ -48,7 +48,6 @@ fn main() {
     capnpc::CompilerCommand::new()
         .src_prefix(&capnp_dir)
         .file(capnp_dir.join("system.capnp"))
-        .file(capnp_dir.join("ipfs.capnp"))
         .file(capnp_dir.join("routing.capnp"))
         .file(capnp_dir.join("http.capnp"))
         .file(capnp_dir.join("stem.capnp"))
@@ -93,7 +92,7 @@ fn main() {
 
     // ── Cargo rebuild triggers ──────────────────────────────────────
     // Re-run this build script whenever any schema file changes.
-    for schema in &["system", "ipfs", "routing", "http", "stem"] {
+    for schema in &["system", "routing", "http", "stem"] {
         println!(
             "cargo:rerun-if-changed={}",
             capnp_dir.join(format!("{schema}.capnp")).display()

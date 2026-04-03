@@ -39,11 +39,6 @@ mod stem_capnp {
 }
 
 #[allow(dead_code)]
-mod ipfs_capnp {
-    include!(concat!(env!("OUT_DIR"), "/ipfs_capnp.rs"));
-}
-
-#[allow(dead_code)]
 mod routing_capnp {
     include!(concat!(env!("OUT_DIR"), "/routing_capnp.rs"));
 }
@@ -332,7 +327,7 @@ async fn play_rpc_against_peer(
 ///
 /// The service orchestrates both sides: picks random moves for white (us)
 /// and black (them) and applies them to the remote engine. Each move pair
-/// is published to IPFS as a replay node.
+/// is logged locally for replay debugging.
 async fn play_rpc_game(
     engine: &chess_capnp::chess_engine::Client,
     us: &str,
