@@ -71,6 +71,7 @@ cid = "0.11"
 hex = "0.4"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 axum = "0.8"
+rustyline = "15"
 dirs = "5"
 cap-std = "3.4"
 arc-swap = "1"
@@ -86,7 +87,9 @@ schema-id = { path = "crates/schema-id" }
 wasm-encoder = "0.243"
 
 [build-dependencies]
-capnpc = "0.23.3"
+capnpc    = "0.23.3"
+capnp     = "0.23.2"
+schema-id = { path = "crates/schema-id" }
 
 # Optimise WASM guests for size; host binary overridden below.
 [profile.release]

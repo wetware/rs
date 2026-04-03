@@ -56,6 +56,10 @@ pub use membrane::system_capnp;
 pub mod greeter_capnp {
     include!(concat!(env!("OUT_DIR"), "/greeter_capnp.rs"));
 }
+#[allow(dead_code)]
+pub mod shell_capnp {
+    include!(concat!(env!("OUT_DIR"), "/shell_capnp.rs"));
+}
 
 // Modules available for both host and guest
 pub mod config;
