@@ -26,8 +26,8 @@ kernel:
 
 shell:
 	cargo build -p shell --target $(WASM_TARGET) --release --manifest-path std/shell/Cargo.toml
-	@mkdir -p std/shell/boot std/shell/bin
-	cp std/shell/target/$(WASM_TARGET)/release/shell.wasm std/shell/boot/main.wasm
+	@mkdir -p std/shell/bin
+	cp std/shell/target/$(WASM_TARGET)/release/shell.wasm std/shell/bin/shell.wasm
 	@SCHEMA_OUT=$$(find std/shell/target/$(WASM_TARGET)/release/build -path '*/shell-*/out/shell_schema.bin' | head -1) && \
 		if [ -n "$$SCHEMA_OUT" ]; then \
 			cp "$$SCHEMA_OUT" std/shell/bin/shell.schema; \
@@ -62,7 +62,7 @@ run-kernel: kernel
 clean:
 	cargo clean
 	rm -f crates/kernel/bin/main.wasm
-	rm -f std/shell/boot/main.wasm
+	rm -f std/shell/bin/shell.wasm std/shell/bin/shell.schema
 	$(MAKE) -C examples/chess clean
 	$(MAKE) -C examples/echo clean
 	$(MAKE) -C examples/counter clean
