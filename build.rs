@@ -17,6 +17,17 @@ fn main() {
             .expect("failed to compile greeter.capnp");
         println!("cargo:rerun-if-changed={}", greeter_schema.display());
     }
+
+    // Compile shell schema so the ww shell CLI gets typed access.
+    let shell_schema = manifest_path.join("capnp/shell.capnp");
+    if shell_schema.exists() {
+        capnpc::CompilerCommand::new()
+            .src_prefix(manifest_path.join("capnp"))
+            .file(&shell_schema)
+            .run()
+            .expect("failed to compile shell.capnp");
+        println!("cargo:rerun-if-changed={}", shell_schema.display());
+    }
     let cid_file = target_dir.join("default-config.cid");
 
     // Read CID from the generated .cid file in target directory
