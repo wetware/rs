@@ -145,6 +145,9 @@ pub struct HostGraftBuilder {
     route_registry: Option<crate::dispatcher::server::RouteRegistry>,
     /// Pre-created Runtime client (singleton — same backend for every graft).
     runtime_client: system_capnp::runtime::Client,
+    /// Named capabilities from init.d `with` block, forwarded to the child
+    /// cell's graft response as `extras`.
+    extras: Vec<(String, capnp::capability::Client)>,
 }
 
 impl HostGraftBuilder {
@@ -167,6 +170,7 @@ impl HostGraftBuilder {
             allowed_hosts,
             route_registry: None,
             runtime_client,
+            extras: Vec::new(),
         }
     }
 
@@ -176,6 +180,12 @@ impl HostGraftBuilder {
         registry: crate::dispatcher::server::RouteRegistry,
     ) -> Self {
         self.route_registry = Some(registry);
+        self
+    }
+
+    /// Set named capabilities from init.d `with` block to inject into graft.
+    pub fn with_extras(mut self, extras: Vec<(String, capnp::capability::Client)>) -> Self {
+        self.extras = extras;
         self
     }
 }
@@ -219,6 +229,16 @@ impl GraftBuilder for HostGraftBuilder {
             let identity: stem_capnp::identity::Client =
                 capnp_rpc::new_client(EpochGuardedIdentity::new(keypair, guard.clone()));
             builder.set_identity(identity);
+        }
+
+        // Write init.d-scoped extras into the graft response.
+        if !self.extras.is_empty() {
+            let mut extras_builder = builder.reborrow().init_extras(self.extras.len() as u32);
+            for (i, (name, client)) in self.extras.iter().enumerate() {
+                let mut entry = extras_builder.reborrow().get(i as u32);
+                entry.set_name(name);
+                entry.init_cap().set_as_capability(client.hook.clone());
+            }
         }
 
         Ok(())
@@ -265,6 +285,7 @@ pub fn build_membrane_rpc<R, W>(
     stream_control: libp2p_stream::Control,
     route_registry: Option<crate::dispatcher::server::RouteRegistry>,
     runtime_client: system_capnp::runtime::Client,
+    extras: Vec<(String, capnp::capability::Client)>,
 ) -> (RpcSystem<Side>, GuestMembrane)
 where
     R: AsyncRead + Unpin + 'static,
@@ -279,6 +300,9 @@ where
         Vec::new(), // allowed_hosts: empty = allow all (default)
         runtime_client,
     );
+    if !extras.is_empty() {
+        sess_builder = sess_builder.with_extras(extras);
+    }
     if let Some(registry) = route_registry {
         sess_builder = sess_builder.with_route_registry(registry);
     }

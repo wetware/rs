@@ -6,12 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.0.3.0] - 2026-04-03
+
 ### Added
+- Capability threading: `with` block grants in init.d scripts now flow into spawned cells' membranes as `extras` in the graft response
+- `NamedCap` schema type for forwarding type-erased named capabilities across the spawn pipeline
+- `Membrane.graft()` returns an `extras` field containing init.d-scoped capability grants
+- `VatListener.listen()` and `Executor.spawn()` accept optional `caps` parameter for capability forwarding
 - Dual-transport cell registration: one binary can serve both vat RPC (libp2p) and HTTP/WAGI from a single init.d script
 - `with` prelude macro for capability grant bindings in glia scripts
 - `Val::Cell` type: bundles wasm + schema + captured capabilities from lexical scope
 - `cell` builtin: constructs Cell values, scanning the environment for `Val::Cap` bindings
-- `(perform host :http-client)` returns an HttpClient capability to glia scripts
+- `(perform host :new-http-client)` returns an HttpClient capability to glia scripts
 - `(perform host :listen <cell>)` for VatListener and `(perform host :listen <cell> "/path")` for HttpListener
 - Oracle example HTTP mode: stateless per-request JSON endpoint via `curl`
 

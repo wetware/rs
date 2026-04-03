@@ -850,6 +850,23 @@ impl system_capnp::executor::Server for ExecutorImpl {
         let params = pry!(params.get());
         let args = read_text_list_result(params.get_args());
         let env = read_text_list_result(params.get_env());
+
+        // Read optional caps from spawn request (forwarded from init.d `with` block).
+        let extra_caps: Vec<(String, capnp::capability::Client)> = {
+            let mut caps_vec = Vec::new();
+            if let Ok(caps_reader) = params.get_caps() {
+                for entry in caps_reader.iter() {
+                    if let (Ok(name), Ok(cap)) = (
+                        entry.get_name().map(|n| n.to_string().unwrap_or_default()),
+                        entry.get_cap().get_as_capability(),
+                    ) {
+                        caps_vec.push((name, cap));
+                    }
+                }
+            }
+            caps_vec
+        };
+
         let bytecode = self.bytecode.clone();
         let wasm_debug = self.wasm_debug;
         let network_state = self.network_state.clone();
@@ -899,6 +916,7 @@ impl system_capnp::executor::Server for ExecutorImpl {
                     sc,
                     None, // route_registry: spawned cells don't get HTTP routes
                     runtime_client,
+                    extra_caps,
                 );
                 bootstrap_cap = Some(guest.client);
                 rpc

@@ -118,6 +118,33 @@ fn resolve_ipfs_path(path: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Cap extraction — get type-erased capnp Client from Val::Cap.inner
+// ---------------------------------------------------------------------------
+
+/// Extract the type-erased `capnp::capability::Client` from a `Val::Cap`.
+///
+/// Tries each known capnp client type and returns the inner `.client` field.
+/// Returns `None` if the inner type doesn't match any known cap.
+fn extract_capnp_client(
+    inner: &std::rc::Rc<dyn std::any::Any>,
+) -> Option<capnp::capability::Client> {
+    macro_rules! try_downcast {
+        ($ty:ty) => {
+            if let Some(c) = inner.downcast_ref::<$ty>() {
+                return Some(c.client.clone());
+            }
+        };
+    }
+    try_downcast!(system_capnp::host::Client);
+    try_downcast!(system_capnp::runtime::Client);
+    try_downcast!(routing_capnp::routing::Client);
+    try_downcast!(stem_capnp::identity::Client);
+    try_downcast!(http_capnp::http_client::Client);
+    try_downcast!(system_capnp::executor::Client);
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch table — builtins that don't go through the effect system
 // ---------------------------------------------------------------------------
 
@@ -372,12 +399,7 @@ fn make_host_handler(
                         // Cell-based registration:
                         //   (perform host :listen <cell>)          → VatListener
                         //   (perform host :listen <cell> "/path")  → HttpListener
-                        if let Some(Val::Cell {
-                            wasm,
-                            schema,
-                            caps: _caps,
-                        }) = rest.first()
-                        {
+                        if let Some(Val::Cell { wasm, schema, caps }) = rest.first() {
                             let mut load_req = runtime.load_request();
                             load_req.get().set_wasm(wasm);
                             let executor = load_req.send().pipeline.get_executor();
@@ -405,7 +427,38 @@ fn make_host_handler(
                                     if let Some(s) = schema {
                                         req.get().set_schema(s);
                                     }
-                                    // TODO: thread _caps into spawned cells' membranes (Step 6)
+                                    // Forward captured caps from the `with` block.
+                                    // Pre-filter to avoid ghost entries in the capnp list.
+                                    if !caps.is_empty() {
+                                        let valid_caps: Vec<(&str, capnp::capability::Client)> =
+                                            caps.iter()
+                                                .filter_map(|(name, val)| {
+                                                    if let Val::Cap { inner, .. } = val {
+                                                        if let Some(client) =
+                                                            extract_capnp_client(inner)
+                                                        {
+                                                            return Some((name.as_str(), client));
+                                                        }
+                                                        log::warn!(
+                                                            "host :listen — cap '{name}' has unknown inner type, skipping"
+                                                        );
+                                                    }
+                                                    None
+                                                })
+                                                .collect();
+                                        if !valid_caps.is_empty() {
+                                            let mut caps_builder =
+                                                req.get().init_caps(valid_caps.len() as u32);
+                                            for (i, (name, client)) in
+                                                valid_caps.into_iter().enumerate()
+                                            {
+                                                let mut entry =
+                                                    caps_builder.reborrow().get(i as u32);
+                                                entry.set_name(name);
+                                                entry.init_cap().set_as_capability(client.hook);
+                                            }
+                                        }
+                                    }
                                     req.send()
                                         .promise
                                         .await
@@ -421,7 +474,7 @@ fn make_host_handler(
                                     let mut req = listener.listen_request();
                                     req.get().set_executor(executor);
                                     req.get().set_prefix(prefix);
-                                    // TODO: thread _caps into spawned cells' membranes (Step 6)
+                                    // TODO: thread _caps into HTTP cells' membranes (HttpListener schema needs caps param)
                                     req.send()
                                         .promise
                                         .await
@@ -2622,6 +2675,95 @@ mod tests {
             std::env::set_var("WW_ROOT", "");
             let blocked = run_initd(&mut env, &ctx, &dispatch).await.unwrap();
             assert!(!blocked, "should not block when WW_ROOT is empty");
+        })
+        .await;
+    }
+
+    // --- extract_capnp_client tests ---
+
+    #[test]
+    fn test_extract_capnp_client_known_types() {
+        let s = test_session();
+        // Host client
+        let inner: Rc<dyn std::any::Any> = Rc::new(s.host.clone());
+        assert!(
+            extract_capnp_client(&inner).is_some(),
+            "should extract host client"
+        );
+        // Runtime client
+        let inner: Rc<dyn std::any::Any> = Rc::new(s.runtime.clone());
+        assert!(
+            extract_capnp_client(&inner).is_some(),
+            "should extract runtime client"
+        );
+        // Routing client
+        let inner: Rc<dyn std::any::Any> = Rc::new(s.routing.clone());
+        assert!(
+            extract_capnp_client(&inner).is_some(),
+            "should extract routing client"
+        );
+        // HttpClient
+        let inner: Rc<dyn std::any::Any> = Rc::new(s.http_client.clone());
+        assert!(
+            extract_capnp_client(&inner).is_some(),
+            "should extract http_client"
+        );
+    }
+
+    #[test]
+    fn test_extract_capnp_client_unknown_type_returns_none() {
+        let inner: Rc<dyn std::any::Any> = Rc::new(42i32);
+        assert!(
+            extract_capnp_client(&inner).is_none(),
+            "unknown type should return None"
+        );
+    }
+
+    // --- cell-based listen with caps ---
+
+    #[tokio::test]
+    async fn test_host_listen_cell_with_caps() {
+        run_local(async {
+            let s = test_session();
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let http_cap = Val::Cap {
+                name: "http".into(),
+                schema_cid: "test-http-cid".into(),
+                inner: Rc::new(s.http_client.clone()),
+            };
+            let cell = Val::Cell {
+                wasm: b"fake-wasm".to_vec(),
+                schema: Some(b"fake-schema".to_vec()),
+                caps: vec![("http".to_string(), http_cap)],
+            };
+            let result = call_handler(&handler, "listen", &[cell]).await;
+            assert!(
+                result.is_ok(),
+                "cell-based listen with caps failed: {:?}",
+                result.unwrap_err()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_host_listen_cell_without_caps() {
+        run_local(async {
+            let s = test_session();
+            let handler =
+                make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone());
+            let cell = Val::Cell {
+                wasm: b"fake-wasm".to_vec(),
+                schema: Some(b"fake-schema".to_vec()),
+                caps: vec![],
+            };
+            let result = call_handler(&handler, "listen", &[cell]).await;
+            assert!(
+                result.is_ok(),
+                "cell-based listen without caps failed: {:?}",
+                result.unwrap_err()
+            );
         })
         .await;
     }

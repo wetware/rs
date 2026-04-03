@@ -1,5 +1,13 @@
 # TODOs
 
+## Shell session memory limits / TTL
+**What:** Bound memory growth in long-lived shell cell sessions. Each `def` grows the Glia `Env`, each `load` caches bytes in a `thread_local! HashMap` with no eviction. A long-lived session or malicious client can grow WASM linear memory until the host OOMs.
+**Why:** Per-session isolation via VatListener spawn mode means each shell connection is a separate WASM process. But there's no ceiling on how large that process can grow.
+**Context:** Options: (a) WASM linear memory limit via wasmtime config, (b) session TTL (kill after N minutes), (c) Env size limit in glia, (d) `load` cache eviction. The VatListener connection rate limiting TODO (P2) provides the multiplier backstop (max concurrent sessions). This TODO handles per-session growth. Design doc: `~/.gstack/projects/wetware-ww/lthibault-master-design-20260402-192805.md`.
+**Effort:** S
+**Priority:** P2
+**Depends on:** Shell cell (ww shell)
+
 ## Glia-level finally / resource cleanup via effects
 **What:** `with-resource` or `finally` pattern — cleanup handlers that run on scope exit.
 **Why:** Rust Drop handles Rust-side cleanup, but Glia code can't hook into scope exit.
