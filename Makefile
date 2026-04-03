@@ -5,7 +5,7 @@
 
 WASM_TARGET := wasm32-wasip2
 
-.PHONY: all host std kernel shell examples chess echo counter discovery oracle clean run-kernel run-daemon
+.PHONY: all host std kernel shell examples chess echo counter discovery oracle clean run-kernel
 .PHONY: container-build container-run container-dev container-clean
 
 all: std examples host
@@ -56,11 +56,6 @@ oracle:
 
 run-kernel: kernel
 	cargo run -- run crates/kernel
-
-# Run node with shell cell registered (daemon mode, no TTY).
-# Terminal 2: ww shell --addr /ip4/127.0.0.1/tcp/<port>/p2p/<peer-id>
-run-daemon: std host
-	cargo run -- run crates/kernel std/shell
 
 # --- Clean -------------------------------------------------------------------
 

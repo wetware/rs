@@ -46,6 +46,11 @@ mod routing_capnp {
 }
 
 #[allow(dead_code)]
+mod http_capnp {
+    include!(concat!(env!("OUT_DIR"), "/http_capnp.rs"));
+}
+
+#[allow(dead_code)]
 mod greeter_capnp {
     include!(concat!(env!("OUT_DIR"), "/greeter_capnp.rs"));
 }

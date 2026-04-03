@@ -49,6 +49,11 @@ mod routing_capnp {
 }
 
 #[allow(dead_code)]
+mod http_capnp {
+    include!(concat!(env!("OUT_DIR"), "/http_capnp.rs"));
+}
+
+#[allow(dead_code)]
 mod chess_capnp {
     include!(concat!(env!("OUT_DIR"), "/chess_capnp.rs"));
 }
@@ -248,7 +253,6 @@ fn run_cell() {
 
 struct RpcDialingSink {
     vat_client: system_capnp::vat_client::Client,
-    unixfs: ipfs_capnp::unix_f_s::Client,
     self_id: Vec<u8>,
     seen: Rc<RefCell<HashSet<Vec<u8>>>>,
 }
@@ -267,12 +271,11 @@ impl routing_capnp::provider_sink::Server for RpcDialingSink {
         }
 
         let vat_client = self.vat_client.clone();
-        let unixfs = self.unixfs.clone();
         let self_id = self.self_id.clone();
         let peer = peer_id.clone();
 
         Promise::from_future(async move {
-            if let Err(e) = play_rpc_against_peer(&vat_client, &unixfs, &self_id, &peer).await {
+            if let Err(e) = play_rpc_against_peer(&vat_client, &self_id, &peer).await {
                 log::error!("game vs {} failed: {e}", short_id(&peer));
             }
             // Pause between games so the output is readable.
@@ -298,34 +301,16 @@ impl routing_capnp::provider_sink::Server for RpcDialingSink {
 // play_rpc_against_peer — dial via VatClient and play a typed RPC game
 // ---------------------------------------------------------------------------
 
-/// Publish a JSON node to IPFS and return its CID, or None on failure.
-///
-/// Each node forms one link in a content-addressed linked list:
-/// `{"n":1,"w":"e2e4","b":"e7e5","prev":null}` -> CID.
-///
-/// Returns `None` (with a warning log) if IPFS is unreachable or the add
-/// fails — the game continues without replay logging.
-async fn publish_node(unixfs: &ipfs_capnp::unix_f_s::Client, json: &str) -> Option<String> {
-    let mut req = unixfs.add_request();
-    req.get().set_data(json.as_bytes());
-    match req.send().promise.await {
-        Ok(resp) => match resp.get().and_then(|r| r.get_cid()) {
-            Ok(cid) => cid.to_str().ok().map(|s| s.to_string()),
-            Err(e) => {
-                log::warn!("replay publish failed (reading CID): {e}");
-                None
-            }
-        },
-        Err(e) => {
-            log::warn!("replay publish failed: {e}");
-            None
-        }
-    }
+/// Log a replay node. Previously published to IPFS; now just logged.
+/// IPFS content access was removed from the graft response — cells use
+/// the WASI virtual filesystem (CidTree) instead.
+fn log_replay_node(json: &str) -> Option<String> {
+    log::debug!("replay: {json}");
+    None
 }
 
 async fn play_rpc_against_peer(
     vat_client: &system_capnp::vat_client::Client,
-    unixfs: &ipfs_capnp::unix_f_s::Client,
     self_id: &[u8],
     peer_id: &[u8],
 ) -> Result<(), capnp::Error> {
@@ -340,7 +325,7 @@ async fn play_rpc_against_peer(
     let engine: chess_capnp::chess_engine::Client = resp.get()?.get_cap().get_as_capability()?;
 
     log::info!("game {us} vs {them}: started (RPC)");
-    play_rpc_game(&engine, unixfs, &us, &them).await
+    play_rpc_game(&engine, &us, &them).await
 }
 
 /// Drive a game using typed ChessEngine RPC calls.
@@ -350,7 +335,6 @@ async fn play_rpc_against_peer(
 /// is published to IPFS as a replay node.
 async fn play_rpc_game(
     engine: &chess_capnp::chess_engine::Client,
-    unixfs: &ipfs_capnp::unix_f_s::Client,
     us: &str,
     them: &str,
 ) -> Result<(), capnp::Error> {
@@ -374,7 +358,7 @@ async fn play_rpc_game(
         if moves.len() == 0 {
             // No legal moves for white — black wins.
             let node = format!(r#"{{"result":"0-1",{}}}"#, prev_field(&prev_cid));
-            prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
+            prev_cid = log_replay_node(&node).or(prev_cid);
             log::info!("game {us} vs {them}: {them} wins after {move_num} moves");
             break;
         }
@@ -409,7 +393,7 @@ async fn play_rpc_game(
                 r#"{{"n":{move_num},"w":"{white_move}","result":"{result_str}",{}}}"#,
                 prev_field(&prev_cid)
             );
-            prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
+            prev_cid = log_replay_node(&node).or(prev_cid);
             log::info!("game {us} vs {them}: {us} wins after {move_num} moves ({white_move})");
             break;
         }
@@ -424,7 +408,7 @@ async fn play_rpc_game(
                 r#"{{"n":{move_num},"w":"{white_move}","result":"1-0",{}}}"#,
                 prev_field(&prev_cid)
             );
-            prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
+            prev_cid = log_replay_node(&node).or(prev_cid);
             log::info!("game {us} vs {them}: {us} wins after {move_num} moves");
             break;
         }
@@ -451,7 +435,7 @@ async fn play_rpc_game(
             r#"{{"n":{move_num},"w":"{white_move}","b":"{black_move}",{}}}"#,
             prev_field(&prev_cid)
         );
-        prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
+        prev_cid = log_replay_node(&node).or(prev_cid);
         log::info!("  {move_num}. {white_move} {black_move}");
 
         // Check status after black's move.
@@ -463,7 +447,7 @@ async fn play_rpc_game(
                 _ => "1/2-1/2",
             };
             let node = format!(r#"{{"result":"{result_str}",{}}}"#, prev_field(&prev_cid));
-            prev_cid = publish_node(unixfs, &node).await.or(prev_cid);
+            prev_cid = log_replay_node(&node).or(prev_cid);
             log::info!("game {us} vs {them}: {them} wins");
             break;
         }
@@ -486,17 +470,12 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
     let graft_resp = membrane.graft_request().send().promise.await?;
     let results = graft_resp.get()?;
     let host = results.get_host()?;
-    let ipfs = results.get_ipfs()?;
     let routing = results.get_routing()?;
 
     // Get network capabilities — vat_client for typed capability dialing.
     let network_resp = host.network_request().send().promise.await?;
     let network = network_resp.get()?;
     let vat_client = network.get_vat_client()?;
-
-    // Get UnixFS for replay publishing.
-    let unixfs_resp = ipfs.unixfs_request().send().promise.await?;
-    let unixfs = unixfs_resp.get()?.get_api()?;
 
     // Resolve peer identity.
     let id_resp = host.id_request().send().promise.await?;
@@ -523,7 +502,6 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
         // Search for peers; RpcDialingSink dials new ones via RPC.
         let sink: routing_capnp::provider_sink::Client = capnp_rpc::new_client(RpcDialingSink {
             vat_client: vat_client.clone(),
-            unixfs: unixfs.clone(),
             self_id: self_id.clone(),
             seen: seen.clone(),
         });

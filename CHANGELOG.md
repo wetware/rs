@@ -6,14 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added
-- `make run-daemon` target for two-terminal shell demo
-
 ### Changed
 - Kernel daemon mode uses `std::future::pending()` instead of blocking stdin read, freeing the worker thread for cell work
 
 ### Fixed
 - Containerfile copies correct shell artifacts (bin/shell.wasm, bin/shell.schema, etc/init.d/50-shell.glia)
+- Chess example: add missing `http.capnp` to build, remove stale IPFS graft dependency (replay logging is now local)
 
 ## [0.0.4.0] - 2026-04-03
 
