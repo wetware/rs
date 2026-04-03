@@ -53,7 +53,7 @@ fn setup_runtime() -> system_capnp::runtime::Client {
 ///
 /// The echo binary reads stdin until EOF, then exits 0. Closing the host-side
 /// stdin ByteStream should deliver EOF to the WASI guest, causing a clean exit.
-/// This is the fundamental mechanism that VatListener relies on for RPC cell
+/// This is the fundamental mechanism that VatListener relies on for vat cell
 /// shutdown.
 #[tokio::test]
 async fn test_stdin_close_exits_echo_cell() {

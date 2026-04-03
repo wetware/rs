@@ -115,7 +115,7 @@ struct VatHandler {
 interface VatListener {
   listen @0 (handler :VatHandler, schema :Data,
              caps :List(import "stem.capnp".NamedCap)) -> ();
-  # Accept incoming Cap'n Proto RPC connections on /ww/0.1.0/rpc/{cid}
+  # Accept incoming Cap'n Proto RPC connections on /ww/0.1.0/vat/{cid}
   # where cid = CIDv1(raw, BLAKE3(schema)).
   #
   # handler.spawn: for each connection, spawn a cell via the Executor.
@@ -133,7 +133,7 @@ interface VatListener {
 
 interface VatClient {
   dial @0 (peer :Data, schema :Data) -> (cap :AnyPointer);
-  # Open a Cap'n Proto RPC connection to peer on /ww/0.1.0/rpc/{cid}
+  # Open a Cap'n Proto RPC connection to peer on /ww/0.1.0/vat/{cid}
   # where cid = CIDv1(raw, BLAKE3(schema)).
   # The schema is the canonical Cap'n Proto encoding of a schema.Node.
   # Bootstraps a Cap'n Proto vat over the stream and returns the remote

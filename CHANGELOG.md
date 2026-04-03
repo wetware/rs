@@ -158,7 +158,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - Every cell type now gets membrane RPC and WIT data_streams. HTTP/WAGI cells can access host capabilities (IPFS, routing, identity) through the WIT side-channel while using stdin/stdout for CGI I/O. No more "lightweight" cells that miss out on the capability system.
 - One spawn path for all cell types. The `lightweight` flag and `new_lightweight()` are gone. Cell types are differentiated by stdin/stdout semantics, not by which host plumbing they get.
-- RPC cells use stdin as a shutdown signal: closing stdin tells the cell to drain gracefully. No bytes are ever written (equivalent to Go's `<-chan struct{}`). `handle_vat_connection` closes stdin on all exit paths (peer disconnect, bootstrap timeout, capability extraction failure) to prevent orphaned processes.
+- Vat cells use stdin as a shutdown signal: closing stdin tells the cell to drain gracefully. No bytes are ever written (equivalent to Go's `<-chan struct{}`). `handle_vat_connection` closes stdin on all exit paths (peer disconnect, bootstrap timeout, capability extraction failure) to prevent orphaned processes.
 
 ## [Unreleased]
 
@@ -191,7 +191,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Spike 2: Two Cap'n Proto RPC systems coexist on shared LocalSet
   - Spike 3: Off-thread WASM compilation (267x speedup via serialize/deserialize)
   - Bonus: current_thread runtime in std::thread (worker thread topology)
-- WAGI adapter and guest crate for HTTP cells (#304)
+- WAGI adapter and guest crate for WAGI cells (#304)
   - `WagiAdapter` with `build_cgi_env()` and `parse_cgi_response()` (16 unit tests)
   - `wagi-guest` crate: zero-dependency helper library for WAGI cells
   - Counter example rewritten from 305 lines of FastCGI to 32 lines using `wagi-guest`

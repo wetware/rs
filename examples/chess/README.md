@@ -102,7 +102,7 @@ the merged image via the WASI filesystem interceptor.
 
 Two execution modes, selected by the init.d script:
 
-- **Cell mode** (`WW_CELL_MODE=vat`): per-connection RPC cell
+- **Cell mode** (`WW_CELL_MODE=vat`): per-connection vat cell
   spawned by `VatListener`. Creates a `ChessEngineImpl` and exports
   it via `system::serve()`. The host bridges the capability to the
   connecting peer via Cap'n Proto RPC bootstrapping.
@@ -117,7 +117,7 @@ Two execution modes, selected by the init.d script:
 The protocol address is derived at build time from the ChessEngine
 Cap'n Proto schema: `CIDv1(raw, BLAKE3(canonical(schema.Node)))`.
 This CID serves as both the DHT key and the subprotocol address
-(`/ww/0.1.0/rpc/{cid}`). Schema bytes are compiled at build time
+(`/ww/0.1.0/vat/{cid}`). Schema bytes are compiled at build time
 and passed explicitly via RPC -- the host reads `bin/chess-demo.schema`
 from the image to derive the CID.
 
@@ -144,7 +144,7 @@ interface ChessEngine {
 `etc/init.d/chess.glia`:
 
 ```clojure
-; Register RPC cell for the ChessEngine capability.
+; Register vat cell for the ChessEngine capability.
 ; VatListener spawns a cell process per connection; the cell exports
 ; a ChessEngine capability via system::serve().
 (def chess-wasm (load "bin/chess-demo.wasm"))

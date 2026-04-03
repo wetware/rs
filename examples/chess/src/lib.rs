@@ -223,14 +223,14 @@ impl chess_capnp::chess_engine::Server for ChessEngineImpl {
 }
 
 // ---------------------------------------------------------------------------
-// Cell mode — RPC capability export via system::serve()
+// Cell mode — vat capability export via system::serve()
 // ---------------------------------------------------------------------------
 
-/// RPC cell for VatListener-spawned processes.
+/// Vat cell for VatListener-spawned processes.
 ///
 /// Creates a ChessEngine and exports it as the bootstrap capability.
 /// The host bridges this cap to the connecting peer. The process stays
-/// alive until the host drops the RPC connection.
+/// alive until the host drops the connection.
 fn run_cell() {
     let engine = ChessEngineImpl::new();
     let client: chess_capnp::chess_engine::Client = capnp_rpc::new_client(engine);

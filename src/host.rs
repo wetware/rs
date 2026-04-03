@@ -140,7 +140,7 @@ pub struct KuboBootstrapInfo {
     pub addr: Multiaddr,
 }
 
-/// Commands sent from RPC cells to the swarm event loop.
+/// Commands sent from vat cells to the swarm event loop.
 pub enum SwarmCommand {
     Connect {
         peer_id: PeerId,

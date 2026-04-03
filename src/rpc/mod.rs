@@ -52,7 +52,7 @@ pub fn schema_cid(schema_bytes: &[u8]) -> String {
 
 /// Build a `StreamProtocol` from a schema CID string.
 pub fn schema_protocol(cid: &str) -> Result<StreamProtocol, capnp::Error> {
-    StreamProtocol::try_from_owned(format!("/ww/0.1.0/rpc/{cid}"))
+    StreamProtocol::try_from_owned(format!("/ww/0.1.0/vat/{cid}"))
         .map_err(|e| capnp::Error::failed(format!("invalid protocol from schema CID: {e}")))
 }
 
@@ -91,7 +91,7 @@ pub(crate) enum CellType {
     Raw(String),
     /// HTTP/WAGI cell with path prefix.
     Http(String),
-    /// Cap'n Proto RPC cell with canonical schema bytes.
+    /// Cap'n Proto vat cell with canonical schema bytes.
     Capnp(Vec<u8>),
 }
 

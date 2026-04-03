@@ -1,6 +1,6 @@
 ; Chess init.d script — evaluated by the kernel at boot.
 ;
-; Registers the ChessEngine RPC cell. VatListener spawns a cell per
+; Registers the ChessEngine vat cell. VatListener spawns a cell per
 ; connection (no args = cell mode); each cell exports ChessEngine
 ; via system::serve().
 ;

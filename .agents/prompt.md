@@ -154,7 +154,7 @@ envvar tells the guest what plumbing it's running under:
 
 | `WW_CELL_MODE` | stdio carries | Host wires up |
 |----------------|--------------|---------------|
-| `vat` | Cap'n Proto RPC | `/ww/0.1.0/rpc/{cid}` listener |
+| `vat` | Cap'n Proto RPC | `/ww/0.1.0/vat/{cid}` listener |
 | `raw` | raw libp2p stream bytes | `/ww/0.1.0/stream/{protocol}` listener |
 | `http` | CGI env vars + stdin/stdout | WAGI (CGI for WASM) |
 | absent | Cap'n Proto RPC (host channel) | pid0 — full Membrane graft |
@@ -240,8 +240,8 @@ make shell     # Glia shell WASM
 make host      # host binary only
 make examples  # all examples (chess + echo + counter)
 make echo      # echo example (raw cell)
-make counter   # counter example (HTTP/WAGI cell)
-make chess     # chess example (Cap'n Proto RPC cell)
+make counter   # counter example (WAGI cell)
+make chess     # chess example (Cap'n Proto vat cell)
 make           # rebuild everything
 ```
 

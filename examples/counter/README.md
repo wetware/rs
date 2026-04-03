@@ -1,12 +1,12 @@
-# Counter -- HTTP/WAGI Cell
+# Counter -- WAGI Cell
 
-Stateful HTTP cell that counts requests. Proves the `Cell::http`
+Stateful WAGI cell that counts requests. Proves the `Cell::http`
 pipeline end-to-end: host receives HTTP, spawns a cell, pipes
 WAGI over stdio, returns the response.
 
 ## What it demonstrates
 
-- **HTTP cell** (`WW_CELL_MODE=http`) -- WAGI (CGI for WASM)
+- **WAGI cell** (`WW_CELL_MODE=http`) -- CGI for WASM
 - `HttpListener` routes by path prefix
 - FastCGI binary protocol over stdin/stdout
 - Per-request cell spawning (stateless from the host's view)
@@ -124,7 +124,7 @@ a dependency (or a hand-rolled parser). FastCGI is a well-defined
 binary protocol that's simpler to parse than HTTP. The host already
 has an HTTP parser and translates between HTTP and FastCGI.
 
-**Why not Cap'n Proto RPC?** HTTP cells are intentionally simpler
+**Why not Cap'n Proto RPC?** WAGI cells are intentionally simpler
 than capnp cells. They target developers who want to expose a REST
 endpoint without learning Cap'n Proto. FastCGI is the simplest
 well-specified binary protocol for this job.

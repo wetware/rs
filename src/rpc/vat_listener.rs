@@ -10,7 +10,7 @@
 //! **Serve mode** (VatHandler::serve): bootstrap each connection with a persistent
 //! capability — no cell spawning. One capability serves all connections.
 //!
-//! **Stdin semantics for RPC cells (spawn mode):** stdin is a shutdown signal
+//! **Stdin semantics for vat cells (spawn mode):** stdin is a shutdown signal
 //! channel, not a data transport. The host never writes bytes — it only closes
 //! stdin to signal the cell to drain gracefully (equivalent to Go's `<-chan struct{}`).
 //!
@@ -220,7 +220,7 @@ pub async fn handle_vat_connection_spawn(
     let response = spawn_req.send().promise.await?;
     let process = response.get()?.get_process()?;
 
-    // 2. Get stdin handle. For RPC cells, stdin is a shutdown signal:
+    // 2. Get stdin handle. For vat cells, stdin is a shutdown signal:
     //    closing it tells the cell to drain and exit gracefully.
     //    No bytes are ever written — it's a <-chan struct{}.
     let stdin_resp = process.stdin_request().send().promise.await?;

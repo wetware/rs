@@ -60,7 +60,7 @@
 
 ## ~~Protocol namespace collision between StreamListener and VatListener~~
 **RESOLVED:** Stream and vat protocols now use distinct prefixes:
-`/ww/0.1.0/stream/{name}` vs `/ww/0.1.0/rpc/{cid}`.
+`/ww/0.1.0/stream/{name}` vs `/ww/0.1.0/vat/{cid}`.
 
 ## Connection rate limiting for VatListener
 **What:** Every incoming connection in `VatListenerImpl` spawns a new WASI cell process with no concurrency limit. A malicious peer (or many peers) can flood connections, causing unbounded process spawning.
@@ -105,7 +105,7 @@
 ## WAGI host-side implementation (axum + route table, Phase 2)
 **What:** Implement `--with-http host:port` flag that spawns an axum router. Routes by path prefix from `Cell::http(prefix)` custom section. Each request dispatches a cell spawn to the `ExecutorPool` via `SpawnRequest` channel, pipes CGI env vars + body to stdin, reads CGI response from stdout.
 **Why:** `Cell::http` variant exists in the type system. Phase 1 delivers WAGI adapter, lightweight spawn, and `ww test http` CLI. Phase 2 adds the production HTTP server.
-**Context:** WagiAdapter (`src/dispatcher/wagi.rs`) provides `build_cgi_env()` and `parse_cgi_response()`. All cells now get data_streams + membrane RPC (lightweight flag removed); HTTP cells use stdin/stdout for CGI I/O while accessing host capabilities via the WIT side-channel. axum runs on the dedicated WagiService thread (`current_thread` runtime). WASM execution happens on executor threads. ~100-150 lines for the server + route table.
+**Context:** WagiAdapter (`src/dispatcher/wagi.rs`) provides `build_cgi_env()` and `parse_cgi_response()`. All cells now get data_streams + membrane RPC (lightweight flag removed); WAGI cells use stdin/stdout for CGI I/O while accessing host capabilities via the WIT side-channel. axum runs on the dedicated WagiService thread (`current_thread` runtime). WASM execution happens on executor threads. ~100-150 lines for the server + route table.
 **Effort:** M
 **Priority:** P2
 **Depends on:** WAGI adapter (done), lightweight spawn (done), AIMD fuel scheduler (done), thread-per-subsystem runtime (#302)
@@ -128,7 +128,7 @@
 
 ## Multi-language WAGI examples (Go, Python)
 **What:** WAGI cell examples in Go (via TinyGo) and Python (via componentize-py). Proves that any language compiling to wasm32-wasip2 can serve HTTP through Wetware.
-**Why:** The WAGI model's main selling point is language-agnostic HTTP cells. Rust-only examples don't demonstrate this.
+**Why:** The WAGI model's main selling point is language-agnostic WAGI cells. Rust-only examples don't demonstrate this.
 **Context:** TinyGo targets wasm32-wasip2 natively. componentize-py wraps CPython into a WASI component. Both toolchains are maturing but have sharp edges. Defer until toolchains stabilize and the Rust WAGI path is proven in production.
 **Effort:** M
 **Priority:** P3

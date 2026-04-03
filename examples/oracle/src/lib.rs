@@ -258,14 +258,14 @@ async fn fetch_prices(
 }
 
 // ---------------------------------------------------------------------------
-// Cell mode — RPC capability export via system::serve()
+// Cell mode — vat capability export via system::serve()
 // ---------------------------------------------------------------------------
 
-/// RPC cell for VatListener-spawned processes.
+/// Vat cell for VatListener-spawned processes.
 ///
 /// Creates a PriceOracle and exports it as the bootstrap capability.
 /// Fetches prices via HttpClient in the background. The process stays
-/// alive until the host drops the RPC connection.
+/// alive until the host drops the connection.
 fn run_cell() {
     let cache = init_cache();
     let oracle = PriceOracleImpl {
@@ -468,9 +468,9 @@ async fn run_consumer(membrane: Membrane) -> Result<(), capnp::Error> {
 // HTTP/WAGI mode — stateless per-request handler
 // ---------------------------------------------------------------------------
 
-/// HTTP cell handler: graft membrane, fetch prices, respond with JSON.
+/// WAGI cell handler: graft membrane, fetch prices, respond with JSON.
 ///
-/// stdin/stdout carry CGI (body in, response out). The RPC membrane runs
+/// stdin/stdout carry CGI (body in, response out). The capnp membrane runs
 /// over the `wetware:streams` side-channel — no conflict.
 fn run_http() -> Result<(), ()> {
     use wagi_guest as wagi;
