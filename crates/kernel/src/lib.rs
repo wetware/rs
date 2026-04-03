@@ -428,21 +428,34 @@ fn make_host_handler(
                                         req.get().set_schema(s);
                                     }
                                     // Forward captured caps from the `with` block.
+                                    // Pre-filter to avoid ghost entries in the capnp list.
                                     if !caps.is_empty() {
-                                        let mut caps_builder =
-                                            req.get().init_caps(caps.len() as u32);
-                                        for (i, (name, val)) in caps.iter().enumerate() {
-                                            if let Val::Cap { inner, .. } = val {
-                                                if let Some(client) = extract_capnp_client(inner) {
-                                                    let mut entry =
-                                                        caps_builder.reborrow().get(i as u32);
-                                                    entry.set_name(name);
-                                                    entry.init_cap().set_as_capability(client.hook);
-                                                } else {
-                                                    log::warn!(
-                                                        "host :listen — cap '{name}' has unknown inner type, skipping"
-                                                    );
-                                                }
+                                        let valid_caps: Vec<(&str, capnp::capability::Client)> =
+                                            caps.iter()
+                                                .filter_map(|(name, val)| {
+                                                    if let Val::Cap { inner, .. } = val {
+                                                        if let Some(client) =
+                                                            extract_capnp_client(inner)
+                                                        {
+                                                            return Some((name.as_str(), client));
+                                                        }
+                                                        log::warn!(
+                                                            "host :listen — cap '{name}' has unknown inner type, skipping"
+                                                        );
+                                                    }
+                                                    None
+                                                })
+                                                .collect();
+                                        if !valid_caps.is_empty() {
+                                            let mut caps_builder =
+                                                req.get().init_caps(valid_caps.len() as u32);
+                                            for (i, (name, client)) in
+                                                valid_caps.into_iter().enumerate()
+                                            {
+                                                let mut entry =
+                                                    caps_builder.reborrow().get(i as u32);
+                                                entry.set_name(name);
+                                                entry.init_cap().set_as_capability(client.hook);
                                             }
                                         }
                                     }

@@ -153,6 +153,7 @@ async fn test_vat_connection_closes_stdin_on_peer_disconnect() {
                 let executor = load_resp.get().unwrap().get_executor().unwrap();
                 ww::rpc::vat_listener::handle_vat_connection_spawn(
                     executor,
+                    Vec::new(), // no extra caps in test
                     // Convert tokio duplex → futures-io via compat layer.
                     bridge_stream.compat(),
                     "test-protocol-cid",
