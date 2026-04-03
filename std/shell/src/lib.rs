@@ -438,6 +438,7 @@ struct ShellImpl {
     env: Rc<RefCell<Env>>,
     ctx: Rc<RefCell<ShellSession>>,
     dispatch: HashMap<&'static str, HandlerFn>,
+    ready: Rc<std::cell::Cell<bool>>,
 }
 
 #[allow(refining_impl_trait)]
@@ -464,6 +465,15 @@ impl shell_capnp::shell::Server for ShellImpl {
         };
 
         Promise::from_future(async move {
+            // Check that the serve closure has finished initializing.
+            if !self.ready.get() {
+                results
+                    .get()
+                    .set_result("shell not ready (initialization in progress)");
+                results.get().set_is_error(true);
+                return Ok(());
+            }
+
             if text.trim().is_empty() {
                 results.get().set_result("");
                 results.get().set_is_error(false);
@@ -534,17 +544,22 @@ fn run_impl() {
         initialized: false,
     }));
     let dispatch = build_dispatch();
+    let ready = Rc::new(std::cell::Cell::new(false));
 
     let shell_impl = ShellImpl {
         env: Rc::clone(&env),
         ctx: Rc::clone(&ctx),
         dispatch: build_dispatch(),
+        ready: Rc::clone(&ready),
     };
     let client: shell_capnp::shell::Client = capnp_rpc::new_client(shell_impl);
 
     system::serve(client.client, |membrane: Membrane| async move {
+        log::info!("shell: grafting membrane...");
         let graft_resp = membrane.graft_request().send().promise.await?;
+        log::info!("shell: graft response received");
         let results = graft_resp.get()?;
+        log::info!("shell: graft results parsed");
 
         // Fill session with grafted capabilities.
         {
@@ -605,6 +620,13 @@ fn run_impl() {
             glia::load_prelude(&mut env, &mut shell_dispatch).await;
         }
 
-        Ok(())
+        ready.set(true);
+
+        // Keep the closure alive forever. The RPC system drives eval calls
+        // concurrently via the poll loop. The cell exits when the host closes
+        // the RPC connection (peer disconnect → VatListener closes stdin).
+        // pending() never resolves, so the poll loop keeps running the RPC
+        // system while this future stays Pending.
+        std::future::pending::<Result<(), capnp::Error>>().await
     });
 }
