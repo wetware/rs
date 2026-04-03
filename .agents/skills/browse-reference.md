@@ -36,7 +36,9 @@ If they want to browse, show the menu:
 >     across crates (`doc/capnp-cross-crate.md`)
 > 13. **Guest API** — WASI bindings for guest WASM modules
 >     (`doc/api/wasm-guest.md`)
-> 14. **Design docs** — deep dives on effects, macros, HTTP surface,
+> 14. **Guest runtime** — poll loop, effect dispatch, oneshot
+>     channel, WASI integration (`doc/guest-runtime.md`)
+> 15. **Design docs** — deep dives on effects, macros, HTTP surface,
 >     economic platform (`doc/designs/`)
 
 ## How to present reference material
