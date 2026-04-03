@@ -1924,6 +1924,39 @@ pub fn eval_expr<'a, D: Dispatch>(
                     return eval_hof(head, &evaled_args, env, dispatch).await;
                 }
 
+                // 4b. cell builtin (captures Val::Cap bindings from scope)
+                if head == "cell" {
+                    let wasm = match evaled_args.first() {
+                        Some(Val::Bytes(b)) => b.clone(),
+                        _ => {
+                            return Err(eval_err!(
+                                "cell: first arg must be wasm bytes, got {}",
+                                evaled_args
+                                    .first()
+                                    .map_or("nothing".into(), |v| format!("{v}"))
+                            ))
+                        }
+                    };
+                    let schema = match evaled_args.get(1) {
+                        Some(Val::Bytes(b)) => Some(b.clone()),
+                        None => None,
+                        _ => {
+                            return Err(eval_err!(
+                                "cell: second arg (schema) must be bytes, got {}",
+                                evaled_args[1]
+                            ))
+                        }
+                    };
+                    if evaled_args.len() > 2 {
+                        return Err(eval_err!(
+                            "cell: expected 1-2 args (wasm [schema]), got {}",
+                            evaled_args.len()
+                        ));
+                    }
+                    let caps = env.collect_caps();
+                    return Ok(Val::Cell { wasm, schema, caps });
+                }
+
                 // 5. Sync builtins
                 if let Some(result) = eval_builtin(head, &evaled_args) {
                     return result;

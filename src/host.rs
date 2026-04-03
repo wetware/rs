@@ -1140,9 +1140,16 @@ impl ClientSwarm {
         self.stream_control.clone()
     }
 
-    /// Add a known address for a peer (for direct dial via --addr).
+    /// Add a known address for a peer and initiate dialing.
     pub fn add_peer_addr(&mut self, peer_id: PeerId, addr: Multiaddr) {
-        self.swarm.add_peer_address(peer_id, addr);
+        self.swarm.add_peer_address(peer_id, addr.clone());
+        // Proactively dial so the connection is established before open_stream.
+        if let Err(e) = self
+            .swarm
+            .dial(addr.with(libp2p::multiaddr::Protocol::P2p(peer_id)))
+        {
+            tracing::warn!(peer = %peer_id, "Failed to initiate dial: {e}");
+        }
     }
 
     /// Drive the swarm event loop. Spawn this as a background task.

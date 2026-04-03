@@ -1162,27 +1162,38 @@ async fn run_initd(
     let root = ww_root.trim_end_matches('/');
 
     // Read init.d scripts via WASI virtual filesystem.
-    // The host-side CidTree resolves these paths lazily through the IPFS DAG.
-    let initd_path = format!("{root}/etc/init.d");
-    let entries = match std::fs::read_dir(&initd_path) {
-        Ok(dir) => {
-            let mut names: Vec<String> = dir
-                .filter_map(|entry| {
-                    let entry = entry.ok()?;
-                    let name = entry.file_name().to_str()?.to_string();
-                    if name.ends_with(".glia") {
-                        Some(name)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            names.sort(); // lexicographic order for SysV init
-            names
+    // Try $WW_ROOT/etc/init.d first (IPFS CidTree path), then fall back to
+    // /etc/init.d (direct WASI preopen for local images).
+    let initd_paths = [format!("{root}/etc/init.d"), "/etc/init.d".to_string()];
+    let (initd_path, entries) = {
+        let mut found = None;
+        for path in &initd_paths {
+            if let Ok(dir) = std::fs::read_dir(path) {
+                let mut names: Vec<String> = dir
+                    .filter_map(|entry| {
+                        let entry = entry.ok()?;
+                        let name = entry.file_name().to_str()?.to_string();
+                        if name.ends_with(".glia") {
+                            Some(name)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                names.sort();
+                found = Some((path.clone(), names));
+                break;
+            }
         }
-        Err(e) => {
-            log::warn!("init.d: {initd_path} not found, skipping");
-            return Ok(false);
+        match found {
+            Some(f) => f,
+            None => {
+                log::warn!(
+                    "init.d: not found (tried {} paths), skipping",
+                    initd_paths.len()
+                );
+                return Ok(false);
+            }
         }
     };
 
