@@ -125,7 +125,9 @@ fn resolve_ipfs_path(path: &str) -> String {
 ///
 /// Tries each known capnp client type and returns the inner `.client` field.
 /// Returns `None` if the inner type doesn't match any known cap.
-fn extract_capnp_client(inner: &std::rc::Rc<dyn std::any::Any>) -> Option<capnp::capability::Client> {
+fn extract_capnp_client(
+    inner: &std::rc::Rc<dyn std::any::Any>,
+) -> Option<capnp::capability::Client> {
     macro_rules! try_downcast {
         ($ty:ty) => {
             if let Some(c) = inner.downcast_ref::<$ty>() {
@@ -397,12 +399,7 @@ fn make_host_handler(
                         // Cell-based registration:
                         //   (perform host :listen <cell>)          → VatListener
                         //   (perform host :listen <cell> "/path")  → HttpListener
-                        if let Some(Val::Cell {
-                            wasm,
-                            schema,
-                            caps,
-                        }) = rest.first()
-                        {
+                        if let Some(Val::Cell { wasm, schema, caps }) = rest.first() {
                             let mut load_req = runtime.load_request();
                             load_req.get().set_wasm(wasm);
                             let executor = load_req.send().pipeline.get_executor();
@@ -440,9 +437,7 @@ fn make_host_handler(
                                                     let mut entry =
                                                         caps_builder.reborrow().get(i as u32);
                                                     entry.set_name(name);
-                                                    entry
-                                                        .init_cap()
-                                                        .set_as_capability(client.hook);
+                                                    entry.init_cap().set_as_capability(client.hook);
                                                 } else {
                                                     log::warn!(
                                                         "host :listen — cap '{name}' has unknown inner type, skipping"
