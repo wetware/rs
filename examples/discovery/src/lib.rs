@@ -36,13 +36,13 @@ mod stem_capnp {
 }
 
 #[allow(dead_code)]
-mod ipfs_capnp {
-    include!(concat!(env!("OUT_DIR"), "/ipfs_capnp.rs"));
+mod routing_capnp {
+    include!(concat!(env!("OUT_DIR"), "/routing_capnp.rs"));
 }
 
 #[allow(dead_code)]
-mod routing_capnp {
-    include!(concat!(env!("OUT_DIR"), "/routing_capnp.rs"));
+mod http_capnp {
+    include!(concat!(env!("OUT_DIR"), "/http_capnp.rs"));
 }
 
 #[allow(dead_code)]
