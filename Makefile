@@ -25,9 +25,13 @@ kernel:
 	cp target/$(WASM_TARGET)/release/kernel.wasm crates/kernel/bin/main.wasm
 
 shell:
-	cargo build -p shell --target $(WASM_TARGET) --release
-	@mkdir -p std/shell/boot
-	cp target/$(WASM_TARGET)/release/shell.wasm std/shell/boot/main.wasm
+	cargo build -p shell --target $(WASM_TARGET) --release --manifest-path std/shell/Cargo.toml
+	@mkdir -p std/shell/boot std/shell/bin
+	cp std/shell/target/$(WASM_TARGET)/release/shell.wasm std/shell/boot/main.wasm
+	@SCHEMA_OUT=$$(find std/shell/target/$(WASM_TARGET)/release/build -path '*/shell-*/out/shell_schema.bin' | head -1) && \
+		if [ -n "$$SCHEMA_OUT" ]; then \
+			cp "$$SCHEMA_OUT" std/shell/bin/shell.schema; \
+		fi
 
 # --- Examples ----------------------------------------------------------------
 

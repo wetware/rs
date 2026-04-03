@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.0.4.0] - 2026-04-03
+
+### Added
+- `ww shell` CLI: connect to a running node and evaluate Glia expressions remotely
+- Shell cell (`std/shell/`): WASM guest that evaluates Glia over Cap'n Proto RPC
+- `Shell.eval()` interface in `shell.capnp`: send text, get result + error flag
+- Client-mode libp2p swarm (`ClientSwarm`): identify + stream only, no listeners
+- Shell init.d registration via VatListener spawn mode
+- Prelude loaded at shell cell startup (when, and, or, defn, cond, with)
+- Cap handlers for host (:id, :addrs, :peers), routing (:provide, :hash), ipfs (:cat, :ls)
+- rustyline REPL with 30s eval timeout and Ctrl-D/exit support
+
 ## [0.0.3.0] - 2026-04-03
 
 ### Added

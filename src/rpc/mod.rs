@@ -43,7 +43,7 @@ use crate::system_capnp;
 /// but different type IDs produce different CIDs.
 ///
 /// Returns the CID as a string: `CIDv1(raw, BLAKE3(schema_bytes))`.
-pub(crate) fn schema_cid(schema_bytes: &[u8]) -> String {
+pub fn schema_cid(schema_bytes: &[u8]) -> String {
     let digest = blake3::hash(schema_bytes);
     let mh = cid::multihash::Multihash::<64>::wrap(0x1e, digest.as_bytes())
         .expect("blake3 digest always fits in 64-byte multihash");
@@ -51,7 +51,7 @@ pub(crate) fn schema_cid(schema_bytes: &[u8]) -> String {
 }
 
 /// Build a `StreamProtocol` from a schema CID string.
-pub(crate) fn schema_protocol(cid: &str) -> Result<StreamProtocol, capnp::Error> {
+pub fn schema_protocol(cid: &str) -> Result<StreamProtocol, capnp::Error> {
     StreamProtocol::try_from_owned(format!("/ww/0.1.0/rpc/{cid}"))
         .map_err(|e| capnp::Error::failed(format!("invalid protocol from schema CID: {e}")))
 }

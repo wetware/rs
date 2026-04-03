@@ -8,6 +8,8 @@ use tokio::sync::watch;
 
 use libp2p::Multiaddr;
 
+mod shell;
+
 use ww::cell::CellBuilder;
 use ww::host;
 use ww::image;
@@ -166,6 +168,23 @@ enum Commands {
         /// Required only if --stem is provided.
         #[arg(long)]
         private_key: Option<String>,
+    },
+
+    /// Connect to a running node and open a Glia REPL.
+    ///
+    /// Evaluates Glia expressions on the remote node. State persists
+    /// across evals (def sticks). Ctrl-D or (exit) to disconnect.
+    ///
+    /// Example:
+    ///   ww shell --addr /ip4/127.0.0.1/tcp/2025/p2p/12D3KooW...
+    Shell {
+        /// Multiaddr of the target node (must include /p2p/<peer-id>)
+        #[arg(long)]
+        addr: Multiaddr,
+
+        /// Path to Ed25519 identity file for auth.
+        #[arg(long, env = "WW_IDENTITY", value_name = "PATH")]
+        identity: Option<PathBuf>,
     },
 }
 
@@ -331,6 +350,10 @@ impl Commands {
                 private_key,
             } => Self::push(path, ipfs_url, stem, rpc_url, private_key).await,
             Commands::Keygen { output } => Self::keygen(output).await,
+            Commands::Shell { addr, identity } => {
+                let local = tokio::task::LocalSet::new();
+                local.run_until(shell::run_shell(addr, identity)).await
+            }
         }
     }
 
