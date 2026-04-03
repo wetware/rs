@@ -554,79 +554,40 @@ fn run_impl() {
     };
     let client: shell_capnp::shell::Client = capnp_rpc::new_client(shell_impl);
 
-    system::serve(client.client, |membrane: Membrane| async move {
-        log::info!("shell: grafting membrane...");
-        let graft_resp = membrane.graft_request().send().promise.await?;
-        log::info!("shell: graft response received");
-        let results = graft_resp.get()?;
-        log::info!("shell: graft results parsed");
-
-        // Fill session with grafted capabilities.
-        {
-            let mut session = ctx.borrow_mut();
-            session.host = Some(results.get_host()?);
-            session.runtime = Some(results.get_runtime()?);
-            session.routing = Some(results.get_routing()?);
-            session.http_client = Some(results.get_http_client()?);
-            session.initialized = true;
-        }
-
-        // Bind capabilities + effect handlers in the Glia environment.
-        let (host, routing) = {
-            let session = ctx.borrow();
-            (
-                session.host.clone().unwrap(),
-                session.routing.clone().unwrap(),
-            )
-        };
-
+    system::serve(client.client, |_membrane: Membrane| async move {
+        // Load the prelude synchronously (macro definitions only, no capability calls).
         {
             let mut env = env.borrow_mut();
-            let caps: [(&str, &str, Rc<dyn std::any::Any>, Val); 3] = [
-                (
-                    "host",
-                    "host-cid",
-                    Rc::new(host.clone()),
-                    make_host_handler(host),
-                ),
-                ("ipfs", "ipfs-cid", Rc::new(()), make_ipfs_handler()),
-                (
-                    "routing",
-                    "routing-cid",
-                    Rc::new(routing.clone()),
-                    make_routing_handler(routing),
-                ),
-            ];
-            for (name, cid, inner, handler) in caps {
-                env.set(
-                    name.to_string(),
-                    Val::Cap {
-                        name: name.into(),
-                        schema_cid: cid.to_string(),
-                        inner,
-                    },
-                );
-                env.set(format!("{name}-handler"), handler);
+            let prelude_forms = glia::read_many(glia::PRELUDE).expect("prelude: parse error");
+            struct NoopDispatch;
+            impl Dispatch for NoopDispatch {
+                fn call<'a>(
+                    &'a self,
+                    name: &'a str,
+                    _args: &'a [Val],
+                ) -> Pin<Box<dyn Future<Output = Result<Val, Val>> + 'a>> {
+                    Box::pin(std::future::ready(Err(Val::from(format!(
+                        "{name}: not available"
+                    )))))
+                }
             }
-        }
-
-        // Load the prelude (async — evaluates macro definitions).
-        {
-            let mut env = env.borrow_mut();
-            let mut shell_dispatch = ShellDispatch {
-                ctx: &ctx,
-                table: &dispatch,
-            };
-            glia::load_prelude(&mut env, &mut shell_dispatch).await;
+            let mut noop = NoopDispatch;
+            for form in &prelude_forms {
+                // Prelude macros (defmacro) don't make async calls — single poll suffices.
+                let mut fut = Box::pin(eval::eval_toplevel(form, &mut env, &noop));
+                let waker = std::task::Waker::noop();
+                let mut cx = std::task::Context::from_waker(&waker);
+                match fut.as_mut().poll(&mut cx) {
+                    std::task::Poll::Ready(Ok(_)) => {}
+                    std::task::Poll::Ready(Err(e)) => log::error!("prelude: {e}"),
+                    std::task::Poll::Pending => log::error!("prelude: unexpected pending"),
+                }
+            }
         }
 
         ready.set(true);
 
-        // Keep the closure alive forever. The RPC system drives eval calls
-        // concurrently via the poll loop. The cell exits when the host closes
-        // the RPC connection (peer disconnect → VatListener closes stdin).
-        // pending() never resolves, so the poll loop keeps running the RPC
-        // system while this future stays Pending.
+        // Keep alive. The RPC system drives eval calls concurrently.
         std::future::pending::<Result<(), capnp::Error>>().await
     });
 }

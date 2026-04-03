@@ -420,7 +420,7 @@ pub fn read_many(input: &str) -> Result<Vec<Val>, String> {
 // ---------------------------------------------------------------------------
 
 /// The Glia prelude: standard derived forms (when, and, or, defn, cond, not).
-const PRELUDE: &str = include_str!("prelude.glia");
+pub const PRELUDE: &str = include_str!("prelude.glia");
 
 /// Load the prelude macros into the given environment.
 ///
