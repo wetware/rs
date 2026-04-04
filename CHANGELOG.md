@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Init.d scripts for auction, echo, counter, and mindshare examples (all 7 examples now bootable)
 
 ### Fixed
+- Example Makefiles: `make -C examples/foo` works from project root (CARGO variable)
 - Oracle init.d: replace invalid `(with ...)` syntax with `(def http ...)` cap binding
 - Counter example: remove stale schema-inject step (removed in #313)
 - Shell cell: zero warnings (fix unused mut, duplicate build_dispatch call, allow dead_code on scaffolding)

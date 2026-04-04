@@ -2,12 +2,15 @@
 #
 # Usage: make -C examples/oracle
 
+# Default to rustup cargo so `make -C examples/oracle` works without shell profile
+CARGO ?= $(HOME)/.cargo/bin/cargo
+
 WASM_TARGET := wasm32-wasip2
 
 .PHONY: all clean test demo
 
 all:
-	cargo build --target $(WASM_TARGET) --release \
+	$(CARGO) build --target $(WASM_TARGET) --release \
 		--manifest-path Cargo.toml
 	@mkdir -p bin
 	cp target/$(WASM_TARGET)/release/oracle.wasm bin/oracle.wasm
@@ -20,7 +23,7 @@ all:
 		fi
 
 test:
-	cargo test --manifest-path Cargo.toml
+	$(CARGO) test --manifest-path Cargo.toml
 
 demo: all
 	@echo ""
@@ -35,4 +38,4 @@ demo: all
 
 clean:
 	rm -f bin/oracle.wasm bin/oracle.schema
-	cargo clean --manifest-path Cargo.toml
+	$(CARGO) clean --manifest-path Cargo.toml

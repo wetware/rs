@@ -2,12 +2,15 @@
 #
 # Usage: make -C examples/auction
 
+# Default to rustup cargo so `make -C examples/auction` works without shell profile
+CARGO ?= $(HOME)/.cargo/bin/cargo
+
 WASM_TARGET := wasm32-wasip2
 
 .PHONY: all clean
 
 all:
-	cargo build --target $(WASM_TARGET) --release \
+	$(CARGO) build --target $(WASM_TARGET) --release \
 		--manifest-path Cargo.toml
 	@mkdir -p bin
 	cp target/$(WASM_TARGET)/release/auction.wasm bin/auction.wasm
@@ -21,4 +24,4 @@ all:
 
 clean:
 	rm -f bin/auction.wasm bin/auction.schema
-	cargo clean --manifest-path Cargo.toml
+	$(CARGO) clean --manifest-path Cargo.toml
