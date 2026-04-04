@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- Extract shared effect handlers into std/caps crate (shell + MCP share, no duplication)
 - Rename NamedCap to Export in stem.capnp (membrane exports capabilities)
 - Export: use Capability + Schema.Node types instead of AnyPointer + Data
 - Membrane.graft() returns `List(Export)` instead of named typed fields; capabilities looked up by name

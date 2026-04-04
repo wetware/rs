@@ -1,5 +1,5 @@
 [package]
-name = "shell"
+name = "caps"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,18 +9,12 @@ edition = "2021"
 capnp     = "0.23.2"
 capnp-rpc = "0.23.0"
 glia      = { path = "../../crates/glia" }
-log       = "0.4"
-wasip2    = "1.0.2"
 bs58      = "0.5"
 multiaddr = "0.18.2"
-rand      = "0.9"
-system    = { path = "../system" }
-caps      = { path = "../caps" }
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 capnpc    = "0.23.3"
 capnp     = "0.23.2"
-schema-id = { path = "../../crates/schema-id" }

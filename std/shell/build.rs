@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 /// Build script for the shell cell.
 ///
-/// Compiles shell.capnp and shared system schemas, extracts the
-/// Shell interface's canonical bytes, and derives its schema CID.
+/// Compiles shell.capnp and auction.capnp (shell-specific schemas).
+/// Shared schemas (system, routing, stem, http) are provided by the caps crate.
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let manifest_path = Path::new(&manifest_dir);
@@ -21,18 +21,7 @@ fn main() {
         .canonicalize()
         .expect("shell.capnp not found in capnp/");
 
-    // Pass 1: shared schemas
-    capnpc::CompilerCommand::new()
-        .src_prefix(&capnp_dir)
-        .file(capnp_dir.join("system.capnp"))
-        .file(capnp_dir.join("ipfs.capnp"))
-        .file(capnp_dir.join("routing.capnp"))
-        .file(capnp_dir.join("stem.capnp"))
-        .file(capnp_dir.join("http.capnp"))
-        .run()
-        .expect("failed to compile shared capnp schemas");
-
-    // Pass 2: shell schema + schema CID
+    // Shell schema + schema CID
     let raw_request = out_dir.join("shell_request.bin");
     capnpc::CompilerCommand::new()
         .src_prefix(&capnp_dir)
@@ -53,7 +42,7 @@ fn main() {
     schema_id::write_schema_bytes(&out_dir.join("shell_schema.bin"), &schemas[0])
         .expect("write schema bytes");
 
-    // Pass 3: auction schema — needed for :compare handler to dial ComputeProviders.
+    // Auction schema — needed for :compare handler to dial ComputeProviders.
     let auction_schema = manifest_path
         .join("../../examples/auction/auction.capnp")
         .canonicalize()
@@ -78,7 +67,6 @@ fn main() {
         schema_id::extract_schemas(&auction_raw, &[("COMPUTE_PROVIDER", provider_id)])
             .expect("extract ComputeProvider schema");
 
-    // Append auction schema consts to the existing schema_ids.rs.
     let auction_consts_path = out_dir.join("auction_schema_ids.rs");
     schema_id::emit_schema_consts(&auction_consts_path, &auction_schemas)
         .expect("emit auction schema consts");
@@ -87,12 +75,10 @@ fn main() {
         .expect("write auction schema bytes");
 
     // Cargo rebuild triggers
-    for schema in &["system", "ipfs", "routing", "stem", "http", "shell"] {
-        println!(
-            "cargo:rerun-if-changed={}",
-            capnp_dir.join(format!("{schema}.capnp")).display()
-        );
-    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        capnp_dir.join("shell.capnp").display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         auction_schema.display()
