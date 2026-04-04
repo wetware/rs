@@ -14,6 +14,10 @@ fn main() {
 
     capnpc::CompilerCommand::new()
         .src_prefix(&capnp_dir)
+        // Tell capnpc that schema.capnp types live in the `capnp` crate,
+        // not in this crate. Without this, generated code for stem.capnp
+        // emits `crate::schema_capnp::node` instead of `::capnp::schema_capnp::node`.
+        .crate_provides("capnp", [0xa93fc509624c72d9])
         .file(capnp_dir.join("system.capnp"))
         .file(capnp_dir.join("ipfs.capnp"))
         .file(capnp_dir.join("routing.capnp"))

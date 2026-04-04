@@ -24,6 +24,8 @@ fn main() {
     // Pass 1: shared schemas
     capnpc::CompilerCommand::new()
         .src_prefix(&capnp_dir)
+        // schema.capnp types live in the `capnp` crate
+        .crate_provides("capnp", [0xa93fc509624c72d9])
         .file(capnp_dir.join("system.capnp"))
         .file(capnp_dir.join("ipfs.capnp"))
         .file(capnp_dir.join("routing.capnp"))
