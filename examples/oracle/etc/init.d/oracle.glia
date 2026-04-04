@@ -4,17 +4,18 @@
 ;; PriceOracle over schema-keyed RPC (libp2p) and returns JSON
 ;; over HTTP (curl-friendly).
 ;;
-;; The `with` block grants an HttpClient capability to the cell.
+;; The http cap is bound in scope so (cell ...) captures it.
 ;; Both transports share the same binary and the same grants.
 ;;
 ;; Shell commands (after boot):
 ;;   (perform runtime :run (load "bin/oracle.wasm") "serve")   ;; DHT provide
 ;;   (perform runtime :run (load "bin/oracle.wasm") "consume") ;; discover + query
 
+(def http (perform host :http-client))
+
 (def oracle
-  (with [(http (perform host :http-client))]
-    (cell (load "bin/oracle.wasm")
-          (load "bin/oracle.schema"))))
+  (cell (load "bin/oracle.wasm")
+        (load "bin/oracle.schema")))
 
 (perform host :listen oracle)              ;; vat RPC (schema-keyed, libp2p)
 (perform host :listen oracle "/oracle")    ;; HTTP/WAGI at /oracle
