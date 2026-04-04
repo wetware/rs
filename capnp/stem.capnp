@@ -18,6 +18,12 @@ interface Signer {
 interface Identity {
   # Returns a Signer scoped to the requested signing domain.
   signer @0 (domain :Text) -> (signer :Signer);
+
+  verify @1 (data :Data, signature :Data, pubkey :Data) -> (valid :Bool);
+  # Verify an Ed25519 signature against an arbitrary public key.
+  # Stateless — does not use the node's private key.
+  # The pubkey is the 32-byte Ed25519 verifying key.
+  # The signature is the 64-byte Ed25519 signature.
 }
 
 interface Terminal(Session) {

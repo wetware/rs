@@ -16,7 +16,7 @@ use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use libp2p::identity::Keypair;
 use libp2p_core::SignedEnvelope;
 use membrane::{stem_capnp, Epoch, EpochGuard, GraftBuilder, MembraneServer};
@@ -87,6 +87,47 @@ impl stem_capnp::identity::Server for EpochGuardedIdentity {
             guard: self.guard.clone(),
         });
         results.get().set_signer(signer);
+        Promise::ok(())
+    }
+
+    fn verify(
+        self: capnp::capability::Rc<Self>,
+        params: stem_capnp::identity::VerifyParams,
+        mut results: stem_capnp::identity::VerifyResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.guard.check());
+        let params = pry!(params.get());
+        let data = pry!(params.get_data());
+        let signature_bytes = pry!(params.get_signature());
+        let pubkey_bytes = pry!(params.get_pubkey());
+
+        // Parse the public key (32 bytes for Ed25519).
+        let pubkey_arr: [u8; 32] = match pubkey_bytes.try_into() {
+            Ok(arr) => arr,
+            Err(_) => {
+                return Promise::err(capnp::Error::failed("pubkey must be 32 bytes".into()));
+            }
+        };
+        let pubkey = match VerifyingKey::from_bytes(&pubkey_arr) {
+            Ok(key) => key,
+            Err(_) => {
+                results.get().set_valid(false);
+                return Promise::ok(());
+            }
+        };
+
+        // Parse the signature (64 bytes for Ed25519).
+        let sig_arr: [u8; 64] = match signature_bytes.try_into() {
+            Ok(arr) => arr,
+            Err(_) => {
+                return Promise::err(capnp::Error::failed("signature must be 64 bytes".into()));
+            }
+        };
+        let signature = Signature::from_bytes(&sig_arr);
+
+        // Verify with strict validation (rejects malleable signatures).
+        let valid = pubkey.verify_strict(data, &signature).is_ok();
+        results.get().set_valid(valid);
         Promise::ok(())
     }
 }
@@ -324,3 +365,235 @@ where
 
 // Tests for the removed IPFS capability (EpochGuardedUnixFS) have been deleted.
 // IPFS content access now goes through WASI virtual FS — tested in fs_intercept::tests and vfs::tests.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::Signer;
+    use membrane::Epoch;
+
+    /// Generate a random Ed25519 signing key (compatible with the rand version
+    /// used by the root crate, which may differ from ed25519_dalek's rand_core).
+    fn gen_signing_key() -> ed25519_dalek::SigningKey {
+        crate::keys::generate().expect("OS CSPRNG")
+    }
+
+    /// Helper: create an EpochGuardedIdentity client for testing.
+    fn test_identity() -> (
+        stem_capnp::identity::Client,
+        tokio::sync::watch::Sender<Epoch>,
+    ) {
+        let sk = gen_signing_key();
+        let keypair = crate::keys::to_libp2p(&sk).expect("valid ed25519 keypair");
+        let epoch = Epoch {
+            seq: 1,
+            head: b"test".to_vec(),
+            adopted_block: 100,
+        };
+        let (tx, rx) = tokio::sync::watch::channel(epoch);
+        let guard = EpochGuard {
+            issued_seq: 1,
+            receiver: rx,
+        };
+        let client: stem_capnp::identity::Client =
+            capnp_rpc::new_client(EpochGuardedIdentity::new(keypair, guard));
+        (client, tx)
+    }
+
+    /// Helper: sign data with a given signing key (raw Ed25519, no envelope).
+    fn sign_data(sk: &ed25519_dalek::SigningKey, data: &[u8]) -> ed25519_dalek::Signature {
+        sk.sign(data)
+    }
+
+    #[tokio::test]
+    async fn verify_valid_signature_returns_true() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (identity, _tx) = test_identity();
+                let sk = gen_signing_key();
+                let vk = sk.verifying_key();
+                let data = b"hello world";
+                let sig = sign_data(&sk, data);
+
+                let mut req = identity.verify_request();
+                req.get().set_data(data);
+                req.get().set_signature(&sig.to_bytes());
+                req.get().set_pubkey(&vk.to_bytes());
+
+                let resp = req.send().promise.await.expect("verify RPC");
+                assert!(resp.get().expect("verify results").get_valid());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn verify_wrong_data_returns_false() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (identity, _tx) = test_identity();
+                let sk = gen_signing_key();
+                let vk = sk.verifying_key();
+                let sig = sign_data(&sk, b"correct data");
+
+                let mut req = identity.verify_request();
+                req.get().set_data(b"wrong data");
+                req.get().set_signature(&sig.to_bytes());
+                req.get().set_pubkey(&vk.to_bytes());
+
+                let resp = req.send().promise.await.expect("verify RPC");
+                assert!(!resp.get().expect("verify results").get_valid());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn verify_wrong_pubkey_returns_false() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (identity, _tx) = test_identity();
+                let sk = gen_signing_key();
+                let wrong_sk = gen_signing_key();
+                let wrong_vk = wrong_sk.verifying_key();
+                let data = b"hello world";
+                let sig = sign_data(&sk, data);
+
+                let mut req = identity.verify_request();
+                req.get().set_data(data);
+                req.get().set_signature(&sig.to_bytes());
+                req.get().set_pubkey(&wrong_vk.to_bytes());
+
+                let resp = req.send().promise.await.expect("verify RPC");
+                assert!(!resp.get().expect("verify results").get_valid());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn verify_malformed_pubkey_returns_error() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (identity, _tx) = test_identity();
+
+                let mut req = identity.verify_request();
+                req.get().set_data(b"data");
+                req.get().set_signature(&[0u8; 64]);
+                req.get().set_pubkey(&[0u8; 16]); // wrong length
+
+                let result = req.send().promise.await;
+                match result {
+                    Ok(resp) => match resp.get() {
+                        Ok(_) => panic!("should fail with wrong pubkey length"),
+                        Err(e) => assert!(
+                            e.to_string().contains("pubkey must be 32 bytes"),
+                            "unexpected error: {e}"
+                        ),
+                    },
+                    Err(e) => assert!(
+                        e.to_string().contains("pubkey must be 32 bytes"),
+                        "unexpected error: {e}"
+                    ),
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn verify_malformed_signature_returns_error() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (identity, _tx) = test_identity();
+                let sk = gen_signing_key();
+                let vk = sk.verifying_key();
+
+                let mut req = identity.verify_request();
+                req.get().set_data(b"data");
+                req.get().set_signature(&[0u8; 32]); // wrong length (should be 64)
+                req.get().set_pubkey(&vk.to_bytes());
+
+                let result = req.send().promise.await;
+                match result {
+                    Ok(resp) => match resp.get() {
+                        Ok(_) => panic!("should fail with wrong signature length"),
+                        Err(e) => assert!(
+                            e.to_string().contains("signature must be 64 bytes"),
+                            "unexpected error: {e}"
+                        ),
+                    },
+                    Err(e) => assert!(
+                        e.to_string().contains("signature must be 64 bytes"),
+                        "unexpected error: {e}"
+                    ),
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn verify_empty_data_with_valid_signature() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (identity, _tx) = test_identity();
+                let sk = gen_signing_key();
+                let vk = sk.verifying_key();
+                let data = b"";
+                let sig = sign_data(&sk, data);
+
+                let mut req = identity.verify_request();
+                req.get().set_data(data);
+                req.get().set_signature(&sig.to_bytes());
+                req.get().set_pubkey(&vk.to_bytes());
+
+                let resp = req.send().promise.await.expect("verify RPC");
+                assert!(resp.get().expect("verify results").get_valid());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn verify_fails_after_epoch_advance() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (identity, tx) = test_identity();
+                let sk = gen_signing_key();
+                let vk = sk.verifying_key();
+                let data = b"hello";
+                let sig = sign_data(&sk, data);
+
+                // Advance epoch.
+                tx.send(Epoch {
+                    seq: 2,
+                    head: b"new".to_vec(),
+                    adopted_block: 101,
+                })
+                .unwrap();
+
+                let mut req = identity.verify_request();
+                req.get().set_data(data);
+                req.get().set_signature(&sig.to_bytes());
+                req.get().set_pubkey(&vk.to_bytes());
+
+                let result = req.send().promise.await;
+                match result {
+                    Ok(resp) => match resp.get() {
+                        Ok(_) => panic!("verify should fail after epoch advance"),
+                        Err(e) => assert!(
+                            e.to_string().contains("staleEpoch"),
+                            "expected staleEpoch, got: {e}"
+                        ),
+                    },
+                    Err(e) => assert!(
+                        e.to_string().contains("staleEpoch"),
+                        "expected staleEpoch, got: {e}"
+                    ),
+                }
+            })
+            .await;
+    }
+}
