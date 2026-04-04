@@ -97,6 +97,14 @@ impl stem_capnp::identity::Server for StubIdentity {
     ) -> Promise<(), capnp::Error> {
         Promise::err(capnp::Error::unimplemented("stub identity".into()))
     }
+
+    fn verify(
+        self: capnp::capability::Rc<Self>,
+        _params: stem_capnp::identity::VerifyParams,
+        _results: stem_capnp::identity::VerifyResults,
+    ) -> Promise<(), capnp::Error> {
+        Promise::err(capnp::Error::unimplemented("stub identity".into()))
+    }
 }
 
 /// Stub Host: returns unimplemented for all methods.

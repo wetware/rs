@@ -1957,6 +1957,14 @@ mod tests {
         ) -> Promise<(), capnp::Error> {
             Promise::err(capnp::Error::unimplemented("stub".into()))
         }
+
+        fn verify(
+            self: capnp::capability::Rc<Self>,
+            _p: stem_capnp::identity::VerifyParams,
+            _r: stem_capnp::identity::VerifyResults,
+        ) -> Promise<(), capnp::Error> {
+            Promise::err(capnp::Error::unimplemented("stub".into()))
+        }
     }
 
     // --- Helper: construct a Session with test stubs ---
