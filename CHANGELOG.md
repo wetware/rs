@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Dead code: `RpcDriver`, `DriveOutcome`, `drive_until`, `block_on` (zero callers)
 
 ### Added
+- `HttpClient.post()`: outbound HTTP POST capability for WASM guests (domain-scoped, epoch-guarded)
 - Glia shell: `(perform auction :compare)` discovers providers and compares fuel prices
 - `--metrics-addr` flag: optional Prometheus metrics endpoint for fuel observability
 - Fuel auction example: ComputeProvider vat cell with RFQ protocol
