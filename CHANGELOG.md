@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - `HttpClient.post()`: outbound HTTP POST capability for WASM guests (domain-scoped, epoch-guarded)
+- Braindump schema + project scaffold: symmetric p2p context sharing for LLMs (`examples/braindump/`)
 - Glia shell: `(perform auction :compare)` discovers providers and compares fuel prices
 - `--metrics-addr` flag: optional Prometheus metrics endpoint for fuel observability
 - Fuel auction example: ComputeProvider vat cell with RFQ protocol
