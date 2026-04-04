@@ -5,7 +5,7 @@
 
 WASM_TARGET := wasm32-wasip2
 
-.PHONY: all host std kernel shell examples chess echo counter discovery oracle auction braindump clean run-kernel
+.PHONY: all host std kernel shell examples chess echo counter discovery oracle auction mindshare clean run-kernel
 .PHONY: container-build container-run container-dev container-clean
 
 all: std examples host
@@ -37,7 +37,7 @@ shell:
 # Note: auction.capnp lives in capnp/ but is compiled by the example crate
 # that uses it (via build.rs), not by the host binary.
 
-examples: chess echo counter discovery oracle auction braindump
+examples: chess echo counter discovery oracle auction mindshare
 
 chess:
 	$(MAKE) -C examples/chess
@@ -57,8 +57,8 @@ oracle:
 auction:
 	$(MAKE) -C examples/auction
 
-braindump:
-	$(MAKE) -C examples/braindump
+mindshare:
+	$(MAKE) -C examples/mindshare
 
 # --- Run ---------------------------------------------------------------------
 
@@ -77,7 +77,7 @@ clean:
 	$(MAKE) -C examples/discovery clean
 	$(MAKE) -C examples/oracle clean
 	$(MAKE) -C examples/auction clean
-	$(MAKE) -C examples/braindump clean
+	$(MAKE) -C examples/mindshare clean
 
 # --- Container ---------------------------------------------------------------
 

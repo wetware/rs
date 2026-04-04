@@ -1,10 +1,10 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-/// Build script for the braindump example.
+/// Build script for the mindshare example.
 ///
-/// Compiles braindump.capnp and shared system schemas, extracts the
-/// Braindump interface's canonical bytes, and derives its schema CID.
+/// Compiles mindshare.capnp and shared system schemas, extracts the
+/// Mindshare interface's canonical bytes, and derives its schema CID.
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let manifest_path = Path::new(&manifest_dir);
@@ -17,9 +17,9 @@ fn main() {
         .expect("capnp dir not found");
 
     let local_schema = manifest_path
-        .join("braindump.capnp")
+        .join("mindshare.capnp")
         .canonicalize()
-        .expect("braindump.capnp not found next to Cargo.toml");
+        .expect("mindshare.capnp not found next to Cargo.toml");
 
     // Pass 1: shared schemas
     capnpc::CompilerCommand::new()
@@ -31,25 +31,25 @@ fn main() {
         .run()
         .expect("failed to compile shared capnp schemas");
 
-    // Pass 2: braindump schema + schema CID
-    let raw_request = out_dir.join("braindump_request.bin");
+    // Pass 2: mindshare schema + schema CID
+    let raw_request = out_dir.join("mindshare_request.bin");
     capnpc::CompilerCommand::new()
         .src_prefix(manifest_path)
         .file(&local_schema)
         .raw_code_generator_request_path(&raw_request)
         .run()
-        .expect("failed to compile braindump.capnp");
+        .expect("failed to compile mindshare.capnp");
 
-    let braindump_id = find_interface_id(&raw_request, "Braindump")
-        .expect("Braindump interface not found in CodeGeneratorRequest");
+    let mindshare_id = find_interface_id(&raw_request, "Mindshare")
+        .expect("Mindshare interface not found in CodeGeneratorRequest");
 
-    let schemas = schema_id::extract_schemas(&raw_request, &[("BRAINDUMP", braindump_id)])
-        .expect("extract Braindump schema");
+    let schemas = schema_id::extract_schemas(&raw_request, &[("MINDSHARE", mindshare_id)])
+        .expect("extract Mindshare schema");
 
     schema_id::emit_schema_consts(&out_dir.join("schema_ids.rs"), &schemas)
         .expect("emit schema consts");
 
-    schema_id::write_schema_bytes(&out_dir.join("braindump_schema.bin"), &schemas[0])
+    schema_id::write_schema_bytes(&out_dir.join("mindshare_schema.bin"), &schemas[0])
         .expect("write schema bytes");
 
     // Cargo rebuild triggers

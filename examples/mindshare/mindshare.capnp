@@ -1,10 +1,10 @@
-# Braindump — symmetric peer-to-peer context sharing for LLMs.
+# Mindshare — symmetric peer-to-peer context sharing for LLMs.
 #
-# Both peers export a Braindump capability to each other. Each side
+# Both peers export a Mindshare capability to each other. Each side
 # can push context (as content-addressed CIDs) and prompt the other's
 # local LLM. The capability IS the access control.
 #
-# "You have a Braindump or you don't."
+# "You have a Mindshare or you don't."
 
 @0xb7d3e1f2a4c6089a;
 
@@ -15,7 +15,7 @@ struct Metadata {
   supersedes  @3 :Data;       # future: CID of content this replaces
 }
 
-interface Braindump {
+interface Mindshare {
   # Get a write surface for pushing context into this peer's store.
   context @0 () -> (writer :ContextWriter);
   # Get a rate-limited prompt capability against this peer's LLM.
