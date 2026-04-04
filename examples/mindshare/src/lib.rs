@@ -1,7 +1,7 @@
-//! Braindump guest: symmetric peer-to-peer context sharing for LLMs.
+//! Mindshare guest: symmetric peer-to-peer context sharing for LLMs.
 //!
 //! Demonstrates:
-//!   - Bidirectional Braindump capability exchange
+//!   - Bidirectional Mindshare capability exchange
 //!   - ContextWriter for pushing CID-addressed content
 //!   - Rate-limited Prompt capability
 //!
@@ -15,9 +15,9 @@ use wasip2::exports::cli::run::Guest;
 // mod stem_capnp { include!(concat!(env!("OUT_DIR"), "/stem_capnp.rs")); }
 // mod routing_capnp { include!(concat!(env!("OUT_DIR"), "/routing_capnp.rs")); }
 // mod http_capnp { include!(concat!(env!("OUT_DIR"), "/http_capnp.rs")); }
-// mod braindump_capnp { include!(concat!(env!("OUT_DIR"), "/braindump_capnp.rs")); }
+// mod mindshare_capnp { include!(concat!(env!("OUT_DIR"), "/mindshare_capnp.rs")); }
 
-// Build-time schema constants: BRAINDUMP_SCHEMA (&[u8]) and BRAINDUMP_CID (&str).
+// Build-time schema constants: MINDSHARE_SCHEMA (&[u8]) and MINDSHARE_CID (&str).
 include!(concat!(env!("OUT_DIR"), "/schema_ids.rs"));
 
 // ---------------------------------------------------------------------------
@@ -56,16 +56,16 @@ fn init_logging() {
 // Entry point
 // ---------------------------------------------------------------------------
 
-struct BraindumpGuest;
+struct MindshareGuest;
 
-impl Guest for BraindumpGuest {
+impl Guest for MindshareGuest {
     fn run() -> Result<(), ()> {
         init_logging();
         // Stub: cell logic will be implemented in a follow-up PR.
         // For now, just verify the schema compiles and CID is derived.
-        log::info!("braindump schema CID: {BRAINDUMP_CID}");
+        log::info!("mindshare schema CID: {MINDSHARE_CID}");
         Ok(())
     }
 }
 
-wasip2::cli::command::export!(BraindumpGuest);
+wasip2::cli::command::export!(MindshareGuest);
