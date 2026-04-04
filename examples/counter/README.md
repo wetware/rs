@@ -136,12 +136,14 @@ well-specified binary protocol for this job.
 ```clojure
 ; Register the counter cell as an HTTP handler at /counter.
 ; HttpListener spawns a cell per request and pipes FastCGI.
-(perform host :listen executor "/counter" (load "bin/counter.wasm"))
+(def counter (cell (load "bin/counter.wasm")))
+
+(perform host :listen counter "/counter")
 ```
 
-The script registers the counter binary with the host's
-`HttpListener` under the path prefix `"/counter"`. Each incoming
-HTTP request spawns a fresh counter cell. The executor capability
+The script defines the counter cell, then registers it with the
+host's `HttpListener` under the path prefix `"/counter"`. Each
+incoming HTTP request spawns a fresh counter cell. The capability
 is passed explicitly -- no ambient authority.
 
 ## Tests
