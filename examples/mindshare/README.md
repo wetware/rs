@@ -85,6 +85,70 @@ make mindshare
 - **Domain-scoped HTTP.** HttpClient enforces host allowlist. The LLM call stays local.
 - **Epoch-guarded.** All capabilities revoke on epoch advance. Peers re-graft automatically.
 
+## Running
+
+### Step 1: Boot the node
+
+Stack the mindshare layer on top of the kernel. The init.d script
+registers the Mindshare cell with the host's `VatListener` and grants
+it an `HttpClient` capability for local LLM queries.
+
+```sh
+ww run --port=2025 crates/kernel examples/mindshare
+```
+
+This drops you into a Glia shell.
+
+### Step 2: Start the DHT service
+
+From the Glia shell, run mindshare in service mode to provide the
+schema CID on the DHT:
+
+```clojure
+/ > (perform runtime :run (load "bin/mindshare.wasm") "serve")
+```
+
+### Step 3: Connect a second peer
+
+Open a second terminal:
+
+```sh
+ww run --port=2026 crates/kernel examples/mindshare
+```
+
+From the second Glia shell, start the service and connect:
+
+```clojure
+/ > (perform runtime :run (load "bin/mindshare.wasm") "serve")
+```
+
+The two peers will discover each other via DHT and exchange Mindshare
+capabilities automatically.
+
+> **Note:** Cell logic is currently a stub. The init.d script and
+> schema are ready; the runtime behavior will land in a follow-up PR.
+
+## Init.d script
+
+`etc/init.d/mindshare.glia`:
+
+```clojure
+;; Grant an HttpClient capability (for local LLM) and define the cell.
+(def mindshare
+  (with [(http (perform host :http-client))]
+    (cell (load "bin/mindshare.wasm")
+          (load "bin/mindshare.schema"))))
+
+(perform host :listen mindshare)
+```
+
+**`with`** creates local capability bindings. **`cell`** bundles
+wasm + schema + all capabilities from scope. The `HttpClient` is
+needed for outbound HTTP calls to the local LLM server (Ollama).
+
+The service mode is started interactively from the Glia shell --
+not from the init.d script.
+
 ## From the shell
 
 ```clojure
@@ -108,6 +172,24 @@ make mindshare
 
 ;; Read what they've pushed to you
 (perform ipfs :cat "/ipfs/QmCasey.../reply.md")
+```
+
+## Files
+
+```
+examples/mindshare/
+├── Cargo.toml
+├── Makefile               # make mindshare
+├── README.md              # this file
+├── mindshare.capnp        # Mindshare schema source
+├── bin/                   # build output (gitignored)
+│   ├── mindshare.wasm
+│   └── mindshare.schema   # compiled schema bytes
+├── etc/
+│   └── init.d/
+│       └── mindshare.glia # cell registration
+└── src/
+    └── lib.rs             # guest implementation
 ```
 
 ## Roadmap

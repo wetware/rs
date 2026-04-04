@@ -85,6 +85,64 @@ The operator sets `base_price` and `total_capacity`.
   in the host runtime deducts consumed fuel from `remaining_budget` and stops refueling
   at 0. The cell traps naturally via `Trap::OutOfFuel`.
 
+## Running
+
+### Step 1: Boot the node
+
+Stack the auction layer on top of the kernel. The init.d script
+registers the ComputeProvider cell with the host's `VatListener`.
+
+```sh
+ww run --port=2025 crates/kernel examples/auction
+```
+
+This drops you into a Glia shell.
+
+### Step 2: Start the DHT service
+
+From the Glia shell, run the auction in service mode. This provides
+the schema CID on the DHT and re-provides periodically:
+
+```clojure
+/ > (perform runtime :run (load "bin/auction.wasm") "serve")
+```
+
+### Step 3: Query from a consumer (optional)
+
+Open a second terminal and boot a consumer node:
+
+```sh
+ww run --port=2026 crates/kernel examples/auction
+```
+
+From the consumer's Glia shell, compare quotes across providers:
+
+```clojure
+/ > (perform auction :compare "QmWasmCid...")
+```
+
+## Init.d script
+
+`etc/init.d/auction.glia`:
+
+```clojure
+;; Register the ComputeProvider vat cell.
+;; VatListener spawns a cell per RPC connection; the cell exports
+;; ComputeProvider via system::serve().
+(def auction-wasm (load "bin/auction.wasm"))
+(def auction-schema (load "bin/auction.schema"))
+
+(perform host :listen runtime auction-wasm auction-schema)
+```
+
+The script registers the auction binary with the host's `VatListener`.
+The schema is read from `bin/auction.schema` (adjacent to the WASM
+binary). Each incoming RPC connection spawns a fresh cell that exports
+a `ComputeProvider` capability.
+
+The service mode (DHT provide) is started interactively from the
+Glia shell -- not from the init.d script.
+
 ## Comparing from the shell
 
 From a running Glia REPL:
@@ -97,6 +155,24 @@ From a running Glia REPL:
 
 The `:compare` handler discovers providers via DHT, solicits quotes in parallel
 (up to 10 providers, 5s timeout each), filters expired quotes, and sorts by price.
+
+## Files
+
+```
+examples/auction/
+├── Cargo.toml
+├── Makefile              # make auction
+├── README.md             # this file
+├── auction.capnp         # ComputeProvider schema source
+├── bin/                  # build output (gitignored)
+│   ├── auction.wasm
+│   └── auction.schema    # compiled schema bytes
+├── etc/
+│   └── init.d/
+│       └── auction.glia  # cell registration
+└── src/
+    └── lib.rs            # guest implementation
+```
 
 ## Phase 2 roadmap
 

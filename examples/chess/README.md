@@ -150,7 +150,7 @@ interface ChessEngine {
 (def chess-wasm (load "bin/chess-demo.wasm"))
 (def chess-schema (load "bin/chess-demo.schema"))
 
-(perform host :listen executor chess-wasm chess-schema)
+(perform host :listen runtime chess-wasm chess-schema)
 ```
 
 The script registers the chess binary with the host's `VatListener`.

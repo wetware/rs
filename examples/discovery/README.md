@@ -125,7 +125,7 @@ The same binary serves both roles:
 (def discovery-wasm (load "bin/discovery.wasm"))
 (def discovery-schema (load "bin/discovery.schema"))
 
-(perform host :listen executor discovery-wasm discovery-schema)
+(perform host :listen runtime discovery-wasm discovery-schema)
 ```
 
 The script registers the discovery binary with the host's

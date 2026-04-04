@@ -24,8 +24,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `FuelPolicy` schema: `Executor.spawn()` accepts a fuel allocation policy (scheduled or oneshot)
 - `FuelEstimator::new_oneshot()`: spawn cells with fixed fuel budgets that trap at exhaustion
 - `Identity.verify()`: Ed25519 signature verification on the membrane (symmetric with sign)
+- Init.d scripts for auction, echo, counter, and mindshare examples (all 7 examples now bootable)
 
 ### Fixed
+- Oracle init.d: replace invalid `(with ...)` syntax with `(def http ...)` cap binding
 - Counter example: remove stale schema-inject step (removed in #313)
 - Shell cell: zero warnings (fix unused mut, duplicate build_dispatch call, allow dead_code on scaffolding)
 
