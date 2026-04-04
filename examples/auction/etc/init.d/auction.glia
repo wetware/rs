@@ -1,0 +1,18 @@
+;; auction.glia — fuel auction ComputeProvider vat cell
+;;
+;; Registers the ComputeProvider vat cell. VatListener spawns a cell
+;; per RPC connection (no args = cell mode); each cell exports
+;; ComputeProvider via system::serve().
+;;
+;; The cell needs Identity (for quote signing) and Runtime (for
+;; spawning metered child cells), which it obtains via membrane.graft()
+;; inside the cell. No extra `with` grants needed here — the membrane
+;; provides them.
+;;
+;; Shell commands (after boot):
+;;   (perform runtime :run (load "bin/auction.wasm") "serve")   ;; DHT provide loop
+
+(def auction-wasm (load "bin/auction.wasm"))
+(def auction-schema (load "bin/auction.schema"))
+
+(perform host :listen runtime auction-wasm auction-schema)

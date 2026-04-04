@@ -1,0 +1,10 @@
+; echo.glia — raw stream echo cell
+;
+; Registers the echo cell as a raw stream handler.
+; StreamListener spawns a cell per connection; the cell reads
+; stdin and writes it back to stdout unchanged.
+;
+; This is the simplest possible cell: no schema, no Cap'n Proto.
+; It validates the full spawn-pipe-collect pipeline.
+
+(perform host :listen runtime "echo" (load "bin/echo.wasm"))
