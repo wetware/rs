@@ -5,7 +5,7 @@
 
 WASM_TARGET := wasm32-wasip2
 
-.PHONY: all host std kernel shell examples chess echo counter discovery oracle clean run-kernel
+.PHONY: all host std kernel shell examples chess echo counter discovery oracle auction clean run-kernel
 .PHONY: container-build container-run container-dev container-clean
 
 all: std examples host
@@ -35,7 +35,7 @@ shell:
 
 # --- Examples ----------------------------------------------------------------
 
-examples: chess echo counter discovery oracle
+examples: chess echo counter discovery oracle auction
 
 chess:
 	$(MAKE) -C examples/chess
@@ -51,6 +51,9 @@ discovery:
 
 oracle:
 	$(MAKE) -C examples/oracle
+
+auction:
+	$(MAKE) -C examples/auction
 
 # --- Run ---------------------------------------------------------------------
 
@@ -68,6 +71,7 @@ clean:
 	$(MAKE) -C examples/counter clean
 	$(MAKE) -C examples/discovery clean
 	$(MAKE) -C examples/oracle clean
+	$(MAKE) -C examples/auction clean
 
 # --- Container ---------------------------------------------------------------
 
