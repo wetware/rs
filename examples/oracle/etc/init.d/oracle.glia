@@ -4,14 +4,13 @@
 ;; PriceOracle over schema-keyed RPC (libp2p) and returns JSON
 ;; over HTTP (curl-friendly).
 ;;
-;; The http cap is bound in scope so (cell ...) captures it.
 ;; Both transports share the same binary and the same grants.
+;; All graft caps (including http-client) are auto-injected by
+;; the membrane.
 ;;
 ;; Shell commands (after boot):
 ;;   (perform runtime :run (load "bin/oracle.wasm") "serve")   ;; DHT provide
 ;;   (perform runtime :run (load "bin/oracle.wasm") "consume") ;; discover + query
-
-(def http (perform host :http-client))
 
 (def oracle
   (cell (load "bin/oracle.wasm")
