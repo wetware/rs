@@ -1,6 +1,6 @@
 # Braindump
 
-Symmetric peer-to-peer context sharing for LLMs. You have a Braindump or you don't.
+Symmetric peer-to-peer context sharing for LLMs.
 
 ## What it demonstrates
 
