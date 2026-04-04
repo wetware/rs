@@ -15,15 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Dead code: `RpcDriver`, `DriveOutcome`, `drive_until`, `block_on` (zero callers)
 
 ### Added
-<<<<<<< HEAD
-<<<<<<< HEAD
+- Glia shell: `(perform auction :compare)` discovers providers and compares fuel prices
 - Fuel auction example: ComputeProvider vat cell with RFQ protocol
-=======
-- `auction.capnp`: RFQ protocol schema (Quote struct + ComputeProvider interface)
->>>>>>> e4c26bc (feat: auction.capnp schema — Quote struct + ComputeProvider interface)
-=======
-- Fuel auction example: ComputeProvider vat cell with RFQ protocol
->>>>>>> 524ebd9 (feat: ComputeProvider vat cell — fuel auction example with RFQ protocol)
 - `doc/guest-runtime.md`: design spec for the hand-rolled single-threaded async runtime
 - `FuelPolicy` schema: `Executor.spawn()` accepts a fuel allocation policy (scheduled or oneshot)
 - `FuelEstimator::new_oneshot()`: spawn cells with fixed fuel budgets that trap at exhaustion
