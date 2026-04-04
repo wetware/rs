@@ -75,15 +75,53 @@ pub struct FuelEstimator {
     /// Cells that make host calls are already handled by the call_hook,
     /// so the epoch callback just refuels without double-observing.
     host_calls_this_epoch: u32,
+    /// Per-cell ceiling for the EWMA budget (default: MAX_FUEL).
+    max_fuel: u64,
+    /// Per-cell floor for the EWMA budget (default: MIN_FUEL).
+    min_fuel: u64,
+    /// Total fuel budget from a oneshot quote.  `None` = unlimited (scheduled cell).
+    /// When this reaches 0 the epoch callback stops refueling and the cell traps.
+    remaining_budget: Option<u64>,
 }
 
 impl FuelEstimator {
+    #[must_use]
     pub fn new(initial: u64) -> Self {
         Self {
             budget: initial,
             avg_ratio: RATIO_SCALE / 2,
             initialized: false,
             host_calls_this_epoch: 0,
+            max_fuel: MAX_FUEL,
+            min_fuel: MIN_FUEL,
+            remaining_budget: None,
+        }
+    }
+
+    /// Create an estimator for a oneshot (budgeted) cell.
+    ///
+    /// `max_fuel`/`min_fuel`: per-epoch bounds. 0 = use system defaults.
+    /// `total_budget`: total fuel credits. Cell traps when exhausted.
+    #[must_use]
+    pub fn new_oneshot(total_budget: u64, max_fuel: u64, min_fuel: u64) -> Self {
+        let effective_max = if max_fuel > 0 {
+            max_fuel.min(MAX_FUEL)
+        } else {
+            MAX_FUEL
+        };
+        let effective_min = if min_fuel > 0 {
+            min_fuel.min(effective_max)
+        } else {
+            MIN_FUEL
+        };
+        Self {
+            budget: INITIAL_FUEL,
+            avg_ratio: RATIO_SCALE / 2,
+            initialized: false,
+            host_calls_this_epoch: 0,
+            max_fuel: effective_max,
+            min_fuel: effective_min,
+            remaining_budget: Some(total_budget),
         }
     }
 
@@ -115,8 +153,8 @@ impl FuelEstimator {
         // Budget inversely proportional to utilization ratio.
         // ratio=0 (pure I/O) → budget=MAX_FUEL
         // ratio=1000 (pure compute) → budget=0, clamped to MIN_FUEL
-        let new_budget =
-            (MAX_FUEL * (RATIO_SCALE - self.avg_ratio) / RATIO_SCALE).clamp(MIN_FUEL, MAX_FUEL);
+        let new_budget = (self.max_fuel * (RATIO_SCALE - self.avg_ratio) / RATIO_SCALE)
+            .clamp(self.min_fuel, self.max_fuel);
         self.budget = new_budget;
         new_budget
     }
@@ -184,6 +222,7 @@ struct ProcInit {
     image_root: Option<PathBuf>,
     cache_mode: Option<cache::CacheMode>,
     cid_tree: Option<std::sync::Arc<crate::vfs::CidTree>>,
+    fuel_estimator: Option<FuelEstimator>,
 }
 
 /// Builder for constructing a Proc configuration
@@ -201,6 +240,7 @@ pub struct Builder {
     image_root: Option<PathBuf>,
     cache_mode: Option<cache::CacheMode>,
     cid_tree: Option<std::sync::Arc<crate::vfs::CidTree>>,
+    fuel_estimator: Option<FuelEstimator>,
 }
 
 /// Handles for accessing the host-side of data streams.
@@ -244,6 +284,7 @@ impl Builder {
             image_root: None,
             cache_mode: None,
             cid_tree: None,
+            fuel_estimator: None,
         }
     }
 
@@ -362,6 +403,16 @@ impl Builder {
         self
     }
 
+    /// Override the default fuel estimator.
+    ///
+    /// When set, this estimator replaces `FuelEstimator::new(INITIAL_FUEL)` in
+    /// the process store.  Used by `ExecutorImpl::spawn()` to inject oneshot
+    /// budget constraints from the `FuelPolicy` schema.
+    pub fn with_fuel_estimator(mut self, est: FuelEstimator) -> Self {
+        self.fuel_estimator = Some(est);
+        self
+    }
+
     /// Build a Proc instance. All required parameters must be supplied first.
     pub async fn build(self) -> Result<Proc> {
         let bytecode = self
@@ -390,6 +441,7 @@ impl Builder {
             image_root: self.image_root,
             cache_mode: self.cache_mode,
             cid_tree: self.cid_tree,
+            fuel_estimator: self.fuel_estimator,
         })
         .await
     }
@@ -428,6 +480,7 @@ impl Proc {
             image_root,
             cache_mode,
             cid_tree,
+            fuel_estimator,
         } = init;
 
         let stdin_stream = AsyncStdinStream::new(stdin);
@@ -511,7 +564,7 @@ impl Proc {
             data_stream,
             cache_mode,
             cid_tree,
-            fuel_estimator: FuelEstimator::new(INITIAL_FUEL),
+            fuel_estimator: fuel_estimator.unwrap_or_else(|| FuelEstimator::new(INITIAL_FUEL)),
         };
 
         let mut store = Store::new(&engine, state);
@@ -533,7 +586,22 @@ impl Proc {
         // the call_hook below).  For compute-bound cells, this is the only
         // refueling path — without it, fuel exhaustion causes Trap::OutOfFuel.
         store.epoch_deadline_callback(|mut ctx| {
+            // Read fuel level before borrowing the estimator mutably.
+            let current_fuel = ctx.get_fuel().unwrap_or(0);
             let est = &mut ctx.data_mut().fuel_estimator;
+
+            // Budget exhaustion check for oneshot cells.
+            // When remaining_budget hits 0, stop refueling.  The cell traps on
+            // the next instruction that would consume fuel.
+            if let Some(ref mut remaining) = est.remaining_budget {
+                let consumed = est.budget.saturating_sub(current_fuel);
+                *remaining = remaining.saturating_sub(consumed);
+                if *remaining == 0 {
+                    tracing::info!("fuel.auction.exhausted");
+                    return Ok(wasmtime::UpdateDeadline::Continue(1));
+                }
+            }
+
             if est.host_calls_this_epoch == 0 {
                 // No host calls this epoch — cell is compute-bound.
                 // Observe full consumption so EWMA converges toward MIN_FUEL.
@@ -1029,6 +1097,60 @@ mod tests {
             compute_ratio > 800,
             "compute ratio should be >800, got {}",
             compute_ratio
+        );
+    }
+
+    // =========================================================================
+    // FuelEstimator oneshot / fuel-policy tests
+    // =========================================================================
+
+    #[test]
+    fn fuel_estimator_new_oneshot_basic() {
+        let est = FuelEstimator::new_oneshot(5_000_000, 0, 0);
+        assert_eq!(est.remaining_budget, Some(5_000_000));
+        assert_eq!(est.max_fuel, MAX_FUEL);
+        assert_eq!(est.min_fuel, MIN_FUEL);
+    }
+
+    #[test]
+    fn fuel_estimator_new_oneshot_custom_bounds() {
+        let est = FuelEstimator::new_oneshot(5_000_000, 5_000_000, 50_000);
+        assert_eq!(est.max_fuel, 5_000_000);
+        assert_eq!(est.min_fuel, 50_000);
+    }
+
+    #[test]
+    fn fuel_estimator_new_oneshot_max_clamped() {
+        // maxPerEpoch > MAX_FUEL should be clamped
+        let est = FuelEstimator::new_oneshot(5_000_000, 100_000_000, 0);
+        assert_eq!(est.max_fuel, MAX_FUEL);
+    }
+
+    #[test]
+    fn fuel_estimator_default_unchanged() {
+        // Verify new() still produces the same behavior
+        let est = FuelEstimator::new(INITIAL_FUEL);
+        assert_eq!(est.remaining_budget, None);
+        assert_eq!(est.max_fuel, MAX_FUEL);
+        assert_eq!(est.min_fuel, MIN_FUEL);
+    }
+
+    #[test]
+    fn fuel_estimator_oneshot_uses_custom_bounds() {
+        let mut est = FuelEstimator::new_oneshot(5_000_000, 5_000_000, 50_000);
+        // After observing high utilization, budget should clamp to custom min, not global MIN_FUEL
+        for _ in 0..20 {
+            est.on_host_return(0); // simulate 100% consumption
+        }
+        assert!(
+            est.budget() >= 50_000,
+            "should clamp to custom min_fuel, got {}",
+            est.budget()
+        );
+        assert!(
+            est.budget() <= 5_000_000,
+            "should clamp to custom max_fuel, got {}",
+            est.budget()
         );
     }
 }
