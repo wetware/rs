@@ -851,6 +851,32 @@ impl system_capnp::executor::Server for ExecutorImpl {
         let args = read_text_list_result(params.get_args());
         let env = read_text_list_result(params.get_env());
 
+        // Read fuel policy (defaults to Scheduled if not provided).
+        // Construct the appropriate FuelEstimator based on the policy variant.
+        use crate::cell::proc::FuelEstimator;
+        let fuel_estimator = if params.has_fuel_policy() {
+            match pry!(pry!(params.get_fuel_policy()).which()) {
+                system_capnp::fuel_policy::Scheduled(()) => None,
+                system_capnp::fuel_policy::Oneshot(Ok(oneshot)) => {
+                    let total_budget = oneshot.get_total_budget();
+                    let max_per_epoch = oneshot.get_max_per_epoch();
+                    let min_per_epoch = oneshot.get_min_per_epoch();
+                    Some(FuelEstimator::new_oneshot(
+                        total_budget,
+                        max_per_epoch,
+                        min_per_epoch,
+                    ))
+                }
+                system_capnp::fuel_policy::Oneshot(Err(e)) => {
+                    return Promise::err(capnp::Error::failed(format!(
+                        "invalid oneshot fuel policy: {e}"
+                    )));
+                }
+            }
+        } else {
+            None // Default: scheduled (unlimited)
+        };
+
         // Read optional caps from spawn request (forwarded from init.d `with` block).
         let extra_caps: Vec<(String, capnp::capability::Client)> = {
             let mut caps_vec = Vec::new();
@@ -886,13 +912,16 @@ impl system_capnp::executor::Server for ExecutorImpl {
             // All cells get data_streams + membrane RPC.
             // stdin/stdout semantics vary by cell type (wire protocol, CGI,
             // or shutdown signal), but the WIT membrane channel is universal.
-            let (builder, mut handles) = ProcBuilder::new()
+            let mut proc_builder = ProcBuilder::new()
                 .with_env(env)
                 .with_args(args)
                 .with_wasm_debug(wasm_debug)
                 .with_bytecode((*bytecode).clone())
-                .with_stdio(guest_stdin, guest_stdout, guest_stderr)
-                .with_data_streams();
+                .with_stdio(guest_stdin, guest_stdout, guest_stderr);
+            if let Some(est) = fuel_estimator {
+                proc_builder = proc_builder.with_fuel_estimator(est);
+            }
+            let (builder, mut handles) = proc_builder.with_data_streams();
 
             let proc = builder
                 .build()

@@ -47,9 +47,28 @@ interface Runtime {
   # Terminate all tasks spawned through this Runtime.
 }
 
+struct FuelPolicy {
+  union {
+    scheduled @0 :Void;
+    # System thread. Fuel is a scheduler signal, not a budget.
+    # EWMA auto-adjusts. Runs indefinitely. Current behavior.
+
+    oneshot @1 :OneshotFuel;
+    # Fixed budget. Trap at exhaustion (Trap::OutOfFuel).
+    # Auction-metered cells. "Prepaid card."
+  }
+}
+
+struct OneshotFuel {
+  totalBudget @0 :UInt64;
+  maxPerEpoch @1 :UInt64;   # 0 = use MAX_FUEL default
+  minPerEpoch @2 :UInt64;   # 0 = use MIN_FUEL default
+}
+
 interface Executor {
   spawn @0 (args :List(Text), env :List(Text),
-            caps :List(import "stem.capnp".NamedCap)) -> (process :Process);
+            caps :List(import "stem.capnp".NamedCap),
+            fuelPolicy :FuelPolicy) -> (process :Process);
   # Spawn a new instance of the bound WASM binary with the given
   # args and env.  Late-binding args/env is required for WAGI, which
   # injects per-request CGI env vars (REQUEST_METHOD, PATH_INFO, etc.).
