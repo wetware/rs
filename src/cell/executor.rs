@@ -74,6 +74,7 @@ pub struct CellBuilder {
     signing_key: Option<Arc<SigningKey>>,
     route_registry: Option<crate::dispatcher::server::RouteRegistry>,
     cache_policy: crate::rpc::CachePolicy,
+    suppress_stdin: bool,
 }
 
 impl CellBuilder {
@@ -99,6 +100,7 @@ impl CellBuilder {
             signing_key: None,
             route_registry: None,
             cache_policy: crate::rpc::CachePolicy::default(),
+            suppress_stdin: false,
         }
     }
 
@@ -217,6 +219,16 @@ impl CellBuilder {
         self
     }
 
+    /// Suppress host stdin bridging.
+    ///
+    /// When set, the cell receives an empty stdin (closed immediately)
+    /// instead of a bridge to the host's stdin.  Use this when the host
+    /// stdin is reserved for another cell (e.g. MCP server mode).
+    pub fn with_suppress_stdin(mut self, suppress: bool) -> Self {
+        self.suppress_stdin = suppress;
+        self
+    }
+
     /// Build the Cell.
     ///
     /// # Panics
@@ -242,6 +254,7 @@ impl CellBuilder {
             signing_key: self.signing_key,
             route_registry: self.route_registry,
             cache_policy: self.cache_policy,
+            suppress_stdin: self.suppress_stdin,
         }
     }
 }
@@ -271,6 +284,8 @@ pub struct Cell {
     pub signing_key: Option<Arc<SigningKey>>,
     pub route_registry: Option<crate::dispatcher::server::RouteRegistry>,
     pub cache_policy: crate::rpc::CachePolicy,
+    /// When true, the cell receives an empty stdin instead of bridging host stdin.
+    pub suppress_stdin: bool,
 }
 
 /// Result of spawning a cell with RPC: exit code, guest membrane, and optional epoch sender.
@@ -327,6 +342,7 @@ impl Cell {
             signing_key: _,
             route_registry: _,
             cache_policy: _,
+            suppress_stdin,
         } = self;
 
         crate::config::init_tracing();
@@ -358,7 +374,13 @@ impl Cell {
         // cooked mode and forwards bytes via mpsc. A tokio task drains the channel
         // into the duplex writer. Both shell and daemon modes need a live stdin pipe
         // so the guest can block on it until the host signals shutdown (closes stdin).
-        let stdin_handle: Box<dyn tokio::io::AsyncRead + Send + Sync + Unpin> = {
+        let stdin_handle: Box<dyn tokio::io::AsyncRead + Send + Sync + Unpin> = if suppress_stdin {
+            // Suppressed stdin: the cell receives an immediately-closed pipe.
+            // Used in MCP mode where host stdin is reserved for another cell.
+            let (reader, _writer) = tokio::io::duplex(1);
+            // _writer is dropped, so reader sees EOF immediately.
+            Box::new(reader)
+        } else {
             let (reader, mut writer) = tokio::io::duplex(4096);
             let (tx, mut rx) = mpsc::channel::<Vec<u8>>(4);
 
