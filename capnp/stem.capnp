@@ -35,11 +35,11 @@ interface Terminal(Session) {
 
 using Schema = import "/capnp/schema.capnp";
 
-struct NamedCap {
+struct Export {
   name   @0 :Text;
   cap    @1 :Capability;
   schema @2 :Schema.Node;
-  # A named capability with its schema for runtime introspection.
+  # An exported capability with its schema for runtime introspection.
   # name: canonical name (e.g. "host", "identity", "runtime").
   # cap: the capability interface reference.
   # schema: Cap'n Proto schema node describing the interface.
@@ -47,7 +47,7 @@ struct NamedCap {
 
 interface Membrane {
   graft @0 () -> (
-    caps :List(NamedCap)       # All capabilities, named and type-erased.
+    caps :List(Export)         # All capabilities, named and type-erased.
   );
   # Pure capability provisioning (ocap model). Having a Membrane reference IS
   # authorization — no signer needed. Wrap in Terminal(Membrane) to gate access.

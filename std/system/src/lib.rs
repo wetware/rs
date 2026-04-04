@@ -420,7 +420,7 @@ where
 ///     let graft = membrane.graft_request().send().promise.await?;
 ///     let results = graft.get()?;
 ///     let caps = results.get_caps()?;
-///     // Look up capabilities by name in the NamedCap list.
+///     // Look up capabilities by name in the Export list.
 ///     Ok(())
 /// });
 /// ```

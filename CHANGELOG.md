@@ -7,8 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
-- NamedCap: use Capability + Schema.Node types instead of AnyPointer + Data
-- Membrane.graft() returns `List(NamedCap)` instead of named typed fields; capabilities looked up by name
+- Rename NamedCap to Export in stem.capnp (membrane exports capabilities)
+- Export: use Capability + Schema.Node types instead of AnyPointer + Data
+- Membrane.graft() returns `List(Export)` instead of named typed fields; capabilities looked up by name
 - Guest runtime: unify three duplicate poll loops (drive_rpc_only, drive_rpc_with_future, block_on) into a single generic `poll_loop<T>()`
 - Guest runtime: replace `futures::noop_waker`/`poll_unpin` with `std::task::Waker::noop()`/`Pin::new().poll()`
 - Glia effect handler: simplify state machine (factor out repeated handler stack push, remove no-op match)

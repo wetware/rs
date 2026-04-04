@@ -63,7 +63,7 @@ type Membrane = stem_capnp::membrane::Client;
 
 /// Look up a typed capability by name from the graft caps list.
 fn get_graft_cap<T: capnp::capability::FromClientHook>(
-    caps: &capnp::struct_list::Reader<'_, stem_capnp::named_cap::Owned>,
+    caps: &capnp::struct_list::Reader<'_, stem_capnp::export::Owned>,
     name: &str,
 ) -> Result<T, capnp::Error> {
     for i in 0..caps.len() {
