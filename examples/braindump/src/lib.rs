@@ -10,34 +10,12 @@
 use wasip2::cli::stderr::get_stderr;
 use wasip2::exports::cli::run::Guest;
 
-// ---------------------------------------------------------------------------
-// Cap'n Proto generated modules
-// ---------------------------------------------------------------------------
-
-#[allow(dead_code)]
-mod system_capnp {
-    include!(concat!(env!("OUT_DIR"), "/system_capnp.rs"));
-}
-
-#[allow(dead_code)]
-mod stem_capnp {
-    include!(concat!(env!("OUT_DIR"), "/stem_capnp.rs"));
-}
-
-#[allow(dead_code)]
-mod routing_capnp {
-    include!(concat!(env!("OUT_DIR"), "/routing_capnp.rs"));
-}
-
-#[allow(dead_code)]
-mod http_capnp {
-    include!(concat!(env!("OUT_DIR"), "/http_capnp.rs"));
-}
-
-#[allow(dead_code)]
-mod braindump_capnp {
-    include!(concat!(env!("OUT_DIR"), "/braindump_capnp.rs"));
-}
+// Cap'n Proto generated modules — uncomment as cell logic lands.
+// mod system_capnp { include!(concat!(env!("OUT_DIR"), "/system_capnp.rs")); }
+// mod stem_capnp { include!(concat!(env!("OUT_DIR"), "/stem_capnp.rs")); }
+// mod routing_capnp { include!(concat!(env!("OUT_DIR"), "/routing_capnp.rs")); }
+// mod http_capnp { include!(concat!(env!("OUT_DIR"), "/http_capnp.rs")); }
+// mod braindump_capnp { include!(concat!(env!("OUT_DIR"), "/braindump_capnp.rs")); }
 
 // Build-time schema constants: BRAINDUMP_SCHEMA (&[u8]) and BRAINDUMP_CID (&str).
 include!(concat!(env!("OUT_DIR"), "/schema_ids.rs"));
