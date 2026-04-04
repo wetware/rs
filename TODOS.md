@@ -149,3 +149,11 @@
 **Effort:** M
 **Priority:** P3
 **Depends on:** CidTree virtual filesystem (src/vfs.rs)
+
+## MCP server over HTTP+SSE (Mode 2)
+**What:** Run the McpAdapter as an HTTP+SSE endpoint on the node, so remote MCP clients can connect without a local `ww mcp` process. Same adapter code, different transport.
+**Why:** Enables web-based MCP clients and remote LLM-to-node connections without requiring the LLM to run on the same machine as the node.
+**Context:** Mode 1 (`ww mcp` over stdio) is the primary interface. Mode 2 reuses the same `ProtocolAdapter` trait with an HTTP+SSE transport instead of stdio. The design doc (`~/.gstack/projects/wetware-ww/lthibault-master-design-20260326-223714.md`) already accounts for this. Not needed for the initial demo since Claude connects to a local host and dials remote nodes via capabilities.
+**Effort:** M
+**Priority:** P3
+**Depends on:** `ww mcp` (Mode 1, stdio transport)
