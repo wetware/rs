@@ -85,6 +85,27 @@ The operator sets `base_price` and `total_capacity`.
   in the host runtime deducts consumed fuel from `remaining_budget` and stops refueling
   at 0. The cell traps naturally via `Trap::OutOfFuel`.
 
+## Curl it
+
+```sh
+curl http://localhost:8080/auction
+```
+
+Returns JSON with current auction status:
+
+```json
+{
+  "status": "ok",
+  "base_price_per_mfuel": 1,
+  "total_capacity": 10000000000,
+  "utilization": 0.0
+}
+```
+
+The HTTP endpoint returns static defaults (each WAGI invocation is a
+fresh cell with no shared state). Real-time data comes from the vat
+RPC `status()` method.
+
 ## Running
 
 ### Step 1: Boot the node
@@ -126,19 +147,19 @@ From the consumer's Glia shell, compare quotes across providers:
 `etc/init.d/auction.glia`:
 
 ```clojure
-;; Register the ComputeProvider vat cell.
-;; VatListener spawns a cell per RPC connection; the cell exports
-;; ComputeProvider via system::serve().
-(def auction-wasm (load "bin/auction.wasm"))
-(def auction-schema (load "bin/auction.schema"))
+;; One binary, two transports.
+(def auction
+  (cell (load "bin/auction.wasm")
+        (load "bin/auction.schema")))
 
-(perform host :listen runtime auction-wasm auction-schema)
+(perform host :listen auction)              ;; vat RPC (schema-keyed, libp2p)
+(perform host :listen auction "/auction")   ;; HTTP/WAGI at /auction
 ```
 
-The script registers the auction binary with the host's `VatListener`.
-The schema is read from `bin/auction.schema` (adjacent to the WASM
-binary). Each incoming RPC connection spawns a fresh cell that exports
-a `ComputeProvider` capability.
+The script registers the auction binary on two transports: schema-keyed
+RPC via `VatListener` (each incoming connection spawns a fresh cell that
+exports `ComputeProvider`), and HTTP/WAGI at `/auction` (curl-friendly
+JSON status).
 
 The service mode (DHT provide) is started interactively from the
 Glia shell -- not from the init.d script.

@@ -586,6 +586,45 @@ async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
 }
 
 // ---------------------------------------------------------------------------
+// HTTP/WAGI mode — stateless per-request handler
+// ---------------------------------------------------------------------------
+
+/// WAGI cell handler: returns JSON auction status with default values.
+///
+/// Each WAGI invocation is a fresh cell with no shared state, so live
+/// auction data is not available.  The HTTP endpoint is for curl demos
+/// showing the auction exists and its configured price.
+///
+/// stdin/stdout carry CGI (body in, response out).  The capnp membrane
+/// runs over the `wetware:streams` side-channel — no conflict.
+fn run_http() -> Result<(), ()> {
+    use wagi_guest as wagi;
+
+    let base_price = std::env::var("AUCTION_BASE_PRICE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_BASE_PRICE);
+    let total_capacity = std::env::var("AUCTION_TOTAL_CAPACITY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_TOTAL_CAPACITY);
+
+    let json = serde_json::json!({
+        "status": "ok",
+        "base_price_per_mfuel": base_price,
+        "total_capacity": total_capacity,
+        "available": total_capacity,
+        "utilization": 0.0,
+        "active_tickets": 0
+    });
+
+    let body = serde_json::to_string_pretty(&json)
+        .unwrap_or_else(|_| r#"{"error":"json serialization"}"#.into());
+    wagi::respond(200, &[("Content-Type", "application/json")], &body);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -594,6 +633,12 @@ struct AuctionGuest;
 impl Guest for AuctionGuest {
     fn run() -> Result<(), ()> {
         init_logging();
+
+        // HTTP/WAGI mode: detected by CGI env var presence.
+        // HttpListener injects REQUEST_METHOD; VatListener does not.
+        if std::env::var("REQUEST_METHOD").is_ok() {
+            return run_http();
+        }
 
         match std::env::args().nth(1).as_deref() {
             Some("serve") => {
