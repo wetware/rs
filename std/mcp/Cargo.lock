@@ -119,6 +119,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "caps"
+version = "0.1.0"
+dependencies = [
+ "bs58",
+ "capnp",
+ "capnp-rpc",
+ "capnpc",
+ "glia",
+ "multiaddr",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -573,13 +585,11 @@ dependencies = [
 name = "mcp"
 version = "0.1.0"
 dependencies = [
- "bs58",
  "capnp",
  "capnp-rpc",
- "capnpc",
+ "caps",
  "glia",
  "log",
- "multiaddr",
  "serde",
  "serde_json",
  "system",
