@@ -105,9 +105,7 @@ impl stem_capnp::identity::Server for EpochGuardedIdentity {
         let pubkey_arr: [u8; 32] = match pubkey_bytes.try_into() {
             Ok(arr) => arr,
             Err(_) => {
-                return Promise::err(capnp::Error::failed(
-                    "pubkey must be 32 bytes".into(),
-                ));
+                return Promise::err(capnp::Error::failed("pubkey must be 32 bytes".into()));
             }
         };
         let pubkey = match VerifyingKey::from_bytes(&pubkey_arr) {
@@ -122,9 +120,7 @@ impl stem_capnp::identity::Server for EpochGuardedIdentity {
         let sig_arr: [u8; 64] = match signature_bytes.try_into() {
             Ok(arr) => arr,
             Err(_) => {
-                return Promise::err(capnp::Error::failed(
-                    "signature must be 64 bytes".into(),
-                ));
+                return Promise::err(capnp::Error::failed("signature must be 64 bytes".into()));
             }
         };
         let signature = Signature::from_bytes(&sig_arr);
@@ -388,8 +384,7 @@ mod tests {
         tokio::sync::watch::Sender<Epoch>,
     ) {
         let sk = gen_signing_key();
-        let keypair =
-            crate::keys::to_libp2p(&sk).expect("valid ed25519 keypair");
+        let keypair = crate::keys::to_libp2p(&sk).expect("valid ed25519 keypair");
         let epoch = Epoch {
             seq: 1,
             head: b"test".to_vec(),
