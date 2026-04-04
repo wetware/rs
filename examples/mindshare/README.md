@@ -1,15 +1,15 @@
-# Braindump
+# Mindshare
 
 Symmetric peer-to-peer context sharing for LLMs.
 
 ## What it demonstrates
 
-- **Bidirectional capability exchange** -- both peers export a Braindump to each other, not client-server
-- **Sub-capability attenuation** -- Braindump returns separate ContextWriter and Prompt capabilities, each independently grantable and revocable
+- **Bidirectional capability exchange** -- both peers export a Mindshare to each other, not client-server
+- **Sub-capability attenuation** -- Mindshare returns separate ContextWriter and Prompt capabilities, each independently grantable and revocable
 - **Rate limiting as capability wrapper** -- token bucket intrinsic to the Prompt object, not an external policy check
 - **Content-addressed push** -- context pushed as UnixFS CIDs, resolved from the receiver's local content store
 - **Local LLM integration** -- HttpClient POST to Ollama/llama-server, no cloud APIs
-- **Schema-keyed DHT discovery** -- peers running Braindump find each other automatically via schema CID
+- **Schema-keyed DHT discovery** -- peers running Mindshare find each other automatically via schema CID
 
 ## How it works
 
@@ -20,7 +20,7 @@ Louis                        DHT                        Casey
   |<-- [casey, ...] ----------|                           |
   |                           |                           |
   |-- dial + trust ceremony --------------------------->  |
-  |<----- exchange Braindump capabilities --------------->|
+  |<----- exchange Mindshare capabilities --------------->|
   |                           |                           |
   |-- push(notes.md CID) -------------------------------->|
   |                           |        [stored at /louis/] |
@@ -54,14 +54,14 @@ from noise across the shared context surface.
 ## Building
 
 ```sh
-make braindump
+make mindshare
 ```
 
 ## Schema
 
-`braindump.capnp` defines:
+`mindshare.capnp` defines:
 
-- **`Braindump`** -- top-level capability with two sub-capabilities:
+- **`Mindshare`** -- top-level capability with two sub-capabilities:
   - `context()` -- returns a ContextWriter for pushing content
   - `prompt()` -- returns a rate-limited Prompt for querying the LLM
 - **`ContextWriter`** -- single method:
@@ -77,7 +77,7 @@ make braindump
 
 ## Security
 
-- **Capability IS access control.** No ACLs, no auth tokens. You hold a Braindump
+- **Capability IS access control.** No ACLs, no auth tokens. You hold a Mindshare
   capability or you don't. Revocation = drop the capability.
 - **Per-peer isolation.** Each sender writes to a jailed prefix. No cross-contamination.
 - **Rate limiting intrinsic to Prompt.** The token bucket travels with the capability.
@@ -91,8 +91,8 @@ make braindump
 ;; Connect to a peer
 (perform host :connect "/ip4/192.168.1.42/tcp/2025/p2p/12D3Koo...")
 
-;; Get their Braindump capability
-(def bd (perform braindump :open "12D3Koo..."))
+;; Get their Mindshare capability
+(def bd (perform mindshare :open "12D3Koo..."))
 
 ;; Push context — UnixFS paths are first-class
 (perform bd :push "/ipfs/QmNotes.../idea.md")
@@ -113,9 +113,9 @@ make braindump
 ## Roadmap
 
 - **Trust ceremony** -- identity verification before capability export (TBD)
-- **Reconnect persistence** -- Braindump survives disconnection, context persists
+- **Reconnect persistence** -- Mindshare survives disconnection, context persists
 - **Context window management** -- summarization/focus when context exceeds LLM limits
 - **Epistemic graphs** -- Metadata `relation` and `supersedes` fields enable structured
   reasoning over a DAG of claims (supports, contradicts, refines)
 - **Multi-party research rooms** -- N peers, shared LLM surface, capability-scoped views
-- **notes.alembic.network** -- Obsidian-style web explorer for braindump content
+- **notes.alembic.network** -- Obsidian-style web explorer for mindshare content
