@@ -122,6 +122,19 @@ impl Env {
     }
 
     /// Collapse all frames into a single merged HashMap (inner overrides outer).
+    /// Collect all visible bindings (inner overrides outer) as `(name, val)` pairs.
+    /// Used by import to extract a module's exported definitions.
+    #[must_use]
+    pub fn bindings(&self) -> Vec<(String, Val)> {
+        let mut merged = Frame::new();
+        for frame in &self.frames {
+            for (k, v) in frame {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+        merged.into_iter().collect()
+    }
+
     /// Returns a new Env with one frame containing all visible bindings.
     /// Used by `fn` to capture the definition-time environment.
     pub fn snapshot(&self) -> Self {

@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Dead code: `RpcDriver`, `DriveOutcome`, `drive_until`, `block_on` (zero callers)
 
 ### Added
+- Glia: `(def m (perform import "path"))` loads and caches modules as a capability-gated effect
 - `--mcp` flag: MCP server mode for AI agent integration (JSON-RPC on stdin/stdout)
 - Auction example: HTTP/WAGI endpoint at /auction (curl-able JSON status)
 - `HttpClient.post()`: outbound HTTP POST capability for WASM guests (domain-scoped, epoch-guarded)
