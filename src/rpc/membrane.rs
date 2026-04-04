@@ -290,7 +290,7 @@ impl GraftBuilder for HostGraftBuilder {
         for (i, (name, client)) in entries.iter().enumerate() {
             let mut entry = caps_builder.reborrow().get(i as u32);
             entry.set_name(name);
-            entry.set_schema(&[]); // Phase 1: empty schema bytes
+            entry.reborrow().init_schema(); // Phase 1: default (empty) Schema.Node
             entry.init_cap().set_as_capability(client.hook.clone());
         }
 
@@ -298,7 +298,7 @@ impl GraftBuilder for HostGraftBuilder {
         for (i, (name, client)) in extras_owned.iter().enumerate() {
             let mut entry = caps_builder.reborrow().get((offset + i) as u32);
             entry.set_name(name);
-            entry.set_schema(&[]); // Phase 1: empty schema bytes
+            entry.reborrow().init_schema(); // Phase 1: default (empty) Schema.Node
             entry.init_cap().set_as_capability(client.hook.clone());
         }
 
