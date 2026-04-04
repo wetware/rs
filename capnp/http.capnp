@@ -13,4 +13,7 @@ struct Header {
 interface HttpClient {
   get @0 (url :Text, headers :List(Header)) -> (status :UInt16, headers :List(Header), body :Data);
   # Fetch a URL. Domain scoping enforced host-side.
+
+  post @1 (url :Text, headers :List(Header), body :Data) -> (status :UInt16, headers :List(Header), body :Data);
+  # POST to a URL with a body. Domain scoping enforced host-side.
 }
