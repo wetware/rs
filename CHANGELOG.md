@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `doc/guest-runtime.md`: design spec for the hand-rolled single-threaded async runtime
 - `FuelPolicy` schema: `Executor.spawn()` accepts a fuel allocation policy (scheduled or oneshot)
 - `FuelEstimator::new_oneshot()`: spawn cells with fixed fuel budgets that trap at exhaustion
+- `Identity.verify()`: Ed25519 signature verification on the membrane (symmetric with sign)
 
 ### Fixed
 - Counter example: remove stale schema-inject step (removed in #313)
