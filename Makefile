@@ -5,7 +5,7 @@
 
 WASM_TARGET := wasm32-wasip2
 
-.PHONY: all host std kernel shell examples chess echo counter discovery oracle auction mindshare clean run-kernel
+.PHONY: all host std kernel shell mcp examples chess echo counter discovery oracle auction mindshare clean run-kernel
 .PHONY: container-build container-run container-dev container-clean
 
 all: std examples host
@@ -17,7 +17,7 @@ host:
 
 # --- Std components ----------------------------------------------------------
 
-std: kernel shell
+std: kernel shell mcp
 
 kernel:
 	cargo build -p kernel --target $(WASM_TARGET) --release
@@ -32,6 +32,12 @@ shell:
 		if [ -n "$$SCHEMA_OUT" ]; then \
 			cp "$$SCHEMA_OUT" std/shell/bin/shell.schema; \
 		fi
+
+mcp:
+	cargo build -p mcp --target $(WASM_TARGET) --release --manifest-path std/mcp/Cargo.toml
+	@mkdir -p std/mcp/bin
+	cp std/mcp/target/$(WASM_TARGET)/release/mcp.wasm std/mcp/bin/mcp.wasm
+	cp std/mcp/target/$(WASM_TARGET)/release/mcp.wasm std/mcp/bin/main.wasm
 
 # --- Examples ----------------------------------------------------------------
 # Note: auction.capnp lives in capnp/ but is compiled by the example crate
@@ -71,6 +77,7 @@ clean:
 	cargo clean
 	rm -f crates/kernel/bin/main.wasm
 	rm -f std/shell/bin/shell.wasm std/shell/bin/shell.schema
+	rm -f std/mcp/bin/mcp.wasm std/mcp/bin/main.wasm
 	$(MAKE) -C examples/chess clean
 	$(MAKE) -C examples/echo clean
 	$(MAKE) -C examples/counter clean
