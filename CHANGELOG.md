@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- Extract shared effect handlers into std/caps crate (shell + MCP share, no duplication)
 - Rename NamedCap to Export in stem.capnp (membrane exports capabilities)
 - Export: use Capability + Schema.Node types instead of AnyPointer + Data
 - Membrane.graft() returns `List(Export)` instead of named typed fields; capabilities looked up by name
@@ -18,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Dead code: `RpcDriver`, `DriveOutcome`, `drive_until`, `block_on` (zero callers)
 
 ### Added
+- `--mcp` flag: MCP server mode for AI agent integration (JSON-RPC on stdin/stdout)
 - Auction example: HTTP/WAGI endpoint at /auction (curl-able JSON status)
 - `HttpClient.post()`: outbound HTTP POST capability for WASM guests (domain-scoped, epoch-guarded)
 - Mindshare schema + project scaffold: symmetric p2p context sharing for LLMs (`examples/mindshare/`)
