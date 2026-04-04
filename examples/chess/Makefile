@@ -2,13 +2,16 @@
 #
 # Usage: make -C examples/chess
 
+# Default to rustup cargo so `make -C examples/chess` works without shell profile
+CARGO ?= $(HOME)/.cargo/bin/cargo
+
 WASM_TARGET := wasm32-wasip2
 ROOT := ../..
 
 .PHONY: all clean
 
 all:
-	cargo build -p chess --target $(WASM_TARGET) --release
+	$(CARGO) build -p chess --target $(WASM_TARGET) --release
 	@mkdir -p bin
 	cp $(ROOT)/target/$(WASM_TARGET)/release/chess.wasm bin/chess-demo.wasm
 	@# Copy compiled schema bytes next to the WASM binary.

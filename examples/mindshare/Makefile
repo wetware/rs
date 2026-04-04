@@ -2,12 +2,15 @@
 #
 # Usage: make -C examples/mindshare
 
+# Default to rustup cargo so `make -C examples/mindshare` works without shell profile
+CARGO ?= $(HOME)/.cargo/bin/cargo
+
 WASM_TARGET := wasm32-wasip2
 
 .PHONY: all clean
 
 all:
-	cargo build --target $(WASM_TARGET) --release \
+	$(CARGO) build --target $(WASM_TARGET) --release \
 		--manifest-path Cargo.toml
 	@mkdir -p bin
 	cp target/$(WASM_TARGET)/release/mindshare.wasm bin/mindshare.wasm
@@ -21,4 +24,4 @@ all:
 
 clean:
 	rm -f bin/mindshare.wasm bin/mindshare.schema
-	cargo clean --manifest-path Cargo.toml
+	$(CARGO) clean --manifest-path Cargo.toml
