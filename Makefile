@@ -34,6 +34,8 @@ shell:
 		fi
 
 # --- Examples ----------------------------------------------------------------
+# Note: auction.capnp lives in capnp/ but is compiled by the example crate
+# that uses it (via build.rs), not by the host binary.
 
 examples: chess echo counter discovery oracle auction
 
