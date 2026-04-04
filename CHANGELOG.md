@@ -20,7 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - Glia: `(def m (perform import "path"))` loads and caches modules as a capability-gated effect
-- `--mcp` flag: MCP server mode for AI agent integration (JSON-RPC on stdin/stdout)
+- `ww run --mcp`: MCP server cell (std/mcp/) with shared caps crate, Claude Code integration
 - Auction example: HTTP/WAGI endpoint at /auction (curl-able JSON status)
 - `HttpClient.post()`: outbound HTTP POST capability for WASM guests (domain-scoped, epoch-guarded)
 - Mindshare schema + project scaffold: symmetric p2p context sharing for LLMs (`examples/mindshare/`)
