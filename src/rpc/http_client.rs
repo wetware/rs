@@ -164,9 +164,9 @@ impl http_capnp::http_client::Server for EpochGuardedHttpProxy {
             .map_err(|e| capnp::Error::failed(format!("failed to build request: {e}"))));
         let client = self.client.clone();
 
-        Promise::from_future(async move {
-            Self::execute_and_serialize(client, request, results).await
-        })
+        Promise::from_future(
+            async move { Self::execute_and_serialize(client, request, results).await },
+        )
     }
 
     fn post(
@@ -194,8 +194,8 @@ impl http_capnp::http_client::Server for EpochGuardedHttpProxy {
             .map_err(|e| capnp::Error::failed(format!("failed to build request: {e}"))));
         let client = self.client.clone();
 
-        Promise::from_future(async move {
-            Self::execute_and_serialize(client, request, results).await
-        })
+        Promise::from_future(
+            async move { Self::execute_and_serialize(client, request, results).await },
+        )
     }
 }
