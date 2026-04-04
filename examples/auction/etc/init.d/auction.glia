@@ -1,8 +1,8 @@
-;; auction.glia — fuel auction ComputeProvider vat cell
+;; auction.glia — fuel auction over RPC + HTTP
 ;;
-;; Registers the ComputeProvider vat cell. VatListener spawns a cell
-;; per RPC connection (no args = cell mode); each cell exports
-;; ComputeProvider via system::serve().
+;; Demonstrates one binary on two transports. The cell exports
+;; ComputeProvider over schema-keyed RPC (libp2p) and returns JSON
+;; over HTTP (curl-friendly).
 ;;
 ;; The cell needs Identity (for quote signing) and Runtime (for
 ;; spawning metered child cells), which it obtains via membrane.graft()
@@ -12,7 +12,9 @@
 ;; Shell commands (after boot):
 ;;   (perform runtime :run (load "bin/auction.wasm") "serve")   ;; DHT provide loop
 
-(def auction-wasm (load "bin/auction.wasm"))
-(def auction-schema (load "bin/auction.schema"))
+(def auction
+  (cell (load "bin/auction.wasm")
+        (load "bin/auction.schema")))
 
-(perform host :listen runtime auction-wasm auction-schema)
+(perform host :listen auction)              ;; vat RPC (schema-keyed, libp2p)
+(perform host :listen auction "/auction")   ;; HTTP/WAGI at /auction
