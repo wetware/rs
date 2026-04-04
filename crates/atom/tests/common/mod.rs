@@ -80,7 +80,7 @@ impl GraftBuilder for StubSessionBuilder {
         let mut caps = builder.reborrow().init_caps(1);
         let mut entry = caps.reborrow().get(0);
         entry.set_name("runtime");
-        entry.set_schema(&[]);
+        entry.reborrow().init_schema(); // Phase 1: default (empty) Schema.Node
         entry.init_cap().set_as_capability(runtime.client.hook);
         Ok(())
     }
@@ -216,27 +216,27 @@ impl GraftBuilder for FullStubSessionBuilder {
 
         let mut e = caps.reborrow().get(0);
         e.set_name("identity");
-        e.set_schema(&[]);
+        e.reborrow().init_schema(); // Phase 1: default (empty) Schema.Node
         e.init_cap().set_as_capability(identity.client.hook);
 
         let mut e = caps.reborrow().get(1);
         e.set_name("host");
-        e.set_schema(&[]);
+        e.reborrow().init_schema();
         e.init_cap().set_as_capability(host.client.hook);
 
         let mut e = caps.reborrow().get(2);
         e.set_name("runtime");
-        e.set_schema(&[]);
+        e.reborrow().init_schema();
         e.init_cap().set_as_capability(runtime.client.hook);
 
         let mut e = caps.reborrow().get(3);
         e.set_name("routing");
-        e.set_schema(&[]);
+        e.reborrow().init_schema();
         e.init_cap().set_as_capability(routing.client.hook);
 
         let mut e = caps.reborrow().get(4);
         e.set_name("http-client");
-        e.set_schema(&[]);
+        e.reborrow().init_schema();
         e.init_cap().set_as_capability(http_client.client.hook);
 
         Ok(())

@@ -33,14 +33,16 @@ interface Terminal(Session) {
   # identity by signing a nonce with the expected key.
 }
 
+using Schema = import "/capnp/schema.capnp";
+
 struct NamedCap {
-  name @0 :Text;
-  cap  @1 :AnyPointer;
-  schema @2 :Data;
-  # A named, typed, type-erased capability.
+  name   @0 :Text;
+  cap    @1 :Capability;
+  schema @2 :Schema.Node;
+  # A named capability with its schema for runtime introspection.
   # name: canonical name (e.g. "host", "identity", "runtime").
-  # cap: the capability itself (cast via get_as()).
-  # schema: Cap'n Proto schema bytes for runtime introspection (may be empty).
+  # cap: the capability interface reference.
+  # schema: Cap'n Proto schema node describing the interface.
 }
 
 interface Membrane {
