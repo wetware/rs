@@ -260,7 +260,7 @@ impl GraftBuilder for HostGraftBuilder {
                 guard.clone(),
             ));
 
-        // Collect all capabilities into a flat list of NamedCap entries.
+        // Collect all capabilities into a flat list of Export entries.
         // Core caps: identity, host, runtime, routing, http-client.
         let mut entries: Vec<(&str, capnp::capability::Client)> = Vec::new();
 

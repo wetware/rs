@@ -64,7 +64,7 @@ impl system_capnp::executor::Server for StubExecutor {
     }
 }
 
-/// GraftBuilder that populates graft results with a StubRuntime (NamedCap list format).
+/// GraftBuilder that populates graft results with a StubRuntime (Export list format).
 pub struct StubSessionBuilder;
 
 impl GraftBuilder for StubSessionBuilder {
@@ -194,7 +194,7 @@ impl routing_capnp::routing::Server for StubRouting {
     }
 }
 
-/// GraftBuilder that populates ALL 5 graft capabilities with stubs (NamedCap list format).
+/// GraftBuilder that populates ALL 5 graft capabilities with stubs (Export list format).
 /// Used to verify that graft() returns every capability field.
 pub struct FullStubSessionBuilder;
 
