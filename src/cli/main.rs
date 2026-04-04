@@ -119,6 +119,12 @@ enum Commands {
         /// "isolated": always create a fresh Executor server.
         #[arg(long, default_value = "shared", env = "WW_RUNTIME_CACHE_POLICY")]
         runtime_cache_policy: String,
+
+        /// Enable the Prometheus metrics endpoint on the given address.
+        /// Serves fuel observability metrics at GET /metrics.
+        /// Example: --metrics-addr 127.0.0.1:9090
+        #[arg(long, value_name = "ADDR")]
+        metrics_addr: Option<String>,
     },
 
     /// Generate a new Ed25519 identity secret.
@@ -294,6 +300,7 @@ impl Commands {
                 mcp,
                 http_listen,
                 runtime_cache_policy,
+                metrics_addr,
             } => {
                 if mcp {
                     // TODO(mikel): Wire MCP adapter here.
@@ -331,6 +338,7 @@ impl Commands {
                     executor_threads,
                     http_listen,
                     runtime_cache_policy,
+                    metrics_addr,
                 )
                 .await
             }
@@ -1068,6 +1076,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         executor_threads: usize,
         http_listen: Option<String>,
         runtime_cache_policy: String,
+        metrics_addr: Option<String>,
     ) -> Result<()> {
         // Dev-mode compat: if a single local root mount has boot/main.wasm
         // but not bin/main.wasm, copy it over (the runtime expects bin/).
@@ -1274,11 +1283,27 @@ wasip2::cli::command::export!({iface_name}Guest);
             None
         };
 
+        // Prometheus metrics thread (only when --metrics-addr is provided).
+        let fuel_registry = ww::metrics::new_fuel_registry();
+        if let Some(ref addr) = metrics_addr {
+            let listen_addr: std::net::SocketAddr = addr
+                .parse()
+                .context("invalid --metrics-addr address (expected host:port)")?;
+            supervisor.spawn(
+                "metrics",
+                ww::metrics::MetricsService {
+                    listen_addr,
+                    fuel_registry: fuel_registry.clone(),
+                },
+            );
+        }
+
         tracing::info!(
             mounts = all_mounts.len(),
             root = %image_path,
             port,
             http = http_listen.as_deref().unwrap_or("disabled"),
+            metrics = metrics_addr.as_deref().unwrap_or("disabled"),
             "Booting environment"
         );
 
