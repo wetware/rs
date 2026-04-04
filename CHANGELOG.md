@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - Glia shell: `(perform auction :compare)` discovers providers and compares fuel prices
+- `--metrics-addr` flag: optional Prometheus metrics endpoint for fuel observability
 - Fuel auction example: ComputeProvider vat cell with RFQ protocol
 - `doc/guest-runtime.md`: design spec for the hand-rolled single-threaded async runtime
 - `FuelPolicy` schema: `Executor.spawn()` accepts a fuel allocation policy (scheduled or oneshot)
