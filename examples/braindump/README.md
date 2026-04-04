@@ -88,19 +88,26 @@ make braindump
 ## From the shell
 
 ```clojure
-;; Connect to a peer and get their Braindump
-(def casey (dial "12D3Koo..."))
-(def bd (perform casey :braindump))
+;; Connect to a peer
+(perform host :connect "/ip4/192.168.1.42/tcp/2025/p2p/12D3Koo...")
 
-;; Push context
-(braindump-push bd "notes/idea.md")
+;; Get their Braindump capability
+(def bd (perform braindump :open "12D3Koo..."))
+
+;; Push context — UnixFS paths are first-class
+(perform bd :push "/ipfs/QmNotes.../idea.md")
+(perform bd :push "/ipfs/QmData.../results.csv" {:tags ["experiment" "v2"]})
 
 ;; Prompt against their context
-(braindump-ask bd "what's the strongest objection to this?")
+(perform bd :ask "what's the strongest objection to this?")
+;; => "The main gap is..."
 
 ;; Check rate limit
-(braindump-remaining bd)
+(perform bd :remaining)
 ;; => {:calls 8 :reset-in 3600}
+
+;; Read what they've pushed to you
+(perform ipfs :cat "/ipfs/QmCasey.../reply.md")
 ```
 
 ## Roadmap
