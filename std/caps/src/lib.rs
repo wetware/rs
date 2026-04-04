@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::future::Future;
 use std::rc::Rc;
 
 use glia::Val;
@@ -93,6 +94,232 @@ pub fn extract_method(data: &Val) -> Result<(String, Vec<Val>), Val> {
         }
     };
     Ok((method, items[1..].to_vec()))
+}
+
+// ---------------------------------------------------------------------------
+// Import handler — module loading as a membrane capability
+// ---------------------------------------------------------------------------
+
+/// Schema CID for the import capability (local, not a real capnp schema).
+pub const IMPORT_SCHEMA_CID: &str = "local:import";
+
+thread_local! {
+    /// Cache for imported module maps, keyed by resolved path.
+    /// Second `(def m (perform import "core"))` returns the cached map.
+    static IMPORT_CACHE: RefCell<HashMap<String, Val>> = RefCell::new(HashMap::new());
+}
+
+/// Create a `Val::Cap` representing the import capability.
+///
+/// Callers bind this in the env so `(perform import "core")` resolves
+/// `import` to a cap value that the effect system can match.
+pub fn make_import_cap() -> Val {
+    Val::Cap {
+        name: "import".into(),
+        schema_cid: IMPORT_SCHEMA_CID.into(),
+        inner: Rc::new(()),
+    }
+}
+
+/// Clear the import cache. Useful for testing or when the virtual filesystem changes.
+pub fn clear_import_cache() {
+    IMPORT_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
+/// Resolve an import path to an absolute filesystem path.
+///
+/// - Relative path (no leading `/`): resolved to `/lib/{path}.glia`
+/// - Absolute path (leading `/`): appended with `.glia`
+fn resolve_import_path(path: &str) -> String {
+    if path.starts_with('/') {
+        format!("{}.glia", path)
+    } else {
+        format!("/lib/{}.glia", path)
+    }
+}
+
+/// Create the import effect handler.
+///
+/// Usage: `(def core (perform import "core"))`
+///
+/// The handler:
+/// 1. Resolves the path (relative → `/lib/`, absolute → as-is)
+/// 2. Checks the import cache
+/// 3. If not cached: loads file, parses as Glia forms, evals in fresh scope
+/// 4. Collects bindings as a `Val::Map`
+/// 5. Caches the map for idempotent re-import
+/// 6. Resumes with the map
+///
+/// The caller binds the returned map: `(def core (perform import "core"))`.
+/// Access members via the map: `(core :help)`.
+pub fn make_import_handler() -> Val {
+    Val::AsyncNativeFn {
+        name: "import-handler".into(),
+        func: Rc::new(move |args: Vec<Val>| {
+            Box::pin(async move {
+                // Effect data for `(perform import "core")`:
+                // args[0] = data list, args[1] = resume continuation.
+                //
+                // Cap-targeted perform packs all args after the target into a
+                // list: `(perform import "core")` → data = Val::List(["core"]).
+                let data = &args[0];
+                let resume = &args[1];
+
+                // Extract the path from the data list.
+                // `(perform import "core")` → data = ["core"]
+                let path = match data {
+                    Val::List(items) => match items.first() {
+                        Some(Val::Str(s)) => s.clone(),
+                        other => {
+                            let desc = match other {
+                                Some(v) => format!("{v}"),
+                                None => "nothing".into(),
+                            };
+                            return Err(Val::from(format!(
+                                "import: expected string path, got {desc}"
+                            )));
+                        }
+                    },
+                    Val::Str(s) => s.clone(),
+                    other => {
+                        return Err(Val::from(format!(
+                            "import: expected path string, got {other}"
+                        )));
+                    }
+                };
+
+                let resolved = resolve_import_path(&path);
+
+                // Check cache
+                let cached =
+                    IMPORT_CACHE.with(|cache| cache.borrow().get(&resolved).cloned());
+                if let Some(map) = cached {
+                    return call_resume(resume, map);
+                }
+
+                // Load the file via eval_load
+                let bytes_val = eval_load(&[Val::Str(resolved.clone())])?;
+                let content = match &bytes_val {
+                    Val::Bytes(b) => std::str::from_utf8(b)
+                        .map_err(|e| {
+                            Val::from(format!("import: invalid UTF-8 in {resolved}: {e}"))
+                        })?
+                        .to_string(),
+                    Val::Str(s) => s.clone(),
+                    other => {
+                        return Err(Val::from(format!(
+                            "import: load returned {other}, expected bytes or string"
+                        )));
+                    }
+                };
+
+                // Parse the file as Glia forms
+                let forms = glia::read_many(&content)
+                    .map_err(|e| Val::from(format!("import: parse error in {resolved}: {e}")))?;
+
+                // Evaluate in a fresh Env (isolated scope)
+                let mut import_env = glia::eval::Env::new();
+                // Load prelude so imported modules can use `defn`, `when`, etc.
+                {
+                    let prelude_forms = glia::read_many(glia::PRELUDE)
+                        .map_err(|e| Val::from(format!("import: prelude parse: {e}")))?;
+                    struct NoopDispatch;
+                    impl glia::eval::Dispatch for NoopDispatch {
+                        fn call<'a>(
+                            &'a self,
+                            name: &'a str,
+                            _args: &'a [glia::Val],
+                        ) -> std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<Output = Result<glia::Val, glia::Val>>
+                                    + 'a,
+                            >,
+                        > {
+                            Box::pin(std::future::ready(Err(glia::Val::from(format!(
+                                "{name}: not available during import"
+                            )))))
+                        }
+                    }
+                    let noop = NoopDispatch;
+                    for form in &prelude_forms {
+                        // Prelude forms are synchronous (macros only), so poll once.
+                        let mut fut =
+                            Box::pin(glia::eval::eval_toplevel(form, &mut import_env, &noop));
+                        let waker = std::task::Waker::noop();
+                        let mut cx = std::task::Context::from_waker(&waker);
+                        match fut.as_mut().poll(&mut cx) {
+                            std::task::Poll::Ready(Ok(_)) => {}
+                            std::task::Poll::Ready(Err(e)) => {
+                                return Err(Val::from(format!("import: prelude error: {e}")));
+                            }
+                            std::task::Poll::Pending => {
+                                return Err(Val::from("import: prelude unexpectedly pending"));
+                            }
+                        }
+                    }
+                }
+
+                // Evaluate module forms
+                {
+                    struct NoopDispatch;
+                    impl glia::eval::Dispatch for NoopDispatch {
+                        fn call<'a>(
+                            &'a self,
+                            name: &'a str,
+                            _args: &'a [glia::Val],
+                        ) -> std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<Output = Result<glia::Val, glia::Val>>
+                                    + 'a,
+                            >,
+                        > {
+                            Box::pin(std::future::ready(Err(glia::Val::from(format!(
+                                "{name}: not available during import"
+                            )))))
+                        }
+                    }
+                    let noop = NoopDispatch;
+                    for form in &forms {
+                        let analyzed = glia::expr::analyze(form)
+                            .map_err(|e| Val::from(format!("import: analyze error in {resolved}: {e}")))?;
+                        let mut fut = Box::pin(glia::eval::eval_toplevel_expr(
+                            &analyzed,
+                            &mut import_env,
+                            &noop,
+                        ));
+                        let waker = std::task::Waker::noop();
+                        let mut cx = std::task::Context::from_waker(&waker);
+                        match fut.as_mut().poll(&mut cx) {
+                            std::task::Poll::Ready(Ok(_)) => {}
+                            std::task::Poll::Ready(Err(e)) => {
+                                return Err(Val::from(format!("import: eval error in {resolved}: {e}")));
+                            }
+                            std::task::Poll::Pending => {
+                                return Err(Val::from(format!(
+                                    "import: eval unexpectedly pending in {resolved}"
+                                )));
+                            }
+                        }
+                    }
+                }
+
+                // Collect bindings as a Val::Map
+                let bindings = import_env.bindings();
+                let map_entries: Vec<(Val, Val)> = bindings
+                    .into_iter()
+                    .map(|(name, val)| (Val::Keyword(name), val))
+                    .collect();
+                let module_map = Val::Map(map_entries);
+
+                // Cache the map
+                IMPORT_CACHE.with(|cache| {
+                    cache.borrow_mut().insert(resolved, module_map.clone());
+                });
+
+                call_resume(resume, module_map)
+            })
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -332,7 +559,7 @@ pub fn wrap_with_handlers(form: &Val, extra_caps: &[&str]) -> Val {
 
     // Wrap in cap handlers (innermost to outermost)
     // Core caps first, then any extras
-    let mut caps: Vec<&str> = vec!["routing", "ipfs", "host"];
+    let mut caps: Vec<&str> = vec!["import", "routing", "ipfs", "host"];
     for extra in extra_caps {
         caps.insert(0, extra);
     }
@@ -368,4 +595,188 @@ pub fn get_graft_cap<T: capnp::capability::FromClientHook>(
     Err(capnp::Error::failed(format!(
         "capability '{name}' not found in graft response"
     )))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_path_resolution_relative() {
+        assert_eq!(resolve_import_path("core"), "/lib/core.glia");
+    }
+
+    #[test]
+    fn import_path_resolution_nested() {
+        assert_eq!(resolve_import_path("std/net"), "/lib/std/net.glia");
+    }
+
+    #[test]
+    fn import_path_resolution_absolute() {
+        assert_eq!(resolve_import_path("/absolute/path"), "/absolute/path.glia");
+    }
+
+    #[test]
+    fn import_cache_clear() {
+        IMPORT_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert("/lib/test.glia".into(), Val::Map(vec![]));
+        });
+        clear_import_cache();
+        IMPORT_CACHE.with(|cache| {
+            assert!(cache.borrow().is_empty());
+        });
+    }
+
+    #[test]
+    fn import_handler_returns_map() {
+        clear_import_cache();
+
+        // Pre-populate the cache to test that the handler returns a map
+        let test_map = Val::Map(vec![
+            (Val::Keyword("x".into()), Val::Int(42)),
+            (Val::Keyword("y".into()), Val::Int(99)),
+        ]);
+        IMPORT_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert("/lib/core.glia".into(), test_map.clone());
+        });
+
+        // Build the handler and call it with cached data
+        let handler = make_import_handler();
+        match &handler {
+            Val::AsyncNativeFn { func, .. } => {
+                // Simulate: (perform import "core")
+                // Effect data is a list of the args: ["core"]
+                let data = Val::List(vec![Val::Str("core".into())]);
+
+                // Build a resume function that captures the result
+                let result = Rc::new(RefCell::new(None));
+                let result_clone = result.clone();
+                let resume = Val::NativeFn {
+                    name: "test-resume".into(),
+                    func: Rc::new(move |args: &[Val]| {
+                        *result_clone.borrow_mut() = Some(args[0].clone());
+                        Ok(Val::Nil)
+                    }),
+                };
+
+                let args = vec![data, resume];
+                let fut = func(args);
+
+                // Poll the future (should resolve immediately for cached imports)
+                let waker = std::task::Waker::noop();
+                let mut cx = std::task::Context::from_waker(&waker);
+                let mut pinned = fut;
+                match std::pin::Pin::new(&mut pinned).poll(&mut cx) {
+                    std::task::Poll::Ready(Ok(_)) => {}
+                    std::task::Poll::Ready(Err(e)) => panic!("import handler failed: {e}"),
+                    std::task::Poll::Pending => panic!("import handler unexpectedly pending"),
+                }
+
+                // Verify the result is the cached map
+                let r = result.borrow();
+                let result_val = r.as_ref().expect("resume should have been called");
+                match result_val {
+                    Val::Map(entries) => {
+                        assert_eq!(entries.len(), 2);
+                        // Check that :x is 42
+                        let x = entries
+                            .iter()
+                            .find(|(k, _)| matches!(k, Val::Keyword(s) if s == "x"))
+                            .map(|(_, v)| v);
+                        assert_eq!(x, Some(&Val::Int(42)));
+                    }
+                    other => panic!("expected Map, got {other}"),
+                }
+            }
+            _ => panic!("expected AsyncNativeFn"),
+        }
+
+        clear_import_cache();
+    }
+
+    #[test]
+    fn import_cached_returns_same_map() {
+        clear_import_cache();
+
+        let test_map = Val::Map(vec![(Val::Keyword("a".into()), Val::Int(1))]);
+        IMPORT_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert("/lib/cached.glia".into(), test_map.clone());
+        });
+
+        // Call handler twice — both should return the same cached map
+        let handler = make_import_handler();
+        let func = match &handler {
+            Val::AsyncNativeFn { func, .. } => func.clone(),
+            _ => panic!("expected AsyncNativeFn"),
+        };
+
+        for _ in 0..2 {
+            let data = Val::List(vec![Val::Str("cached".into())]);
+            let result = Rc::new(RefCell::new(None));
+            let result_clone = result.clone();
+            let resume = Val::NativeFn {
+                name: "test-resume".into(),
+                func: Rc::new(move |args: &[Val]| {
+                    *result_clone.borrow_mut() = Some(args[0].clone());
+                    Ok(Val::Nil)
+                }),
+            };
+
+            let fut = func(vec![data, resume]);
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(&waker);
+            let mut pinned = fut;
+            match std::pin::Pin::new(&mut pinned).poll(&mut cx) {
+                std::task::Poll::Ready(Ok(_)) => {}
+                other => panic!("unexpected poll result: {other:?}"),
+            }
+
+            let r = result.borrow();
+            match r.as_ref().unwrap() {
+                Val::Map(entries) => assert_eq!(entries.len(), 1),
+                other => panic!("expected Map, got {other}"),
+            }
+        }
+
+        clear_import_cache();
+    }
+
+    #[test]
+    fn import_missing_file_returns_error() {
+        clear_import_cache();
+
+        let handler = make_import_handler();
+        let func = match &handler {
+            Val::AsyncNativeFn { func, .. } => func.clone(),
+            _ => panic!("expected AsyncNativeFn"),
+        };
+
+        let data = Val::List(vec![Val::Str("nonexistent".into())]);
+        let resume = Val::NativeFn {
+            name: "test-resume".into(),
+            func: Rc::new(move |_args: &[Val]| Ok(Val::Nil)),
+        };
+
+        let fut = func(vec![data, resume]);
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut pinned = fut;
+        match std::pin::Pin::new(&mut pinned).poll(&mut cx) {
+            std::task::Poll::Ready(Err(_)) => {} // expected — file doesn't exist
+            std::task::Poll::Ready(Ok(_)) => panic!("expected error for missing file"),
+            std::task::Poll::Pending => panic!("unexpected pending"),
+        }
+
+        clear_import_cache();
+    }
 }
