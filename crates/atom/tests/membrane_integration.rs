@@ -7,17 +7,40 @@
 mod common;
 
 use atom::stem_capnp;
+use atom::system_capnp;
 use atom::{AtomIndexer, Epoch, IndexerConfig, MembraneServer, TerminalServer};
 use auth::SigningDomain;
 use capnp_rpc::new_client;
 use common::{deploy_atom, set_head, spawn_anvil, FullStubSessionBuilder, StubSessionBuilder};
 use ed25519_dalek::SigningKey;
+use membrane::http_capnp;
+use membrane::routing_capnp;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
+
+/// Look up a typed capability by name from the graft caps list.
+fn get_graft_cap<T: capnp::capability::FromClientHook>(
+    caps: &capnp::struct_list::Reader<'_, stem_capnp::named_cap::Owned>,
+    name: &str,
+) -> Result<T, capnp::Error> {
+    for i in 0..caps.len() {
+        let entry = caps.get(i);
+        let n = entry
+            .get_name()?
+            .to_str()
+            .map_err(|e| capnp::Error::failed(e.to_string()))?;
+        if n == name {
+            return entry.get_cap().get_as_capability();
+        }
+    }
+    Err(capnp::Error::failed(format!(
+        "capability '{name}' not found in graft response"
+    )))
+}
 
 /// Signer that produces libp2p SignedEnvelopes for Terminal challenge-response.
 struct TestSigner {
@@ -179,7 +202,9 @@ async fn test_membrane_graft_runtime_against_anvil() {
         .await
         .expect("graft RPC");
     let graft_response = graft_rpc_response.get().expect("graft results");
-    let runtime = graft_response.get_runtime().expect("runtime");
+    let graft_caps = graft_response.get_caps().expect("caps");
+    let runtime: system_capnp::runtime::Client =
+        get_graft_cap(&graft_caps, "runtime").expect("runtime");
 
     // Verify runtime works under current epoch (shutdown succeeds).
     runtime
@@ -220,7 +245,9 @@ async fn test_membrane_graft_no_auth() {
         .await
         .expect("graft RPC");
     let results = graft_resp.get().expect("graft results");
-    let runtime = results.get_runtime().expect("runtime");
+    let graft_caps = results.get_caps().expect("caps");
+    let runtime: system_capnp::runtime::Client =
+        get_graft_cap(&graft_caps, "runtime").expect("runtime");
 
     // Verify runtime works (shutdown succeeds under current epoch).
     runtime
@@ -255,11 +282,10 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
         .promise
         .await
         .expect("graft RPC");
-    let runtime = graft_resp
-        .get()
-        .expect("graft results")
-        .get_runtime()
-        .expect("runtime");
+    let graft_results = graft_resp.get().expect("graft results");
+    let graft_caps = graft_results.get_caps().expect("caps");
+    let runtime: system_capnp::runtime::Client =
+        get_graft_cap(&graft_caps, "runtime").expect("runtime");
 
     runtime
         .shutdown_request()
@@ -285,11 +311,10 @@ async fn test_membrane_stale_epoch_then_recovery_no_chain() {
         .promise
         .await
         .expect("re-graft RPC");
-    let runtime2 = graft_resp2
-        .get()
-        .expect("re-graft results")
-        .get_runtime()
-        .expect("runtime");
+    let results2 = graft_resp2.get().expect("re-graft results");
+    let caps2 = results2.get_caps().expect("caps");
+    let runtime2: system_capnp::runtime::Client =
+        get_graft_cap(&caps2, "runtime").expect("runtime");
 
     runtime2
         .shutdown_request()
@@ -372,7 +397,7 @@ fn full_stub_membrane(rx: watch::Receiver<Epoch>) -> stem_capnp::membrane::Clien
     new_client(MembraneServer::new(rx, FullStubSessionBuilder))
 }
 
-/// Verify that graft() returns all 5 capabilities: identity, host, runtime, routing, httpClient.
+/// Verify that graft() returns all 5 capabilities: identity, host, runtime, routing, http-client.
 #[tokio::test]
 async fn test_graft_returns_all_five_capabilities() {
     let epoch = Epoch {
@@ -391,26 +416,22 @@ async fn test_graft_returns_all_five_capabilities() {
         .await
         .expect("graft RPC");
     let results = graft_resp.get().expect("graft results");
+    let caps = results.get_caps().expect("caps");
 
-    // All 5 capability fields must be non-null.
-    results
-        .get_identity()
-        .expect("identity capability should be present");
-    results
-        .get_host()
-        .expect("host capability should be present");
-    results
-        .get_runtime()
-        .expect("runtime capability should be present");
-    results
-        .get_routing()
-        .expect("routing capability should be present");
-    results
-        .get_http_client()
-        .expect("httpClient capability should be present");
+    // All 5 capabilities must be present by name.
+    assert_eq!(caps.len(), 5, "expected 5 capabilities");
+    let _identity: stem_capnp::identity::Client =
+        get_graft_cap(&caps, "identity").expect("identity capability should be present");
+    let _host: system_capnp::host::Client =
+        get_graft_cap(&caps, "host").expect("host capability should be present");
+    let runtime: system_capnp::runtime::Client =
+        get_graft_cap(&caps, "runtime").expect("runtime capability should be present");
+    let _routing: routing_capnp::routing::Client =
+        get_graft_cap(&caps, "routing").expect("routing capability should be present");
+    let _http_client: http_capnp::http_client::Client =
+        get_graft_cap(&caps, "http-client").expect("http-client capability should be present");
 
     // Verify runtime actually works (shutdown succeeds).
-    let runtime = results.get_runtime().expect("runtime");
     runtime
         .shutdown_request()
         .send()
@@ -501,7 +522,9 @@ async fn test_terminal_over_stream_pair() {
             .expect("graft RPC");
 
             let results = graft_resp.get().expect("graft results");
-            let runtime = results.get_runtime().expect("runtime");
+            let stream_caps = results.get_caps().expect("caps");
+            let runtime: system_capnp::runtime::Client =
+                get_graft_cap(&stream_caps, "runtime").expect("runtime");
             timeout(
                 Duration::from_secs(5),
                 runtime.shutdown_request().send().promise,

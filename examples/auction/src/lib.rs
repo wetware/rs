@@ -58,6 +58,23 @@ include!(concat!(env!("OUT_DIR"), "/schema_ids.rs"));
 
 type Membrane = stem_capnp::membrane::Client;
 
+/// Look up a typed capability by name from the graft caps list.
+fn get_graft_cap<T: capnp::capability::FromClientHook>(
+    caps: &capnp::struct_list::Reader<'_, stem_capnp::named_cap::Owned>,
+    name: &str,
+) -> Result<T, capnp::Error> {
+    for i in 0..caps.len() {
+        let entry = caps.get(i);
+        let n = entry.get_name()?.to_str().map_err(|e| capnp::Error::failed(e.to_string()))?;
+        if n == name {
+            return entry.get_cap().get_as_capability();
+        }
+    }
+    Err(capnp::Error::failed(format!(
+        "capability '{name}' not found in graft response"
+    )))
+}
+
 fn short_id(peer_id: &[u8]) -> String {
     let h = hex::encode(peer_id);
     if h.len() > 8 {
@@ -491,9 +508,12 @@ fn run_cell() {
         async move {
             let graft_resp = membrane.graft_request().send().promise.await?;
             let results = graft_resp.get()?;
-            let identity = results.get_identity()?;
-            let host = results.get_host()?;
-            let runtime = results.get_runtime()?;
+            let caps = results.get_caps()?;
+            let identity: stem_capnp::identity::Client =
+                get_graft_cap(&caps, "identity")?;
+            let host: system_capnp::host::Client = get_graft_cap(&caps, "host")?;
+            let runtime: system_capnp::runtime::Client =
+                get_graft_cap(&caps, "runtime")?;
 
             // Get peer ID for provider field.
             let id_resp = host.id_request().send().promise.await?;
@@ -558,8 +578,9 @@ fn run_cell() {
 async fn run_service(membrane: Membrane) -> Result<(), capnp::Error> {
     let graft_resp = membrane.graft_request().send().promise.await?;
     let results = graft_resp.get()?;
-    let host = results.get_host()?;
-    let routing = results.get_routing()?;
+    let caps = results.get_caps()?;
+    let host: system_capnp::host::Client = get_graft_cap(&caps, "host")?;
+    let routing: routing_capnp::routing::Client = get_graft_cap(&caps, "routing")?;
 
     let id_resp = host.id_request().send().promise.await?;
     let self_id = id_resp.get()?.get_peer_id()?.to_vec();

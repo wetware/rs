@@ -64,7 +64,7 @@ impl system_capnp::executor::Server for StubExecutor {
     }
 }
 
-/// GraftBuilder that populates graft results with a StubRuntime.
+/// GraftBuilder that populates graft results with a StubRuntime (NamedCap list format).
 pub struct StubSessionBuilder;
 
 impl GraftBuilder for StubSessionBuilder {
@@ -76,7 +76,12 @@ impl GraftBuilder for StubSessionBuilder {
         let runtime: system_capnp::runtime::Client = capnp_rpc::new_client(StubRuntime {
             guard: guard.clone(),
         });
-        builder.set_runtime(runtime);
+
+        let mut caps = builder.reborrow().init_caps(1);
+        let mut entry = caps.reborrow().get(0);
+        entry.set_name("runtime");
+        entry.set_schema(&[]);
+        entry.init_cap().set_as_capability(runtime.client.hook);
         Ok(())
     }
 }
@@ -189,7 +194,7 @@ impl routing_capnp::routing::Server for StubRouting {
     }
 }
 
-/// GraftBuilder that populates ALL 5 graft capabilities with stubs.
+/// GraftBuilder that populates ALL 5 graft capabilities with stubs (NamedCap list format).
 /// Used to verify that graft() returns every capability field.
 pub struct FullStubSessionBuilder;
 
@@ -200,21 +205,39 @@ impl GraftBuilder for FullStubSessionBuilder {
         mut builder: atom::stem_capnp::membrane::graft_results::Builder<'_>,
     ) -> std::result::Result<(), capnp::Error> {
         let identity: stem_capnp::identity::Client = capnp_rpc::new_client(StubIdentity);
-        builder.set_identity(identity);
-
         let host: system_capnp::host::Client = capnp_rpc::new_client(StubHost);
-        builder.set_host(host);
-
         let runtime: system_capnp::runtime::Client = capnp_rpc::new_client(StubRuntime {
             guard: guard.clone(),
         });
-        builder.set_runtime(runtime);
-
         let routing: routing_capnp::routing::Client = capnp_rpc::new_client(StubRouting);
-        builder.set_routing(routing);
-
         let http_client: http_capnp::http_client::Client = capnp_rpc::new_client(StubHttpClient);
-        builder.set_http_client(http_client);
+
+        let mut caps = builder.reborrow().init_caps(5);
+
+        let mut e = caps.reborrow().get(0);
+        e.set_name("identity");
+        e.set_schema(&[]);
+        e.init_cap().set_as_capability(identity.client.hook);
+
+        let mut e = caps.reborrow().get(1);
+        e.set_name("host");
+        e.set_schema(&[]);
+        e.init_cap().set_as_capability(host.client.hook);
+
+        let mut e = caps.reborrow().get(2);
+        e.set_name("runtime");
+        e.set_schema(&[]);
+        e.init_cap().set_as_capability(runtime.client.hook);
+
+        let mut e = caps.reborrow().get(3);
+        e.set_name("routing");
+        e.set_schema(&[]);
+        e.init_cap().set_as_capability(routing.client.hook);
+
+        let mut e = caps.reborrow().get(4);
+        e.set_name("http-client");
+        e.set_schema(&[]);
+        e.init_cap().set_as_capability(http_client.client.hook);
 
         Ok(())
     }

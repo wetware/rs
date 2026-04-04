@@ -237,6 +237,7 @@ impl GraftBuilder for HostGraftBuilder {
         guard: &EpochGuard,
         mut builder: stem_capnp::membrane::graft_results::Builder<'_>,
     ) -> Result<(), capnp::Error> {
+        // Build the core capabilities.
         let mut host_impl = super::HostImpl::new(
             self.network_state.clone(),
             self.swarm_cmd_tx.clone(),
@@ -248,38 +249,57 @@ impl GraftBuilder for HostGraftBuilder {
             host_impl = host_impl.with_route_registry(registry.clone());
         }
         let host: system_capnp::host::Client = capnp_rpc::new_client(host_impl);
-        builder.set_host(host);
-
-        builder.set_runtime(self.runtime_client.clone());
 
         let routing: routing_capnp::routing::Client = capnp_rpc::new_client(
             super::routing::RoutingImpl::new(self.swarm_cmd_tx.clone(), guard.clone()),
         );
-        builder.set_routing(routing);
 
         let http_client: http_capnp::http_client::Client =
             capnp_rpc::new_client(super::http_client::EpochGuardedHttpProxy::new(
                 self.allowed_hosts.clone(),
                 guard.clone(),
             ));
-        builder.set_http_client(http_client);
+
+        // Collect all capabilities into a flat list of NamedCap entries.
+        // Core caps: identity, host, runtime, routing, http-client.
+        let mut entries: Vec<(&str, capnp::capability::Client)> = Vec::new();
 
         if let Some(sk) = &self.signing_key {
             let keypair =
                 crate::keys::to_libp2p(sk).map_err(|e| capnp::Error::failed(e.to_string()))?;
             let identity: stem_capnp::identity::Client =
                 capnp_rpc::new_client(EpochGuardedIdentity::new(keypair, guard.clone()));
-            builder.set_identity(identity);
+            entries.push(("identity", identity.client));
         }
 
-        // Write init.d-scoped extras into the graft response.
-        if !self.extras.is_empty() {
-            let mut extras_builder = builder.reborrow().init_extras(self.extras.len() as u32);
-            for (i, (name, client)) in self.extras.iter().enumerate() {
-                let mut entry = extras_builder.reborrow().get(i as u32);
-                entry.set_name(name);
-                entry.init_cap().set_as_capability(client.hook.clone());
-            }
+        entries.push(("host", host.client));
+        entries.push(("runtime", self.runtime_client.clone().client));
+        entries.push(("routing", routing.client));
+        entries.push(("http-client", http_client.client));
+
+        // Append init.d-scoped extras.
+        let extras_owned: Vec<(String, capnp::capability::Client)> = self
+            .extras
+            .iter()
+            .map(|(name, client)| (name.clone(), client.clone()))
+            .collect();
+
+        let count = (entries.len() + extras_owned.len()) as u32;
+        let mut caps_builder = builder.reborrow().init_caps(count);
+
+        for (i, (name, client)) in entries.iter().enumerate() {
+            let mut entry = caps_builder.reborrow().get(i as u32);
+            entry.set_name(name);
+            entry.set_schema(&[]); // Phase 1: empty schema bytes
+            entry.init_cap().set_as_capability(client.hook.clone());
+        }
+
+        let offset = entries.len();
+        for (i, (name, client)) in extras_owned.iter().enumerate() {
+            let mut entry = caps_builder.reborrow().get((offset + i) as u32);
+            entry.set_name(name);
+            entry.set_schema(&[]); // Phase 1: empty schema bytes
+            entry.init_cap().set_as_capability(client.hook.clone());
         }
 
         Ok(())

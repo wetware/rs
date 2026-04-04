@@ -36,21 +36,23 @@ interface Terminal(Session) {
 struct NamedCap {
   name @0 :Text;
   cap  @1 :AnyPointer;
-  # A named, type-erased capability.  Used to forward init.d-scoped
-  # grants (via `with` + `cell`) into spawned cells' membranes.
+  schema @2 :Data;
+  # A named, typed, type-erased capability.
+  # name: canonical name (e.g. "host", "identity", "runtime").
+  # cap: the capability itself (cast via get_as()).
+  # schema: Cap'n Proto schema bytes for runtime introspection (may be empty).
 }
 
 interface Membrane {
   graft @0 () -> (
-    identity :Identity,                           # Host-side identity hub: maps signing domains → Signers.
-    host     :import "system.capnp".Host,         # Swarm-level operations (id, addrs, peers, network).
-    runtime  :import "system.capnp".Runtime,      # WASM compilation + execution (load, shutdown).
-    routing  :import "routing.capnp".Routing,      # Content routing + data transfer via IPFS.
-    httpClient :import "http.capnp".HttpClient,   # Outbound HTTP (domain-scoped).
-    extras   :List(NamedCap)                      # Init.d-scoped grants from `with` block.
+    caps :List(NamedCap)       # All capabilities, named and type-erased.
   );
   # Pure capability provisioning (ocap model). Having a Membrane reference IS
   # authorization — no signer needed. Wrap in Terminal(Membrane) to gate access.
+  #
+  # Canonical names: "identity", "host", "runtime", "routing", "http-client".
+  # Init.d-scoped grants (from `with` blocks) are appended after the core caps.
+  #
   # Listener/Dialer accessed via host.network().
   # IPFS content access goes through the WASI virtual filesystem (CidTree).
 }

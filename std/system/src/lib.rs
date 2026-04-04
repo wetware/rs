@@ -418,9 +418,9 @@ where
 /// ```no_run
 /// wetware_guest::run(|membrane| async move {
 ///     let graft = membrane.graft_request().send().promise.await?;
-///     let runtime = graft.get()?.get_runtime()?;
-///     let load_resp = runtime.load_request().send().promise.await?;
-///     let executor = load_resp.get()?.get_executor()?;
+///     let results = graft.get()?;
+///     let caps = results.get_caps()?;
+///     // Look up capabilities by name in the NamedCap list.
 ///     Ok(())
 /// });
 /// ```

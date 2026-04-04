@@ -1334,6 +1334,30 @@ async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ---------------------------------------------------------------------------
+// Graft helpers: name-based lookup in parallel lists
+// ---------------------------------------------------------------------------
+
+/// Look up a typed capability by name from the graft caps list.
+fn get_graft_cap<T: capnp::capability::FromClientHook>(
+    caps: &capnp::struct_list::Reader<'_, stem_capnp::named_cap::Owned>,
+    name: &str,
+) -> Result<T, capnp::Error> {
+    for i in 0..caps.len() {
+        let entry = caps.get(i);
+        let n = entry
+            .get_name()?
+            .to_str()
+            .map_err(|e| capnp::Error::failed(e.to_string()))?;
+        if n == name {
+            return entry.get_cap().get_as_capability();
+        }
+    }
+    Err(capnp::Error::failed(format!(
+        "capability '{name}' not found in graft response"
+    )))
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -1353,12 +1377,21 @@ fn run_impl() {
         let graft_resp = membrane.graft_request().send().promise.await?;
         let results = graft_resp.get()?;
 
+        // Iterate the caps list to find capabilities by name.
+        let caps = results.get_caps()?;
+
+        let host: system_capnp::host::Client = get_graft_cap(&caps, "host")?;
+        let runtime: system_capnp::runtime::Client = get_graft_cap(&caps, "runtime")?;
+        let routing: routing_capnp::routing::Client = get_graft_cap(&caps, "routing")?;
+        let identity: stem_capnp::identity::Client = get_graft_cap(&caps, "identity")?;
+        let http_client: http_capnp::http_client::Client = get_graft_cap(&caps, "http-client")?;
+
         let ctx = RefCell::new(Session {
-            host: results.get_host()?,
-            runtime: results.get_runtime()?,
-            routing: results.get_routing()?,
-            identity: results.get_identity()?,
-            http_client: results.get_http_client()?,
+            host: host.clone(),
+            runtime: runtime.clone(),
+            routing: routing.clone(),
+            identity,
+            http_client: http_client.clone(),
             cwd: "/".to_string(),
         });
 
@@ -1371,7 +1404,7 @@ fn run_impl() {
         // performs to these handlers via the effect system.
         {
             let s = ctx.borrow();
-            let caps: [(&str, &str, Rc<dyn std::any::Any>, Val); 4] = [
+            let caps_list: [(&str, &str, Rc<dyn std::any::Any>, Val); 4] = [
                 (
                     "host",
                     schema_ids::HOST_CID,
@@ -1400,7 +1433,7 @@ fn run_impl() {
                     make_routing_handler(s.routing.clone()),
                 ),
             ];
-            for (name, cid, inner, handler) in caps {
+            for (name, cid, inner, handler) in caps_list {
                 env.set(
                     name.to_string(),
                     Val::Cap {
@@ -1411,6 +1444,31 @@ fn run_impl() {
                 );
                 env.set(format!("{name}-handler"), handler);
             }
+        }
+
+        // Auto-inject ALL graft caps into the Glia environment as named Val::Cap entries.
+        // This way init.d scripts can use any graft cap by name without explicit (def ...) bindings.
+        for i in 0..caps.len() {
+            let entry = caps.get(i);
+            let cap_name = entry
+                .get_name()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(e.to_string()))?;
+            // Skip caps already bound above with explicit handlers.
+            if matches!(
+                cap_name,
+                "host" | "runtime" | "routing" | "ipfs" | "identity"
+            ) {
+                continue;
+            }
+            env.set(
+                cap_name.to_string(),
+                Val::Cap {
+                    name: cap_name.into(),
+                    schema_cid: String::new(),
+                    inner: Rc::new(()),
+                },
+            );
         }
 
         // Load the prelude (standard macros: when, and, or, defn, cond, not).
