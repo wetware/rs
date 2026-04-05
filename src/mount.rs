@@ -39,6 +39,16 @@ pub fn parse_args(args: &[String]) -> Result<Vec<Mount>> {
     args.iter().map(|arg| parse_one(arg)).collect()
 }
 
+/// Expand `~` at the start of a path to the user's home directory.
+fn expand_tilde(path: &str) -> String {
+    if path == "~" || path.starts_with("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return format!("{}{}", home.display(), &path[1..]);
+        }
+    }
+    path.to_string()
+}
+
 fn parse_one(arg: &str) -> Result<Mount> {
     if arg.is_empty() {
         bail!("empty mount argument");
@@ -55,7 +65,7 @@ fn parse_one(arg: &str) -> Result<Mount> {
                 bail!("mount has empty source: {arg}");
             }
             return Ok(Mount {
-                source: left.to_string(),
+                source: expand_tilde(left),
                 target: PathBuf::from(right),
             });
         }
@@ -63,7 +73,7 @@ fn parse_one(arg: &str) -> Result<Mount> {
 
     // No colon, or right side doesn't start with '/' → root mount.
     Ok(Mount {
-        source: arg.to_string(),
+        source: expand_tilde(arg),
         target: PathBuf::from("/"),
     })
 }
@@ -97,7 +107,8 @@ mod tests {
     #[test]
     fn targeted_mount_file() {
         let m = parse_one("~/.ww/identity:/etc/identity").unwrap();
-        assert_eq!(m.source, "~/.ww/identity");
+        assert!(!m.source.starts_with('~'), "tilde should be expanded");
+        assert!(m.source.ends_with("/.ww/identity"));
         assert_eq!(m.target, PathBuf::from("/etc/identity"));
         assert!(!m.is_root());
     }
@@ -105,7 +116,8 @@ mod tests {
     #[test]
     fn targeted_mount_directory() {
         let m = parse_one("~/data:/var/data").unwrap();
-        assert_eq!(m.source, "~/data");
+        assert!(!m.source.starts_with('~'), "tilde should be expanded");
+        assert!(m.source.ends_with("/data"));
         assert_eq!(m.target, PathBuf::from("/var/data"));
     }
 
@@ -146,5 +158,21 @@ mod tests {
     #[test]
     fn empty_source_errors() {
         assert!(parse_one(":/etc/identity").is_err());
+    }
+
+    #[test]
+    fn tilde_expanded_root_mount() {
+        let m = parse_one("~/.ww").unwrap();
+        assert!(!m.source.starts_with('~'), "tilde should be expanded");
+        assert!(m.source.ends_with("/.ww"));
+        assert!(m.is_root());
+    }
+
+    #[test]
+    fn tilde_expanded_targeted_mount() {
+        let m = parse_one("~/.ww/identity:/etc/identity").unwrap();
+        assert!(!m.source.starts_with('~'), "tilde should be expanded");
+        assert!(m.source.ends_with("/.ww/identity"));
+        assert_eq!(m.target, PathBuf::from("/etc/identity"));
     }
 }
