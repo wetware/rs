@@ -200,7 +200,29 @@ Wetware is the drivetrain; the LLM is the driver.  "Agent" means
 any autonomous process — AI, human, script.  Wetware controls
 what they're *allowed to do*, not what they *are*.  The MCP
 endpoint itself is a Cell — a sandboxed WASM process with scoped
-capabilities, not special host code.  *(MCP Cell is TODO.)*
+capabilities, not special host code.
+
+MCP tools — how AI agents interact:
+The MCP cell exposes per-capability tools derived from the
+membrane graft.  Each capability becomes an MCP tool with an
+`action` parameter:
+- **host** — `id`, `peers`, `addrs` (node identity + peers)
+- **routing** — `provide`, `find_providers` (DHT routing)
+- **runtime** — `run` (load + execute WASM binaries)
+- **identity** — `sign`, `verify` (Ed25519 operations)
+- **http-client** — `get`, `post` (outbound HTTP)
+- **import** — `import` (load Glia module by path)
+- **eval** — evaluate any Glia s-expression (primary interface)
+
+`eval` is the primary power interface.  Per-cap tools are the
+discovery layer — they make Glia's eval surface legible to AI
+agents without requiring Glia syntax knowledge.
+
+~/.ww user layer:
+Run `ww perform install` to bootstrap `~/.ww/` (boot, bin, lib,
+etc/init.d).  Mount it: `ww run --mcp crates/kernel ~/.ww`.
+AI agents write files to `~/.ww/`; cells read from it.
+Generate identity: `ww keygen > ~/.ww/etc/identity`.
 
 The problem Wetware solves:
 

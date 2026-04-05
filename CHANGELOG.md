@@ -9,8 +9,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - `ww perform install` — bootstrap ~/.ww user layer (boot, bin, lib, etc/init.d). Idempotent.
 - `ww doctor` — environment health check (rustc, cargo, wasm32-wasip2, optional Kubo/Ollama)
+- MCP dynamic tools: per-capability MCP tools generated from membrane graft (host, routing, runtime, identity, http-client, import). Each tool has per-action parameter schemas. eval remains primary interface.
+- MCP security: input escaping (glia_escape), action allowlisting, no generic tools for unknown capabilities
+- TODOS.md: Export.schema population, MCP resources, MCP prompts, eval error improvements
 
 ### Changed
+- MCP cell: tools/list returns per-cap tools dynamically instead of single static eval tool
+- .agents/prompt.md: document MCP tools and ~/.ww workflow for AI agents
 - Extract shared effect handlers into std/caps crate (shell + MCP share, no duplication)
 - Rename NamedCap to Export in stem.capnp (membrane exports capabilities)
 - Export: use Capability + Schema.Node types instead of AnyPointer + Data

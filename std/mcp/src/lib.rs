@@ -4,8 +4,9 @@
 //! stdin/stdout.  Grafts the membrane to obtain capabilities, sets
 //! up a Glia evaluator, and serves JSON-RPC requests.
 //!
-//! The cell exposes a single MCP tool: `eval`, which evaluates Glia
-//! expressions against the node's membrane capabilities.
+//! Per-capability tools make Glia's eval surface legible to AI agents.
+//! `eval` remains the primary interface; per-cap tools are the discovery
+//! layer.  Each tool call translates to a Glia expression internally.
 //!
 //! ```text
 //! Claude Code -> stdin/stdout -> MCP cell (WASM) -> Glia eval -> membrane caps
@@ -95,25 +96,262 @@ fn initialize_result() -> serde_json::Value {
     })
 }
 
-fn tools_list_result() -> serde_json::Value {
-    serde_json::json!({
-        "tools": [
-            {
-                "name": "eval",
-                "description": "Evaluate a Glia expression on the Wetware node. Returns the result as text. Examples: (perform host :id), (perform host :peers), (help)",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "expression": {
-                            "type": "string",
-                            "description": "Glia expression to evaluate"
-                        }
-                    },
-                    "required": ["expression"]
-                }
+// ---------------------------------------------------------------------------
+// Dynamic tool generation from membrane capabilities
+// ---------------------------------------------------------------------------
+
+/// Build tool definitions for known capabilities.  Returns per-action schemas
+/// that teach MCP clients what each capability can do.
+fn tool_def_for_cap(name: &str) -> Option<serde_json::Value> {
+    match name {
+        "host" => Some(serde_json::json!({
+            "name": "host",
+            "description": "Node identity and peer management. Actions: id (peer identity), peers (connected peers), addrs (listen addresses).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["id", "peers", "addrs"],
+                        "description": "The operation to perform"
+                    }
+                },
+                "required": ["action"]
             }
-        ]
+        })),
+        "routing" => Some(serde_json::json!({
+            "name": "routing",
+            "description": "DHT content routing (Kademlia). Actions: provide (announce a CID), find_providers (find peers hosting a CID).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["provide", "find_providers"],
+                        "description": "The routing operation"
+                    },
+                    "cid": {
+                        "type": "string",
+                        "description": "Content identifier (CID)"
+                    }
+                },
+                "required": ["action", "cid"]
+            }
+        })),
+        "runtime" => Some(serde_json::json!({
+            "name": "runtime",
+            "description": "Load and execute WASM binaries as cells.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["run"],
+                        "description": "The runtime operation"
+                    },
+                    "wasm_path": {
+                        "type": "string",
+                        "description": "Path to WASM binary in the FHS image (e.g. bin/myapp.wasm)"
+                    }
+                },
+                "required": ["action", "wasm_path"]
+            }
+        })),
+        "identity" => Some(serde_json::json!({
+            "name": "identity",
+            "description": "Ed25519 cryptographic operations. Actions: sign (sign a nonce with a domain-scoped key), verify (verify a signature against a public key).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["sign", "verify"],
+                        "description": "The cryptographic operation"
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Signing domain (for sign action)"
+                    },
+                    "nonce": {
+                        "type": "integer",
+                        "description": "Nonce to sign (for sign action)"
+                    },
+                    "data": {
+                        "type": "string",
+                        "description": "Hex-encoded data to verify (for verify action)"
+                    },
+                    "signature": {
+                        "type": "string",
+                        "description": "Hex-encoded signature (for verify action)"
+                    },
+                    "pubkey": {
+                        "type": "string",
+                        "description": "Hex-encoded Ed25519 public key (for verify action)"
+                    }
+                },
+                "required": ["action"]
+            }
+        })),
+        "http-client" => Some(serde_json::json!({
+            "name": "http-client",
+            "description": "Outbound HTTP requests. Actions: get (HTTP GET), post (HTTP POST with body).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["get", "post"],
+                        "description": "HTTP method"
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "Request URL"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Request body (for post action)"
+                    }
+                },
+                "required": ["action", "url"]
+            }
+        })),
+        "import" => Some(serde_json::json!({
+            "name": "import",
+            "description": "Load a Glia module by path. Returns the module's exported bindings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Module path (e.g. 'core' resolves to /lib/core.glia)"
+                    }
+                },
+                "required": ["path"]
+            }
+        })),
+        _ => None,
+    }
+}
+
+/// The eval tool — always present as the primary power interface.
+fn eval_tool_def() -> serde_json::Value {
+    serde_json::json!({
+        "name": "eval",
+        "description": "Evaluate a Glia s-expression on the Wetware node. This is the primary interface — use for complex operations, scripting, multi-step workflows, and anything not covered by other tools. Examples: (perform host :id), (def x (perform host :peers)), (help)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "expression": {
+                    "type": "string",
+                    "description": "Glia s-expression to evaluate"
+                }
+            },
+            "required": ["expression"]
+        }
     })
+}
+
+/// Build the tools list from the grafted capabilities.
+///
+/// Only known capabilities get per-cap tools.  Unknown caps are
+/// accessible through `eval` — we don't generate tools from
+/// untrusted capability names.
+fn build_tools_list(cap_names: &[String]) -> serde_json::Value {
+    let mut tools: Vec<serde_json::Value> = Vec::new();
+
+    for name in cap_names {
+        if let Some(def) = tool_def_for_cap(name) {
+            tools.push(def);
+        }
+        // Unknown caps: no tool.  Use eval to interact.
+    }
+
+    // eval is always last — the primary power interface.
+    tools.push(eval_tool_def());
+
+    serde_json::json!({ "tools": tools })
+}
+
+/// Escape a string for safe embedding inside a Glia double-quoted string literal.
+/// Prevents injection by escaping `"` and `\`.
+fn glia_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Validate that a name contains only safe characters (alphanumeric, hyphens, underscores).
+/// Rejects anything that could be used for Glia injection.
+fn is_safe_identifier(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Translate a per-cap tool call into a Glia expression for eval.
+///
+/// Only known capabilities are supported.  Unknown caps must use the `eval` tool
+/// directly — we do not generate expressions from untrusted capability names.
+fn tool_call_to_glia(tool_name: &str, args: &serde_json::Value) -> Option<String> {
+    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Reject actions that aren't safe identifiers (prevents injection via :action keywords).
+    if !action.is_empty() && !is_safe_identifier(action) {
+        return None;
+    }
+
+    match tool_name {
+        "host" => match action {
+            "id" | "peers" | "addrs" => Some(format!("(perform host :{action})")),
+            _ => None,
+        },
+        "routing" => {
+            let cid = glia_escape(args.get("cid").and_then(|v| v.as_str()).unwrap_or(""));
+            match action {
+                "provide" => Some(format!("(perform routing :provide (bytes \"{cid}\"))")),
+                "find_providers" => {
+                    Some(format!("(perform routing :find-providers (bytes \"{cid}\"))"))
+                }
+                _ => None,
+            }
+        }
+        "runtime" => {
+            let path = glia_escape(args.get("wasm_path").and_then(|v| v.as_str()).unwrap_or(""));
+            match action {
+                "run" => Some(format!("(perform runtime :run (load \"{path}\"))")),
+                _ => None,
+            }
+        }
+        "identity" => match action {
+            "sign" => {
+                let domain = glia_escape(args.get("domain").and_then(|v| v.as_str()).unwrap_or("default"));
+                let nonce = args.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
+                Some(format!("(perform identity :sign \"{domain}\" {nonce})"))
+            }
+            "verify" => {
+                let data = glia_escape(args.get("data").and_then(|v| v.as_str()).unwrap_or(""));
+                let sig = glia_escape(args.get("signature").and_then(|v| v.as_str()).unwrap_or(""));
+                let pk = glia_escape(args.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""));
+                Some(format!(
+                    "(perform identity :verify (bytes \"{data}\") (bytes \"{sig}\") (bytes \"{pk}\"))"
+                ))
+            }
+            _ => None,
+        },
+        "http-client" => {
+            let url = glia_escape(args.get("url").and_then(|v| v.as_str()).unwrap_or(""));
+            match action {
+                "get" => Some(format!("(perform http-client :get \"{url}\")")),
+                "post" => {
+                    let body = glia_escape(args.get("body").and_then(|v| v.as_str()).unwrap_or(""));
+                    Some(format!("(perform http-client :post \"{url}\" \"{body}\")"))
+                }
+                _ => None,
+            }
+        }
+        "import" => {
+            let path = glia_escape(args.get("path").and_then(|v| v.as_str()).unwrap_or(""));
+            Some(format!("(def imported (perform import \"{path}\"))"))
+        }
+        // Unknown caps: no tool dispatch.  Use eval directly.
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -202,21 +440,21 @@ async fn handle_request(
     env: &RefCell<Env>,
     ctx: &RefCell<McpSession>,
     dispatch_table: &HashMap<&'static str, HandlerFn>,
+    tools_list: &serde_json::Value,
+    cap_names: &[String],
 ) -> bool {
     let req: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(r) => r,
         Err(e) => {
-            // Parse error: respond with JSON-RPC error if we can.
             let null_id = serde_json::Value::Null;
             write_error(&null_id, -32700, &format!("Parse error: {e}"));
             return true;
         }
     };
 
-    // Notifications (no id) get no response.
     let id = match req.id {
         Some(ref id) => id.clone(),
-        None => return true, // notification — no response needed
+        None => return true,
     };
 
     match req.method.as_str() {
@@ -227,66 +465,64 @@ async fn handle_request(
             write_result(&id, serde_json::json!({}));
         }
         "tools/list" => {
-            write_result(&id, tools_list_result());
+            write_result(&id, tools_list.clone());
         }
         "tools/call" => {
-            // Extract tool name and arguments.
             let params = req.params.unwrap_or(serde_json::Value::Null);
             let tool_name = params
                 .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
 
-            match tool_name {
-                "eval" => {
-                    let expression = params
-                        .get("arguments")
-                        .and_then(|a| a.get("expression"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+            if tool_name == "eval" {
+                // Direct eval path.
+                let expression = arguments
+                    .get("expression")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
-                    if expression.is_empty() {
-                        write_result(
-                            &id,
-                            serde_json::json!({
-                                "content": [{
-                                    "type": "text",
-                                    "text": "error: empty expression"
-                                }],
-                                "isError": true,
-                            }),
-                        );
-                    } else {
-                        match eval_expression(expression, env, ctx, dispatch_table).await {
-                            Ok(result) => {
-                                write_result(
-                                    &id,
-                                    serde_json::json!({
-                                        "content": [{
-                                            "type": "text",
-                                            "text": result,
-                                        }],
-                                    }),
-                                );
-                            }
+                if expression.is_empty() {
+                    write_tool_error(&id, "empty expression");
+                } else {
+                    match eval_expression(expression, env, ctx, dispatch_table).await {
+                        Ok(result) => write_tool_result(&id, &result),
+                        Err(err) => write_tool_error(&id, &err),
+                    }
+                }
+            } else if cap_names.iter().any(|n| n == tool_name) || tool_def_for_cap(tool_name).is_some() {
+                // Per-cap tool: translate to Glia expression and eval.
+                match tool_call_to_glia(tool_name, &arguments) {
+                    Some(expr) => {
+                        match eval_expression(&expr, env, ctx, dispatch_table).await {
+                            Ok(result) => write_tool_result(&id, &result),
                             Err(err) => {
-                                write_result(
+                                // Structured error for AI clients.
+                                let action = arguments.get("action")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                write_tool_error(
                                     &id,
-                                    serde_json::json!({
-                                        "content": [{
-                                            "type": "text",
-                                            "text": err,
-                                        }],
-                                        "isError": true,
-                                    }),
+                                    &format!("{err}\n\nhint: capability '{tool_name}' action '{action}' failed. Try: (perform {tool_name} :{action})"),
                                 );
                             }
                         }
                     }
+                    None => {
+                        let action = arguments.get("action")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(none)");
+                        write_tool_error(
+                            &id,
+                            &format!("Unknown action '{action}' for capability '{tool_name}'"),
+                        );
+                    }
                 }
-                _ => {
-                    write_error(&id, -32602, &format!("Unknown tool: {tool_name}"));
-                }
+            } else {
+                write_error(&id, -32602, &format!("Unknown tool: {tool_name}"));
             }
         }
         _ => {
@@ -295,6 +531,27 @@ async fn handle_request(
     }
 
     true
+}
+
+/// Write a successful tool call result.
+fn write_tool_result(id: &serde_json::Value, text: &str) {
+    write_result(
+        id,
+        serde_json::json!({
+            "content": [{"type": "text", "text": text}],
+        }),
+    );
+}
+
+/// Write a tool call error result.
+fn write_tool_error(id: &serde_json::Value, message: &str) {
+    write_result(
+        id,
+        serde_json::json!({
+            "content": [{"type": "text", "text": message}],
+            "isError": true,
+        }),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -333,8 +590,17 @@ fn run_impl() {
             let graft_resp = membrane.graft_request().send().promise.await?;
             let results = graft_resp.get()?;
             let caps = results.get_caps()?;
+
+            // Extract capability names from the graft for dynamic tool generation.
+            let cap_names: Vec<String> = (0..caps.len())
+                .filter_map(|i| caps.get(i).get_name().ok().map(|s| s.to_string().ok()).flatten())
+                .collect();
+
             let host: system_capnp::host::Client = get_graft_cap(&caps, "host")?;
             let routing: routing_capnp::routing::Client = get_graft_cap(&caps, "routing")?;
+
+            // Build the dynamic tools list from grafted capabilities.
+            let tools_list = build_tools_list(&cap_names);
 
             // Populate session.
             {
@@ -395,7 +661,10 @@ fn run_impl() {
                 match line {
                     Ok(l) if l.trim().is_empty() => continue,
                     Ok(l) => {
-                        let cont = handle_request(&l, &env, &ctx, &dispatch_table).await;
+                        let cont = handle_request(
+                            &l, &env, &ctx, &dispatch_table,
+                            &tools_list, &cap_names,
+                        ).await;
                         if !cont {
                             break;
                         }
