@@ -1,3 +1,6 @@
+# MCP config (absolute paths, machine-specific)
+.mcp.json
+
 # Web Assembly files (build artifacts — rebuild with `make`)
 *.wasm
 

@@ -515,7 +515,14 @@ fn run_impl() {
                 ),
             ];
             for (name, handler) in caps {
-                env.set(name.to_string(), Val::Nil);
+                env.set(
+                    name.to_string(),
+                    Val::Cap {
+                        name: name.into(),
+                        schema_cid: format!("shell:{name}"),
+                        inner: std::rc::Rc::new(()),
+                    },
+                );
                 env.set(format!("{name}-handler"), handler);
             }
         }

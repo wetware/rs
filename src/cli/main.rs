@@ -1136,7 +1136,7 @@ wasip2::cli::command::export!({iface_name}Guest);
             }
         }
 
-        ww::config::init_tracing();
+        ww::config::init_tracing_to_stderr(mcp);
 
         // Build a chain loader: try IPFS first (if reachable), fall back to host FS.
         let ipfs_client = ipfs::HttpClient::new("http://localhost:5001".into());
@@ -1196,22 +1196,29 @@ wasip2::cli::command::export!({iface_name}Guest);
         all_mounts.extend(mounts);
 
         // Apply all mounts into a single FHS root.
+        tracing::debug!("applying mounts...");
         let merged = image::apply_mounts(&all_mounts, &ipfs_client).await?;
+        tracing::debug!("mounts applied");
 
         // Publish the merged image to IPFS so guests can resolve content via
         // the UnixFS capability.  $WW_ROOT is set to /ipfs/<cid>.
+        tracing::debug!("publishing image to IPFS...");
         let root_cid = ipfs_client.add_dir(merged.path()).await?;
         let image_path = format!("/ipfs/{}", root_cid);
+        tracing::debug!(root = %image_path, "image published");
 
         // Resolve identity from /etc/identity in the merged FHS.
+        tracing::debug!("resolving identity...");
         let (sk, _verifying_key, identity_source) = Self::resolve_identity(merged.path())?;
         tracing::info!(source = identity_source, "Node identity resolved");
+        tracing::debug!(source = identity_source, "identity resolved");
 
         let keypair = ww::keys::to_libp2p(&sk)?;
 
         // Attempt to fetch Kubo's identity so we can bootstrap the in-process
         // Kad client against the local node (Amino DHT /ipfs/kad/1.0.0).
         // Non-fatal: if Kubo is unreachable we still start, just without Kad.
+        tracing::debug!("fetching kubo info...");
         let kubo_bootstrap = match ipfs_client.kubo_info().await {
             Ok(info) => parse_kubo_bootstrap(&info),
             Err(e) => {
@@ -1225,6 +1232,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         // factor and the minimum for a single query to converge.  The
         // automatic bootstrap walk (triggered when entries < K) will
         // discover additional peers if needed.
+        tracing::debug!("fetching kubo swarm peers...");
         let kubo_peers: Vec<(libp2p::PeerId, Multiaddr)> = match ipfs_client.swarm_peers().await {
             Ok(raw) => {
                 use rand::seq::SliceRandom;
@@ -1236,7 +1244,7 @@ wasip2::cli::command::export!({iface_name}Guest);
                         Some((peer_id, addr))
                     })
                     .collect();
-                const MAX_KUBO_PEERS: usize = 20; // K_VALUE
+                const MAX_KUBO_PEERS: usize = 3; // Seed a few; Kad bootstrap walk finds the rest
                 if parsed.len() > MAX_KUBO_PEERS {
                     let mut rng = rand::rng();
                     parsed.shuffle(&mut rng);
@@ -1249,6 +1257,8 @@ wasip2::cli::command::export!({iface_name}Guest);
                 Vec::new()
             }
         };
+
+        tracing::debug!("kubo peers fetched");
 
         // ---- Thread-per-subsystem runtime (Pingora-inspired) ----
         //
@@ -1278,9 +1288,11 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         // Wait for the swarm thread to construct the host and send back
         // the stream control + network state.
+        tracing::debug!("waiting for swarm ready...");
         let swarm_ready = swarm_ready_rx
             .await
             .context("Swarm service failed to start")?;
+        tracing::debug!("swarm ready");
         let network_state = swarm_ready.network_state;
         let stream_control = swarm_ready.stream_control;
 

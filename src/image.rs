@@ -96,12 +96,21 @@ pub async fn apply_mounts(mounts: &[Mount], ipfs_client: &ipfs::HttpClient) -> R
     // Materialize into a temp dir.
     let merged_dir = TempDir::new().context("Failed to create temp dir for merged image")?;
 
-    // Try DAG merge; fall back to copy-merge on failure.
-    match try_dag_merge(&root_mounts, ipfs_client, merged_dir.path()).await {
-        Ok(()) => {}
-        Err(e) => {
-            tracing::warn!("DAG merge failed, falling back to copy-merge: {e}");
-            copy_merge(&root_mounts, ipfs_client, merged_dir.path()).await?;
+    // When all root mounts are local, skip IPFS DAG merge entirely and
+    // use direct copy-merge.  DAG merge via Kubo MFS is slow for local
+    // dirs and adds unnecessary round-trips through IPFS.
+    let all_local = root_mounts.iter().all(|m| !ipfs::is_ipfs_path(&m.source));
+
+    if all_local {
+        copy_merge(&root_mounts, ipfs_client, merged_dir.path()).await?;
+    } else {
+        // Try DAG merge; fall back to copy-merge on failure.
+        match try_dag_merge(&root_mounts, ipfs_client, merged_dir.path()).await {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::warn!("DAG merge failed, falling back to copy-merge: {e}");
+                copy_merge(&root_mounts, ipfs_client, merged_dir.path()).await?;
+            }
         }
     }
 

@@ -652,6 +652,10 @@ impl Proc {
         });
 
         // Instantiate it as a normal component
+        // TODO(perf): cache compiled components at ~/.ww/cache/<cid>.cwasm
+        // using Component::serialize() / Component::deserialize().  The CID
+        // (already known by the caller) is a natural cache key.  First run
+        // compiles and saves; subsequent runs load native code in milliseconds.
         let start = std::time::Instant::now();
         tracing::debug!("Compiling guest component");
         let component = Component::from_binary(&engine, &bytecode)?;

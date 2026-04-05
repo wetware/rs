@@ -611,6 +611,8 @@ fn run_impl() {
 
             // 2. Bind cap values + effect handlers into the environment.
             //    Uses shared handler factories from the caps crate.
+            //    Each cap must be Val::Cap (not Val::Nil) so that
+            //    with-effect-handler can match on it.
             {
                 let mut e = env.borrow_mut();
                 let cap_handlers: [(&str, Val); 4] = [
@@ -620,7 +622,18 @@ fn run_impl() {
                     ("import", make_import_handler()),
                 ];
                 for (name, handler) in cap_handlers {
-                    e.set(name.to_string(), Val::Nil);
+                    // Each cap needs a unique schema_cid so that
+                    // with-effect-handler can distinguish them.
+                    // Use the cap name as a placeholder CID until
+                    // real schema CIDs are wired through the graft.
+                    e.set(
+                        name.to_string(),
+                        Val::Cap {
+                            name: name.into(),
+                            schema_cid: format!("mcp:{name}"),
+                            inner: std::rc::Rc::new(()),
+                        },
+                    );
                     e.set(format!("{name}-handler"), handler);
                 }
             }
