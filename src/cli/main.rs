@@ -192,6 +192,21 @@ enum Commands {
         #[arg(long, env = "WW_IDENTITY", value_name = "PATH")]
         identity: Option<PathBuf>,
     },
+
+    /// Effectful operations that mutate state beyond the current directory.
+    Perform {
+        #[command(subcommand)]
+        action: PerformAction,
+    },
+
+    /// Check the development environment for required and optional tools.
+    ///
+    /// Verifies that the Rust toolchain, wasm32-wasip2 target, and Cargo
+    /// are installed. Optionally checks for Kubo (IPFS) and Ollama (LLM).
+    ///
+    /// Exit code 0 if all required checks pass; 1 otherwise.
+    /// Optional checks never cause a non-zero exit.
+    Doctor,
 }
 
 #[derive(Subcommand)]
@@ -222,6 +237,25 @@ enum DaemonAction {
     /// prints the deactivation command. Does not touch ~/.ww/identity or
     /// ~/.ww/config.glia.
     Uninstall,
+}
+
+#[derive(Subcommand)]
+enum PerformAction {
+    /// Bootstrap the ~/.ww user layer.
+    ///
+    /// Creates the FHS-compatible directory structure that serves as the
+    /// user's persistent Wetware environment. Cells read from ~/.ww;
+    /// the operator (or Claude Code) writes to it.
+    ///
+    /// Idempotent: creates missing directories, skips existing ones.
+    /// Never overwrites files.
+    ///
+    /// Directory structure:
+    ///   ~/.ww/boot/         kernel override (optional)
+    ///   ~/.ww/bin/          user WASM binaries
+    ///   ~/.ww/lib/          shared Glia modules
+    ///   ~/.ww/etc/init.d/   user init scripts
+    Install,
 }
 
 /// Strip the `/p2p/<peer-id>` suffix from a multiaddr string, if present.
@@ -347,6 +381,10 @@ impl Commands {
                 let local = tokio::task::LocalSet::new();
                 local.run_until(shell::run_shell(addr, identity)).await
             }
+            Commands::Perform { action } => match action {
+                PerformAction::Install => Self::perform_install().await,
+            },
+            Commands::Doctor => Self::doctor().await,
         }
     }
 
@@ -1578,6 +1616,141 @@ wasip2::cli::command::export!({iface_name}Guest);
         }
 
         Ok(())
+    }
+
+    /// Bootstrap the ~/.ww user layer.
+    #[allow(clippy::unused_async)]
+    async fn perform_install() -> Result<()> {
+        let home = dirs::home_dir().context("Cannot determine home directory")?;
+        let ww_dir = home.join(".ww");
+
+        let subdirs = ["boot", "bin", "lib", "etc/init.d"];
+        let mut created = Vec::new();
+
+        for sub in &subdirs {
+            let dir = ww_dir.join(sub);
+            if !dir.exists() {
+                std::fs::create_dir_all(&dir)
+                    .with_context(|| format!("Failed to create {}", dir.display()))?;
+                created.push(*sub);
+            }
+        }
+
+        if created.is_empty() {
+            println!("~/.ww already exists (all directories present).");
+        } else {
+            println!("Created ~/.ww user layer:");
+            for sub in &created {
+                println!("  ~/.ww/{sub}");
+            }
+            println!("\nMount with:  ww run crates/kernel ~/.ww");
+            println!("Generate identity:  ww keygen > ~/.ww/etc/identity");
+        }
+
+        Ok(())
+    }
+
+    /// Check the development environment.
+    #[allow(clippy::unused_async)]
+    async fn doctor() -> Result<()> {
+        let mut all_required_ok = true;
+
+        // Required: Rust toolchain
+        let rustc = std::process::Command::new("rustc")
+            .arg("--version")
+            .output();
+        match rustc {
+            Ok(out) if out.status.success() => {
+                let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                println!("  Rust toolchain .............. OK ({ver})");
+            }
+            _ => {
+                println!("  Rust toolchain .............. MISSING");
+                println!("    Fix: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh");
+                all_required_ok = false;
+            }
+        }
+
+        // Required: wasm32-wasip2 target
+        let targets = std::process::Command::new("rustup")
+            .args(["target", "list", "--installed"])
+            .output();
+        match targets {
+            Ok(out) if out.status.success() => {
+                let list = String::from_utf8_lossy(&out.stdout);
+                if list.contains("wasm32-wasip2") {
+                    println!("  wasm32-wasip2 target ........ OK");
+                } else {
+                    println!("  wasm32-wasip2 target ........ MISSING");
+                    println!("    Fix: rustup target add wasm32-wasip2");
+                    all_required_ok = false;
+                }
+            }
+            _ => {
+                println!("  wasm32-wasip2 target ........ UNKNOWN (rustup not found)");
+                all_required_ok = false;
+            }
+        }
+
+        // Required: Cargo
+        let cargo = std::process::Command::new("cargo")
+            .arg("--version")
+            .output();
+        match cargo {
+            Ok(out) if out.status.success() => {
+                let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                println!("  Cargo ....................... OK ({ver})");
+            }
+            _ => {
+                println!("  Cargo ....................... MISSING");
+                all_required_ok = false;
+            }
+        }
+
+        // Optional: Kubo
+        let ipfs = std::process::Command::new("ipfs").arg("version").output();
+        match ipfs {
+            Ok(out) if out.status.success() => {
+                let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                println!("  Kubo (IPFS) ................. OK ({ver})");
+            }
+            _ => {
+                println!("  Kubo (IPFS) ................. NOT FOUND (optional)");
+            }
+        }
+
+        // Optional: Ollama
+        let ollama = std::process::Command::new("ollama")
+            .arg("--version")
+            .output();
+        match ollama {
+            Ok(out) if out.status.success() => {
+                let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                println!("  Ollama ...................... OK ({ver})");
+            }
+            _ => {
+                println!("  Ollama ...................... NOT FOUND (optional)");
+            }
+        }
+
+        // Optional: ~/.ww
+        let home = dirs::home_dir();
+        match home {
+            Some(h) if h.join(".ww").exists() => {
+                println!("  ~/.ww ....................... OK");
+            }
+            _ => {
+                println!("  ~/.ww ....................... NOT FOUND (run: ww perform install)");
+            }
+        }
+
+        if all_required_ok {
+            println!("\nAll required checks passed.");
+            Ok(())
+        } else {
+            println!("\nSome required checks failed. Fix the issues above and re-run.");
+            std::process::exit(1);
+        }
     }
 }
 

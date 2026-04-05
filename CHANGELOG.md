@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `ww perform install` — bootstrap ~/.ww user layer (boot, bin, lib, etc/init.d). Idempotent.
+- `ww doctor` — environment health check (rustc, cargo, wasm32-wasip2, optional Kubo/Ollama)
+
 ### Changed
 - Extract shared effect handlers into std/caps crate (shell + MCP share, no duplication)
 - Rename NamedCap to Export in stem.capnp (membrane exports capabilities)
