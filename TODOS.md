@@ -150,6 +150,38 @@
 **Priority:** P3
 **Depends on:** CidTree virtual filesystem (src/vfs.rs)
 
+## Export.schema population for MCP tool introspection
+**What:** Populate `Export.schema` in the membrane graft with real `Schema.Node` bytes. Host capabilities get their schemas from compiled capnp at build time; guest-contributed capabilities get theirs from `.schema` files in the FHS layer.
+**Why:** Enables MCP dynamic tools to derive action lists and parameter schemas from the actual Cap'n Proto interface definitions, replacing the current hardcoded fallback descriptions in `std/mcp/src/lib.rs`.
+**Context:** Currently `init_schema()` in `src/rpc/membrane.rs` creates empty Schema.Node entries. The schema bytes are produced at build time by `schema_id::extract_schemas()` but aren't threaded into the runtime graft. Requires a build-time → runtime pipeline: either `include_bytes!()` on compiled schema artifacts, or runtime loading from the FHS. Once populated, the MCP cell can parse Schema.Node to discover interface methods and their parameter types automatically.
+**Effort:** M
+**Priority:** P2
+**Depends on:** MCP dynamic tools (done)
+
+## MCP resources (Filesystem capability)
+**What:** Expose the merged FHS filesystem as MCP resources via a `Filesystem` capability in the membrane. The MCP cell would serve `resources/list` and `resources/read` requests by delegating to the host-provided Filesystem cap.
+**Why:** Claude Code needs to browse files (init.d scripts, WASM binaries, Glia modules) without writing Glia expressions. MCP resources is the standard mechanism for this.
+**Context:** The MCP cell is a WASM process with zero ambient filesystem access (by design). Workaround: `eval` with `(perform fs :list ...)` and `(perform fs :read ...)`. The clean solution requires a new Filesystem capability interface in the membrane graft, specifically for MCP cells.
+**Effort:** S-M
+**Priority:** P2
+**Depends on:** MCP dynamic tools (done)
+
+## MCP prompts (guided workflows)
+**What:** Pre-built MCP conversation starters for common workflows: `create-cell` (scaffold a new cell project), `deploy-script` (write and deploy a Glia script to ~/.ww), `connect-peer` (guide peer connection setup).
+**Why:** Discoverability for AI agents. Teaches the right workflow patterns. MCP prompts are the standard mechanism for guided interactions.
+**Context:** Tools + eval are sufficient for v1. Prompts become valuable once we see which workflows Claude Code actually uses most. Should be informed by real usage patterns.
+**Effort:** M
+**Priority:** P2
+**Depends on:** MCP dynamic tools (done)
+
+## Eval error improvements + Glia introspection
+**What:** Structured error messages from `eval` (not opaque strings). New Glia forms: `(doc cap)` for capability documentation, `(schema cap)` for schema introspection, enhanced `(help)` with per-cap info.
+**Why:** AI clients need actionable errors to recover from failures. Introspection makes the eval interface self-documenting, reducing the need for hardcoded MCP tool descriptions.
+**Context:** Current eval returns string errors. Structured errors (with error type, capability name, action, and recovery hints) help AI clients decide whether to retry, use a different approach, or escalate. The `(doc)` and `(schema)` forms complement MCP tools by making eval itself discoverable.
+**Effort:** S-M
+**Priority:** P2
+**Depends on:** none
+
 ## MCP server over HTTP+SSE (Mode 2)
 **What:** Run the McpAdapter as an HTTP+SSE endpoint on the node, so remote MCP clients can connect without a local `ww mcp` process. Same adapter code, different transport.
 **Why:** Enables web-based MCP clients and remote LLM-to-node connections without requiring the LLM to run on the same machine as the node.

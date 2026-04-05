@@ -290,7 +290,7 @@ impl GraftBuilder for HostGraftBuilder {
         for (i, (name, client)) in entries.iter().enumerate() {
             let mut entry = caps_builder.reborrow().get(i as u32);
             entry.set_name(name);
-            entry.reborrow().init_schema(); // Phase 1: default (empty) Schema.Node
+            entry.reborrow().init_schema(); // TODO: populate with real Schema.Node bytes for MCP tool description generation
             entry.init_cap().set_as_capability(client.hook.clone());
         }
 
@@ -298,7 +298,7 @@ impl GraftBuilder for HostGraftBuilder {
         for (i, (name, client)) in extras_owned.iter().enumerate() {
             let mut entry = caps_builder.reborrow().get((offset + i) as u32);
             entry.set_name(name);
-            entry.reborrow().init_schema(); // Phase 1: default (empty) Schema.Node
+            entry.reborrow().init_schema(); // TODO: populate from FHS .schema files for guest caps
             entry.init_cap().set_as_capability(client.hook.clone());
         }
 
