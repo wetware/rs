@@ -514,6 +514,9 @@ impl Cell {
             cache_policy,
         );
 
+        // Clone epoch receiver for Terminal auth before it's moved into the RPC system.
+        let terminal_epoch_rx = epoch_rx.clone();
+
         let (rpc_system, guest_membrane) = crate::rpc::membrane::build_membrane_rpc(
             reader,
             writer,
@@ -539,7 +542,12 @@ impl Cell {
             let membrane = guest_membrane.clone();
             match terminal_signing_key {
                 Some(sk) => {
-                    tokio::task::spawn_local(accept_terminal_streams(control, membrane, sk));
+                    tokio::task::spawn_local(accept_terminal_streams(
+                        control,
+                        membrane,
+                        sk,
+                        terminal_epoch_rx,
+                    ));
                 }
                 None => {
                     // No signing key (ephemeral node) — serve raw membrane without
@@ -608,6 +616,7 @@ async fn accept_terminal_streams(
     mut control: libp2p_stream::Control,
     membrane: GuestMembrane,
     signing_key: Arc<SigningKey>,
+    epoch_rx: watch::Receiver<Epoch>,
 ) {
     let mut incoming = match control.accept(CAPNP_PROTOCOL) {
         Ok(s) => s,
@@ -622,7 +631,8 @@ async fn accept_terminal_streams(
     while let Some((peer_id, stream)) = incoming.next().await {
         tracing::debug!(%peer_id, "Terminal stream accepted");
         let m = membrane.clone();
-        tokio::task::spawn_local(serve_one_terminal_stream(stream, m, vk));
+        let erx = epoch_rx.clone();
+        tokio::task::spawn_local(serve_one_terminal_stream(stream, m, vk, erx));
     }
 }
 
@@ -633,6 +643,7 @@ async fn serve_one_terminal_stream(
     stream: libp2p::Stream,
     membrane: GuestMembrane,
     vk: ed25519_dalek::VerifyingKey,
+    epoch_rx: watch::Receiver<Epoch>,
 ) {
     use futures::AsyncReadExt;
     use membrane::stem_capnp;
@@ -642,6 +653,7 @@ async fn serve_one_terminal_stream(
         vk,
         membrane,
         auth::SigningDomain::terminal_membrane(),
+        epoch_rx,
     );
     let terminal_client: stem_capnp::terminal::Client<stem_capnp::membrane::Owned> =
         capnp_rpc::new_client(terminal);
