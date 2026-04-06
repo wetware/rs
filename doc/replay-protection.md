@@ -135,7 +135,8 @@ Epoch transitions support an optional drain duration. When configured:
 The drain provides graceful shutdown semantics (SIGTERM before SIGKILL)
 without weakening security: no new capabilities are issued for the old
 epoch during the drain, and the window is bounded and configurable.
-Default: `Duration::ZERO` (instant epoch advance, current behavior).
+Default: 1 second (`--epoch-drain-secs 1`). Set to 0 for instant
+epoch advance.
 
 ## Summary
 

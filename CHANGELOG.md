@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - `Signer.sign()` now takes `(nonce, epochSeq)` instead of just `(nonce)` — old clients will fail auth (correct behavior)
 - TerminalServer requires `epoch_rx: watch::Receiver<Epoch>` at construction
-- EpochService accepts `drain_duration: Duration` (default `Duration::ZERO`, no behavior change)
+- EpochService accepts `drain_duration: Duration` (default 1s via `--epoch-drain-secs`)
 
 ### Added
 - `PollSet` for multiplexing extra WASI pollables (stdin, listeners) alongside RPC in guest poll_loop

@@ -95,6 +95,11 @@ enum Commands {
         #[arg(long, default_value = "6")]
         confirmation_depth: u64,
 
+        /// Seconds to drain in-flight operations before advancing the epoch.
+        /// During drain, old capabilities still work but FS already serves new content.
+        #[arg(long, default_value = "1")]
+        epoch_drain_secs: u64,
+
         /// Number of executor worker threads for cell scheduling.
         /// Each worker runs its own single-threaded tokio runtime.
         /// 0 = auto-detect (one per CPU core).
@@ -330,6 +335,7 @@ impl Commands {
                 rpc_url,
                 ws_url,
                 confirmation_depth,
+                epoch_drain_secs,
                 executor_threads,
                 mcp,
                 http_listen,
@@ -353,6 +359,7 @@ impl Commands {
                     rpc_url,
                     ws_url,
                     confirmation_depth,
+                    epoch_drain_secs,
                     executor_threads,
                     mcp,
                     http_listen,
@@ -1114,6 +1121,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         rpc_url: String,
         ws_url: String,
         confirmation_depth: u64,
+        epoch_drain_secs: u64,
         executor_threads: usize,
         mcp: bool,
         http_listen: Option<String>,
@@ -1307,7 +1315,7 @@ wasip2::cli::command::export!({iface_name}Guest);
                         confirmation_depth,
                         ipfs_client: ipfs_client.clone(),
                         cid_tree: None, // TODO: pass CidTree when virtual FS is wired
-                        drain_duration: std::time::Duration::ZERO, // TODO: wire from CLI flag
+                        drain_duration: std::time::Duration::from_secs(epoch_drain_secs),
                     },
                 );
             }
