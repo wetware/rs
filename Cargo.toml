@@ -88,6 +88,23 @@ path = "src/cli/main.rs"
 [dev-dependencies]
 schema-id = { path = "crates/schema-id" }
 wasm-encoder = "0.243"
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+
+[[bench]]
+name = "streams"
+harness = false
+
+[[bench]]
+name = "glia_map"
+harness = false
+
+[[bench]]
+name = "arc_cache"
+harness = false
+
+[[bench]]
+name = "kernel_dispatch"
+harness = false
 
 [build-dependencies]
 capnpc    = "0.23.3"
