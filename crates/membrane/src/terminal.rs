@@ -227,17 +227,117 @@ mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
 
+    fn test_epoch(seq: u64) -> Epoch {
+        Epoch {
+            seq,
+            head: vec![0xAB],
+            provenance: crate::epoch::Provenance::Block(100),
+        }
+    }
+
+    /// In-process test signer that produces valid libp2p SignedEnvelopes.
+    struct TestSigner {
+        keypair: libp2p_identity::Keypair,
+    }
+
+    impl TestSigner {
+        fn from_ed25519(sk: &SigningKey) -> Self {
+            let ed_kp =
+                libp2p_identity::ed25519::Keypair::try_from_bytes(&mut sk.to_keypair_bytes())
+                    .expect("valid key");
+            Self {
+                keypair: ed_kp.into(),
+            }
+        }
+    }
+
+    #[allow(refining_impl_trait)]
+    impl stem_capnp::signer::Server for TestSigner {
+        fn sign(
+            self: capnp::capability::Rc<Self>,
+            params: stem_capnp::signer::SignParams,
+            mut results: stem_capnp::signer::SignResults,
+        ) -> Promise<(), Error> {
+            let p = pry!(params.get());
+            let nonce = p.get_nonce();
+            let epoch_seq = p.get_epoch_seq();
+            let domain = SigningDomain::terminal_membrane();
+
+            let mut payload = Vec::with_capacity(16);
+            payload.extend_from_slice(&nonce.to_be_bytes());
+            payload.extend_from_slice(&epoch_seq.to_be_bytes());
+
+            let envelope = pry!(SignedEnvelope::new(
+                &self.keypair,
+                domain.as_str().to_string(),
+                domain.payload_type().to_vec(),
+                payload,
+            )
+            .map_err(|e| Error::failed(format!("signing failed: {e}"))));
+
+            results.get().set_sig(&envelope.into_protobuf_encoding());
+            Promise::ok(())
+        }
+    }
+
+    /// Signer that ignores the epoch_seq from params and signs a hardcoded value.
+    struct WrongEpochSigner {
+        keypair: libp2p_identity::Keypair,
+        forced_epoch_seq: u64,
+    }
+
+    #[allow(refining_impl_trait)]
+    impl stem_capnp::signer::Server for WrongEpochSigner {
+        fn sign(
+            self: capnp::capability::Rc<Self>,
+            params: stem_capnp::signer::SignParams,
+            mut results: stem_capnp::signer::SignResults,
+        ) -> Promise<(), Error> {
+            let p = pry!(params.get());
+            let nonce = p.get_nonce();
+            let domain = SigningDomain::terminal_membrane();
+
+            let mut payload = Vec::with_capacity(16);
+            payload.extend_from_slice(&nonce.to_be_bytes());
+            payload.extend_from_slice(&self.forced_epoch_seq.to_be_bytes());
+
+            let envelope = pry!(SignedEnvelope::new(
+                &self.keypair,
+                domain.as_str().to_string(),
+                domain.payload_type().to_vec(),
+                payload,
+            )
+            .map_err(|e| Error::failed(format!("signing failed: {e}"))));
+
+            results.get().set_sig(&envelope.into_protobuf_encoding());
+            Promise::ok(())
+        }
+    }
+
+    fn terminal_with_epoch(
+        vk: VerifyingKey,
+        epoch: Epoch,
+    ) -> (
+        stem_capnp::terminal::Client<stem_capnp::membrane::Owned>,
+        watch::Sender<Epoch>,
+    ) {
+        let (tx, rx) = watch::channel(epoch);
+        let membrane: stem_capnp::membrane::Client = crate::membrane::membrane_client(rx.clone());
+        let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(
+            vk,
+            membrane,
+            SigningDomain::terminal_membrane(),
+            rx,
+        );
+        (capnp_rpc::new_client(terminal), tx)
+    }
+
     #[test]
     fn terminal_server_constructs_with_membrane_owned() {
         let sk = SigningKey::generate(&mut rand::rngs::OsRng);
         let vk = sk.verifying_key();
 
-        // Build a null membrane client to use as session.
-        let (_tx, rx) = tokio::sync::watch::channel(crate::epoch::Epoch {
-            seq: 1,
-            head: vec![],
-            provenance: crate::epoch::Provenance::Block(0),
-        });
+        let (_tx, rx) = watch::channel(test_epoch(1));
         let membrane: stem_capnp::membrane::Client = crate::membrane::membrane_client(rx.clone());
 
         let _terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(
@@ -250,11 +350,7 @@ mod tests {
 
     #[test]
     fn terminal_server_constructs_with_custom_policy() {
-        let (_tx, rx) = tokio::sync::watch::channel(crate::epoch::Epoch {
-            seq: 1,
-            head: vec![],
-            provenance: crate::epoch::Provenance::Block(0),
-        });
+        let (_tx, rx) = watch::channel(test_epoch(1));
         let membrane: stem_capnp::membrane::Client = crate::membrane::membrane_client(rx.clone());
 
         let _terminal = TerminalServer::<stem_capnp::membrane::Owned>::with_policy(
@@ -263,5 +359,150 @@ mod tests {
             SigningDomain::terminal_membrane(),
             rx,
         );
+    }
+
+    /// Login succeeds when the signer returns the correct epoch_seq.
+    #[tokio::test]
+    async fn login_succeeds_with_matching_epoch() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+                let vk = sk.verifying_key();
+                let (terminal, _tx) = terminal_with_epoch(vk, test_epoch(1));
+
+                let signer: stem_capnp::signer::Client =
+                    capnp_rpc::new_client(TestSigner::from_ed25519(&sk));
+                let mut req = terminal.login_request();
+                req.get().set_signer(signer);
+
+                req.send()
+                    .promise
+                    .await
+                    .expect("login should succeed with matching epoch");
+            })
+            .await;
+    }
+
+    /// Login fails when the signer signs a different epoch_seq than the Terminal's current epoch.
+    #[tokio::test]
+    async fn login_fails_with_wrong_epoch_seq() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+                let vk = sk.verifying_key();
+                let (terminal, _tx) = terminal_with_epoch(vk, test_epoch(1));
+
+                let ed_kp =
+                    libp2p_identity::ed25519::Keypair::try_from_bytes(&mut sk.to_keypair_bytes())
+                        .expect("valid key");
+                let signer: stem_capnp::signer::Client = capnp_rpc::new_client(WrongEpochSigner {
+                    keypair: ed_kp.into(),
+                    forced_epoch_seq: 999, // wrong epoch
+                });
+
+                let mut req = terminal.login_request();
+                req.get().set_signer(signer);
+
+                match req.send().promise.await {
+                    Ok(resp) => match resp.get() {
+                        Ok(_) => panic!("login should fail with wrong epoch_seq"),
+                        Err(e) => assert!(
+                            e.to_string().contains("challenge mismatch"),
+                            "expected challenge mismatch, got: {e}"
+                        ),
+                    },
+                    Err(e) => assert!(
+                        e.to_string().contains("challenge mismatch"),
+                        "expected challenge mismatch, got: {e}"
+                    ),
+                }
+            })
+            .await;
+    }
+
+    /// Signer that advances the epoch as a side-effect of signing.
+    /// This simulates the race where the epoch changes between challenge
+    /// issuance and response verification.
+    struct EpochAdvancingSigner {
+        keypair: libp2p_identity::Keypair,
+        epoch_tx: watch::Sender<Epoch>,
+    }
+
+    #[allow(refining_impl_trait)]
+    impl stem_capnp::signer::Server for EpochAdvancingSigner {
+        fn sign(
+            self: capnp::capability::Rc<Self>,
+            params: stem_capnp::signer::SignParams,
+            mut results: stem_capnp::signer::SignResults,
+        ) -> Promise<(), Error> {
+            let p = pry!(params.get());
+            let nonce = p.get_nonce();
+            let epoch_seq = p.get_epoch_seq();
+            let domain = SigningDomain::terminal_membrane();
+
+            // Sign correctly with the epoch_seq the Terminal sent.
+            let mut payload = Vec::with_capacity(16);
+            payload.extend_from_slice(&nonce.to_be_bytes());
+            payload.extend_from_slice(&epoch_seq.to_be_bytes());
+
+            let envelope = pry!(SignedEnvelope::new(
+                &self.keypair,
+                domain.as_str().to_string(),
+                domain.payload_type().to_vec(),
+                payload,
+            )
+            .map_err(|e| Error::failed(format!("signing failed: {e}"))));
+
+            results.get().set_sig(&envelope.into_protobuf_encoding());
+
+            // Advance the epoch AFTER signing but BEFORE the Terminal verifies.
+            // The Terminal's post-sign check (`current_seq != epoch_seq`) catches this.
+            self.epoch_tx.send(test_epoch(epoch_seq + 1)).ok();
+
+            Promise::ok(())
+        }
+    }
+
+    /// Login fails when the epoch advances between challenge issuance and response verification.
+    #[tokio::test]
+    async fn login_fails_when_epoch_advances_during_auth() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+                let vk = sk.verifying_key();
+                let (terminal, tx) = terminal_with_epoch(vk, test_epoch(1));
+
+                let ed_kp =
+                    libp2p_identity::ed25519::Keypair::try_from_bytes(&mut sk.to_keypair_bytes())
+                        .expect("valid key");
+                let signer: stem_capnp::signer::Client =
+                    capnp_rpc::new_client(EpochAdvancingSigner {
+                        keypair: ed_kp.into(),
+                        epoch_tx: tx,
+                    });
+
+                let mut req = terminal.login_request();
+                req.get().set_signer(signer);
+
+                match req.send().promise.await {
+                    Ok(resp) => match resp.get() {
+                        Ok(_) => panic!("login should fail when epoch advances during auth"),
+                        Err(e) => assert!(
+                            e.to_string()
+                                .contains("epoch advanced during authentication"),
+                            "expected epoch-advanced error, got: {e}"
+                        ),
+                    },
+                    Err(e) => assert!(
+                        e.to_string()
+                            .contains("epoch advanced during authentication"),
+                        "expected epoch-advanced error, got: {e}"
+                    ),
+                }
+            })
+            .await;
     }
 }

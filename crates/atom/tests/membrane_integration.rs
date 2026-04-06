@@ -679,7 +679,7 @@ async fn test_terminal_login_fails_after_epoch_advance() {
     let epoch1 = Epoch {
         seq: 1,
         head: b"head1".to_vec(),
-        adopted_block: 100,
+        provenance: membrane::Provenance::Block(100),
     };
 
     let sk = SigningKey::generate(&mut rand::rngs::OsRng);
@@ -701,7 +701,7 @@ async fn test_terminal_login_fails_after_epoch_advance() {
     tx.send(Epoch {
         seq: 2,
         head: b"head2".to_vec(),
-        adopted_block: 101,
+        provenance: membrane::Provenance::Block(101),
     })
     .unwrap();
 
