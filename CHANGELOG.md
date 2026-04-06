@@ -29,6 +29,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - TerminalServer requires `epoch_rx: watch::Receiver<Epoch>` at construction
 - EpochService accepts `drain_duration: Duration` (default 1s via `--epoch-drain-secs`)
 
+## [0.0.5.0] - 2026-04-06
+
+### Added
+- Terminal login unit tests: matching epoch, wrong epoch_seq, epoch-advance race condition
+- Epoch drain delay unit tests: deferred broadcast timing and zero-drain regression
+- `EpochAdvancingSigner` test helper for simulating epoch races during auth
+
+### Changed
+- SigningDomain payload_type renamed from `/{domain}/nonce` to `/{domain}/challenge` (reflects 16-byte `nonce || epoch_seq` payload)
+
 ### Added
 - `PollSet` for multiplexing extra WASI pollables (stdin, listeners) alongside RPC in guest poll_loop
 - `system::run_with(poll_set, f)` entry point for guests needing concurrent async I/O
