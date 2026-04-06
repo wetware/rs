@@ -125,11 +125,11 @@ enum Commands {
         #[arg(long, default_value = "shared", env = "WW_RUNTIME_CACHE_POLICY")]
         runtime_cache_policy: String,
 
-        /// Enable the Prometheus metrics endpoint on the given address.
-        /// Serves fuel observability metrics at GET /metrics.
-        /// Example: --metrics-addr 127.0.0.1:9090
+        /// Enable the HTTP admin endpoint on the given address.
+        /// Serves Prometheus metrics at GET /metrics. Future: /healthz, /debug.
+        /// Example: --with-http-admin 127.0.0.1:2026
         #[arg(long, value_name = "ADDR")]
-        metrics_addr: Option<String>,
+        with_http_admin: Option<String>,
     },
 
     /// Generate a new Ed25519 identity secret.
@@ -340,7 +340,7 @@ impl Commands {
                 mcp,
                 http_listen,
                 runtime_cache_policy,
-                metrics_addr,
+                with_http_admin,
             } => {
                 let mut mounts = ww::mount::parse_args(&mount_args)?;
                 // --identity PATH is sugar for PATH:/etc/identity mount.
@@ -364,7 +364,7 @@ impl Commands {
                     mcp,
                     http_listen,
                     runtime_cache_policy,
-                    metrics_addr,
+                    with_http_admin,
                 )
                 .await
             }
@@ -1126,7 +1126,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         mcp: bool,
         http_listen: Option<String>,
         runtime_cache_policy: String,
-        metrics_addr: Option<String>,
+        with_http_admin: Option<String>,
     ) -> Result<()> {
         // Dev-mode compat: if a single local root mount has boot/main.wasm
         // but not bin/main.wasm, copy it over (the runtime expects bin/).
@@ -1346,17 +1346,24 @@ wasip2::cli::command::export!({iface_name}Guest);
             None
         };
 
-        // Prometheus metrics thread (only when --metrics-addr is provided).
+        // HTTP admin thread (only when --with-http-admin is provided).
+        // Serves Prometheus metrics at GET /metrics. Future: /healthz, /debug.
         let fuel_registry = ww::metrics::new_fuel_registry();
-        if let Some(ref addr) = metrics_addr {
+        let rpc_metrics = ww::metrics::new_rpc_metrics();
+        let cache_metrics = ww::metrics::new_cache_metrics();
+        let stream_metrics = ww::metrics::new_stream_metrics();
+        if let Some(ref addr) = with_http_admin {
             let listen_addr: std::net::SocketAddr = addr
                 .parse()
-                .context("invalid --metrics-addr address (expected host:port)")?;
+                .context("invalid --with-http-admin address (expected host:port)")?;
             supervisor.spawn(
-                "metrics",
+                "admin",
                 ww::metrics::MetricsService {
                     listen_addr,
                     fuel_registry: fuel_registry.clone(),
+                    rpc_metrics: rpc_metrics.clone(),
+                    cache_metrics: cache_metrics.clone(),
+                    stream_metrics: stream_metrics.clone(),
                 },
             );
         }
@@ -1366,7 +1373,7 @@ wasip2::cli::command::export!({iface_name}Guest);
             root = %image_path,
             port,
             http = http_listen.as_deref().unwrap_or("disabled"),
-            metrics = metrics_addr.as_deref().unwrap_or("disabled"),
+            admin = with_http_admin.as_deref().unwrap_or("disabled"),
             "Booting environment"
         );
 

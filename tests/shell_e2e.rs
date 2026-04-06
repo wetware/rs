@@ -17,8 +17,6 @@ use ww::rpc::{CachePolicy, NetworkState};
 use ww::runtime::{ExecutorPool, SpawnRequest};
 use ww::shell_capnp;
 
-const SHELL_IMAGE_PATH: &str = "std/shell";
-
 fn shell_wasm_exists() -> bool {
     std::path::Path::new("std/shell/bin/shell.wasm").exists()
 }

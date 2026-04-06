@@ -231,8 +231,9 @@ is `!Send`.
 
 Cells are assigned to the least-loaded worker at spawn time (with round-robin
 fallback for ties). Multiple cells on the same worker cooperatively share the
-thread via the AIMD fuel scheduler: cells yield every ~10K instructions at
+thread via the EWMA fuel scheduler: cells yield every ~10K instructions at
 wasmtime host call boundaries, giving sibling cells a chance to run.
+See [fuel-scheduling.md](designs/fuel-scheduling.md) for the full design.
 
 Reference: `src/runtime.rs`
 

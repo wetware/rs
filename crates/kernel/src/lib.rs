@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use glia::eval::{self, Dispatch, Env};
-use glia::{read, read_many, Val};
+use glia::{extract_method, read, read_many, Val};
 
 use std::rc::Rc;
 
@@ -287,23 +287,6 @@ fn call_resume(resume: &Val, val: Val) -> Result<Val, Val> {
     }
 }
 
-/// Extract (method_keyword, rest_args) from the data payload.
-fn extract_method(data: &Val) -> Result<(String, Vec<Val>), Val> {
-    let items = match data {
-        Val::List(items) => items,
-        _ => return Err(Val::from("cap handler: expected list data")),
-    };
-    let method = match items.first() {
-        Some(Val::Keyword(s)) => s.clone(),
-        _ => {
-            return Err(Val::from(
-                "cap handler: first arg must be a keyword method (e.g. :id, :run)",
-            ))
-        }
-    };
-    Ok((method, items[1..].to_vec()))
-}
-
 fn make_host_handler(
     host: system_capnp::host::Client,
     runtime: system_capnp::runtime::Client,
@@ -318,7 +301,7 @@ fn make_host_handler(
             Box::pin(async move {
                 let (method, rest) = extract_method(&args[0])?;
                 let resume = &args[1];
-                let result = match method.as_str() {
+                let result = match method {
                     "id" => {
                         let resp = host
                             .id_request()
@@ -387,10 +370,10 @@ fn make_host_handler(
                                             .map(|m| Val::Str(m.to_string()))
                                     })
                                     .collect();
-                                Some(Val::Map(vec![
+                                Some(Val::Map(glia::ValMap::from_pairs(vec![
                                     (Val::Keyword("peer-id".into()), Val::Str(id)),
                                     (Val::Keyword("addrs".into()), Val::List(addr_vals)),
-                                ]))
+                                ])))
                             })
                             .collect();
                         Val::List(items)
@@ -641,7 +624,7 @@ fn make_runtime_handler(runtime: system_capnp::runtime::Client) -> Val {
             Box::pin(async move {
                 let (method, rest) = extract_method(&args[0])?;
                 let resume = &args[1];
-                let result = match method.as_str() {
+                let result = match method {
                     "run" => {
                         // (perform runtime :run <wasm-bytes> :env {"KEY" "VAL" ...})
                         let wasm = match rest.first() {
@@ -751,7 +734,7 @@ fn make_ipfs_handler() -> Val {
             Box::pin(async move {
                 let (method, rest) = extract_method(&args[0])?;
                 let resume = &args[1];
-                let result = match method.as_str() {
+                let result = match method {
                     "cat" => {
                         let raw_path = match rest.first() {
                             Some(Val::Str(s)) => s.clone(),
@@ -849,7 +832,7 @@ fn make_routing_handler(routing: routing_capnp::routing::Client) -> Val {
             Box::pin(async move {
                 let (method, rest) = extract_method(&args[0])?;
                 let resume = &args[1];
-                let result = match method.as_str() {
+                let result = match method {
                     "provide" => {
                         let name = match rest.first() {
                             Some(Val::Str(s)) => s.clone(),
@@ -907,10 +890,10 @@ fn make_routing_handler(routing: routing_capnp::routing::Client) -> Val {
                                 .filter_map(|a| multiaddr::Multiaddr::try_from(a).ok())
                                 .map(|m| Val::Str(m.to_string()))
                                 .collect();
-                            providers.push(Val::Map(vec![
+                            providers.push(Val::Map(glia::ValMap::from_pairs(vec![
                                 (Val::Keyword("peer-id".into()), Val::Str(id_str)),
                                 (Val::Keyword("addrs".into()), Val::List(addr_vals)),
-                            ]));
+                            ])));
                         }
                         Val::List(providers)
                     }

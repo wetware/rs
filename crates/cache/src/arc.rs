@@ -2,6 +2,14 @@ use cid::Cid;
 use linked_hash_map::LinkedHashMap;
 use std::cmp;
 
+/// Counters for cache hits, misses, and evictions.
+#[derive(Debug, Clone, Default)]
+pub struct ArcStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+}
+
 /// Weight-aware Adaptive Replacement Cache (Megiddo & Modha).
 ///
 /// Not thread-safe — wrap in a `Mutex` for concurrent access.
@@ -38,6 +46,8 @@ pub struct ArcInner<V> {
     ghost_capacity: usize,
     /// Computes the weight of a (key, value) pair in bytes.
     weighter: fn(&Cid, &V) -> usize,
+    /// Hit/miss/eviction counters for observability.
+    stats: ArcStats,
 }
 
 impl<V> ArcInner<V> {
@@ -64,6 +74,7 @@ impl<V> ArcInner<V> {
             budget,
             ghost_capacity,
             weighter,
+            stats: ArcStats::default(),
         }
     }
 
@@ -76,6 +87,7 @@ impl<V> ArcInner<V> {
             let w = (self.weighter)(k, &v);
             self.t1_weight -= w;
             self.t2.insert(*k, v);
+            self.stats.hits += 1;
             return self.t2.get(k);
         }
 
@@ -83,10 +95,12 @@ impl<V> ArcInner<V> {
         if self.t2.contains_key(k) {
             let v = self.t2.remove(k).unwrap();
             self.t2.insert(*k, v);
+            self.stats.hits += 1;
             return self.t2.get(k);
         }
 
         // Miss
+        self.stats.misses += 1;
         None
     }
 
@@ -173,6 +187,11 @@ impl<V> ArcInner<V> {
         self.weight
     }
 
+    /// Hit/miss/eviction counters.
+    pub fn stats(&self) -> &ArcStats {
+        &self.stats
+    }
+
     /// Iterator over all keys in T1 and T2.
     pub fn keys(&self) -> impl Iterator<Item = &Cid> {
         self.t1.keys().chain(self.t2.keys())
@@ -205,12 +224,14 @@ impl<V> ArcInner<V> {
                 self.weight -= w;
                 self.t1_weight -= w;
                 self.b1.insert(k, ());
+                self.stats.evictions += 1;
                 evicted.push((k, v));
             }
         } else if let Some((k, v)) = self.t2.pop_front() {
             let w = (self.weighter)(&k, &v);
             self.weight -= w;
             self.b2.insert(k, ());
+            self.stats.evictions += 1;
             evicted.push((k, v));
         }
     }

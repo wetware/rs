@@ -93,14 +93,14 @@ pub fn load(path: &std::path::Path) -> Result<DaemonConfig> {
 
 /// Extract a [`DaemonConfig`] from a top-level Glia map.
 fn from_val(val: &Val) -> Result<DaemonConfig> {
-    let pairs = match val {
-        Val::Map(pairs) => pairs,
+    let m = match val {
+        Val::Map(m) => m,
         other => bail!("config must be a map, got: {other}"),
     };
 
     let mut config = DaemonConfig::default();
 
-    for (key, value) in pairs {
+    for (key, value) in m.iter() {
         let kw = match key {
             Val::Keyword(k) => k.as_str(),
             _ => continue, // skip non-keyword keys

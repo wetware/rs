@@ -4,6 +4,8 @@
 //! (epoch tick task).  The fuel budget is the scheduling quantum: larger
 //! budgets mean more instructions before yielding, giving the cell higher
 //! effective priority.
+//!
+//! Design doc: `doc/designs/fuel-scheduling.md`
 
 /// Starting budget for a freshly spawned cell (~1 ms at 1 GHz).
 pub const INITIAL_FUEL: u64 = 1_000_000;
