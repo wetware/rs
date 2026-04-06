@@ -238,8 +238,7 @@ mod tests {
             head: vec![],
             adopted_block: 0,
         });
-        let membrane: stem_capnp::membrane::Client =
-            crate::membrane::membrane_client(rx.clone());
+        let membrane: stem_capnp::membrane::Client = crate::membrane::membrane_client(rx.clone());
 
         let _terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(
             vk,
@@ -256,8 +255,7 @@ mod tests {
             head: vec![],
             adopted_block: 0,
         });
-        let membrane: stem_capnp::membrane::Client =
-            crate::membrane::membrane_client(rx.clone());
+        let membrane: stem_capnp::membrane::Client = crate::membrane::membrane_client(rx.clone());
 
         let _terminal = TerminalServer::<stem_capnp::membrane::Owned>::with_policy(
             Box::new(AllowAllPolicy),
