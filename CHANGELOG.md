@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.0.5.0] - 2026-04-06
+
+### Added
+- `crates/stem/` crate: `StemSource` async trait abstracting epoch sources, enabling both on-chain (Atom contract) and off-chain (IPNS) epoch anchors behind a common interface.
+- `AtomSource`: wraps existing `AtomIndexer` + `Finalizer` behind the `StemSource` trait.
+- `IpnsSource`: polls IPNS names via IPFS HTTP API, emitting `Provenance::Timestamp` epochs for off-chain deployments.
+- `StemEvent`: backend-agnostic epoch event type for the shared pin/swap/broadcast pipeline.
+- `HttpClient.name_resolve()` and `name_publish()` for IPNS operations via IPFS HTTP API.
+
+### Changed
+- **Breaking:** `Epoch.adopted_block` replaced with `Epoch.provenance: Provenance` enum (variants: `Block(u64)` for on-chain, `Timestamp(u64)` for off-chain). Cap'n Proto schema updated with union-based provenance and literate documentation.
+- `src/epoch.rs` refactored: `handle_epoch_advance()` is now source-agnostic, shared by all epoch backends. Legacy `run_epoch_pipeline()` preserved for backward compatibility.
+
 ## [Unreleased]
 
 ### Changed
