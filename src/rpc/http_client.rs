@@ -250,7 +250,9 @@ mod tests {
     #[test]
     fn empty_allowlist_permits_all() {
         let proxy = test_proxy(vec![]);
-        assert!(proxy.validate_request("https://anything.example.org/x").is_ok());
+        assert!(proxy
+            .validate_request("https://anything.example.org/x")
+            .is_ok());
     }
 
     #[test]

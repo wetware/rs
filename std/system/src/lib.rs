@@ -380,7 +380,10 @@ impl std::fmt::Display for PollLoopExit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PollLoopExit::RpcClosed { cycle } => {
-                write!(f, "RPC connection closed by host (after {cycle} poll cycles)")
+                write!(
+                    f,
+                    "RPC connection closed by host (after {cycle} poll cycles)"
+                )
             }
             PollLoopExit::RpcError { cycle, error } => {
                 write!(f, "RPC connection error after {cycle} poll cycles: {error}")
@@ -452,8 +455,7 @@ fn poll_loop<T>(
         // registered by the guest (stdin, listeners, etc.).
         // If writes occurred, include the writer so the host can drain it.
         // Otherwise, include the idle timeout as a missed-wakeup safety net.
-        let mut wasi_set: Vec<&WasiPollable> =
-            Vec::with_capacity(2 + extras.pollables.len() + 1);
+        let mut wasi_set: Vec<&WasiPollable> = Vec::with_capacity(2 + extras.pollables.len() + 1);
         wasi_set.push(&pollables.reader);
         if wrote {
             wasi_set.push(&pollables.writer);
@@ -509,7 +511,9 @@ pub fn serve_stdio(bootstrap: capnp::capability::Client) {
 
     // Drive RPC only (no user future) — poll_loop returns Err when RPC closes.
     let empty_extras = PollSet::new();
-    match poll_loop(&mut rpc_system, &pollables, &empty_extras, |_| Poll::<()>::Pending) {
+    match poll_loop(&mut rpc_system, &pollables, &empty_extras, |_| {
+        Poll::<()>::Pending
+    }) {
         Err(ref exit @ PollLoopExit::RpcError { .. }) => {
             log::error!("serve_stdio: {exit}");
         }
@@ -597,9 +601,12 @@ where
     let client = session.client.clone();
     let mut future = Box::pin(f(client));
 
-    match poll_loop(&mut session.rpc_system, &session.pollables, &session.poll_set, |cx| {
-        future.as_mut().poll(cx)
-    }) {
+    match poll_loop(
+        &mut session.rpc_system,
+        &session.pollables,
+        &session.poll_set,
+        |cx| future.as_mut().poll(cx),
+    ) {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             log::error!("guest error: {e}");
