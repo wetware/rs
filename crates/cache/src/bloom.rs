@@ -20,9 +20,9 @@ impl AtomicBloom {
     /// false-positive rate of `fpr` (e.g. 0.00001 = 0.001%).
     pub fn new(capacity: usize, fpr: f64) -> Self {
         // Optimal bit count: m = -n * ln(fpr) / ln(2)^2
-        let m = -1.0 * (capacity as f64) * fpr.ln() / (2.0_f64.ln().powi(2));
+        let m = -(capacity as f64) * fpr.ln() / (2.0_f64.ln().powi(2));
         // Round up to next multiple of 64.
-        let m = ((m as u64 + 63) / 64) * 64;
+        let m = (m as u64).div_ceil(64) * 64;
 
         // Optimal hash count: k = (m/n) * ln(2)
         let k = ((m as f64 / capacity as f64) * 2.0_f64.ln()).round() as u32;

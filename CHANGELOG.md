@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Val::Map now backed by persistent CHAMP trie (im::HashMap) via ValMap wrapper. O(1) clone, O(log N) insert, O(1) lookup for maps with 32+ entries (77-92% improvement). ValMap is the future seam for IPLD-backed persistent maps.
+- `extract_method` moved to glia crate (was duplicated in kernel and caps), returns `(&str, &[Val])` instead of `(String, Vec<Val>)` for zero-alloc capability dispatch.
+- Fn/Macro equality: `Rc::ptr_eq` identity semantics (was always-false). Functions are now equal to themselves.
+- Hash + Eq implemented for Val (enables use as map keys, set elements).
+
+### Added
+- `AtomicBloom`: lock-free bloom filter for ARC cache (100K capacity, 0.001% FPR, ~244KB). `PinsetCache::probably_cached()` public API for lock-free presence checks.
+- `doc/designs/fuel-scheduling.md`: EWMA ratio estimator design doc.
+- Criterion benchmarks for streams, glia map, ARC cache, kernel dispatch.
+- ARC cache hit/miss/eviction Prometheus counters.
+- Tracing spans on RPC listeners.
+
 ### Added
 - Epoch-bound Terminal login: challenge-response now signs `nonce || epoch_seq` (16 bytes), preventing both same-epoch and cross-epoch replay attacks
 - Graceful epoch shutdown: configurable drain delay before epoch broadcast (SIGTERM/SIGKILL model for in-flight operations)
