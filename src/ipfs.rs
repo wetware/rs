@@ -66,6 +66,75 @@ impl HttpClient {
     pub fn unixfs_ref(&self) -> UnixFSRef<'_> {
         UnixFSRef { client: self }
     }
+
+    /// Resolve an IPNS name to a CID path.
+    ///
+    /// Calls `/api/v0/name/resolve` on the IPFS node. The name should be a
+    /// peer ID or IPNS key name (e.g., "k51qzi5uqu5d..." or "self").
+    ///
+    /// Returns the resolved path (e.g., "/ipfs/QmHash...").
+    pub async fn name_resolve(&self, name: &str) -> anyhow::Result<String> {
+        let url = format!(
+            "{}/api/v0/name/resolve?arg={}&nocache=true",
+            self.base_url, name
+        );
+        let response = self
+            .http_client
+            .post(&url)
+            .send()
+            .await
+            .context("IPNS name resolve request failed")?;
+        let status = response.status();
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse name resolve response")?;
+        if !status.is_success() {
+            let msg = body["Message"]
+                .as_str()
+                .unwrap_or("unknown error");
+            anyhow::bail!("IPNS name resolve failed ({}): {}", status, msg);
+        }
+        body["Path"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("name resolve response missing Path field"))
+    }
+
+    /// Publish a CID under this node's IPNS key.
+    ///
+    /// Calls `/api/v0/name/publish` on the IPFS node. The path should be an
+    /// IPFS path (e.g., "/ipfs/QmHash...").
+    ///
+    /// The `key` parameter selects which IPNS key to publish under
+    /// (default: "self" for the node's identity key).
+    pub async fn name_publish(&self, path: &str, key: &str) -> anyhow::Result<String> {
+        let url = format!(
+            "{}/api/v0/name/publish?arg={}&key={}",
+            self.base_url, path, key
+        );
+        let response = self
+            .http_client
+            .post(&url)
+            .send()
+            .await
+            .context("IPNS name publish request failed")?;
+        let status = response.status();
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse name publish response")?;
+        if !status.is_success() {
+            let msg = body["Message"]
+                .as_str()
+                .unwrap_or("unknown error");
+            anyhow::bail!("IPNS name publish failed ({}): {}", status, msg);
+        }
+        body["Name"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("name publish response missing Name field"))
+    }
 }
 
 /// Unixfs API for file and directory operations

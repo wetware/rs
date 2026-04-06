@@ -6,6 +6,7 @@ members = [
     "crates/cache",
     "crates/membrane",
     "crates/schema-id",
+    "crates/stem",
     "crates/guest/auth",
     "std/system",
     "crates/kernel",
@@ -67,6 +68,7 @@ capnp = "0.23.2"
 capnp-rpc = "0.23.0"
 membrane = { path = "crates/membrane" }
 atom = { path = "crates/atom" }
+stem = { path = "crates/stem" }
 cache = { path = "crates/cache" }
 libp2p-stream = "0.3.0-alpha"
 blake3 = "1"
