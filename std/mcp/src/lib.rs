@@ -15,7 +15,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::pin::Pin;
 use std::rc::Rc;
 
@@ -570,6 +570,8 @@ impl Guest for McpCell {
 wasip2::cli::command::export!(McpCell);
 
 fn run_impl() {
+    use futures::io::{AsyncBufReadExt, BufReader};
+
     let env = Rc::new(RefCell::new(Env::new()));
     let ctx = Rc::new(RefCell::new(McpSession {
         host: None,
@@ -577,10 +579,17 @@ fn run_impl() {
     }));
     let dispatch_table = Rc::new(build_dispatch());
 
-    // Connect to the membrane via the WIT streams connection (not stdin/stdout).
-    // This establishes a Cap'n Proto RPC channel to the host for cap grafting.
-    // Meanwhile, WASI stdin/stdout remain free for JSON-RPC I/O.
-    system::run(|membrane: Membrane| {
+    // Register stdin in the poll set so poll_loop can service it
+    // concurrently with the RPC transport (WIT channel).
+    let stdin_stream = wasip2::cli::stdin::get_stdin();
+    let stdin_reader = system::StreamReader::new(stdin_stream);
+    let mut poll_set = system::PollSet::new();
+    poll_set.push(stdin_reader.pollable());
+
+    // Connect to the membrane via the WIT streams connection.
+    // stdin/stdout remain free for JSON-RPC I/O. The poll set
+    // ensures poll_loop wakes on stdin data as well as RPC messages.
+    system::run_with(poll_set, |membrane: Membrane| {
         let env = Rc::clone(&env);
         let ctx = Rc::clone(&ctx);
         let dispatch_table = Rc::clone(&dispatch_table);
@@ -622,10 +631,6 @@ fn run_impl() {
                     ("import", make_import_handler()),
                 ];
                 for (name, handler) in cap_handlers {
-                    // Each cap needs a unique schema_cid so that
-                    // with-effect-handler can distinguish them.
-                    // Use the cap name as a placeholder CID until
-                    // real schema CIDs are wired through the graft.
                     e.set(
                         name.to_string(),
                         Val::Cap {
@@ -667,22 +672,29 @@ fn run_impl() {
                 }
             }
 
-            // 4. JSON-RPC loop on stdin/stdout.
-            let stdin = std::io::stdin();
-            let reader = stdin.lock();
-            for line in reader.lines() {
-                match line {
-                    Ok(l) if l.trim().is_empty() => continue,
-                    Ok(l) => {
+            // 4. JSON-RPC loop on async stdin.
+            //    BufReader + read_line yields Pending when stdin is empty,
+            //    allowing poll_loop to service both stdin and RPC concurrently.
+            let mut buf_reader = BufReader::new(stdin_reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match buf_reader.read_line(&mut line).await {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
                         let cont = handle_request(
-                            &l, &env, &ctx, &dispatch_table,
+                            trimmed, &env, &ctx, &dispatch_table,
                             &tools_list, &cap_names,
                         ).await;
                         if !cont {
                             break;
                         }
                     }
-                    Err(_) => break, // stdin EOF or error
+                    Err(_) => break, // stdin error
                 }
             }
 
@@ -690,4 +702,245 @@ fn run_impl() {
             Ok(())
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Tests — pure logic only, no WASI/WASM dependencies
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- is_safe_identifier --
+
+    #[test]
+    fn safe_identifier_alphanumeric() {
+        assert!(is_safe_identifier("peers"));
+        assert!(is_safe_identifier("findProviders123"));
+    }
+
+    #[test]
+    fn safe_identifier_with_hyphens_and_underscores() {
+        assert!(is_safe_identifier("find-providers"));
+        assert!(is_safe_identifier("my_tool"));
+        assert!(is_safe_identifier("a-b_c"));
+    }
+
+    #[test]
+    fn safe_identifier_rejects_empty() {
+        assert!(!is_safe_identifier(""));
+    }
+
+    #[test]
+    fn safe_identifier_rejects_injection_chars() {
+        assert!(!is_safe_identifier("foo bar"));
+        assert!(!is_safe_identifier("foo\"bar"));
+        assert!(!is_safe_identifier("foo)bar"));
+        assert!(!is_safe_identifier("foo(bar"));
+        assert!(!is_safe_identifier(":keyword"));
+        assert!(!is_safe_identifier("foo;bar"));
+    }
+
+    // -- glia_escape --
+
+    #[test]
+    fn glia_escape_passthrough() {
+        assert_eq!(glia_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn glia_escape_quotes() {
+        assert_eq!(glia_escape(r#"say "hi""#), r#"say \"hi\""#);
+    }
+
+    #[test]
+    fn glia_escape_backslashes() {
+        assert_eq!(glia_escape(r"path\to\file"), r"path\\to\\file");
+    }
+
+    #[test]
+    fn glia_escape_both() {
+        assert_eq!(glia_escape(r#"a\"b"#), r#"a\\\"b"#);
+    }
+
+    #[test]
+    fn glia_escape_empty() {
+        assert_eq!(glia_escape(""), "");
+    }
+
+    // -- tool_call_to_glia --
+
+    fn args(json: serde_json::Value) -> serde_json::Value {
+        json
+    }
+
+    #[test]
+    fn tool_call_host_id() {
+        let result = tool_call_to_glia("host", &args(serde_json::json!({"action": "id"})));
+        assert_eq!(result, Some("(perform host :id)".into()));
+    }
+
+    #[test]
+    fn tool_call_host_peers() {
+        let result = tool_call_to_glia("host", &args(serde_json::json!({"action": "peers"})));
+        assert_eq!(result, Some("(perform host :peers)".into()));
+    }
+
+    #[test]
+    fn tool_call_host_addrs() {
+        let result = tool_call_to_glia("host", &args(serde_json::json!({"action": "addrs"})));
+        assert_eq!(result, Some("(perform host :addrs)".into()));
+    }
+
+    #[test]
+    fn tool_call_host_unknown_action() {
+        let result = tool_call_to_glia("host", &args(serde_json::json!({"action": "delete"})));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn tool_call_routing_provide() {
+        let result = tool_call_to_glia(
+            "routing",
+            &args(serde_json::json!({"action": "provide", "cid": "QmFoo"})),
+        );
+        assert_eq!(
+            result,
+            Some(r#"(perform routing :provide (bytes "QmFoo"))"#.into())
+        );
+    }
+
+    #[test]
+    fn tool_call_routing_find_providers() {
+        let result = tool_call_to_glia(
+            "routing",
+            &args(serde_json::json!({"action": "find_providers", "cid": "QmBar"})),
+        );
+        assert_eq!(
+            result,
+            Some(r#"(perform routing :find-providers (bytes "QmBar"))"#.into())
+        );
+    }
+
+    #[test]
+    fn tool_call_runtime_run() {
+        let result = tool_call_to_glia(
+            "runtime",
+            &args(serde_json::json!({"action": "run", "wasm_path": "bin/app.wasm"})),
+        );
+        assert_eq!(
+            result,
+            Some(r#"(perform runtime :run (load "bin/app.wasm"))"#.into())
+        );
+    }
+
+    #[test]
+    fn tool_call_identity_sign() {
+        let result = tool_call_to_glia(
+            "identity",
+            &args(serde_json::json!({"action": "sign", "domain": "test", "nonce": 42})),
+        );
+        assert_eq!(
+            result,
+            Some(r#"(perform identity :sign "test" 42)"#.into())
+        );
+    }
+
+    #[test]
+    fn tool_call_unknown_tool() {
+        let result = tool_call_to_glia("foobar", &args(serde_json::json!({"action": "x"})));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn tool_call_rejects_injection_in_action() {
+        // Action with injection chars should be rejected by is_safe_identifier
+        let result = tool_call_to_glia(
+            "host",
+            &args(serde_json::json!({"action": "id) (evil"})),
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn tool_call_escapes_user_input() {
+        // CID with quotes should be escaped, not injected
+        let result = tool_call_to_glia(
+            "routing",
+            &args(serde_json::json!({"action": "provide", "cid": r#"Qm")(evil"#})),
+        );
+        assert_eq!(
+            result,
+            Some(r#"(perform routing :provide (bytes "Qm\")(evil"))"#.into())
+        );
+    }
+
+    // -- tool_def_for_cap --
+
+    #[test]
+    fn tool_def_known_caps() {
+        for name in &["host", "routing", "runtime", "identity", "http-client", "import"] {
+            assert!(
+                tool_def_for_cap(name).is_some(),
+                "expected tool def for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_def_unknown_cap() {
+        assert!(tool_def_for_cap("foobar").is_none());
+    }
+
+    #[test]
+    fn tool_def_has_required_fields() {
+        let def = tool_def_for_cap("host").unwrap();
+        assert!(def.get("name").is_some());
+        assert!(def.get("description").is_some());
+        assert!(def.get("inputSchema").is_some());
+        let schema = def.get("inputSchema").unwrap();
+        assert_eq!(schema.get("type").unwrap(), "object");
+    }
+
+    // -- build_tools_list --
+
+    #[test]
+    fn build_tools_list_empty_caps() {
+        let list = build_tools_list(&[]);
+        let tools = list.get("tools").unwrap().as_array().unwrap();
+        assert_eq!(tools.len(), 1); // eval only
+        assert_eq!(tools[0].get("name").unwrap(), "eval");
+    }
+
+    #[test]
+    fn build_tools_list_known_caps() {
+        let caps = vec!["host".into(), "routing".into()];
+        let list = build_tools_list(&caps);
+        let tools = list.get("tools").unwrap().as_array().unwrap();
+        assert_eq!(tools.len(), 3); // host + routing + eval
+        assert_eq!(tools[0].get("name").unwrap(), "host");
+        assert_eq!(tools[1].get("name").unwrap(), "routing");
+        assert_eq!(tools[2].get("name").unwrap(), "eval");
+    }
+
+    #[test]
+    fn build_tools_list_unknown_caps_filtered() {
+        let caps = vec!["host".into(), "unknown_thing".into()];
+        let list = build_tools_list(&caps);
+        let tools = list.get("tools").unwrap().as_array().unwrap();
+        assert_eq!(tools.len(), 2); // host + eval (unknown filtered)
+    }
+
+    // -- initialize_result --
+
+    #[test]
+    fn initialize_result_structure() {
+        let result = initialize_result();
+        assert_eq!(result.get("protocolVersion").unwrap(), PROTOCOL_VERSION);
+        let info = result.get("serverInfo").unwrap();
+        assert_eq!(info.get("name").unwrap(), SERVER_NAME);
+        assert_eq!(info.get("version").unwrap(), SERVER_VERSION);
+        assert!(result.get("capabilities").unwrap().get("tools").is_some());
+    }
 }

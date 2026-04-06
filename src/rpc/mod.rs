@@ -2128,4 +2128,100 @@ mod tests {
             })
             .await;
     }
+
+    // =========================================================================
+    // ByteStream tests
+    // =========================================================================
+
+    /// Helper: create a ByteStream client over in-memory RPC.
+    fn setup_byte_stream_rpc(
+        mode: StreamMode,
+    ) -> (system_capnp::byte_stream::Client, io::DuplexStream) {
+        let (host_side, guest_side) = io::duplex(4096);
+        let stream_impl = ByteStreamImpl::new(guest_side, mode);
+        let client: system_capnp::byte_stream::Client = capnp_rpc::new_client(stream_impl);
+        (client, host_side)
+    }
+
+    #[tokio::test]
+    async fn test_byte_stream_write_and_read_bidirectional() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (client, mut host) = setup_byte_stream_rpc(StreamMode::Bidirectional);
+
+                // Write through the cap.
+                let mut req = client.write_request();
+                req.get().set_data(b"hello");
+                req.send().promise.await.unwrap();
+
+                // Read on the host side.
+                let mut buf = [0u8; 16];
+                let n = host.read(&mut buf).await.unwrap();
+                assert_eq!(&buf[..n], b"hello");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_byte_stream_read_only_rejects_write() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (client, _host) = setup_byte_stream_rpc(StreamMode::ReadOnly);
+                let mut req = client.write_request();
+                req.get().set_data(b"nope");
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "write to read-only stream should fail");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_byte_stream_write_only_rejects_read() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (client, _host) = setup_byte_stream_rpc(StreamMode::WriteOnly);
+                let mut req = client.read_request();
+                req.get().set_max_bytes(1024);
+                let result = req.send().promise.await;
+                assert!(result.is_err(), "read from write-only stream should fail");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_byte_stream_read_returns_host_data() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (client, mut host) = setup_byte_stream_rpc(StreamMode::Bidirectional);
+
+                // Write from host side.
+                use tokio::io::AsyncWriteExt;
+                host.write_all(b"from host").await.unwrap();
+                host.flush().await.unwrap();
+
+                // Read through the cap.
+                let mut req = client.read_request();
+                req.get().set_max_bytes(1024);
+                let resp = req.send().promise.await.unwrap();
+                let data = resp.get().unwrap().get_data().unwrap();
+                assert_eq!(data, b"from host");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_byte_stream_close() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (client, _host) = setup_byte_stream_rpc(StreamMode::Bidirectional);
+                let result = client.close_request().send().promise.await;
+                assert!(result.is_ok(), "close should succeed");
+            })
+            .await;
+    }
 }
