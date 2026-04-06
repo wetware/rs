@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `PollSet` for multiplexing extra WASI pollables (stdin, listeners) alongside RPC in guest poll_loop
+- `system::run_with(poll_set, f)` entry point for guests needing concurrent async I/O
+- `PollLoopExit` with cycle counter for diagnosing RPC connection drops
+- 51 new tests: MCP tool dispatch, caps effect handlers, ByteStream I/O, HttpClient allowlist, membrane E2E
 - `ww perform install` — bootstrap ~/.ww user layer (boot, bin, lib, etc/init.d). Idempotent.
 - `ww doctor` — environment health check (rustc, cargo, wasm32-wasip2, optional Kubo/Ollama)
 - MCP dynamic tools: per-capability MCP tools generated from membrane graft (host, routing, runtime, identity, http-client, import). Each tool has per-action parameter schemas. eval remains primary interface.
@@ -14,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - TODOS.md: Export.schema population, MCP resources, MCP prompts, eval error improvements
 
 ### Changed
+- MCP cell: async stdin via StreamReader + PollSet (fixes host:peers connection drop)
 - MCP cell: tools/list returns per-cap tools dynamically instead of single static eval tool
 - .agents/prompt.md: document MCP tools and ~/.ww workflow for AI agents
 - Extract shared effect handlers into std/caps crate (shell + MCP share, no duplication)
@@ -23,6 +28,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Guest runtime: unify three duplicate poll loops (drive_rpc_only, drive_rpc_with_future, block_on) into a single generic `poll_loop<T>()`
 - Guest runtime: replace `futures::noop_waker`/`poll_unpin` with `std::task::Waker::noop()`/`Pin::new().poll()`
 - Glia effect handler: simplify state machine (factor out repeated handler stack push, remove no-op match)
+
+### Fixed
+- Shell cell: missing import handler (broke all eval with "target must be a keyword or cap")
+- Shell E2E tests: WASM path mismatch (tests were silently skipping)
 
 ### Removed
 - Dead code: `RpcDriver`, `DriveOutcome`, `drive_until`, `block_on` (zero callers)
