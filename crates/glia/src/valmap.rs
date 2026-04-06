@@ -85,9 +85,7 @@ impl Eq for ValMap {}
 
 impl core::fmt::Debug for ValMap {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_map()
-            .entries(self.0.iter())
-            .finish()
+        f.debug_map().entries(self.0.iter()).finish()
     }
 }
 
