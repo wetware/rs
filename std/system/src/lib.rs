@@ -1,3 +1,50 @@
+//! Guest runtime for Wetware WASM cells.
+//!
+//! # Execution Model
+//!
+//! Each WASM guest runs inside a single-threaded wasmtime `Store` on a
+//! tokio `LocalSet` worker.  The host spawns two tasks on the same
+//! `LocalSet`: the WASM guest (via `call_run_async`) and a Cap'n Proto
+//! RPC system that bridges the guest's data streams to the host's
+//! membrane.
+//!
+//! Cooperative scheduling works through two mechanisms:
+//!
+//! 1. **Fuel yield** (`fuel_async_yield_interval`): wasmtime suspends
+//!    the guest every 10K instructions (see `sched::YIELD_INTERVAL`),
+//!    returning `Poll::Pending` from `call_run_async`.  This gives the
+//!    host-side RPC task time to process messages.
+//!
+//! 2. **WASI poll**: when the guest calls `wasi:io/poll#poll`, wasmtime
+//!    makes a host call that yields back to the tokio executor.  The
+//!    host-side RPC task can run during this yield.
+//!
+//! The `poll_loop` function is the guest's cooperative scheduler.  It
+//! alternates between polling the capnp RPC system (to process inbound
+//! messages) and polling user work (the guest's async entry point).
+//!
+//! # Why `Waker::noop()`?
+//!
+//! The poll loop creates a noop waker because WASI poll is the real
+//! wakeup mechanism, not the Rust waker.  When `StreamReader::poll_read`
+//! returns `Pending` with an empty buffer, it calls `wake_by_ref()` —
+//! but this is a no-op.  The actual wakeup happens when `wasi_poll::poll`
+//! returns because the reader pollable is ready.  This is correct for
+//! single-threaded WASM where there's no cross-task notification needed.
+//!
+//! # Write-flush invariant
+//!
+//! The `WRITE_OCCURRED` thread-local tracks whether the RPC system or
+//! user work wrote bytes during the current poll cycle.  If writes
+//! occurred, the loop polls the RPC system again (to flush outbound
+//! messages) and includes the writer pollable in the WASI poll set.
+//! If no writes occurred, only the reader and an idle timeout are polled.
+//!
+//! The idle timeout (100ms) is a safety net for missed wakeups: the
+//! host's `AsyncReadStream` background task can race with the
+//! foreground pollable check, causing a missed wakeup that would
+//! otherwise block the guest indefinitely.
+
 use capnp::capability::FromClientHook;
 use capnp_rpc::rpc_twoparty_capnp::Side;
 use capnp_rpc::twoparty::VatNetwork;
@@ -8,14 +55,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
 // Tracks whether any data was written during the current poll cycle.
-//
-// The guest is single-threaded WASM, so a thread-local `Cell<bool>` is
-// race-free.  This flag replaces the racy `pollables.writer.ready()`
-// check that caused deadlocks during multi-cycle writes: the host-side
-// `AsyncWriteStream` worker could replenish the write budget between
-// the RPC poll and the readiness check, making the loop think it was
-// idle and block on reader-only — while the RPC system still had
-// pending writes.
+// Single-threaded WASM, so a thread-local Cell<bool> is race-free.
 thread_local! {
     static WRITE_OCCURRED: Cell<bool> = const { Cell::new(false) };
 }
@@ -185,6 +225,33 @@ pub struct StreamPollables {
     pub writer: WasiPollable,
 }
 
+/// Additional pollables to include in the guest's poll set.
+///
+/// `poll_loop` always waits on the RPC transport internally.
+/// `PollSet` holds extra streams the guest wants serviced concurrently
+/// (stdin, listeners, extra channels, etc.).
+pub struct PollSet {
+    pollables: Vec<WasiPollable>,
+}
+
+impl PollSet {
+    pub fn new() -> Self {
+        Self {
+            pollables: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, p: WasiPollable) {
+        self.pollables.push(p);
+    }
+}
+
+impl Default for PollSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Safety-net timeout for idle poll cycles.
 ///
 /// When the polling loop has no pending writes and made no progress, it blocks
@@ -237,6 +304,7 @@ pub struct RpcSession<C> {
     pub rpc_system: RpcSystem<Side>,
     pub client: C,
     pub pollables: StreamPollables,
+    pub poll_set: PollSet,
 }
 
 impl<C: FromClientHook> RpcSession<C> {
@@ -263,7 +331,14 @@ impl<C: FromClientHook> RpcSession<C> {
             rpc_system,
             client,
             pollables,
+            poll_set: PollSet::new(),
         }
+    }
+
+    /// Register additional pollables to service concurrently with RPC.
+    pub fn with_poll_set(mut self, poll_set: PollSet) -> Self {
+        self.poll_set = poll_set;
+        self
     }
 
     /// Leak resources to avoid WASI cleanup panics at process exit.
@@ -275,6 +350,45 @@ impl<C: FromClientHook> RpcSession<C> {
         std::mem::forget(self.client);
         std::mem::forget(self.rpc_system);
         std::mem::forget(self.pollables);
+        std::mem::forget(self.poll_set);
+    }
+}
+
+/// Why the poll loop exited without the user future completing.
+///
+/// The `cycle` field counts how many poll-loop iterations completed before
+/// the RPC connection died.  Low values (< 5) mean the connection dropped
+/// during bootstrap; high values mean it dropped mid-request.
+#[derive(Debug)]
+pub enum PollLoopExit {
+    /// RPC connection closed cleanly (remote side hung up).
+    RpcClosed { cycle: u64 },
+    /// RPC connection closed with an error.
+    RpcError { cycle: u64, error: capnp::Error },
+}
+
+impl PollLoopExit {
+    pub fn cycle(&self) -> u64 {
+        match self {
+            PollLoopExit::RpcClosed { cycle } => *cycle,
+            PollLoopExit::RpcError { cycle, .. } => *cycle,
+        }
+    }
+}
+
+impl std::fmt::Display for PollLoopExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PollLoopExit::RpcClosed { cycle } => {
+                write!(
+                    f,
+                    "RPC connection closed by host (after {cycle} poll cycles)"
+                )
+            }
+            PollLoopExit::RpcError { cycle, error } => {
+                write!(f, "RPC connection error after {cycle} poll cycles: {error}")
+            }
+        }
     }
 }
 
@@ -283,57 +397,81 @@ impl<C: FromClientHook> RpcSession<C> {
 /// Each iteration: reset write flag → poll RPC → poll user work → flush
 /// RPC writes → block on WASI I/O.
 ///
-/// Returns `Some(value)` when `poll_work` returns `Poll::Ready(value)`.
-/// Returns `None` if the RPC connection closes first.
+/// Returns `Ok(value)` when `poll_work` returns `Poll::Ready(value)`.
+/// Returns `Err(PollLoopExit)` if the RPC connection closes first.
 fn poll_loop<T>(
     rpc_system: &mut RpcSystem<Side>,
     pollables: &StreamPollables,
+    extras: &PollSet,
     mut poll_work: impl FnMut(&mut Context<'_>) -> Poll<T>,
-) -> Option<T> {
+) -> Result<T, PollLoopExit> {
     let mut rpc_done = false;
+    let mut rpc_exit: Option<PollLoopExit> = None;
     let mut idle_timeout = new_idle_timeout();
+    let mut cycle: u64 = 0;
     loop {
         let mut cx = Context::from_waker(Waker::noop());
-        let mut made_progress = false;
         WRITE_OCCURRED.with(|f| f.set(false));
 
-        // Drive RPC state machine (process inbound messages).
+        // ── Phase 1: Drive RPC (process inbound messages) ──
         if !rpc_done {
-            if let Poll::Ready(_) = Pin::new(&mut *rpc_system).poll(&mut cx) {
+            if let Poll::Ready(result) = Pin::new(&mut *rpc_system).poll(&mut cx) {
                 rpc_done = true;
-                made_progress = true;
+                rpc_exit = Some(match result {
+                    Ok(()) => PollLoopExit::RpcClosed { cycle },
+                    Err(e) => PollLoopExit::RpcError { cycle, error: e },
+                });
             }
         }
 
-        // Drive user work.
+        // ── Phase 2: Drive user work ──
         if let Poll::Ready(val) = poll_work(&mut cx) {
-            return Some(val);
+            return Ok(val);
         }
 
-        // Flush any writes queued by user work before blocking on WASI poll.
-        if !rpc_done {
-            if let Poll::Ready(_) = Pin::new(&mut *rpc_system).poll(&mut cx) {
+        // ── Phase 3: Flush writes ──
+        //
+        // User work may have queued outbound RPC messages.  Poll the RPC
+        // system again so those bytes reach the StreamWriter before we
+        // decide whether to wait on the writer pollable.
+        let wrote = WRITE_OCCURRED.with(|f| f.get());
+        if !rpc_done && wrote {
+            if let Poll::Ready(result) = Pin::new(&mut *rpc_system).poll(&mut cx) {
                 rpc_done = true;
-                made_progress = true;
+                rpc_exit = Some(match result {
+                    Ok(()) => PollLoopExit::RpcClosed { cycle },
+                    Err(e) => PollLoopExit::RpcError { cycle, error: e },
+                });
             }
         }
 
         if rpc_done {
-            return None;
+            return Err(rpc_exit.unwrap_or(PollLoopExit::RpcClosed { cycle }));
         }
 
-        let wrote = WRITE_OCCURRED.with(|f| f.get());
-
-        if wrote || made_progress {
-            if !pollables.writer.ready() {
-                wasi_poll::poll(&[&pollables.reader, &pollables.writer]);
-            }
-        } else {
-            wasi_poll::poll(&[&pollables.reader, &idle_timeout]);
-            if idle_timeout.ready() {
-                idle_timeout = new_idle_timeout();
-            }
+        // ── Phase 4: Block on WASI I/O ──
+        //
+        // Build a poll set from the RPC transport + any extra pollables
+        // registered by the guest (stdin, listeners, etc.).
+        // If writes occurred, include the writer so the host can drain it.
+        // Otherwise, include the idle timeout as a missed-wakeup safety net.
+        let mut wasi_set: Vec<&WasiPollable> = Vec::with_capacity(2 + extras.pollables.len() + 1);
+        wasi_set.push(&pollables.reader);
+        if wrote {
+            wasi_set.push(&pollables.writer);
         }
+        for p in &extras.pollables {
+            wasi_set.push(p);
+        }
+        if !wrote {
+            wasi_set.push(&idle_timeout);
+        }
+        wasi_poll::poll(&wasi_set);
+        if !wrote && idle_timeout.ready() {
+            idle_timeout = new_idle_timeout();
+        }
+
+        cycle += 1;
     }
 }
 
@@ -371,8 +509,16 @@ pub fn serve_stdio(bootstrap: capnp::capability::Client) {
     let network = VatNetwork::new(reader, writer, Side::Server, Default::default());
     let mut rpc_system = RpcSystem::new(Box::new(network), Some(bootstrap));
 
-    // Drive RPC only (no user future) — poll_loop returns None when RPC closes.
-    let _: Option<()> = poll_loop(&mut rpc_system, &pollables, |_| Poll::Pending);
+    // Drive RPC only (no user future) — poll_loop returns Err when RPC closes.
+    let empty_extras = PollSet::new();
+    match poll_loop(&mut rpc_system, &pollables, &empty_extras, |_| {
+        Poll::<()>::Pending
+    }) {
+        Err(ref exit @ PollLoopExit::RpcError { .. }) => {
+            log::error!("serve_stdio: {exit}");
+        }
+        _ => {}
+    }
 
     // Forget resources to avoid WASI cleanup errors.
     std::mem::forget(rpc_system);
@@ -433,6 +579,19 @@ where
     run_with_session(RpcSession::<C>::connect(), f)
 }
 
+/// Like [`run`], but with additional pollables in the poll set.
+///
+/// Use when the guest needs to service extra streams (e.g. stdin)
+/// concurrently with the RPC connection.
+pub fn run_with<C, F, Fut>(poll_set: PollSet, f: F)
+where
+    C: FromClientHook + Clone,
+    F: FnOnce(C) -> Fut,
+    Fut: Future<Output = Result<(), capnp::Error>>,
+{
+    run_with_session(RpcSession::<C>::connect().with_poll_set(poll_set), f)
+}
+
 fn run_with_session<C, F, Fut>(mut session: RpcSession<C>, f: F)
 where
     C: FromClientHook + Clone,
@@ -442,9 +601,20 @@ where
     let client = session.client.clone();
     let mut future = Box::pin(f(client));
 
-    let _ = poll_loop(&mut session.rpc_system, &session.pollables, |cx| {
-        future.as_mut().poll(cx)
-    });
+    match poll_loop(
+        &mut session.rpc_system,
+        &session.pollables,
+        &session.poll_set,
+        |cx| future.as_mut().poll(cx),
+    ) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            log::error!("guest error: {e}");
+        }
+        Err(exit) => {
+            log::error!("guest aborted: {exit}");
+        }
+    }
 
     // Forget to avoid dropping Cap'n Proto objects which would trigger
     // WASI resource cleanup errors.

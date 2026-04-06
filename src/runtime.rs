@@ -486,6 +486,8 @@ pub struct EpochService {
     pub confirmation_depth: u64,
     pub ipfs_client: crate::ipfs::HttpClient,
     pub cid_tree: Option<std::sync::Arc<crate::vfs::CidTree>>,
+    /// Graceful shutdown: capabilities have this long to finish before epoch advances.
+    pub drain_duration: std::time::Duration,
 }
 
 impl Service for EpochService {
@@ -502,6 +504,7 @@ impl Service for EpochService {
                     self.confirmation_depth,
                     self.ipfs_client,
                     self.cid_tree,
+                    self.drain_duration,
                 ) => result,
                 _ = shutdown.changed() => {
                     tracing::info!("epoch shutting down");

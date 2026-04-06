@@ -20,7 +20,7 @@ use ww::shell_capnp;
 const SHELL_IMAGE_PATH: &str = "std/shell";
 
 fn shell_wasm_exists() -> bool {
-    std::path::Path::new("std/shell/boot/main.wasm").exists()
+    std::path::Path::new("std/shell/bin/shell.wasm").exists()
 }
 
 /// Spawn a shell cell on the executor pool and return a Shell client.
@@ -33,7 +33,7 @@ async fn spawn_shell_on_pool(pool: &ExecutorPool) -> Result<shell_capnp::shell::
     let (test_end, cell_end) = tokio::io::duplex(64 * 1024);
 
     // Read the WASM bytes (Send) to move into the factory.
-    let wasm = std::fs::read("std/shell/boot/main.wasm")
+    let wasm = std::fs::read("std/shell/bin/shell.wasm")
         .map_err(|e| anyhow::anyhow!("failed to read shell WASM: {e}"))?;
 
     pool.spawn(SpawnRequest {
@@ -322,6 +322,82 @@ async fn test_shell_eval_empty_input() {
             let (result, is_error) = eval(&shell, "").await;
             assert!(!is_error, "empty input should not error");
             assert!(result.is_empty(), "empty input result: '{result}'");
+        })
+        .await;
+}
+
+// ---------------------------------------------------------------------------
+// Membrane capability tests — exercise the real WASM→RPC→Host path
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_shell_host_id() {
+    if !shell_wasm_exists() {
+        eprintln!("SKIP: shell WASM not built (run `make shell`)");
+        return;
+    }
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_shutdown_tx, shutdown_rx) = watch::channel(());
+            let pool = ExecutorPool::new(1, shutdown_rx);
+            let shell = spawn_shell_on_pool(&pool).await.expect("spawn shell");
+            wait_ready(&shell).await;
+
+            let (result, is_error) = eval(&shell, "(perform host :id)").await;
+            assert!(!is_error, "host :id should not error: {result}");
+            // Result is a bs58-encoded peer ID string — non-empty.
+            assert!(!result.is_empty(), "peer ID should not be empty");
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn test_shell_host_addrs() {
+    if !shell_wasm_exists() {
+        eprintln!("SKIP: shell WASM not built (run `make shell`)");
+        return;
+    }
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_shutdown_tx, shutdown_rx) = watch::channel(());
+            let pool = ExecutorPool::new(1, shutdown_rx);
+            let shell = spawn_shell_on_pool(&pool).await.expect("spawn shell");
+            wait_ready(&shell).await;
+
+            let (result, is_error) = eval(&shell, "(perform host :addrs)").await;
+            assert!(!is_error, "host :addrs should not error: {result}");
+            // In test mode (no swarm), addrs returns an empty list.
+            assert!(
+                result == "()" || result.starts_with('('),
+                "addrs should be a list: {result}"
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn test_shell_host_peers() {
+    if !shell_wasm_exists() {
+        eprintln!("SKIP: shell WASM not built (run `make shell`)");
+        return;
+    }
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (_shutdown_tx, shutdown_rx) = watch::channel(());
+            let pool = ExecutorPool::new(1, shutdown_rx);
+            let shell = spawn_shell_on_pool(&pool).await.expect("spawn shell");
+            wait_ready(&shell).await;
+
+            let (result, is_error) = eval(&shell, "(perform host :peers)").await;
+            assert!(!is_error, "host :peers should not error: {result}");
+            // In test mode (no swarm), peers returns an empty list.
+            assert!(
+                result == "()" || result.starts_with('('),
+                "peers should be a list: {result}"
+            );
         })
         .await;
 }

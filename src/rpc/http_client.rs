@@ -199,3 +199,89 @@ impl http_capnp::http_client::Server for EpochGuardedHttpProxy {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use membrane::epoch::Epoch;
+    use tokio::sync::watch;
+
+    fn test_proxy(allowed_hosts: Vec<String>) -> EpochGuardedHttpProxy {
+        let epoch = Epoch {
+            seq: 1,
+            head: vec![],
+            adopted_block: 0,
+        };
+        let (_tx, rx) = watch::channel(epoch);
+        let guard = EpochGuard {
+            issued_seq: 1,
+            receiver: rx,
+        };
+        EpochGuardedHttpProxy::new(allowed_hosts, guard)
+    }
+
+    fn stale_proxy(allowed_hosts: Vec<String>) -> EpochGuardedHttpProxy {
+        let epoch = Epoch {
+            seq: 2,
+            head: vec![],
+            adopted_block: 0,
+        };
+        let (_tx, rx) = watch::channel(epoch);
+        let guard = EpochGuard {
+            issued_seq: 1, // stale — epoch advanced
+            receiver: rx,
+        };
+        EpochGuardedHttpProxy::new(allowed_hosts, guard)
+    }
+
+    #[test]
+    fn allowlist_permits_listed_host() {
+        let proxy = test_proxy(vec!["example.com".into()]);
+        assert!(proxy.validate_request("https://example.com/path").is_ok());
+    }
+
+    #[test]
+    fn allowlist_rejects_unlisted_host() {
+        let proxy = test_proxy(vec!["example.com".into()]);
+        let err = proxy.validate_request("https://evil.com/path").unwrap_err();
+        assert!(err.to_string().contains("not in allowlist"));
+    }
+
+    #[test]
+    fn empty_allowlist_permits_all() {
+        let proxy = test_proxy(vec![]);
+        assert!(proxy
+            .validate_request("https://anything.example.org/x")
+            .is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_url() {
+        let proxy = test_proxy(vec![]);
+        let err = proxy.validate_request("not a url").unwrap_err();
+        assert!(err.to_string().contains("invalid URL"));
+    }
+
+    #[test]
+    fn rejects_url_without_host() {
+        let proxy = test_proxy(vec![]);
+        let err = proxy.validate_request("data:text/plain,hello").unwrap_err();
+        assert!(err.to_string().contains("no host"));
+    }
+
+    #[test]
+    fn stale_epoch_rejects_request() {
+        let proxy = stale_proxy(vec![]);
+        let err = proxy.validate_request("https://example.com").unwrap_err();
+        assert!(err.to_string().contains("staleEpoch"));
+    }
+
+    #[test]
+    fn allowlist_does_not_match_subdomains() {
+        let proxy = test_proxy(vec!["example.com".into()]);
+        let err = proxy
+            .validate_request("https://sub.example.com/path")
+            .unwrap_err();
+        assert!(err.to_string().contains("not in allowlist"));
+    }
+}
