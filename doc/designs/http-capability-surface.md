@@ -157,7 +157,7 @@ for observability only. Intentional deviation from CGI spec.
 | WASM fault (trap, OOB) | `Result`, no panic | Built |
 | Host-side glue panics | `tokio::spawn` per cell | Built |
 | Cell floods stdout | `MAX_RESPONSE_BYTES` (16 MiB) | Built |
-| Cell eats all CPU | AIMD fuel scheduler (wasmtime fuel + call-hook) | Built |
+| Cell eats all CPU | EWMA fuel scheduler (wasmtime fuel + call-hook) | Built |
 | Cell eats all memory | wasmtime `StoreLimits` | TODO |
 | Cell hangs forever | per-request timeout (30s) | TODO |
 | Concurrent request flood | max cells per prefix | TODO (Phase 2) |
@@ -191,7 +191,7 @@ HttpClientBuilder added to graft() return. HttpServer null without
 - [x] wagi-guest crate: env var helpers + CGI response formatting
 - [x] Counter example rewritten as WAGI cell (306 -> 32 lines)
 - [x] Lightweight spawn path in `ExecutorImpl::spawn()`
-- [x] AIMD fuel scheduler (call-hook refueling at host boundaries, 10 unit tests)
+- [x] EWMA fuel scheduler (call-hook refueling at host boundaries, 10 unit tests)
 - [x] Process.kill() via watch channel + tokio::select!
 - [ ] Per-request timeout (30s)
 - [ ] `ww test http` CLI subcommand

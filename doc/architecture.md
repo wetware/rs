@@ -71,7 +71,7 @@ guest execution at the edge.  The table below maps the two models side by side.
 | Runtime | JavaScript / V8 | WASM / Wasmtime |
 | OS threads | Shared pool across isolates | Dedicated OS thread per executor worker |
 | Task scheduling | V8 event loop per isolate | `tokio::task::spawn_local` on a `LocalSet` per worker |
-| Multiplexing | Many isolates per thread (V8-managed) | M:N — many cells per worker (AIMD fuel scheduler) |
+| Multiplexing | Many isolates per thread (V8-managed) | M:N — many cells per worker (EWMA fuel scheduler) |
 | Preemption mechanism | V8 interrupt API (time-based) | Wasmtime fuel counter (instruction-based, deterministic) |
 | CPU-bound guest behavior | Isolate interrupted after CPU time budget | Cell yields every `YIELD_INTERVAL` instructions via `fuel_async_yield_interval` |
 | Cold start | ~0ms (isolate reuse within process) | Per-cell WASM compilation; `Engine` is shared across cells |

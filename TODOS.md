@@ -1,5 +1,13 @@
 # TODOs
 
+## Float equality: align with Clojure semantics (0.0 == -0.0)
+**What:** Normalize -0.0 to 0.0 in both `PartialEq` and `Hash` impls for `Val::Float`. Currently `0.0 != -0.0` because `PartialEq` uses `f64::to_bits()` (bitwise comparison). Clojure treats `(= 0.0 -0.0)` as true (IEEE 754 semantics).
+**Why:** Deviation from Clojure semantics. A map with key `0.0` won't find entries inserted with key `-0.0`. The current behavior is consistent (`Hash` and `PartialEq` agree on `to_bits()`), so no HashMap invariant violation, but it's a footgun for users coming from Clojure.
+**Context:** Fix is small: in `PartialEq` for Float, treat `a.to_bits() == b.to_bits() || (a == 0.0 && b == 0.0)`. In `Hash`, normalize `-0.0` to `0.0` before `to_bits()`. NaN handling (NaN != NaN) can stay as-is (matches both IEEE 754 and Clojure). File: `crates/glia/src/lib.rs` PartialEq and Hash impls.
+**Effort:** XS
+**Priority:** P3
+**Depends on:** Hybrid ValMap (done)
+
 ## Shell session memory limits / TTL
 **What:** Bound memory growth in long-lived shell cell sessions. Each `def` grows the Glia `Env`, each `load` caches bytes in a `thread_local! HashMap` with no eviction. A long-lived session or malicious client can grow WASM linear memory until the host OOMs.
 **Why:** Per-session isolation via VatListener spawn mode means each shell connection is a separate WASM process. But there's no ceiling on how large that process can grow.
@@ -75,21 +83,16 @@
 ## ~~Dual DHT — LAN + WAN content routing~~ ✅
 **RESOLVED:** `kad_lan` field added to `WetwareBehaviour` running `/ipfs/lan/kad/1.0.0` in server mode. Dual-dispatch provide/findProviders with cross-DHT PeerId dedup via `FindRequest`. Kubo peers classified by `is_lan_addr()` into WAN/LAN routing tables. 10 unit tests for extracted helpers. Design doc at `~/.gstack/projects/wetware-ww/lthibault-feat-local-routing-design-20260329-131709.md`.
 
-## Thread-per-subsystem runtime (Pingora-inspired) (#302)
-**What:** Replace the single shared multi-threaded tokio runtime with a thread-per-subsystem topology. Each subsystem (libp2p swarm, HTTP/WAGI, executor, epoch) gets its own OS thread with its own `current_thread` tokio runtime. The executor gets N worker threads for M:N cell scheduling via fuel-based cooperative yielding.
-**Why:** Isolation (cells can't starve the swarm), predictable latency (no cross-subsystem task stealing), foundation for hot restart and per-cell resource accounting.
-**Context:** Inspired by Cloudflare Pingora's threading model, but without the Pingora dependency. `wasmtime::Store` is `!Send`, so executor threads must use `current_thread` + `LocalSet`. AIMD fuel scheduler yields every 10K instructions, enabling cooperative M:N scheduling within each thread. Cross-thread communication stays as tokio channels. Design doc at `~/.gstack/projects/wetware-ww/lthibault-master-design-20260331-182015.md`.
-**Effort:** M-L
-**Priority:** P1
-**Depends on:** AIMD fuel scheduler (done)
+## ~~Thread-per-subsystem runtime (Pingora-inspired) (#302)~~ ✅
+**RESOLVED:** Service trait + Host supervisor + ExecutorPool (M:N cell scheduling). SwarmService, EpochService, WagiService, MetricsService each on dedicated OS threads. EWMA fuel scheduler for cooperative yielding. Design doc: `doc/designs/fuel-scheduling.md`.
 
 ## Metrics-over-WAGI cell
 **What:** A `Cell::http("/metrics")` that exposes executor pool stats (cell counts per worker, spawn channel depth, compilation cache hit rate) as Prometheus-format metrics over the WAGI HTTP path.
 **Why:** Operators need visibility into runtime health without attaching a debugger. Standard Prometheus scraping works with existing monitoring stacks.
-**Context:** Deferred from thread-per-subsystem scope (#302). The executor pool exposes `cell_counts` and `worker_count()` already. CompilationService (when built) will track cache hits/misses. Wire these into a metrics cell that formats as Prometheus text exposition.
+**Context:** MetricsService already serves `/metrics` on `--metrics-addr`. This TODO is about a *WAGI cell* that serves metrics over the HTTP capability path, complementing the admin metrics endpoint. The executor pool exposes `cell_counts` and `worker_count()` already.
 **Effort:** S
-**Priority:** P2
-**Depends on:** WAGI host implementation (Phase 2), CompilationService
+**Priority:** P3
+**Depends on:** CompilationService (for cache hit/miss stats)
 
 ## Worker health monitoring / heartbeats
 **What:** Each executor worker thread emits periodic heartbeat timestamps. A monitor checks for stale workers (no heartbeat in N seconds) and logs warnings.
@@ -97,18 +100,13 @@
 **Context:** Deferred from thread-per-subsystem scope (#302). Implementation: each worker updates an `AtomicU64` timestamp after each fuel yield. A lightweight monitor thread (or the Host supervisor) periodically scans timestamps. Stale = no update in 5s. Log warning with worker ID and last-known cell name.
 **Effort:** S
 **Priority:** P2
-**Depends on:** Thread-per-subsystem runtime (#302)
+**Depends on:** Thread-per-subsystem runtime (done)
 
 ## ~~Nested LocalSet cleanup in spawn_rpc_inner~~ ✅
 **RESOLVED:** `spawn_rpc_inner()` in `src/cell/executor.rs` and both spawn paths in `src/rpc/mod.rs` now use `tokio::task::spawn_local()` targeting the ambient worker `LocalSet` instead of creating nested `LocalSet`s. RPC systems and stderr drains run as sibling tasks on the worker, enabling proper M:N cooperative scheduling.
 
-## WAGI host-side implementation (axum + route table, Phase 2)
-**What:** Implement `--with-http host:port` flag that spawns an axum router. Routes by path prefix from `Cell::http(prefix)` custom section. Each request dispatches a cell spawn to the `ExecutorPool` via `SpawnRequest` channel, pipes CGI env vars + body to stdin, reads CGI response from stdout.
-**Why:** `Cell::http` variant exists in the type system. Phase 1 delivers WAGI adapter, lightweight spawn, and `ww test http` CLI. Phase 2 adds the production HTTP server.
-**Context:** WagiAdapter (`src/dispatcher/wagi.rs`) provides `build_cgi_env()` and `parse_cgi_response()`. All cells now get data_streams + membrane RPC (lightweight flag removed); WAGI cells use stdin/stdout for CGI I/O while accessing host capabilities via the WIT side-channel. axum runs on the dedicated WagiService thread (`current_thread` runtime). WASM execution happens on executor threads. ~100-150 lines for the server + route table.
-**Effort:** M
-**Priority:** P2
-**Depends on:** WAGI adapter (done), lightweight spawn (done), AIMD fuel scheduler (done), thread-per-subsystem runtime (#302)
+## ~~WAGI host-side implementation (axum + route table, Phase 2)~~ ✅
+**RESOLVED:** `--http-listen` flag, WagiService on dedicated thread, axum router with route registry, CGI dispatch to ExecutorPool. Code: `src/dispatcher/server.rs`, `src/rpc/http_listener.rs`.
 
 ## HTTP-to-capnp bridge module
 **What:** A capnp cell that translates HTTP requests into capability invocations. This is an application-level module, not a runtime feature. An HTTP/WAGI cell (Cell::http) that reads CGI env vars from the host, dials a capnp service via VatClient, invokes a method, and returns the result as a CGI response on stdout.
@@ -116,7 +114,7 @@
 **Context:** This is intentionally application-level. The bridge cell would be a WASM binary with `Cell::http` that uses the guest Membrane to dial capnp services. It translates REST-style routes to capability method calls. Could be generic (schema-driven routing) or hand-written per service. Uses wagi-guest crate for CGI env var reading and response formatting.
 **Effort:** M
 **Priority:** P3
-**Depends on:** WAGI host implementation (Phase 2), VatClient guest-side
+**Depends on:** WAGI host implementation (done), VatClient guest-side
 
 ## mDNS for Kubo-less LAN peer discovery
 **What:** Add `libp2p::mdns::tokio::Behaviour` to `WetwareBehaviour` to discover LAN peers without Kubo. mDNS is a **peer discovery source** that feeds the LAN DHT routing table — not a routing primitive. It does not touch Cap'n Proto or the guest API.
@@ -132,7 +130,7 @@
 **Context:** TinyGo targets wasm32-wasip2 natively. componentize-py wraps CPython into a WASI component. Both toolchains are maturing but have sharp edges. Defer until toolchains stabilize and the Rust WAGI path is proven in production.
 **Effort:** M
 **Priority:** P3
-**Depends on:** WAGI host implementation (Phase 2)
+**Depends on:** WAGI host implementation (done)
 
 ## CidTree: concurrent directory listing cache
 **What:** Replace `Mutex<LruCache>` in `CidTree` with a concurrent cache (`dashmap` or `quick_cache`) to reduce contention under high concurrent cell load.
