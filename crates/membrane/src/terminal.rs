@@ -189,7 +189,7 @@ mod tests {
         let (_tx, rx) = tokio::sync::watch::channel(crate::epoch::Epoch {
             seq: 1,
             head: vec![],
-            adopted_block: 0,
+            provenance: crate::epoch::Provenance::Block(0),
         });
         let membrane: stem_capnp::membrane::Client = crate::membrane::membrane_client(rx);
 
@@ -205,7 +205,7 @@ mod tests {
         let (_tx, rx) = tokio::sync::watch::channel(crate::epoch::Epoch {
             seq: 1,
             head: vec![],
-            adopted_block: 0,
+            provenance: crate::epoch::Provenance::Block(0),
         });
         let membrane: stem_capnp::membrane::Client = crate::membrane::membrane_client(rx);
 

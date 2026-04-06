@@ -390,7 +390,7 @@ where
 mod tests {
     use super::*;
     use ed25519_dalek::Signer;
-    use membrane::Epoch;
+    use membrane::{Epoch, Provenance};
 
     /// Generate a random Ed25519 signing key (compatible with the rand version
     /// used by the root crate, which may differ from ed25519_dalek's rand_core).
@@ -408,7 +408,7 @@ mod tests {
         let epoch = Epoch {
             seq: 1,
             head: b"test".to_vec(),
-            adopted_block: 100,
+            provenance: Provenance::Block(100),
         };
         let (tx, rx) = tokio::sync::watch::channel(epoch);
         let guard = EpochGuard {
@@ -590,7 +590,7 @@ mod tests {
                 tx.send(Epoch {
                     seq: 2,
                     head: b"new".to_vec(),
-                    adopted_block: 101,
+                    provenance: Provenance::Block(101),
                 })
                 .unwrap();
 

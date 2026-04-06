@@ -35,7 +35,7 @@ pub struct FinalizedEvent {
     pub cid: Vec<u8>,
     #[serde(rename = "cid_hash")]
     pub cid_hash_hex: String,
-    /// Block that satisfied eligibility; use as Epoch.adopted_block.
+    /// Block that satisfied eligibility; use as Epoch.provenance (Block variant).
     pub block_number: u64,
     #[serde(rename = "tx_hash")]
     pub tx_hash_hex: String,

@@ -5,7 +5,7 @@ use capnp_rpc::RpcSystem;
 use ed25519_dalek::SigningKey;
 use futures::FutureExt;
 use libp2p::StreamProtocol;
-use membrane::Epoch;
+use membrane::{Epoch, Provenance};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -474,7 +474,7 @@ impl Cell {
         let initial_epoch = self.initial_epoch.clone().unwrap_or(Epoch {
             seq: 0,
             head: vec![],
-            adopted_block: 0,
+            provenance: Provenance::Block(0),
         });
         let (join, handles) = self.spawn_with_streams().await?;
         let mut handles = handles;
