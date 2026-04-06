@@ -180,7 +180,7 @@ fn make_auction_handler(
                 let (method, rest) = extract_method(&args[0])?;
                 let resume = &args[1];
 
-                match method.as_str() {
+                match method {
                     "compare" => {
                         // Parse args: wasm_cid (required), fuel (optional, default 1M).
                         let wasm_cid = match rest.first() {
@@ -294,7 +294,7 @@ fn make_auction_handler(
                         let result: Vec<Val> = quotes
                             .into_iter()
                             .map(|(provider, price, qfuel, expires)| {
-                                Val::Map(vec![
+                                Val::Map(glia::ValMap::from_pairs(vec![
                                     (
                                         Val::Keyword("provider".into()),
                                         Val::Str(provider),
@@ -311,7 +311,7 @@ fn make_auction_handler(
                                         Val::Keyword("expires".into()),
                                         Val::Int(expires),
                                     ),
-                                ])
+                                ]))
                             })
                             .collect();
 

@@ -26,6 +26,9 @@ pub mod eval;
 pub mod expr;
 pub mod oneshot;
 pub mod pattern;
+pub mod valmap;
+
+pub use valmap::ValMap;
 
 /// Crate version from Cargo.toml (compile-time).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -111,7 +114,7 @@ pub enum Val {
     Keyword(String),
     List(Vec<Val>),
     Vector(Vec<Val>),
-    Map(Vec<(Val, Val)>),
+    Map(ValMap),
     Set(Vec<Val>),
     /// Opaque binary data — a runtime value, not parseable from text.
     /// Produced by evaluating expressions like `(ipfs cat "...")`.
@@ -193,7 +196,7 @@ impl core::fmt::Debug for Val {
             Val::Keyword(s) => f.debug_tuple("Keyword").field(s).finish(),
             Val::List(v) => f.debug_tuple("List").field(v).finish(),
             Val::Vector(v) => f.debug_tuple("Vector").field(v).finish(),
-            Val::Map(v) => f.debug_tuple("Map").field(v).finish(),
+            Val::Map(m) => f.debug_tuple("Map").field(m).finish(),
             Val::Set(v) => f.debug_tuple("Set").field(v).finish(),
             Val::Bytes(b) => write!(f, "Bytes({} bytes)", b.len()),
             Val::Fn { arities, .. } => write!(f, "Fn({} arities)", arities.len()),
@@ -221,16 +224,36 @@ impl core::fmt::Debug for Val {
     }
 }
 
+/// Extract (method_keyword, rest_args) from a capability dispatch payload.
+///
+/// Zero-allocation: returns borrows into the original `Val::List`.
+/// Used by capability handlers in kernel and caps crates.
+pub fn extract_method(data: &Val) -> Result<(&str, &[Val]), Val> {
+    let items = match data {
+        Val::List(items) => items.as_slice(),
+        _ => return Err(Val::from("cap handler: expected list data")),
+    };
+    let method = match items.first() {
+        Some(Val::Keyword(s)) => s.as_str(),
+        _ => {
+            return Err(Val::from(
+                "cap handler: first arg must be a keyword method (e.g. :id, :run)",
+            ))
+        }
+    };
+    Ok((method, &items[1..]))
+}
+
 /// Convert a string error into a structured error value.
 ///
 /// Enables incremental migration from `Result<Val, String>` to `Result<Val, Val>`:
 /// existing `Err(format!(...))` sites auto-convert via the `?` operator.
 impl From<String> for Val {
     fn from(s: String) -> Self {
-        Val::Map(vec![
+        Val::Map(ValMap::from_pairs(vec![
             (Val::Keyword("type".into()), Val::Keyword("internal".into())),
             (Val::Keyword("message".into()), Val::Str(s)),
-        ])
+        ]))
     }
 }
 
@@ -258,9 +281,10 @@ impl PartialEq for Val {
             (Val::Map(a), Val::Map(b)) => a == b,
             (Val::Set(a), Val::Set(b)) => a == b,
             (Val::Bytes(a), Val::Bytes(b)) => a == b,
-            // Closures and macros are never equal (identity semantics, like Clojure).
-            (Val::Fn { .. }, Val::Fn { .. }) => false,
-            (Val::Macro { .. }, Val::Macro { .. }) => false,
+            // Closures and macros: identity equality via Rc pointer comparison.
+            // Same Rc allocation = same closure instance.
+            (Val::Fn { env: a, .. }, Val::Fn { env: b, .. }) => std::rc::Rc::ptr_eq(a, b),
+            (Val::Macro { env: a, .. }, Val::Macro { env: b, .. }) => std::rc::Rc::ptr_eq(a, b),
             // Closures, native fns, and macros are never equal (identity semantics).
             (Val::NativeFn { func: a, .. }, Val::NativeFn { func: b, .. }) => {
                 std::rc::Rc::ptr_eq(a, b)
@@ -292,6 +316,49 @@ impl PartialEq for Val {
     }
 }
 
+/// Eq is safe because PartialEq is reflexive for all variants:
+/// - Floats use to_bits() (reflexive; NOTE: 0.0 != -0.0, deliberate deviation from Clojure)
+/// - Fn/Macro use Rc::ptr_eq (reflexive: same pointer = true)
+/// - Sentinels (Recur/Effect/Resume) return false (these are never used as map keys)
+impl Eq for Val {}
+
+impl std::hash::Hash for Val {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        match self {
+            Val::Nil => {}
+            Val::Bool(b) => b.hash(state),
+            Val::Int(n) => n.hash(state),
+            // Consistent with PartialEq: 0.0 != -0.0 (bitwise comparison).
+            Val::Float(n) => n.to_bits().hash(state),
+            Val::Str(s) => s.hash(state),
+            Val::Sym(s) => s.hash(state),
+            Val::Keyword(s) => s.hash(state),
+            Val::List(items) => items.hash(state),
+            Val::Vector(items) => items.hash(state),
+            Val::Map(m) => m.hash(state),
+            Val::Set(items) => items.hash(state),
+            Val::Bytes(b) => b.hash(state),
+            // Identity hash via Rc pointer (consistent with Rc::ptr_eq PartialEq).
+            Val::Fn { env, .. } => (std::rc::Rc::as_ptr(env) as *const () as usize).hash(state),
+            Val::Macro { env, .. } => (std::rc::Rc::as_ptr(env) as *const () as usize).hash(state),
+            Val::NativeFn { func, .. } => {
+                (std::rc::Rc::as_ptr(func) as *const () as usize).hash(state)
+            }
+            Val::AsyncNativeFn { func, .. } => {
+                (std::rc::Rc::as_ptr(func) as *const () as usize).hash(state)
+            }
+            Val::Cap { schema_cid, .. } => schema_cid.hash(state),
+            Val::Cell { wasm, schema, .. } => {
+                wasm.hash(state);
+                schema.hash(state);
+            }
+            // Sentinels: hash by discriminant only (already done above).
+            Val::Recur(_) | Val::Effect { .. } | Val::Resume(_) => {}
+        }
+    }
+}
+
 impl core::fmt::Display for Val {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -311,9 +378,9 @@ impl core::fmt::Display for Val {
             Val::Keyword(s) => write!(f, ":{s}"),
             Val::List(items) => fmt_seq(f, "(", ")", items),
             Val::Vector(items) => fmt_seq(f, "[", "]", items),
-            Val::Map(pairs) => {
+            Val::Map(m) => {
                 write!(f, "{{")?;
-                for (i, (k, v)) in pairs.iter().enumerate() {
+                for (i, (k, v)) in m.iter().enumerate() {
                     if i > 0 {
                         write!(f, " ")?;
                     }
@@ -711,7 +778,7 @@ fn parse_map_inner(tokens: &[Token], raw: bool) -> Result<(Val, &[Token]), Strin
             return Err("unclosed map".into());
         }
         if rest[0] == Token::MapClose {
-            return Ok((Val::Map(pairs), &rest[1..]));
+            return Ok((Val::Map(ValMap::from_pairs(pairs)), &rest[1..]));
         }
         let (key, after_key) = if raw {
             parse_tokens_raw(rest)?
@@ -994,9 +1061,9 @@ fn transform_syntax_quote(val: &Val, depth: usize) -> Result<Val, String> {
 
         // Map: recursively transform keys and values, reconstruct with assoc.
         // `{:a 1 :b ~x}` becomes `(assoc {} :a 1 :b x)`
-        Val::Map(pairs) => {
-            let mut assoc_args = vec![Val::Sym("assoc".into()), Val::Map(vec![])];
-            for (k, v) in pairs {
+        Val::Map(m) => {
+            let mut assoc_args = vec![Val::Sym("assoc".into()), Val::Map(ValMap::new())];
+            for (k, v) in m.iter() {
                 let tk = transform_syntax_quote(k, depth)?;
                 let tv = transform_syntax_quote(v, depth)?;
                 assoc_args.push(tk);
@@ -1376,12 +1443,10 @@ mod tests {
     #[test]
     fn parse_map() {
         match read("{:a 1 :b 2}").unwrap() {
-            Val::Map(pairs) => {
-                assert_eq!(pairs.len(), 2);
-                assert_eq!(pairs[0].0, Val::Keyword("a".into()));
-                assert_eq!(pairs[0].1, Val::Int(1));
-                assert_eq!(pairs[1].0, Val::Keyword("b".into()));
-                assert_eq!(pairs[1].1, Val::Int(2));
+            Val::Map(m) => {
+                assert_eq!(m.len(), 2);
+                assert_eq!(m.get(&Val::Keyword("a".into())), Some(&Val::Int(1)));
+                assert_eq!(m.get(&Val::Keyword("b".into())), Some(&Val::Int(2)));
             }
             other => panic!("expected Map, got {other:?}"),
         }
@@ -1390,7 +1455,7 @@ mod tests {
     #[test]
     fn parse_empty_map() {
         match read("{}").unwrap() {
-            Val::Map(pairs) => assert!(pairs.is_empty()),
+            Val::Map(m) => assert!(m.is_empty()),
             other => panic!("expected empty Map, got {other:?}"),
         }
     }
@@ -1445,24 +1510,22 @@ mod tests {
     fn parse_nested_config() {
         let input = r#"{:images ["a" "b"] :flags #{:verbose}}"#;
         match read(input).unwrap() {
-            Val::Map(pairs) => {
-                assert_eq!(pairs.len(), 2);
-                assert_eq!(pairs[0].0, Val::Keyword("images".into()));
-                match &pairs[0].1 {
-                    Val::Vector(v) => {
+            Val::Map(m) => {
+                assert_eq!(m.len(), 2);
+                match m.get(&Val::Keyword("images".into())) {
+                    Some(Val::Vector(v)) => {
                         assert_eq!(v.len(), 2);
                         assert_eq!(v[0], Val::Str("a".into()));
                         assert_eq!(v[1], Val::Str("b".into()));
                     }
-                    other => panic!("expected Vector, got {other:?}"),
+                    other => panic!("expected Vector for :images, got {other:?}"),
                 }
-                assert_eq!(pairs[1].0, Val::Keyword("flags".into()));
-                match &pairs[1].1 {
-                    Val::Set(s) => {
+                match m.get(&Val::Keyword("flags".into())) {
+                    Some(Val::Set(s)) => {
                         assert_eq!(s.len(), 1);
                         assert_eq!(s[0], Val::Keyword("verbose".into()));
                     }
-                    other => panic!("expected Set, got {other:?}"),
+                    other => panic!("expected Set for :flags, got {other:?}"),
                 }
             }
             other => panic!("expected Map, got {other:?}"),
@@ -1478,15 +1541,15 @@ mod tests {
  :images   ["images/my-app" "images/shell"]}
 "#;
         match read(input).unwrap() {
-            Val::Map(pairs) => {
-                assert_eq!(pairs.len(), 3);
-                assert_eq!(pairs[0].0, Val::Keyword("port".into()));
-                assert_eq!(pairs[0].1, Val::Int(2025));
-                assert_eq!(pairs[1].0, Val::Keyword("key-file".into()));
-                assert_eq!(pairs[1].1, Val::Str("~/.ww/key".into()));
-                assert_eq!(pairs[2].0, Val::Keyword("images".into()));
-                match &pairs[2].1 {
-                    Val::Vector(v) => assert_eq!(v.len(), 2),
+            Val::Map(m) => {
+                assert_eq!(m.len(), 3);
+                assert_eq!(m.get(&Val::Keyword("port".into())), Some(&Val::Int(2025)));
+                assert_eq!(
+                    m.get(&Val::Keyword("key-file".into())),
+                    Some(&Val::Str("~/.ww/key".into()))
+                );
+                match m.get(&Val::Keyword("images".into())) {
+                    Some(Val::Vector(v)) => assert_eq!(v.len(), 2),
                     other => panic!("expected Vector, got {other:?}"),
                 }
             }
@@ -1663,10 +1726,10 @@ mod tests {
 
     #[test]
     fn display_map() {
-        let v = Val::Map(vec![
+        let v = Val::Map(ValMap::from_pairs(vec![
             (Val::Keyword("a".into()), Val::Int(1)),
             (Val::Keyword("b".into()), Val::Int(2)),
-        ]);
+        ]));
         assert_eq!(format!("{v}"), "{:a 1 :b 2}");
     }
 
@@ -1712,9 +1775,13 @@ mod tests {
 
     #[test]
     fn roundtrip_map() {
+        // im::HashMap doesn't preserve insertion order, so check
+        // that the round-trip produces an equivalent map, not identical text.
         let input = "{:a 1 :b 2}";
         let val = read(input).unwrap();
-        assert_eq!(format!("{val}"), input);
+        let output = format!("{val}");
+        let reparsed = read(&output).unwrap();
+        assert_eq!(val, reparsed);
     }
 
     #[test]
@@ -1755,9 +1822,9 @@ mod tests {
 
     /// Helper matching the kernel's `map_get_str` — extract a string value
     /// for a keyword key from a glia Map.
-    fn map_get_str<'a>(pairs: &'a [(Val, Val)], key: &str) -> Option<&'a str> {
-        pairs.iter().find_map(|(k, v)| match (k, v) {
-            (Val::Keyword(k), Val::Str(s)) if k == key => Some(s.as_str()),
+    fn map_get_str<'a>(m: &'a ValMap, key: &str) -> Option<&'a str> {
+        m.get(&Val::Keyword(key.into())).and_then(|v| match v {
+            Val::Str(s) => Some(s.as_str()),
             _ => None,
         })
     }
