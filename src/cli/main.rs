@@ -1307,6 +1307,7 @@ wasip2::cli::command::export!({iface_name}Guest);
                         confirmation_depth,
                         ipfs_client: ipfs_client.clone(),
                         cid_tree: None, // TODO: pass CidTree when virtual FS is wired
+                        drain_duration: std::time::Duration::ZERO, // TODO: wire from CLI flag
                     },
                 );
             }

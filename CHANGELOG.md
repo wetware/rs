@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Epoch-bound Terminal login: challenge-response now signs `nonce || epoch_seq` (16 bytes), preventing both same-epoch and cross-epoch replay attacks
+- Graceful epoch shutdown: configurable drain delay before epoch broadcast (SIGTERM/SIGKILL model for in-flight operations)
+- `doc/replay-protection.md`: four-layer defence model documentation (domain separation, epoch binding, epoch guards, on-chain finality)
+
+### Changed
+- `Signer.sign()` now takes `(nonce, epochSeq)` instead of just `(nonce)` — old clients will fail auth (correct behavior)
+- TerminalServer requires `epoch_rx: watch::Receiver<Epoch>` at construction
+- EpochService accepts `drain_duration: Duration` (default `Duration::ZERO`, no behavior change)
+
+### Added
 - `PollSet` for multiplexing extra WASI pollables (stdin, listeners) alongside RPC in guest poll_loop
 - `system::run_with(poll_set, f)` entry point for guests needing concurrent async I/O
 - `PollLoopExit` with cycle counter for diagnosing RPC connection drops

@@ -154,12 +154,17 @@ impl stem_capnp::signer::Server for EpochGuardedDomainSigner {
         mut results: stem_capnp::signer::SignResults,
     ) -> Promise<(), capnp::Error> {
         pry!(self.guard.check());
-        let nonce = pry!(params.get()).get_nonce();
+        let p = pry!(params.get());
+        let nonce = p.get_nonce();
+        let epoch_seq = p.get_epoch_seq();
+        let mut payload = Vec::with_capacity(16);
+        payload.extend_from_slice(&nonce.to_be_bytes());
+        payload.extend_from_slice(&epoch_seq.to_be_bytes());
         let envelope = pry!(SignedEnvelope::new(
             &self.keypair,
             self.domain.as_str().to_string(),
             self.domain.payload_type().to_vec(),
-            nonce.to_be_bytes().to_vec(),
+            payload,
         )
         .map_err(|e| capnp::Error::failed(e.to_string())));
         results.get().set_sig(&envelope.into_protobuf_encoding());
