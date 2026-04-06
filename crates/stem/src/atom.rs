@@ -1,4 +1,4 @@
-//! AtomSource: on-chain epoch source backed by the Atom contract.
+//! `AtomSource`: on-chain epoch source backed by the Atom contract.
 //!
 //! Wraps the existing `AtomIndexer` + `Finalizer` pipeline behind the
 //! `StemSource` trait. The downstream pipeline (pin, swap, broadcast) is
@@ -18,9 +18,9 @@ use membrane::Epoch;
 
 use crate::{StemEvent, StemSource};
 
-/// On-chain epoch source: Atom contract HeadUpdated events.
+/// On-chain epoch source: Atom contract `HeadUpdated` events.
 ///
-/// Runs the existing AtomIndexer + Finalizer pipeline and converts
+/// Runs the existing `AtomIndexer` + Finalizer pipeline and converts
 /// finalized events into `StemEvent` values for the shared pipeline.
 pub struct AtomSource {
     pub config: IndexerConfig,
@@ -30,17 +30,15 @@ pub struct AtomSource {
 /// Callback type for processing stem events in the shared pipeline.
 ///
 /// The caller provides this to handle pin/swap/broadcast for each
-/// finalized event. This keeps AtomSource decoupled from IPFS/CidTree.
-pub type EventHandler =
-    Box<dyn Fn(StemEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> + Send>;
+/// finalized event. This keeps `AtomSource` decoupled from IPFS/CidTree.
+pub type EventHandler = Box<
+    dyn Fn(StemEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        + Send,
+>;
 
 #[async_trait]
 impl StemSource for AtomSource {
-    async fn run(
-        self,
-        epoch_tx: watch::Sender<Epoch>,
-        shutdown: CancellationToken,
-    ) -> Result<()> {
+    async fn run(self, epoch_tx: watch::Sender<Epoch>, shutdown: CancellationToken) -> Result<()> {
         let indexer = Arc::new(AtomIndexer::new(self.config.clone()));
         let mut events = indexer.subscribe();
 
@@ -62,7 +60,7 @@ impl StemSource for AtomSource {
 
         loop {
             tokio::select! {
-                _ = shutdown.cancelled() => {
+                () = shutdown.cancelled() => {
                     info!("AtomSource shutting down");
                     break;
                 }

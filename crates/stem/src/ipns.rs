@@ -1,4 +1,4 @@
-//! IpnsSource: off-chain epoch source backed by IPNS record resolution.
+//! `IpnsSource`: off-chain epoch source backed by IPNS record resolution.
 //!
 //! Polls an IPNS name via the IPFS HTTP API, comparing the resolved CID's
 //! sequence number against the last known value. When the sequence advances,
@@ -24,7 +24,7 @@ use crate::StemSource;
 pub struct IpnsConfig {
     /// The IPNS name to resolve (peer ID or key name, e.g., "k51qzi5uqu5d...").
     pub name: String,
-    /// Base URL of the IPFS HTTP API (e.g., "http://localhost:5001").
+    /// Base URL of the IPFS HTTP API (e.g., "<http://localhost:5001>").
     pub ipfs_api_url: String,
     /// How often to poll for IPNS record changes.
     pub poll_interval: Duration,
@@ -61,15 +61,8 @@ pub struct IpnsSource {
 /// Resolve an IPNS name via the IPFS HTTP API.
 ///
 /// Returns the resolved IPFS path (e.g., "/ipfs/bafy...").
-async fn resolve_name(
-    http_client: &reqwest::Client,
-    api_url: &str,
-    name: &str,
-) -> Result<String> {
-    let url = format!(
-        "{}/api/v0/name/resolve?arg={}&nocache=true",
-        api_url, name
-    );
+async fn resolve_name(http_client: &reqwest::Client, api_url: &str, name: &str) -> Result<String> {
+    let url = format!("{api_url}/api/v0/name/resolve?arg={name}&nocache=true");
     let response = http_client
         .post(&url)
         .send()
@@ -81,22 +74,18 @@ async fn resolve_name(
         .await
         .context("Failed to parse name resolve response")?;
     if !status.is_success() {
-        let msg = body["Message"]
-            .as_str()
-            .unwrap_or("unknown error");
-        anyhow::bail!("IPNS resolve failed ({}): {}", status, msg);
+        let msg = body["Message"].as_str().unwrap_or("unknown error");
+        anyhow::bail!("IPNS resolve failed ({status}): {msg}");
     }
     body["Path"]
         .as_str()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .ok_or_else(|| anyhow::anyhow!("name resolve response missing Path field"))
 }
 
 /// Extract raw CID bytes from an IPFS path like "/ipfs/bafy...".
 fn path_to_cid_bytes(ipfs_path: &str) -> Result<Vec<u8>> {
-    let cid_str = ipfs_path
-        .strip_prefix("/ipfs/")
-        .unwrap_or(ipfs_path);
+    let cid_str = ipfs_path.strip_prefix("/ipfs/").unwrap_or(ipfs_path);
     // Parse as a CID to get canonical bytes.
     // For now, store the CID string as UTF-8 bytes (consistent with Atom's
     // approach where head bytes are the raw CID encoding).
@@ -112,11 +101,7 @@ fn now_unix_secs() -> u64 {
 
 #[async_trait]
 impl StemSource for IpnsSource {
-    async fn run(
-        self,
-        epoch_tx: watch::Sender<Epoch>,
-        shutdown: CancellationToken,
-    ) -> Result<()> {
+    async fn run(self, epoch_tx: watch::Sender<Epoch>, shutdown: CancellationToken) -> Result<()> {
         let http_client = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(30))
@@ -135,11 +120,11 @@ impl StemSource for IpnsSource {
 
         loop {
             tokio::select! {
-                _ = shutdown.cancelled() => {
+                () = shutdown.cancelled() => {
                     info!("IpnsSource shutting down");
                     return Ok(());
                 }
-                _ = sleep(self.config.poll_interval) => {
+                () = sleep(self.config.poll_interval) => {
                     match resolve_name(
                         &http_client,
                         &self.config.ipfs_api_url,
@@ -151,8 +136,7 @@ impl StemSource for IpnsSource {
                             // Check if the resolved path changed.
                             let changed = current_path
                                 .as_ref()
-                                .map(|p| p != &resolved_path)
-                                .unwrap_or(true);
+                                .map_or(true, |p| p != &resolved_path);
 
                             if changed {
                                 current_seq += 1;
@@ -215,8 +199,9 @@ mod tests {
 
     #[test]
     fn path_to_cid_bytes_strips_prefix() {
-        let bytes = path_to_cid_bytes("/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
-            .unwrap();
+        let bytes =
+            path_to_cid_bytes("/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+                .unwrap();
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
             "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"

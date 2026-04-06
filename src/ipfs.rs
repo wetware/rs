@@ -90,9 +90,7 @@ impl HttpClient {
             .await
             .context("Failed to parse name resolve response")?;
         if !status.is_success() {
-            let msg = body["Message"]
-                .as_str()
-                .unwrap_or("unknown error");
+            let msg = body["Message"].as_str().unwrap_or("unknown error");
             anyhow::bail!("IPNS name resolve failed ({}): {}", status, msg);
         }
         body["Path"]
@@ -125,9 +123,7 @@ impl HttpClient {
             .await
             .context("Failed to parse name publish response")?;
         if !status.is_success() {
-            let msg = body["Message"]
-                .as_str()
-                .unwrap_or("unknown error");
+            let msg = body["Message"].as_str().unwrap_or("unknown error");
             anyhow::bail!("IPNS name publish failed ({}): {}", status, msg);
         }
         body["Name"]

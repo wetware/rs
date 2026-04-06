@@ -1,11 +1,11 @@
 //! Stem: epoch source abstraction.
 //!
 //! Stem generalizes the epoch anchor into a trait so the same epoch-guard
-//! machinery (pin, CidTree swap, broadcast, EpochGuard invalidation) works
+//! machinery (pin, `CidTree` swap, broadcast, `EpochGuard` invalidation) works
 //! against different backends:
 //!
-//! - **stem::atomic** (on-chain) — Atom contract events with blockchain finality.
-//! - **stem::eventual** (off-chain) — IPNS records with DHT + gossipsub propagation.
+//! - **`stem::atomic`** (on-chain) — Atom contract events with blockchain finality.
+//! - **`stem::eventual`** (off-chain) — IPNS records with DHT + gossipsub propagation.
 //!
 //! ```text
 //!                 UnixPath (CID -> UnixFS)       Value (capnp, future)
@@ -20,7 +20,7 @@
 //!
 //! The [`StemSource`] trait is the core abstraction. Implementations run a
 //! long-lived loop that sends [`Epoch`] values to a `watch::Sender` whenever
-//! the content root advances. The downstream pipeline (IPFS pinning, CidTree
+//! the content root advances. The downstream pipeline (IPFS pinning, `CidTree`
 //! swap, epoch broadcast) is shared and lives in the host's `epoch.rs`.
 
 pub mod atom;
@@ -48,7 +48,7 @@ pub struct StemEvent {
 /// Implementations run until the `shutdown` token is cancelled or an
 /// unrecoverable error occurs. On each new epoch, the source sends the
 /// updated [`Epoch`] to `epoch_tx`. The downstream pipeline (pin new CID,
-/// swap CidTree root, unpin old CID, broadcast epoch) is handled by the
+/// swap `CidTree` root, unpin old CID, broadcast epoch) is handled by the
 /// caller, not the source.
 ///
 /// # Implementations
@@ -62,11 +62,7 @@ pub trait StemSource: Send + 'static {
     /// Sends new epochs to `epoch_tx` as they are discovered/finalized.
     /// Returns `Ok(())` on clean shutdown (cancellation), or `Err` on
     /// unrecoverable failure.
-    async fn run(
-        self,
-        epoch_tx: watch::Sender<Epoch>,
-        shutdown: CancellationToken,
-    ) -> Result<()>;
+    async fn run(self, epoch_tx: watch::Sender<Epoch>, shutdown: CancellationToken) -> Result<()>;
 }
 
 #[cfg(test)]
