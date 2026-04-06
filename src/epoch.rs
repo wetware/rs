@@ -190,3 +190,89 @@ async fn handle_finalized(
     epoch_tx.send(new_epoch).ok();
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atom::FinalizedEvent;
+
+    fn test_finalized_event(seq: u64) -> FinalizedEvent {
+        // Build a valid CIDv1 (raw codec, identity multihash) so
+        // cid_bytes_to_ipfs_path succeeds.
+        let mh = cid::multihash::Multihash::<64>::wrap(0x00, b"test").expect("identity mh");
+        let c = cid::Cid::new_v1(0x55, mh);
+        FinalizedEvent {
+            seq,
+            cid: c.to_bytes(),
+            cid_hash_hex: String::new(),
+            block_number: 42,
+            tx_hash_hex: String::new(),
+            log_index: 0,
+            writer: String::new(),
+        }
+    }
+
+    /// Drain delay defers epoch broadcast by the configured duration.
+    #[tokio::test]
+    async fn drain_delay_defers_epoch_broadcast() {
+        let (epoch_tx, mut epoch_rx) = watch::channel(Epoch {
+            seq: 0,
+            head: vec![],
+            adopted_block: 0,
+        });
+
+        let fe = test_finalized_event(1);
+        let ipfs_client = ipfs::HttpClient::new("http://127.0.0.1:1".into());
+
+        let drain = Duration::from_millis(200);
+        let start = tokio::time::Instant::now();
+
+        // Pin/unpin will fail (no IPFS daemon) but handle_finalized logs and continues.
+        let _ = handle_finalized(&fe, &epoch_tx, &ipfs_client, &mut None, None, drain).await;
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= drain,
+            "epoch broadcast should be deferred by drain duration ({drain:?}), but only {elapsed:?} elapsed"
+        );
+
+        // Epoch should have advanced.
+        epoch_rx.mark_changed();
+        let epoch = epoch_rx.borrow_and_update().clone();
+        assert_eq!(epoch.seq, 1, "epoch should have advanced to seq=1");
+    }
+
+    /// Zero drain duration broadcasts immediately (no regression).
+    #[tokio::test]
+    async fn zero_drain_broadcasts_immediately() {
+        let (epoch_tx, mut epoch_rx) = watch::channel(Epoch {
+            seq: 0,
+            head: vec![],
+            adopted_block: 0,
+        });
+
+        let fe = test_finalized_event(1);
+        let ipfs_client = ipfs::HttpClient::new("http://127.0.0.1:1".into());
+
+        let start = tokio::time::Instant::now();
+        let _ = handle_finalized(
+            &fe,
+            &epoch_tx,
+            &ipfs_client,
+            &mut None,
+            None,
+            Duration::ZERO,
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "zero drain should broadcast immediately, took {elapsed:?}"
+        );
+
+        epoch_rx.mark_changed();
+        let epoch = epoch_rx.borrow_and_update().clone();
+        assert_eq!(epoch.seq, 1);
+    }
+}
