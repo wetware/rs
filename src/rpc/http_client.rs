@@ -203,14 +203,14 @@ impl http_capnp::http_client::Server for EpochGuardedHttpProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use membrane::epoch::Epoch;
+    use membrane::epoch::{Epoch, Provenance};
     use tokio::sync::watch;
 
     fn test_proxy(allowed_hosts: Vec<String>) -> EpochGuardedHttpProxy {
         let epoch = Epoch {
             seq: 1,
             head: vec![],
-            adopted_block: 0,
+            provenance: Provenance::Block(0),
         };
         let (_tx, rx) = watch::channel(epoch);
         let guard = EpochGuard {
@@ -224,7 +224,7 @@ mod tests {
         let epoch = Epoch {
             seq: 2,
             head: vec![],
-            adopted_block: 0,
+            provenance: Provenance::Block(0),
         };
         let (_tx, rx) = watch::channel(epoch);
         let guard = EpochGuard {

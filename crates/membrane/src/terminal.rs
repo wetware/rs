@@ -231,7 +231,7 @@ mod tests {
         Epoch {
             seq,
             head: vec![0xAB],
-            adopted_block: 100,
+            provenance: crate::epoch::Provenance::Block(100),
         }
     }
 

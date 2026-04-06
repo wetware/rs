@@ -1719,7 +1719,7 @@ mod tests {
         let epoch = ::membrane::Epoch {
             seq,
             head: vec![],
-            adopted_block: 0,
+            provenance: ::membrane::Provenance::Block(0),
         };
         let (tx, rx) = tokio::sync::watch::channel(epoch);
         let guard = EpochGuard {
@@ -1864,7 +1864,7 @@ mod tests {
                 tx.send(::membrane::Epoch {
                     seq: 2,
                     head: vec![],
-                    adopted_block: 0,
+                    provenance: ::membrane::Provenance::Block(0),
                 })
                 .unwrap();
 
@@ -1896,7 +1896,7 @@ mod tests {
                 tx.send(::membrane::Epoch {
                     seq: 2,
                     head: vec![],
-                    adopted_block: 0,
+                    provenance: ::membrane::Provenance::Block(0),
                 })
                 .unwrap();
 

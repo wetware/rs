@@ -342,7 +342,7 @@ Finalizer (K-confirmation strategy)
 pin new CID / unpin old CID on IPFS
     |
     v
-epoch_tx.send(Epoch { seq, head, adopted_block })
+epoch_tx.send(Epoch { seq, head, provenance })
     |
     v
 EpochGuard invalidation → stale capabilities fail → guest re-grafts

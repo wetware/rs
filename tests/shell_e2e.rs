@@ -44,7 +44,7 @@ async fn spawn_shell_on_pool(pool: &ExecutorPool) -> Result<shell_capnp::shell::
                 let epoch = membrane::Epoch {
                     seq: 1,
                     head: vec![],
-                    adopted_block: 0,
+                    provenance: membrane::Provenance::Block(0),
                 };
                 let (_epoch_tx, epoch_rx) = watch::channel(epoch);
                 let guard = membrane::EpochGuard {

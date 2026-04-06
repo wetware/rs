@@ -45,6 +45,6 @@ pub mod epoch;
 pub mod membrane;
 pub mod terminal;
 
-pub use epoch::{Epoch, EpochGuard};
+pub use epoch::{Epoch, EpochGuard, Provenance};
 pub use membrane::{membrane_client, GraftBuilder, MembraneServer, NoExtension};
 pub use terminal::{AllowAllPolicy, AuthPolicy, TerminalServer, VerifyingKeyPolicy};
