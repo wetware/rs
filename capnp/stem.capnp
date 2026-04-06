@@ -11,8 +11,12 @@ struct Epoch {
 }
 
 interface Signer {
-  sign @0 (nonce :UInt64) -> (sig :Data);
-  # Sign a nonce; the domain and payload_type are baked in by the issuing Identity hub.
+  sign @0 (nonce :UInt64, epochSeq :UInt64) -> (sig :Data);
+  # Sign a challenge binding (nonce, epochSeq).  The signed payload is
+  # nonce.to_be_bytes() || epochSeq.to_be_bytes() (16 bytes total).
+  # The random nonce prevents replay within the same epoch; the epochSeq
+  # prevents cross-epoch reuse (a signature from epoch N is invalid at N+1).
+  # The domain and payload_type are baked in by the issuing Identity hub.
 }
 
 interface Identity {
@@ -28,9 +32,11 @@ interface Identity {
 
 interface Terminal(Session) {
   login @0 (signer :Signer) -> (session :Session);
-  # Authenticate via challenge-response, returning the guarded capability.
+  # Authenticate via epoch-bound challenge-response.  The Terminal generates
+  # a random nonce + current epoch seq, the Signer signs both, and the
+  # Terminal verifies the signature, nonce, epoch freshness, and auth policy.
   # Having a Terminal reference does NOT grant access — the caller must prove
-  # identity by signing a nonce with the expected key.
+  # identity by signing the challenge with the expected key.
 }
 
 using Schema = import "/capnp/schema.capnp";

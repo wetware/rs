@@ -8,6 +8,7 @@
 //! (Membrane). Having a Membrane reference IS authorization (ocap); Terminal
 //! is the gate that decides who gets that reference.
 
+use crate::epoch::Epoch;
 use crate::stem_capnp;
 use auth::SigningDomain;
 use capnp::capability::Promise;
@@ -15,6 +16,7 @@ use capnp::Error;
 use capnp_rpc::pry;
 use ed25519_dalek::VerifyingKey;
 use libp2p_core::SignedEnvelope;
+use tokio::sync::watch;
 
 /// Policy for Terminal authentication decisions.
 ///
@@ -69,15 +71,33 @@ fn to_verifying_key(pk: libp2p_identity::ed25519::PublicKey) -> Result<Verifying
 /// # Auth flow
 ///
 /// 1. Caller sends `login(signer)` request
-/// 2. Terminal generates a random nonce, sends `signer.sign(nonce)`
-/// 3. Signer returns a libp2p `SignedEnvelope` (RFC 0002) containing the nonce
-/// 4. Terminal decodes the envelope, verifies the signature + domain + nonce,
-///    and checks the signing key matches the expected `verifying_key`
-/// 5. On success, returns the guarded `session` capability
+/// 2. Terminal reads the current epoch and generates a random nonce
+/// 3. Terminal sends `signer.sign(nonce, epoch_seq)` — both values are
+///    bound into the signed payload (`nonce || epoch_seq`, 16 bytes)
+/// 4. Signer returns a libp2p `SignedEnvelope` (RFC 0002)
+/// 5. Terminal decodes the envelope, verifies the signature + domain +
+///    challenge payload, and checks the signing key against the auth policy
+/// 6. Terminal verifies the epoch hasn't advanced since step 2
+/// 7. On success, returns the guarded `session` capability
+///
+/// # Security properties
+///
+/// The signed challenge binds two independent values:
+///
+/// - **Random nonce** — prevents replay within the same epoch.  A fresh
+///   `u64` is drawn from the OS CSPRNG for every login attempt.
+/// - **Epoch sequence** — prevents cross-epoch reuse.  A signature captured
+///   during epoch N is cryptographic garbage during epoch N+1 because the
+///   epoch_seq in the payload won't match the Terminal's current epoch.
+///
+/// Together they provide defence-in-depth: the nonce stops same-epoch replay,
+/// the epoch binding stops stale-epoch replay, and the EpochGuard on issued
+/// capabilities provides a final runtime check at capability-use time.
 pub struct TerminalServer<Session: capnp::traits::Owned> {
     policy: Box<dyn AuthPolicy>,
     session: <Session as capnp::traits::Owned>::Reader<'static>,
     domain: SigningDomain,
+    epoch_rx: watch::Receiver<Epoch>,
 }
 
 impl<Session> TerminalServer<Session>
@@ -92,15 +112,20 @@ where
     /// The `domain` determines the signing context for challenge-response auth.
     /// Different guarded capabilities should use different domains to prevent
     /// cross-protocol signature replay.
+    ///
+    /// The `epoch_rx` provides the current epoch for binding into the
+    /// challenge-response — signatures are tied to the epoch they were issued in.
     pub fn new(
         vk: VerifyingKey,
         session: <Session as capnp::traits::Owned>::Reader<'static>,
         domain: SigningDomain,
+        epoch_rx: watch::Receiver<Epoch>,
     ) -> Self {
         Self::with_policy(
             Box::new(VerifyingKeyPolicy { expected: vk }),
             session,
             domain,
+            epoch_rx,
         )
     }
 
@@ -109,11 +134,13 @@ where
         policy: Box<dyn AuthPolicy>,
         session: <Session as capnp::traits::Owned>::Reader<'static>,
         domain: SigningDomain,
+        epoch_rx: watch::Receiver<Epoch>,
     ) -> Self {
         Self {
             policy,
             session,
             domain,
+            epoch_rx,
         }
     }
 }
@@ -137,9 +164,15 @@ where
         let session = self.session.clone();
         let domain = self.domain.clone();
 
+        // Read current epoch — the seq is bound into the signed challenge
+        // so that a captured signature from epoch N is garbage during epoch N+1.
+        let epoch = self.epoch_rx.borrow().clone();
+        let epoch_seq = epoch.seq;
+
         let nonce: u64 = rand::random();
         let mut sign_req = signer.sign_request();
         sign_req.get().set_nonce(nonce);
+        sign_req.get().set_epoch_seq(epoch_seq);
 
         Promise::from_future(async move {
             let sign_resp = sign_req.send().promise.await?;
@@ -155,10 +188,24 @@ where
                 .payload_and_signing_key(domain.as_str().to_string(), domain.payload_type())
                 .map_err(|e| Error::failed(format!("login auth failed: {e}")))?;
 
-            // Check the nonce matches our challenge.
-            let expected_payload = nonce.to_be_bytes();
+            // Check the nonce || epoch_seq matches our challenge.
+            let mut expected_payload = Vec::with_capacity(16);
+            expected_payload.extend_from_slice(&nonce.to_be_bytes());
+            expected_payload.extend_from_slice(&epoch_seq.to_be_bytes());
             if payload != expected_payload {
-                return Err(Error::failed("login auth failed: nonce mismatch".into()));
+                return Err(Error::failed(
+                    "login auth failed: challenge mismatch".into(),
+                ));
+            }
+
+            // Verify the epoch hasn't advanced since we issued the challenge.
+            // This closes the race where the epoch changes between challenge
+            // issuance and response verification.
+            let current_seq = self.epoch_rx.borrow().seq;
+            if current_seq != epoch_seq {
+                return Err(Error::failed(
+                    "login auth failed: epoch advanced during authentication".into(),
+                ));
             }
 
             // Extract the ed25519 key and delegate authorization to the policy.
@@ -191,12 +238,14 @@ mod tests {
             head: vec![],
             adopted_block: 0,
         });
-        let membrane: stem_capnp::membrane::Client = crate::membrane::membrane_client(rx);
+        let membrane: stem_capnp::membrane::Client =
+            crate::membrane::membrane_client(rx.clone());
 
         let _terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(
             vk,
             membrane,
             SigningDomain::terminal_membrane(),
+            rx,
         );
     }
 
@@ -207,12 +256,14 @@ mod tests {
             head: vec![],
             adopted_block: 0,
         });
-        let membrane: stem_capnp::membrane::Client = crate::membrane::membrane_client(rx);
+        let membrane: stem_capnp::membrane::Client =
+            crate::membrane::membrane_client(rx.clone());
 
         let _terminal = TerminalServer::<stem_capnp::membrane::Owned>::with_policy(
             Box::new(AllowAllPolicy),
             membrane,
             SigningDomain::terminal_membrane(),
+            rx,
         );
     }
 }
