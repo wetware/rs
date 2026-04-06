@@ -293,7 +293,9 @@ fn render_metrics(state: &MetricsState) -> String {
 
     // ---- Stream metrics ----
 
-    out.push_str("# HELP ww_stream_bytes_pumped_total Total bytes pumped through stream listeners.\n");
+    out.push_str(
+        "# HELP ww_stream_bytes_pumped_total Total bytes pumped through stream listeners.\n",
+    );
     out.push_str("# TYPE ww_stream_bytes_pumped_total counter\n");
     out.push_str("# HELP ww_stream_pump_ops_total Total pump read/write cycles.\n");
     out.push_str("# TYPE ww_stream_pump_ops_total counter\n");
@@ -442,7 +444,9 @@ mod tests {
         }
         let output = render_metrics(&state);
         // 0.005s falls in le=0.005 bucket (<=)
-        assert!(output.contains("ww_rpc_duration_seconds_bucket{method=\"host.id\",le=\"0.005\"} 1"));
+        assert!(
+            output.contains("ww_rpc_duration_seconds_bucket{method=\"host.id\",le=\"0.005\"} 1")
+        );
         // 0.050s falls in le=0.05 bucket
         assert!(output.contains("ww_rpc_duration_seconds_bucket{method=\"host.id\",le=\"0.05\"} 2"));
         // +Inf always has all observations

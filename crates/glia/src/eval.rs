@@ -3545,7 +3545,10 @@ mod tests {
         let mut d = RecordingDispatch::new();
         assert_eq!(
             eval_str("(assoc {:a 1} :a 99)", &mut env, &mut d),
-            Ok(Val::Map(ValMap::from_pairs(vec![(Val::Keyword("a".into()), Val::Int(99))])))
+            Ok(Val::Map(ValMap::from_pairs(vec![(
+                Val::Keyword("a".into()),
+                Val::Int(99)
+            )])))
         );
     }
 
@@ -4742,7 +4745,10 @@ mod tests {
         // Should be {:ok 3}
         assert_eq!(
             result,
-            Val::Map(ValMap::from_pairs(vec![(Val::Keyword("ok".into()), Val::Int(3))]))
+            Val::Map(ValMap::from_pairs(vec![(
+                Val::Keyword("ok".into()),
+                Val::Int(3)
+            )]))
         );
     }
 
@@ -4959,7 +4965,10 @@ mod tests {
         // Should be {:ok 3}
         assert_eq!(
             result,
-            Val::Map(ValMap::from_pairs(vec![(Val::Keyword("ok".into()), Val::Int(3))]))
+            Val::Map(ValMap::from_pairs(vec![(
+                Val::Keyword("ok".into()),
+                Val::Int(3)
+            )]))
         );
     }
 
@@ -5032,8 +5041,7 @@ mod tests {
         if let Val::Map(m) = &result {
             assert!(m.contains_key(&Val::Keyword("err".into())));
             // The error value should contain the message "nope"
-            if let Some(err_val) = m.get(&Val::Keyword("err".into()))
-            {
+            if let Some(err_val) = m.get(&Val::Keyword("err".into())) {
                 if let Val::Map(err_m) = err_val {
                     assert_eq!(
                         err_m.get(&Val::Keyword("message".into())),

@@ -44,21 +44,13 @@ fn bench_extract_method(c: &mut Criterion) {
         }
         let data = Val::List(items);
 
-        group.bench_with_input(
-            BenchmarkId::new("clone", n_args),
-            &data,
-            |b, data| {
-                b.iter(|| extract_method_clone(data));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("clone", n_args), &data, |b, data| {
+            b.iter(|| extract_method_clone(data));
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("borrow", n_args),
-            &data,
-            |b, data| {
-                b.iter(|| extract_method_borrow(data));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("borrow", n_args), &data, |b, data| {
+            b.iter(|| extract_method_borrow(data));
+        });
     }
 
     group.finish();

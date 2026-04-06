@@ -287,7 +287,6 @@ fn call_resume(resume: &Val, val: Val) -> Result<Val, Val> {
     }
 }
 
-
 fn make_host_handler(
     host: system_capnp::host::Client,
     runtime: system_capnp::runtime::Client,
@@ -374,7 +373,7 @@ fn make_host_handler(
                                 Some(Val::Map(glia::ValMap::from_pairs(vec![
                                     (Val::Keyword("peer-id".into()), Val::Str(id)),
                                     (Val::Keyword("addrs".into()), Val::List(addr_vals)),
-                                ]))
+                                ])))
                             })
                             .collect();
                         Val::List(items)

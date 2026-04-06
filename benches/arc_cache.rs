@@ -11,8 +11,8 @@ use criterion::{criterion_group, criterion_main, Criterion};
 fn make_cid(seed: u64) -> Cid {
     // Build a CID with identity multihash (0x00) containing the seed bytes.
     // This is fast and deterministic — good enough for benchmarking.
-    let digest = cid::multihash::Multihash::wrap(0x00, &seed.to_le_bytes())
-        .expect("identity multihash");
+    let digest =
+        cid::multihash::Multihash::wrap(0x00, &seed.to_le_bytes()).expect("identity multihash");
     Cid::new_v1(0x55, digest) // raw codec
 }
 

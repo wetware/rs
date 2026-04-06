@@ -88,8 +88,8 @@ mod tests {
     use super::*;
 
     fn make_cid(seed: u64) -> Cid {
-        let mh = cid::multihash::Multihash::wrap(0x00, &seed.to_le_bytes())
-            .expect("identity multihash");
+        let mh =
+            cid::multihash::Multihash::wrap(0x00, &seed.to_le_bytes()).expect("identity multihash");
         Cid::new_v1(0x55, mh)
     }
 

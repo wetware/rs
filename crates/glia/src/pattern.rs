@@ -594,7 +594,10 @@ mod tests {
             Val::Keyword("name".into()),
             Pattern::Bind("n".into()),
         )]);
-        let val = Val::Map(ValMap::from_pairs(vec![(Val::Keyword("age".into()), Val::Int(30))]));
+        let val = Val::Map(ValMap::from_pairs(vec![(
+            Val::Keyword("age".into()),
+            Val::Int(30),
+        )]));
         assert_eq!(match_pattern(&pat, &val), None);
     }
 
@@ -684,7 +687,10 @@ mod tests {
                 Val::Keyword("name".into()),
                 Val::Str("Alice".into()),
             )])),
-            Val::Map(ValMap::from_pairs(vec![(Val::Keyword("name".into()), Val::Str("Bob".into()))])),
+            Val::Map(ValMap::from_pairs(vec![(
+                Val::Keyword("name".into()),
+                Val::Str("Bob".into()),
+            )])),
         ]);
         let result = match_pattern(&pat, &val);
         assert_eq!(
