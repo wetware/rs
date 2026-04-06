@@ -6,7 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Val::Map now backed by persistent CHAMP trie (im::HashMap) via ValMap wrapper. O(1) clone, O(log N) insert, O(1) lookup for maps with 32+ entries (77-92% improvement). ValMap is the future seam for IPLD-backed persistent maps.
+- `extract_method` moved to glia crate (was duplicated in kernel and caps), returns `(&str, &[Val])` instead of `(String, Vec<Val>)` for zero-alloc capability dispatch.
+- Fn/Macro equality: `Rc::ptr_eq` identity semantics (was always-false). Functions are now equal to themselves.
+- Hash + Eq implemented for Val (enables use as map keys, set elements).
+
 ### Added
+- `AtomicBloom`: lock-free bloom filter for ARC cache (100K capacity, 0.001% FPR, ~244KB). `PinsetCache::probably_cached()` public API for lock-free presence checks.
+- `doc/designs/fuel-scheduling.md`: EWMA ratio estimator design doc.
+- Criterion benchmarks for streams, glia map, ARC cache, kernel dispatch.
+- ARC cache hit/miss/eviction Prometheus counters.
+- Tracing spans on RPC listeners.
+
+### Added
+- Epoch-bound Terminal login: challenge-response now signs `nonce || epoch_seq` (16 bytes), preventing both same-epoch and cross-epoch replay attacks
+- Graceful epoch shutdown: configurable drain delay before epoch broadcast (SIGTERM/SIGKILL model for in-flight operations)
+- `doc/replay-protection.md`: four-layer defence model documentation (domain separation, epoch binding, epoch guards, on-chain finality)
+
+### Changed
+- `Signer.sign()` now takes `(nonce, epochSeq)` instead of just `(nonce)` — old clients will fail auth (correct behavior)
+- TerminalServer requires `epoch_rx: watch::Receiver<Epoch>` at construction
+- EpochService accepts `drain_duration: Duration` (default 1s via `--epoch-drain-secs`)
+
+### Added
+- `PollSet` for multiplexing extra WASI pollables (stdin, listeners) alongside RPC in guest poll_loop
+- `system::run_with(poll_set, f)` entry point for guests needing concurrent async I/O
+- `PollLoopExit` with cycle counter for diagnosing RPC connection drops
+- 51 new tests: MCP tool dispatch, caps effect handlers, ByteStream I/O, HttpClient allowlist, membrane E2E
 - `ww perform install` — bootstrap ~/.ww user layer (boot, bin, lib, etc/init.d). Idempotent.
 - `ww doctor` — environment health check (rustc, cargo, wasm32-wasip2, optional Kubo/Ollama)
 - MCP dynamic tools: per-capability MCP tools generated from membrane graft (host, routing, runtime, identity, http-client, import). Each tool has per-action parameter schemas. eval remains primary interface.
@@ -14,6 +41,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - TODOS.md: Export.schema population, MCP resources, MCP prompts, eval error improvements
 
 ### Changed
+- MCP cell: async stdin via StreamReader + PollSet (fixes host:peers connection drop)
 - MCP cell: tools/list returns per-cap tools dynamically instead of single static eval tool
 - .agents/prompt.md: document MCP tools and ~/.ww workflow for AI agents
 - Extract shared effect handlers into std/caps crate (shell + MCP share, no duplication)
@@ -23,6 +51,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Guest runtime: unify three duplicate poll loops (drive_rpc_only, drive_rpc_with_future, block_on) into a single generic `poll_loop<T>()`
 - Guest runtime: replace `futures::noop_waker`/`poll_unpin` with `std::task::Waker::noop()`/`Pin::new().poll()`
 - Glia effect handler: simplify state machine (factor out repeated handler stack push, remove no-op match)
+
+### Fixed
+- Shell cell: missing import handler (broke all eval with "target must be a keyword or cap")
+- Shell E2E tests: WASM path mismatch (tests were silently skipping)
 
 ### Removed
 - Dead code: `RpcDriver`, `DriveOutcome`, `drive_until`, `block_on` (zero callers)

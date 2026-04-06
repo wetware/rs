@@ -23,8 +23,9 @@ use wasip2::exports::cli::run::Guest;
 
 // Shared effect handler factories.
 use caps::{
-    call_resume, eval_load, extract_method, get_graft_cap, make_host_handler, make_ipfs_handler,
-    make_routing_handler, routing_capnp, system_capnp, stem_capnp, wrap_with_handlers,
+    call_resume, eval_load, extract_method, get_graft_cap, make_host_handler, make_import_handler,
+    make_ipfs_handler, make_routing_handler, routing_capnp, system_capnp, stem_capnp,
+    wrap_with_handlers,
 };
 
 // Shell-specific generated Cap'n Proto modules.
@@ -179,7 +180,7 @@ fn make_auction_handler(
                 let (method, rest) = extract_method(&args[0])?;
                 let resume = &args[1];
 
-                match method.as_str() {
+                match method {
                     "compare" => {
                         // Parse args: wasm_cid (required), fuel (optional, default 1M).
                         let wasm_cid = match rest.first() {
@@ -293,7 +294,7 @@ fn make_auction_handler(
                         let result: Vec<Val> = quotes
                             .into_iter()
                             .map(|(provider, price, qfuel, expires)| {
-                                Val::Map(vec![
+                                Val::Map(glia::ValMap::from_pairs(vec![
                                     (
                                         Val::Keyword("provider".into()),
                                         Val::Str(provider),
@@ -310,7 +311,7 @@ fn make_auction_handler(
                                         Val::Keyword("expires".into()),
                                         Val::Int(expires),
                                     ),
-                                ])
+                                ]))
                             })
                             .collect();
 
@@ -505,10 +506,11 @@ fn run_impl() {
         // 2. Bind cap values + effect handlers into the environment.
         {
             let mut env = env.borrow_mut();
-            let caps: [(&str, Val); 4] = [
+            let caps: [(&str, Val); 5] = [
                 ("host", make_host_handler(host)),
                 ("ipfs", make_ipfs_handler()),
                 ("routing", make_routing_handler(routing.clone())),
+                ("import", make_import_handler()),
                 (
                     "auction",
                     make_auction_handler(routing, vat_client, self_id),

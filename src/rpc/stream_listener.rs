@@ -79,16 +79,21 @@ impl system_capnp::stream_listener::Server for StreamListenerImpl {
                             tracing::warn!(protocol = %stream_protocol, "Stream subprotocol accept loop ended unexpectedly");
                             break;
                         };
-                        tracing::debug!(
+                        let _accept_span = tracing::info_span!(
+                            "stream.accept",
                             peer = %peer_id,
                             protocol = %stream_protocol,
-                            "Incoming stream subprotocol connection"
-                        );
+                        ).entered();
+                        tracing::debug!("Incoming stream connection");
                         let executor = executor.clone();
                         let protocol = protocol_suffix.clone();
                         tokio::task::spawn_local(async move {
+                            let _handle_span = tracing::info_span!(
+                                "stream.handle",
+                                protocol = protocol.as_str(),
+                            ).entered();
                             if let Err(e) = handle_connection(executor, stream, &protocol).await {
-                                tracing::error!(protocol, "Stream cell connection error: {e}");
+                                tracing::error!("Stream cell connection error: {e}");
                             }
                         });
                     }
@@ -157,6 +162,7 @@ pub(crate) async fn pump_stream_to_stdin(
     mut reader: impl futures::io::AsyncRead + Unpin,
     stdin: system_capnp::byte_stream::Client,
 ) {
+    let _span = tracing::info_span!("stream.pump_in").entered();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         match reader.read(&mut buf).await {
@@ -165,6 +171,7 @@ pub(crate) async fn pump_stream_to_stdin(
                 break;
             }
             Ok(n) => {
+                tracing::trace!(bytes = n, "pump_in: read chunk");
                 let mut req = stdin.write_request();
                 req.get().set_data(&buf[..n]);
                 if let Err(e) = req.send().promise.await {
@@ -186,6 +193,7 @@ pub(crate) async fn pump_stdout_to_stream(
     stdout: system_capnp::byte_stream::Client,
     mut writer: impl futures::io::AsyncWrite + Unpin,
 ) {
+    let _span = tracing::info_span!("stream.pump_out").entered();
     loop {
         let mut req = stdout.read_request();
         req.get().set_max_bytes(64 * 1024);
@@ -196,6 +204,7 @@ pub(crate) async fn pump_stdout_to_stream(
         match result {
             Ok(data) if data.is_empty() => break,
             Ok(data) => {
+                tracing::trace!(bytes = data.len(), "pump_out: write chunk");
                 if let Err(e) = writer.write_all(&data).await {
                     tracing::debug!("stream write error: {e}");
                     break;

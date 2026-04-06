@@ -10,6 +10,9 @@ use std::rc::Rc;
 
 use glia::Val;
 
+// Re-export extract_method from glia for downstream consumers (shell, MCP).
+pub use glia::extract_method;
+
 // Re-export schema_capnp so generated stem code can resolve `crate::schema_capnp`.
 pub use capnp::schema_capnp;
 
@@ -80,21 +83,6 @@ pub fn call_resume(resume: &Val, val: Val) -> Result<Val, Val> {
     }
 }
 
-pub fn extract_method(data: &Val) -> Result<(String, Vec<Val>), Val> {
-    let items = match data {
-        Val::List(items) => items,
-        _ => return Err(Val::from("cap handler: expected list data")),
-    };
-    let method = match items.first() {
-        Some(Val::Keyword(s)) => s.clone(),
-        _ => {
-            return Err(Val::from(
-                "cap handler: first arg must be a keyword method (e.g. :id, :run)",
-            ))
-        }
-    };
-    Ok((method, items[1..].to_vec()))
-}
 
 // ---------------------------------------------------------------------------
 // Import handler — module loading as a membrane capability
@@ -335,7 +323,7 @@ pub fn make_host_handler(host: system_capnp::host::Client) -> Val {
                 let (method, _rest) = extract_method(&args[0])?;
                 let resume = &args[1];
 
-                match method.as_str() {
+                match method {
                     "id" => {
                         let resp = host
                             .id_request()
@@ -404,7 +392,7 @@ pub fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                         })
                                     })
                                     .collect();
-                                Some(Val::Map(vec![
+                                Some(Val::Map(glia::ValMap::from_pairs(vec![
                                     (Val::Keyword("peer-id".into()), Val::Str(encoded)),
                                     (Val::Keyword("addrs".into()), Val::List(addrs)),
                                 ]))
@@ -428,7 +416,7 @@ pub fn make_routing_handler(routing: routing_capnp::routing::Client) -> Val {
                 let (method, rest) = extract_method(&args[0])?;
                 let resume = &args[1];
 
-                match method.as_str() {
+                match method {
                     "provide" => {
                         let key = match rest.first() {
                             Some(Val::Str(s)) => s.clone(),
@@ -480,7 +468,7 @@ pub fn make_ipfs_handler() -> Val {
                 let (method, rest) = extract_method(&args[0])?;
                 let resume = &args[1];
 
-                match method.as_str() {
+                match method {
                     "cat" => {
                         let path = match rest.first() {
                             Some(Val::Str(s)) => s.clone(),
@@ -515,7 +503,7 @@ pub fn make_ipfs_handler() -> Val {
                                         let e = e.ok()?;
                                         let name = e.file_name().to_string_lossy().to_string();
                                         let size = e.metadata().ok()?.len();
-                                        Some(Val::Map(vec![
+                                        Some(Val::Map(glia::ValMap::from_pairs(vec![
                                             (Val::Keyword("name".into()), Val::Str(name)),
                                             (Val::Keyword("size".into()), Val::Int(size as i64)),
                                         ]))
@@ -625,7 +613,7 @@ mod tests {
         IMPORT_CACHE.with(|cache| {
             cache
                 .borrow_mut()
-                .insert("/lib/test.glia".into(), Val::Map(vec![]));
+                .insert("/lib/test.glia".into(), Val::Map(glia::ValMap::new());
         });
         clear_import_cache();
         IMPORT_CACHE.with(|cache| {
@@ -638,10 +626,10 @@ mod tests {
         clear_import_cache();
 
         // Pre-populate the cache to test that the handler returns a map
-        let test_map = Val::Map(vec![
+        let test_map = Val::Map(glia::ValMap::from_pairs(vec![
             (Val::Keyword("x".into()), Val::Int(42)),
             (Val::Keyword("y".into()), Val::Int(99)),
-        ]);
+        ]));
         IMPORT_CACHE.with(|cache| {
             cache
                 .borrow_mut()
@@ -706,7 +694,7 @@ mod tests {
     fn import_cached_returns_same_map() {
         clear_import_cache();
 
-        let test_map = Val::Map(vec![(Val::Keyword("a".into()), Val::Int(1))]);
+        let test_map = Val::Map(glia::ValMap::from_pairs(vec![(Val::Keyword("a".into()), Val::Int(1))]));
         IMPORT_CACHE.with(|cache| {
             cache
                 .borrow_mut()
@@ -778,5 +766,97 @@ mod tests {
         }
 
         clear_import_cache();
+    }
+
+    // -- call_resume --
+
+    #[test]
+    fn call_resume_with_native_fn() {
+        let resume = Val::NativeFn {
+            name: "test-resume".into(),
+            func: std::rc::Rc::new(|args: &[Val]| Ok(args[0].clone())),
+        };
+        let result = call_resume(&resume, Val::Int(42));
+        assert_eq!(result, Ok(Val::Int(42)));
+    }
+
+    #[test]
+    fn call_resume_with_non_fn_errors() {
+        let result = call_resume(&Val::Nil, Val::Int(1));
+        assert!(result.is_err());
+        let result = call_resume(&Val::Int(5), Val::Str("x".into()));
+        assert!(result.is_err());
+    }
+
+    // -- extract_method --
+
+    #[test]
+    fn extract_method_valid() {
+        let data = Val::List(vec![
+            Val::Keyword("peers".into()),
+            Val::Int(1),
+            Val::Str("extra".into()),
+        ]);
+        let (method, rest) = extract_method(&data).unwrap();
+        assert_eq!(method, "peers");
+        assert_eq!(rest, vec![Val::Int(1), Val::Str("extra".into())]);
+    }
+
+    #[test]
+    fn extract_method_keyword_only() {
+        let data = Val::List(vec![Val::Keyword("id".into())]);
+        let (method, rest) = extract_method(&data).unwrap();
+        assert_eq!(method, "id");
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn extract_method_non_list_errors() {
+        assert!(extract_method(&Val::Int(5)).is_err());
+        assert!(extract_method(&Val::Nil).is_err());
+    }
+
+    #[test]
+    fn extract_method_non_keyword_head_errors() {
+        let data = Val::List(vec![Val::Str("not-keyword".into())]);
+        assert!(extract_method(&data).is_err());
+    }
+
+    #[test]
+    fn extract_method_empty_list_errors() {
+        assert!(extract_method(&Val::List(vec![])).is_err());
+    }
+
+    // -- wrap_with_handlers --
+
+    #[test]
+    fn wrap_with_handlers_no_extras() {
+        let form = Val::Int(42);
+        let wrapped = wrap_with_handlers(&form, &[]);
+        // Should be nested: host(ipfs(routing(import(:load(42)))))
+        // Outermost is host
+        match &wrapped {
+            Val::List(items) => {
+                assert_eq!(items[0], Val::Sym("with-effect-handler".into()));
+                assert_eq!(items[1], Val::Sym("host".to_string()));
+            }
+            other => panic!("expected list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrap_with_handlers_with_extras() {
+        let form = Val::Int(1);
+        let wrapped = wrap_with_handlers(&form, &["custom"]);
+        // "custom" is an extra cap — should appear in the wrapping
+        match &wrapped {
+            Val::List(items) => {
+                assert_eq!(items[0], Val::Sym("with-effect-handler".into()));
+                // The outermost is still host (extras are inserted at index 0
+                // of the caps vec, so they're INNER, not outer)
+                assert_eq!(items[1], Val::Sym("host".to_string()));
+            }
+            other => panic!("expected list, got {other:?}"),
+        }
     }
 }

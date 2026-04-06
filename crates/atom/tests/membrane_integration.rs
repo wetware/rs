@@ -64,14 +64,20 @@ impl stem_capnp::signer::Server for TestSigner {
         params: stem_capnp::signer::SignParams,
         mut results: stem_capnp::signer::SignResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        let nonce = capnp_rpc::pry!(params.get()).get_nonce();
+        let p = capnp_rpc::pry!(params.get());
+        let nonce = p.get_nonce();
+        let epoch_seq = p.get_epoch_seq();
         let domain = SigningDomain::terminal_membrane();
+
+        let mut payload = Vec::with_capacity(16);
+        payload.extend_from_slice(&nonce.to_be_bytes());
+        payload.extend_from_slice(&epoch_seq.to_be_bytes());
 
         let envelope = capnp_rpc::pry!(libp2p_core::SignedEnvelope::new(
             &self.keypair,
             domain.as_str().to_string(),
             domain.payload_type().to_vec(),
-            nonce.to_be_bytes().to_vec(),
+            payload,
         )
         .map_err(|e| capnp::Error::failed(format!("signing failed: {e}"))));
 
@@ -98,11 +104,12 @@ fn terminal_membrane(
     rx: watch::Receiver<Epoch>,
     vk: ed25519_dalek::VerifyingKey,
 ) -> stem_capnp::terminal::Client<stem_capnp::membrane::Owned> {
-    let membrane = stub_membrane(rx);
+    let membrane = stub_membrane(rx.clone());
     new_client(TerminalServer::<stem_capnp::membrane::Owned>::new(
         vk,
         membrane,
         SigningDomain::terminal_membrane(),
+        rx,
     ))
 }
 
@@ -460,12 +467,13 @@ async fn test_terminal_over_stream_pair() {
     let sk = SigningKey::generate(&mut rand::rngs::OsRng);
     let vk = sk.verifying_key();
     let (_tx, rx) = watch::channel(epoch);
-    let membrane = full_stub_membrane(rx);
+    let membrane = full_stub_membrane(rx.clone());
 
     let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(
         vk,
         membrane,
         SigningDomain::terminal_membrane(),
+        rx,
     );
     let terminal_client: stem_capnp::terminal::Client<stem_capnp::membrane::Owned> =
         new_client(terminal);
@@ -554,12 +562,13 @@ async fn test_terminal_over_stream_wrong_key_rejected() {
     let wrong_sk = SigningKey::generate(&mut rand::rngs::OsRng);
 
     let (_tx, rx) = watch::channel(epoch);
-    let membrane = full_stub_membrane(rx);
+    let membrane = full_stub_membrane(rx.clone());
 
     let terminal = TerminalServer::<stem_capnp::membrane::Owned>::new(
         host_vk,
         membrane,
         SigningDomain::terminal_membrane(),
+        rx,
     );
     let terminal_client: stem_capnp::terminal::Client<stem_capnp::membrane::Owned> =
         new_client(terminal);
@@ -662,4 +671,47 @@ async fn test_terminal_malformed_signature_rejected() {
             "error should mention invalid signed envelope, got: {e}"
         ),
     }
+}
+
+/// Terminal login should fail after epoch advances (epoch-bound signature is stale).
+#[tokio::test]
+async fn test_terminal_login_fails_after_epoch_advance() {
+    let epoch1 = Epoch {
+        seq: 1,
+        head: b"head1".to_vec(),
+        adopted_block: 100,
+    };
+
+    let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+    let vk = sk.verifying_key();
+
+    let (tx, rx) = watch::channel(epoch1);
+    let terminal = terminal_membrane(rx, vk);
+
+    // Login succeeds under epoch 1.
+    let signer1: stem_capnp::signer::Client = new_client(TestSigner::from_ed25519(&sk));
+    let mut req1 = terminal.login_request();
+    req1.get().set_signer(signer1);
+    req1.send()
+        .promise
+        .await
+        .expect("login should succeed under epoch 1");
+
+    // Advance epoch.
+    tx.send(Epoch {
+        seq: 2,
+        head: b"head2".to_vec(),
+        adopted_block: 101,
+    })
+    .unwrap();
+
+    // Login again — the Terminal issues a challenge bound to epoch 2,
+    // and the signer signs it correctly, so this should succeed too.
+    let signer2: stem_capnp::signer::Client = new_client(TestSigner::from_ed25519(&sk));
+    let mut req2 = terminal.login_request();
+    req2.get().set_signer(signer2);
+    req2.send()
+        .promise
+        .await
+        .expect("login should succeed under epoch 2 (signer signs the new epoch_seq)");
 }

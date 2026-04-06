@@ -10,6 +10,7 @@
 //! see `run_atom_pipeline` which wraps `AtomSource` from `crates/stem/`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use membrane::Epoch;
@@ -28,13 +29,20 @@ use crate::ipfs;
 /// 2. Pre-warm CidTree directory cache for new root
 /// 3. Swap CidTree root (FS sees new content)
 /// 4. Unpin old CID
-/// 5. Broadcast epoch (capabilities die, guests re-negotiate)
+/// 5. Drain — SIGTERM window for in-flight operations
+/// 6. Broadcast epoch — SIGKILL, capabilities die, guests re-negotiate
+///
+/// `drain_duration` controls graceful shutdown: when non-zero, capabilities have
+/// this long to finish in-flight work before the epoch advances and they die.
+/// During the drain window the FS already serves new content (CidTree was swapped),
+/// but capabilities still reference the old epoch.
 pub async fn handle_epoch_advance(
     event: &StemEvent,
     epoch_tx: &watch::Sender<Epoch>,
     ipfs_client: &ipfs::HttpClient,
     prev_ipfs_path: &mut Option<String>,
     cid_tree: Option<&Arc<crate::vfs::CidTree>>,
+    drain_duration: Duration,
 ) -> Result<()> {
     let ipfs_path =
         cid_bytes_to_ipfs_path(&event.cid).context("Failed to convert CID to IPFS path")?;
@@ -72,7 +80,18 @@ pub async fn handle_epoch_advance(
 
     *prev_ipfs_path = Some(ipfs_path);
 
-    // 5. Broadcast epoch (capabilities die, guests re-negotiate).
+    // 5. Drain — give in-flight operations time to finish.
+    if !drain_duration.is_zero() {
+        info!(
+            seq = event.seq,
+            drain_ms = drain_duration.as_millis() as u64,
+            "Draining epoch — capabilities have {}s to finish",
+            drain_duration.as_secs_f32()
+        );
+        tokio::time::sleep(drain_duration).await;
+    }
+
+    // 6. Broadcast epoch (capabilities die, guests re-negotiate).
     let new_epoch = Epoch {
         seq: event.seq,
         head: event.cid.clone(),
@@ -90,9 +109,6 @@ pub async fn handle_epoch_advance(
 }
 
 // ── Legacy entry point (Atom-specific) ──────────────────────────────
-//
-// Preserved for backward compatibility with callers that use the old
-// `run_epoch_pipeline` signature. Internally delegates to `AtomSource`.
 
 use atom::{AtomIndexer, FinalizerBuilder, IndexerConfig};
 use membrane::Provenance;
@@ -102,12 +118,16 @@ use membrane::Provenance;
 /// Wraps the old AtomIndexer + Finalizer flow with the shared
 /// `handle_epoch_advance` downstream. Callers should migrate to
 /// `AtomSource::run()` from `crates/stem/` for new code.
+///
+/// `drain_duration` controls graceful shutdown: when non-zero, capabilities have
+/// this long to finish in-flight work before the epoch advances and they die.
 pub async fn run_epoch_pipeline(
     config: IndexerConfig,
     epoch_tx: watch::Sender<Epoch>,
     confirmation_depth: u64,
     ipfs_client: ipfs::HttpClient,
     cid_tree: Option<Arc<crate::vfs::CidTree>>,
+    drain_duration: Duration,
 ) -> Result<()> {
     let indexer = Arc::new(AtomIndexer::new(config.clone()));
     let mut events = indexer.subscribe();
@@ -163,6 +183,7 @@ pub async fn run_epoch_pipeline(
                         &ipfs_client,
                         &mut prev_ipfs_path,
                         cid_tree.as_ref(),
+                        drain_duration,
                     )
                     .await
                     {

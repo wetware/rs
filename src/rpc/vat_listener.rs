@@ -109,19 +109,25 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
                                     tracing::warn!(protocol = %stream_protocol, "Vat accept loop ended unexpectedly");
                                     break;
                                 };
-                                tracing::debug!(
+                                let _accept_span = tracing::info_span!(
+                                    "vat.accept",
                                     peer = %peer_id,
                                     protocol = %stream_protocol,
-                                    "Incoming vat connection (spawn mode)"
-                                );
+                                    mode = "spawn",
+                                ).entered();
+                                tracing::debug!("Incoming vat connection");
                                 let executor = executor.clone();
                                 let protocol_cid = protocol_cid.clone();
                                 let caps = extra_caps.clone();
                                 tokio::task::spawn_local(async move {
+                                    let _handle_span = tracing::info_span!(
+                                        "vat.handle",
+                                        protocol = protocol_cid,
+                                    ).entered();
                                     if let Err(e) =
                                         handle_vat_connection_spawn(executor, caps, stream, &protocol_cid).await
                                     {
-                                        tracing::error!(protocol = protocol_cid, "Vat cell connection error: {e}");
+                                        tracing::error!("Vat cell connection error: {e}");
                                     }
                                 });
                             }
@@ -152,18 +158,24 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
                                     tracing::warn!(protocol = %stream_protocol, "Vat accept loop ended unexpectedly");
                                     break;
                                 };
-                                tracing::debug!(
+                                let _accept_span = tracing::info_span!(
+                                    "vat.accept",
                                     peer = %peer_id,
                                     protocol = %stream_protocol,
-                                    "Incoming vat connection (serve mode)"
-                                );
+                                    mode = "serve",
+                                ).entered();
+                                tracing::debug!("Incoming vat connection");
                                 let cap = bootstrap_cap.clone();
                                 let protocol_cid = protocol_cid.clone();
                                 tokio::task::spawn_local(async move {
+                                    let _handle_span = tracing::info_span!(
+                                        "vat.handle",
+                                        protocol = protocol_cid,
+                                    ).entered();
                                     if let Err(e) =
                                         handle_vat_connection_serve(cap, stream, &protocol_cid).await
                                     {
-                                        tracing::error!(protocol = protocol_cid, "Vat serve connection error: {e}");
+                                        tracing::error!("Vat serve connection error: {e}");
                                     }
                                 });
                             }

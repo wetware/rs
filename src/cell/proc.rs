@@ -64,6 +64,8 @@ use crate::sched::{INITIAL_FUEL, MAX_FUEL, MIN_FUEL, RATIO_SCALE, YIELD_INTERVAL
 /// Using the ratio instead of absolute consumed avoids a feedback loop
 /// where consumed depends on budget, which would spiral to MIN_FUEL under
 /// bursty workloads.
+///
+/// Design doc: `doc/designs/fuel-scheduling.md`
 pub struct FuelEstimator {
     budget: u64,
     /// EWMA of consumed/budget ratio (fixed-point, 0..RATIO_SCALE).
@@ -571,7 +573,7 @@ impl Proc {
 
         // Load the initial fuel budget.  fuel_async_yield_interval controls how
         // often Wasmtime suspends the guest to poll other Tokio tasks — this is
-        // independent of the AIMD budget ceiling.  A cell with MAX_FUEL still
+        // independent of the EWMA budget ceiling.  A cell with MAX_FUEL still
         // yields every YIELD_INTERVAL instructions.
         store.set_fuel(INITIAL_FUEL)?;
         store.fuel_async_yield_interval(Some(YIELD_INTERVAL))?;
