@@ -134,9 +134,8 @@ impl StemSource for IpnsSource {
                             consecutive_failures = 0;
 
                             // Check if the resolved path changed.
-                            let changed = current_path
-                                .as_ref()
-                                .map_or(true, |p| p != &resolved_path);
+                            let changed =
+                                current_path.as_deref() != Some(resolved_path.as_str());
 
                             if changed {
                                 current_seq += 1;
