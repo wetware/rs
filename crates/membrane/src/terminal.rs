@@ -394,15 +394,13 @@ mod tests {
                 let vk = sk.verifying_key();
                 let (terminal, _tx) = terminal_with_epoch(vk, test_epoch(1));
 
-                let ed_kp = libp2p_identity::ed25519::Keypair::try_from_bytes(
-                    &mut sk.to_keypair_bytes(),
-                )
-                .expect("valid key");
-                let signer: stem_capnp::signer::Client =
-                    capnp_rpc::new_client(WrongEpochSigner {
-                        keypair: ed_kp.into(),
-                        forced_epoch_seq: 999, // wrong epoch
-                    });
+                let ed_kp =
+                    libp2p_identity::ed25519::Keypair::try_from_bytes(&mut sk.to_keypair_bytes())
+                        .expect("valid key");
+                let signer: stem_capnp::signer::Client = capnp_rpc::new_client(WrongEpochSigner {
+                    keypair: ed_kp.into(),
+                    forced_epoch_seq: 999, // wrong epoch
+                });
 
                 let mut req = terminal.login_request();
                 req.get().set_signer(signer);
@@ -477,10 +475,9 @@ mod tests {
                 let vk = sk.verifying_key();
                 let (terminal, tx) = terminal_with_epoch(vk, test_epoch(1));
 
-                let ed_kp = libp2p_identity::ed25519::Keypair::try_from_bytes(
-                    &mut sk.to_keypair_bytes(),
-                )
-                .expect("valid key");
+                let ed_kp =
+                    libp2p_identity::ed25519::Keypair::try_from_bytes(&mut sk.to_keypair_bytes())
+                        .expect("valid key");
                 let signer: stem_capnp::signer::Client =
                     capnp_rpc::new_client(EpochAdvancingSigner {
                         keypair: ed_kp.into(),
@@ -494,12 +491,14 @@ mod tests {
                     Ok(resp) => match resp.get() {
                         Ok(_) => panic!("login should fail when epoch advances during auth"),
                         Err(e) => assert!(
-                            e.to_string().contains("epoch advanced during authentication"),
+                            e.to_string()
+                                .contains("epoch advanced during authentication"),
                             "expected epoch-advanced error, got: {e}"
                         ),
                     },
                     Err(e) => assert!(
-                        e.to_string().contains("epoch advanced during authentication"),
+                        e.to_string()
+                            .contains("epoch advanced during authentication"),
                         "expected epoch-advanced error, got: {e}"
                     ),
                 }

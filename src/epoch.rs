@@ -255,8 +255,15 @@ mod tests {
         let ipfs_client = ipfs::HttpClient::new("http://127.0.0.1:1".into());
 
         let start = tokio::time::Instant::now();
-        let _ =
-            handle_finalized(&fe, &epoch_tx, &ipfs_client, &mut None, None, Duration::ZERO).await;
+        let _ = handle_finalized(
+            &fe,
+            &epoch_tx,
+            &ipfs_client,
+            &mut None,
+            None,
+            Duration::ZERO,
+        )
+        .await;
         let elapsed = start.elapsed();
 
         assert!(
