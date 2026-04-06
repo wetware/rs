@@ -2802,6 +2802,9 @@ dependencies = [
 [[package]]
 name = "glia"
 version = "0.1.0"
+dependencies = [
+ "im",
+]
 
 [[package]]
 name = "glob"
@@ -3354,6 +3357,20 @@ dependencies = [
  "tokio",
  "url",
  "xmltree",
+]
+
+[[package]]
+name = "im"
+version = "15.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0acd33ff0285af998aaf9b57342af478078f53492322fafc47450e09397e0e9"
+dependencies = [
+ "bitmaps",
+ "rand_core 0.6.4",
+ "rand_xoshiro",
+ "sized-chunks",
+ "typenum",
+ "version_check",
 ]
 
 [[package]]

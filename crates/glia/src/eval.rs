@@ -22,7 +22,7 @@ use std::rc::Rc;
 
 use crate::effect::{self, HandlerStack};
 use crate::expr::FnBody;
-use crate::{oneshot, FnArity, Val};
+use crate::{oneshot, FnArity, Val, ValMap};
 
 /// Monotonic counter for `gensym`.
 static GENSYM_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -986,7 +986,7 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
             let empty = match &args[0] {
                 Val::Nil => true,
                 Val::List(v) | Val::Vector(v) | Val::Set(v) => v.is_empty(),
-                Val::Map(pairs) => pairs.is_empty(),
+                Val::Map(m) => m.is_empty(),
                 Val::Str(s) => s.is_empty(),
                 other => return Some(Err(eval_err!("empty?: expected collection, got {other}"))),
             };
@@ -1062,16 +1062,16 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
                     )))
                 }
             };
-            let mut pairs = match &args[1] {
-                Val::Map(pairs) => pairs.clone(),
+            let m = match &args[1] {
+                Val::Map(m) => m.clone(),
                 other => {
                     return Some(Err(eval_err!(
                         "ex-info: second arg must be a map, got {other}"
                     )))
                 }
             };
-            pairs.push((Val::Keyword("message".into()), Val::Str(msg)));
-            Some(Ok(Val::Map(pairs)))
+            let m = m.assoc(Val::Keyword("message".into()), Val::Str(msg));
+            Some(Ok(Val::Map(m)))
         }
 
         _ => None, // not a built-in
@@ -1083,7 +1083,7 @@ fn builtin_contains(args: &[Val]) -> Result<Val, Val> {
         return Err(eval_err!("contains?: expected 2 args, got {}", args.len()));
     }
     let found = match &args[0] {
-        Val::Map(pairs) => pairs.iter().any(|(k, _)| k == &args[1]),
+        Val::Map(m) => m.contains_key(&args[1]),
         Val::Set(items) => items.iter().any(|v| v == &args[1]),
         Val::Vector(v) => match &args[1] {
             Val::Int(i) => *i >= 0 && (*i as usize) < v.len(),
@@ -1153,7 +1153,7 @@ fn builtin_count(args: &[Val]) -> Result<Val, Val> {
     let n = match &args[0] {
         Val::Nil => 0,
         Val::List(v) | Val::Vector(v) | Val::Set(v) => v.len(),
-        Val::Map(pairs) => pairs.len(),
+        Val::Map(m) => m.len(),
         Val::Str(s) => s.chars().count(),
         other => return Err(eval_err!("count: expected collection or nil, got {other}")),
     };
@@ -1177,14 +1177,7 @@ fn builtin_get(args: &[Val]) -> Result<Val, Val> {
         return Err(eval_err!("get: expected 2 args, got {}", args.len()));
     }
     match &args[0] {
-        Val::Map(pairs) => {
-            for (k, v) in pairs {
-                if k == &args[1] {
-                    return Ok(v.clone());
-                }
-            }
-            Ok(Val::Nil)
-        }
+        Val::Map(m) => Ok(m.get(&args[1]).cloned().unwrap_or(Val::Nil)),
         Val::Vector(v) => match &args[1] {
             Val::Int(i) => {
                 if *i < 0 {
@@ -1207,21 +1200,14 @@ fn builtin_assoc(args: &[Val]) -> Result<Val, Val> {
             args.len()
         ));
     }
-    let mut pairs = match &args[0] {
-        Val::Map(pairs) => pairs.clone(),
+    let mut m = match &args[0] {
+        Val::Map(m) => m.clone(),
         other => return Err(eval_err!("assoc: first arg must be a map, got {other}")),
     };
     for chunk in args[1..].chunks(2) {
-        let key = &chunk[0];
-        let val = &chunk[1];
-        // Update existing key or append.
-        if let Some(entry) = pairs.iter_mut().find(|(k, _)| k == key) {
-            entry.1 = val.clone();
-        } else {
-            pairs.push((key.clone(), val.clone()));
-        }
+        m = m.assoc(chunk[0].clone(), chunk[1].clone());
     }
-    Ok(Val::Map(pairs))
+    Ok(Val::Map(m))
 }
 
 fn builtin_conj(args: &[Val]) -> Result<Val, Val> {
@@ -1245,16 +1231,12 @@ fn builtin_conj(args: &[Val]) -> Result<Val, Val> {
             }
             Ok(Val::List(result))
         }
-        Val::Map(pairs) => {
-            let mut result = pairs.clone();
+        Val::Map(m) => {
+            let mut result = m.clone();
             for item in &args[1..] {
                 match item {
                     Val::Vector(pair) if pair.len() == 2 => {
-                        if let Some(entry) = result.iter_mut().find(|(k, _)| k == &pair[0]) {
-                            entry.1 = pair[1].clone();
-                        } else {
-                            result.push((pair[0].clone(), pair[1].clone()));
-                        }
+                        result = result.assoc(pair[0].clone(), pair[1].clone());
                     }
                     other => {
                         return Err(eval_err!(
@@ -2041,7 +2023,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                         eval_expr(v, env, dispatch).await?,
                     ));
                 }
-                Ok(Val::Map(items))
+                Ok(Val::Map(ValMap::from_pairs(items)))
             }
 
             Expr::Set(exprs) => {
@@ -3303,8 +3285,8 @@ mod tests {
     /// Check if an error Val contains a substring in its :message field or Display output.
     fn err_contains(err: &Val, needle: &str) -> bool {
         // Check :message field in map
-        if let Val::Map(pairs) = err {
-            for (k, v) in pairs {
+        if let Val::Map(m) = err {
+            for (k, v) in m.iter() {
                 if let (Val::Keyword(key), Val::Str(msg)) = (k, v) {
                     if key == "message" && msg.contains(needle) {
                         return true;
@@ -3550,10 +3532,10 @@ mod tests {
         let mut d = RecordingDispatch::new();
         assert_eq!(
             eval_str("(assoc {:a 1} :b 2)", &mut env, &mut d),
-            Ok(Val::Map(vec![
+            Ok(Val::Map(ValMap::from_pairs(vec![
                 (Val::Keyword("a".into()), Val::Int(1)),
                 (Val::Keyword("b".into()), Val::Int(2)),
-            ]))
+            ])))
         );
     }
 
@@ -3563,7 +3545,7 @@ mod tests {
         let mut d = RecordingDispatch::new();
         assert_eq!(
             eval_str("(assoc {:a 1} :a 99)", &mut env, &mut d),
-            Ok(Val::Map(vec![(Val::Keyword("a".into()), Val::Int(99))]))
+            Ok(Val::Map(ValMap::from_pairs(vec![(Val::Keyword("a".into()), Val::Int(99))])))
         );
     }
 
@@ -3603,10 +3585,10 @@ mod tests {
         let mut d = RecordingDispatch::new();
         assert_eq!(
             eval_str("(conj {:a 1} [:b 2])", &mut env, &mut d),
-            Ok(Val::Map(vec![
+            Ok(Val::Map(ValMap::from_pairs(vec![
                 (Val::Keyword("a".into()), Val::Int(1)),
                 (Val::Keyword("b".into()), Val::Int(2)),
-            ]))
+            ])))
         );
     }
 
@@ -4760,7 +4742,7 @@ mod tests {
         // Should be {:ok 3}
         assert_eq!(
             result,
-            Val::Map(vec![(Val::Keyword("ok".into()), Val::Int(3))])
+            Val::Map(ValMap::from_pairs(vec![(Val::Keyword("ok".into()), Val::Int(3))]))
         );
     }
 
@@ -4768,8 +4750,8 @@ mod tests {
     fn try_err() {
         let result = effects_eval("(try (throw {:type :test}))").unwrap();
         // Should be {:err {:type :test}}
-        if let Val::Map(pairs) = &result {
-            assert!(pairs.iter().any(|(k, _)| k == &Val::Keyword("err".into())));
+        if let Val::Map(m) = &result {
+            assert!(m.contains_key(&Val::Keyword("err".into())));
         } else {
             panic!("expected map, got {result:?}");
         }
@@ -4778,12 +4760,11 @@ mod tests {
     #[test]
     fn try_catch_string() {
         let result = effects_eval(r#"(try (throw "just a string"))"#).unwrap();
-        if let Val::Map(pairs) = &result {
-            let err_val = pairs
-                .iter()
-                .find(|(k, _)| k == &Val::Keyword("err".into()))
-                .map(|(_, v)| v);
-            assert_eq!(err_val, Some(&Val::Str("just a string".into())));
+        if let Val::Map(m) = &result {
+            assert_eq!(
+                m.get(&Val::Keyword("err".into())),
+                Some(&Val::Str("just a string".into()))
+            );
         } else {
             panic!("expected map, got {result:?}");
         }
@@ -4793,8 +4774,8 @@ mod tests {
     fn nested_try() {
         let result = effects_eval("(try (try (throw 1)))").unwrap();
         // Outer try succeeds with {:ok {:err 1}}
-        if let Val::Map(pairs) = &result {
-            assert!(pairs.iter().any(|(k, _)| k == &Val::Keyword("ok".into())));
+        if let Val::Map(m) = &result {
+            assert!(m.contains_key(&Val::Keyword("ok".into())));
         } else {
             panic!("expected map, got {result:?}");
         }
@@ -4812,15 +4793,15 @@ mod tests {
             &mut d,
         )
         .unwrap();
-        if let Val::Map(pairs) = &result {
-            assert!(pairs
-                .iter()
-                .any(|(k, v)| k == &Val::Keyword("message".into())
-                    && v == &Val::Str("bad input".into())));
-            assert!(pairs
-                .iter()
-                .any(|(k, v)| k == &Val::Keyword("type".into())
-                    && v == &Val::Keyword("invalid".into())));
+        if let Val::Map(m) = &result {
+            assert_eq!(
+                m.get(&Val::Keyword("message".into())),
+                Some(&Val::Str("bad input".into()))
+            );
+            assert_eq!(
+                m.get(&Val::Keyword("type".into())),
+                Some(&Val::Keyword("invalid".into()))
+            );
         } else {
             panic!("expected map, got {result:?}");
         }
@@ -4855,8 +4836,8 @@ mod tests {
     #[test]
     fn guard_fail() {
         let result = effects_eval(r#"(try (guard false (ex-info "nope" {:type :fail})))"#).unwrap();
-        if let Val::Map(pairs) = &result {
-            assert!(pairs.iter().any(|(k, _)| k == &Val::Keyword("err".into())));
+        if let Val::Map(m) = &result {
+            assert!(m.contains_key(&Val::Keyword("err".into())));
         } else {
             panic!("expected map, got {result:?}");
         }
@@ -4978,19 +4959,15 @@ mod tests {
         // Should be {:ok 3}
         assert_eq!(
             result,
-            Val::Map(vec![(Val::Keyword("ok".into()), Val::Int(3))])
+            Val::Map(ValMap::from_pairs(vec![(Val::Keyword("ok".into()), Val::Int(3))]))
         );
     }
 
     #[test]
     fn throw_nil() {
         let result = effects_eval("(try (throw nil))").unwrap();
-        if let Val::Map(pairs) = &result {
-            let err_val = pairs
-                .iter()
-                .find(|(k, _)| k == &Val::Keyword("err".into()))
-                .map(|(_, v)| v);
-            assert_eq!(err_val, Some(&Val::Nil));
+        if let Val::Map(m) = &result {
+            assert_eq!(m.get(&Val::Keyword("err".into())), Some(&Val::Nil));
         } else {
             panic!("expected map, got {result:?}");
         }
@@ -4999,12 +4976,8 @@ mod tests {
     #[test]
     fn throw_int() {
         let result = effects_eval("(try (throw 42))").unwrap();
-        if let Val::Map(pairs) = &result {
-            let err_val = pairs
-                .iter()
-                .find(|(k, _)| k == &Val::Keyword("err".into()))
-                .map(|(_, v)| v);
-            assert_eq!(err_val, Some(&Val::Int(42)));
+        if let Val::Map(m) = &result {
+            assert_eq!(m.get(&Val::Keyword("err".into())), Some(&Val::Int(42)));
         } else {
             panic!("expected map, got {result:?}");
         }
@@ -5013,11 +4986,8 @@ mod tests {
     #[test]
     fn throw_vector() {
         let result = effects_eval("(try (throw [1 2 3]))").unwrap();
-        if let Val::Map(pairs) = &result {
-            let err_val = pairs
-                .iter()
-                .find(|(k, _)| k == &Val::Keyword("err".into()))
-                .map(|(_, v)| v);
+        if let Val::Map(m) = &result {
+            let err_val = m.get(&Val::Keyword("err".into()));
             assert_eq!(
                 err_val,
                 Some(&Val::Vector(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
@@ -5049,8 +5019,8 @@ mod tests {
     fn try_deeply_nested() {
         let result = effects_eval("(try (try (try (throw 1))))").unwrap();
         // Outermost try succeeds: {:ok {:ok {:err 1}}}
-        if let Val::Map(pairs) = &result {
-            assert!(pairs.iter().any(|(k, _)| k == &Val::Keyword("ok".into())));
+        if let Val::Map(m) = &result {
+            assert!(m.contains_key(&Val::Keyword("ok".into())));
         } else {
             panic!("expected map, got {result:?}");
         }
@@ -5059,16 +5029,16 @@ mod tests {
     #[test]
     fn guard_with_ex_info() {
         let result = effects_eval(r#"(try (guard false (ex-info "nope" {:type :fail})))"#).unwrap();
-        if let Val::Map(pairs) = &result {
-            assert!(pairs.iter().any(|(k, _)| k == &Val::Keyword("err".into())));
+        if let Val::Map(m) = &result {
+            assert!(m.contains_key(&Val::Keyword("err".into())));
             // The error value should contain the message "nope"
-            if let Some((_, err_val)) = pairs.iter().find(|(k, _)| k == &Val::Keyword("err".into()))
+            if let Some(err_val) = m.get(&Val::Keyword("err".into()))
             {
-                if let Val::Map(err_pairs) = err_val {
-                    assert!(err_pairs
-                        .iter()
-                        .any(|(k, v)| k == &Val::Keyword("message".into())
-                            && v == &Val::Str("nope".into())));
+                if let Val::Map(err_m) = err_val {
+                    assert_eq!(
+                        err_m.get(&Val::Keyword("message".into())),
+                        Some(&Val::Str("nope".into()))
+                    );
                 } else {
                     panic!("expected err to be a map, got {err_val:?}");
                 }
@@ -5191,8 +5161,8 @@ mod tests {
         // try/throw still work with the new state machine (backward compat)
         assert_eq!(
             effects_eval("(try (throw 42))").map(|v| {
-                if let Val::Map(pairs) = &v {
-                    pairs.iter().any(|(k, _)| k == &Val::Keyword("err".into()))
+                if let Val::Map(m) = &v {
+                    m.contains_key(&Val::Keyword("err".into()))
                 } else {
                     false
                 }

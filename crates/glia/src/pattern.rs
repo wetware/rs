@@ -19,6 +19,9 @@
 
 use crate::Val;
 
+#[cfg(test)]
+use crate::ValMap;
+
 // =========================================================================
 // Types
 // =========================================================================
@@ -123,9 +126,9 @@ pub fn analyze_pattern(val: &Val) -> Result<Pattern, String> {
         }
 
         // Map pattern — partial match by key
-        Val::Map(pairs) => {
+        Val::Map(m) => {
             let mut pat_pairs = Vec::new();
-            for (k, v) in pairs {
+            for (k, v) in m.iter() {
                 // Keys must be literals (keywords, strings, ints)
                 let pat = analyze_pattern(v)?;
                 pat_pairs.push((k.clone(), pat));
@@ -217,17 +220,15 @@ pub fn match_pattern(pattern: &Pattern, value: &Val) -> Option<Bindings> {
         }
 
         Pattern::Map(pat_pairs) => {
-            let pairs = match value {
-                Val::Map(p) => p,
+            let m = match value {
+                Val::Map(m) => m,
                 _ => return None,
             };
 
             let mut bindings = Vec::new();
             for (key, pat) in pat_pairs {
-                // Find the key in the map
-                let found = pairs.iter().find(|(k, _)| k == key);
-                match found {
-                    Some((_, val)) => {
+                match m.get(key) {
+                    Some(val) => {
                         bindings.extend(match_pattern(pat, val)?);
                     }
                     None => return None, // Required key missing
@@ -354,10 +355,10 @@ mod tests {
 
     #[test]
     fn analyze_map_pattern() {
-        let pat = analyze_pattern(&Val::Map(vec![(
+        let pat = analyze_pattern(&Val::Map(ValMap::from_pairs(vec![(
             Val::Keyword("name".into()),
             Val::Sym("n".into()),
-        )]))
+        )])))
         .unwrap();
         assert!(matches!(pat, Pattern::Map(pairs) if pairs.len() == 1));
     }
@@ -369,10 +370,10 @@ mod tests {
 
     #[test]
     fn analyze_nested_vector_of_maps() {
-        let pat = analyze_pattern(&Val::Vector(vec![Val::Map(vec![(
+        let pat = analyze_pattern(&Val::Vector(vec![Val::Map(ValMap::from_pairs(vec![(
             Val::Keyword("x".into()),
             Val::Sym("a".into()),
-        )])]));
+        )]))]));
         assert!(pat.is_ok());
     }
 
@@ -577,10 +578,10 @@ mod tests {
             Val::Keyword("name".into()),
             Pattern::Bind("n".into()),
         )]);
-        let val = Val::Map(vec![(
+        let val = Val::Map(ValMap::from_pairs(vec![(
             Val::Keyword("name".into()),
             Val::Str("Alice".into()),
-        )]);
+        )]));
         assert_eq!(
             match_pattern(&pat, &val),
             Some(vec![("n".into(), Val::Str("Alice".into()))])
@@ -593,7 +594,7 @@ mod tests {
             Val::Keyword("name".into()),
             Pattern::Bind("n".into()),
         )]);
-        let val = Val::Map(vec![(Val::Keyword("age".into()), Val::Int(30))]);
+        let val = Val::Map(ValMap::from_pairs(vec![(Val::Keyword("age".into()), Val::Int(30))]));
         assert_eq!(match_pattern(&pat, &val), None);
     }
 
@@ -603,10 +604,10 @@ mod tests {
             Val::Keyword("name".into()),
             Pattern::Bind("n".into()),
         )]);
-        let val = Val::Map(vec![
+        let val = Val::Map(ValMap::from_pairs(vec![
             (Val::Keyword("name".into()), Val::Str("Alice".into())),
             (Val::Keyword("age".into()), Val::Int(30)),
-        ]);
+        ]));
         assert_eq!(
             match_pattern(&pat, &val),
             Some(vec![("n".into(), Val::Str("Alice".into()))])
@@ -619,10 +620,10 @@ mod tests {
             (Val::Keyword("name".into()), Pattern::Bind("n".into())),
             (Val::Keyword("age".into()), Pattern::Bind("a".into())),
         ]);
-        let val = Val::Map(vec![
+        let val = Val::Map(ValMap::from_pairs(vec![
             (Val::Keyword("name".into()), Val::Str("Alice".into())),
             (Val::Keyword("age".into()), Val::Int(30)),
-        ]);
+        ]));
         let result = match_pattern(&pat, &val);
         assert_eq!(
             result,
@@ -642,10 +643,10 @@ mod tests {
                 rest: None,
             },
         )]);
-        let val = Val::Map(vec![(
+        let val = Val::Map(ValMap::from_pairs(vec![(
             Val::Keyword("coords".into()),
             Val::Vector(vec![Val::Float(1.0), Val::Float(2.0)]),
-        )]);
+        )]));
         let result = match_pattern(&pat, &val);
         assert_eq!(
             result,
@@ -679,11 +680,11 @@ mod tests {
             rest: None,
         };
         let val = Val::Vector(vec![
-            Val::Map(vec![(
+            Val::Map(ValMap::from_pairs(vec![(
                 Val::Keyword("name".into()),
                 Val::Str("Alice".into()),
-            )]),
-            Val::Map(vec![(Val::Keyword("name".into()), Val::Str("Bob".into()))]),
+            )])),
+            Val::Map(ValMap::from_pairs(vec![(Val::Keyword("name".into()), Val::Str("Bob".into()))])),
         ]);
         let result = match_pattern(&pat, &val);
         assert_eq!(
