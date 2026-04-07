@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.0.5.0] - 2026-04-06
+
+### Added
+- `crates/stem/` crate: `StemSource` async trait abstracting epoch sources, enabling both on-chain (Atom contract) and off-chain (IPNS) epoch anchors behind a common interface.
+- `AtomSource`: wraps existing `AtomIndexer` + `Finalizer` behind the `StemSource` trait.
+- `IpnsSource`: polls IPNS names via IPFS HTTP API, emitting `Provenance::Timestamp` epochs for off-chain deployments.
+- `StemEvent`: backend-agnostic epoch event type for the shared pin/swap/broadcast pipeline.
+- `HttpClient.name_resolve()` and `name_publish()` for IPNS operations via IPFS HTTP API.
+
+### Changed
+- **Breaking:** `Epoch.adopted_block` replaced with `Epoch.provenance: Provenance` enum (variants: `Block(u64)` for on-chain, `Timestamp(u64)` for off-chain). Cap'n Proto schema updated with union-based provenance and literate documentation.
+- `src/epoch.rs` refactored: `handle_epoch_advance()` is now source-agnostic, shared by all epoch backends. Legacy `run_epoch_pipeline()` preserved for backward compatibility.
+
 ## [Unreleased]
 
 ### Added
@@ -47,6 +60,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `Signer.sign()` now takes `(nonce, epochSeq)` instead of just `(nonce)` — old clients will fail auth (correct behavior)
 - TerminalServer requires `epoch_rx: watch::Receiver<Epoch>` at construction
 - EpochService accepts `drain_duration: Duration` (default 1s via `--epoch-drain-secs`)
+
+## [0.0.5.0] - 2026-04-06
+
+### Added
+- Terminal login unit tests: matching epoch, wrong epoch_seq, epoch-advance race condition
+- Epoch drain delay unit tests: deferred broadcast timing and zero-drain regression
+- `EpochAdvancingSigner` test helper for simulating epoch races during auth
+
+### Changed
+- SigningDomain payload_type renamed from `/{domain}/nonce` to `/{domain}/challenge` (reflects 16-byte `nonce || epoch_seq` payload)
 
 ### Added
 - `PollSet` for multiplexing extra WASI pollables (stdin, listeners) alongside RPC in guest poll_loop

@@ -25,7 +25,7 @@ impl SigningDomain {
     /// Create a signing domain.
     ///
     /// `domain` is the libp2p signed-envelope domain string (e.g. `"ww-terminal-membrane"`).
-    /// The payload type is derived deterministically as `"/{domain}/nonce"`.
+    /// The payload type is derived deterministically as `"/{domain}/challenge"`.
     ///
     /// # Panics
     ///
@@ -33,7 +33,7 @@ impl SigningDomain {
     pub fn new(domain: impl Into<String>) -> Self {
         let domain = domain.into();
         assert!(!domain.is_empty(), "signing domain must not be empty");
-        let payload_type = format!("/{domain}/nonce");
+        let payload_type = format!("/{domain}/challenge");
         Self {
             domain,
             payload_type,
@@ -124,7 +124,7 @@ mod tests {
         let buf = SigningDomain::terminal_membrane().signing_buffer(&nonce.to_be_bytes());
 
         let domain = b"ww-terminal-membrane";
-        let payload_type = b"/ww-terminal-membrane/nonce";
+        let payload_type = b"/ww-terminal-membrane/challenge";
 
         let mut expected = Vec::new();
         push_varint(domain.len(), &mut expected);
@@ -158,7 +158,7 @@ mod tests {
     fn custom_domain() {
         let domain = SigningDomain::new("ww-terminal-wallet");
         assert_eq!(domain.as_str(), "ww-terminal-wallet");
-        assert_eq!(domain.payload_type(), b"/ww-terminal-wallet/nonce");
+        assert_eq!(domain.payload_type(), b"/ww-terminal-wallet/challenge");
     }
 
     #[test]

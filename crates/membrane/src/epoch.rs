@@ -3,12 +3,27 @@
 use capnp::Error;
 use tokio::sync::watch;
 
+/// Backend-specific metadata about how an epoch was adopted.
+///
+/// - `Block` — stem::atomic (on-chain via Atom contract): the Ethereum block
+///   number at which the HeadUpdated event was finalized.
+/// - `Timestamp` — stem::eventual (off-chain via IPNS): the wall-clock Unix
+///   timestamp from the IPNS record validity field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Provenance {
+    Block(u64),
+    Timestamp(u64),
+}
+
 /// Epoch value used by the membrane (matches capnp struct Epoch).
+///
+/// An epoch anchors a point-in-time snapshot of a namespace's content root.
+/// The `seq` field is monotonically increasing regardless of the source backend.
 #[derive(Clone, Debug)]
 pub struct Epoch {
     pub seq: u64,
     pub head: Vec<u8>,
-    pub adopted_block: u64,
+    pub provenance: Provenance,
 }
 
 /// Guard that checks whether the epoch under which a capability was issued is
@@ -36,11 +51,11 @@ impl EpochGuard {
 mod tests {
     use super::*;
 
-    fn epoch(seq: u64, head: &[u8], adopted_block: u64) -> Epoch {
+    fn epoch(seq: u64, head: &[u8], block: u64) -> Epoch {
         Epoch {
             seq,
             head: head.to_vec(),
-            adopted_block,
+            provenance: Provenance::Block(block),
         }
     }
 

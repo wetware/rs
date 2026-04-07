@@ -243,7 +243,7 @@ mod tests {
     use capnp_rpc::rpc_twoparty_capnp::Side;
     use capnp_rpc::twoparty::VatNetwork;
     use capnp_rpc::RpcSystem;
-    use membrane::Epoch;
+    use membrane::{Epoch, Provenance};
     use tokio::io;
     use tokio::sync::watch;
     use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -252,7 +252,7 @@ mod tests {
         Epoch {
             seq,
             head: vec![],
-            adopted_block: 0,
+            provenance: Provenance::Block(0),
         }
     }
 

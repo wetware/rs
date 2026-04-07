@@ -3,7 +3,7 @@ use std::io::Write as _;
 
 use clap::{Parser, Subcommand};
 use ed25519_dalek::VerifyingKey;
-use membrane::Epoch;
+use membrane::{Epoch, Provenance};
 use std::path::{Path, PathBuf};
 use tokio::sync::watch;
 
@@ -1210,7 +1210,7 @@ wasip2::cli::command::export!({iface_name}Guest);
             let initial_epoch = Epoch {
                 seq: head.seq,
                 head: head.cid,
-                adopted_block: 0,
+                provenance: Provenance::Block(0),
             };
 
             epoch_channel = Some(watch::channel(initial_epoch));
