@@ -69,6 +69,48 @@ fn main() {
     // Set the environment variable for use in Rust code
     println!("cargo:rustc-env=DEFAULT_KERNEL_CID={cid_value}");
     println!("cargo:rerun-if-changed={}", cid_file.display());
+
+    // Check for WASM files that will be embedded via include_bytes!() in release builds.
+    // In debug mode, emit a warning but don't fail (allows iterating on non-WASM code).
+    // In release mode, fail with a clear error message.
+    let embedded_wasm = [
+        "crates/kernel/bin/main.wasm",
+        "std/mcp/bin/main.wasm",
+        "std/shell/bin/shell.wasm",
+        "examples/echo/bin/echo.wasm",
+    ];
+    let mut missing = Vec::new();
+    for wasm_path in &embedded_wasm {
+        let full = manifest_path.join(wasm_path);
+        println!("cargo:rerun-if-changed={}", full.display());
+        if !full.exists() {
+            missing.push(*wasm_path);
+        }
+    }
+    if !missing.is_empty() {
+        let profile = env::var("PROFILE").unwrap_or_default();
+        let msg = format!(
+            "Missing WASM files for embedding:\n{}\n\nRun `make std` to build them.",
+            missing
+                .iter()
+                .map(|p| format!("  {p}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        if profile == "release" {
+            panic!("{msg}");
+        } else {
+            println!("cargo:warning={msg}");
+            // In debug mode, create empty stubs so include_bytes!() doesn't fail.
+            for wasm_path in &missing {
+                let full = manifest_path.join(wasm_path);
+                if let Some(parent) = full.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::write(&full, b"");
+            }
+        }
+    }
 }
 
 /// Scan a raw CodeGeneratorRequest for an interface node with the given

@@ -187,3 +187,19 @@
 **Effort:** M
 **Priority:** P3
 **Depends on:** `ww mcp` (Mode 1, stdio transport)
+
+## `ww perform upgrade` — self-update from GitHub Releases
+**What:** `ww perform upgrade` hits the GitHub Releases API, compares semver against the running binary version, downloads the latest release binary, verifies SHA256 checksum, atomically replaces the binary, clears macOS quarantine, and restarts the daemon.
+**Why:** Cohort testers shouldn't have to manually re-download and replace the binary on every release. Self-update is table stakes for CLI tools.
+**Context:** Deferred from the Phase 1 DX pass (PR for install/uninstall/MCP/CID). Complexity areas: SHA256 verification relies on checksums.txt in the release (no binary signing yet), atomic replacement via rename(2) is safe on Unix but needs macOS quarantine clearing, daemon restart needs to handle in-flight MCP connections gracefully. `reqwest` and `serde_json` are already in Cargo.toml. Consider adding binary signing (Apple notarization, GPG) before enabling auto-update for a broader audience.
+**Effort:** M
+**Priority:** P2
+**Depends on:** DX pass Phase 1 (install/uninstall), GitHub Releases with consistent tag naming
+
+## macOS binary notarization
+**What:** Sign and notarize the macOS binary with an Apple Developer certificate so Gatekeeper doesn't block it on download.
+**Why:** Every macOS user who downloads an unsigned binary from GitHub Releases will hit the "Apple cannot verify this app" dialog. For a small cohort, `xattr -d com.apple.quarantine` works. For broader distribution, notarization is required.
+**Context:** Requires an Apple Developer account ($99/yr) and CI integration (Xcode command-line tools, `codesign`, `xcrun notarytool`). The CI workflow already builds on macos-14 (when macOS binary builds are added). Notarization adds ~2-3 minutes to the release job. Consider signing the Linux binary with GPG at the same time.
+**Effort:** S-M
+**Priority:** P3
+**Depends on:** macOS pre-built binary in CI (Phase 2)

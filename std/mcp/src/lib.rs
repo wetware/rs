@@ -534,11 +534,19 @@ async fn handle_request(
 }
 
 /// Write a successful tool call result.
+///
+/// If the `WW_CELL_CID` environment variable is set, prepends
+/// `[CID: <value>]` to the response text so AI agents can observe
+/// content-addressed provenance of the executing WASM.
 fn write_tool_result(id: &serde_json::Value, text: &str) {
+    let annotated = match std::env::var("WW_CELL_CID") {
+        Ok(cid) if !cid.is_empty() => format!("[CID: {cid}]\n\n{text}"),
+        _ => text.to_string(),
+    };
     write_result(
         id,
         serde_json::json!({
-            "content": [{"type": "text", "text": text}],
+            "content": [{"type": "text", "text": annotated}],
         }),
     );
 }

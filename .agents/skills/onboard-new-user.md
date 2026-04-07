@@ -7,108 +7,68 @@ One-time setup and orientation for someone who just arrived.
 Before setup steps, find out what the user actually wants.  Ask
 something like:
 
-> Welcome to Wetware!  Before we set anything up — what brought you
+> Welcome to Wetware!  Before we set anything up -- what brought you
 > here?  Are you exploring, building something specific, or just
 > curious how it works?
 
 Their answer tells you how deep to go and where to hand off after
-setup.  Remember it — you'll use it at the end.
+setup.  Remember it -- you'll use it at the end.
 
-## Detect environment
+## Check installation
 
-Check whether you have shell access (try running a command) and
-whether the repo files are local (try reading a file).  Use the
-result to pick the right path below — don't ask the user.
+Run `ww --version` to see if the binary is installed.
 
----
+### If not installed
 
-## For GitHub browsers
+Tell them how to get started:
 
-If the user hasn't cloned yet:
-
-1. Give a two-sentence intro to Wetware (peer-to-peer OS for agents,
-   capability-secured, no ambient authority).
-2. Explain the Cell type system briefly — it's the first thing that
-   makes Wetware different.
-3. Invite them to clone when they're ready:
-   ```
-   git clone https://github.com/wetware/ww.git && cd ww
-   ```
-4. Tell them once they've cloned, they can ask their AI coding tool:
-   > Read .agents/prompt.md and get me started with Wetware.
-5. Meanwhile, offer to walk them through concepts or examples using
-   the embedded context in `prompt.md`.  Read
-   `.agents/skills/explain-concepts.md` if they want concepts.
-
-Don't push them to clone — some people want to read first.  That's
-fine.
-
----
-
-## For local clones
-
-Tell them up front: "⚗️ Three quick steps, then you'll have a
-running node.  ~5 minutes total."
-
-### Step 1 of 3: Prerequisites (~30 seconds)
-
-Run these checks yourself — don't ask the user to do it:
-- `rustc --version` — Rust toolchain installed?
-- `rustup target list --installed | grep wasm32-wasip2` — target present?
-- Optional: `ipfs --version` for [Kubo](https://docs.ipfs.tech/install/)
-
-If something's missing, fix it (e.g. `rustup target add wasm32-wasip2`)
-or tell the user exactly what to run.  Never just list requirements
-and ask them to confirm.
-
-### Step 2 of 3: Build (~2 minutes)
-
-Run `make` yourself.  First build is slower — tell the user it's
-normal and preview what comes next: "Once this finishes, we'll
-boot a node and you'll have a live p2p shell."
-
-### Step 3 of 3: Quick tour (~1 minute)
-
+**macOS (build from source):**
 ```
-cargo run -- run crates/kernel
+git clone https://github.com/wetware/ww.git && cd ww
+make all
+ww perform install
 ```
 
-This drops into the Glia shell.  Walk them through a few commands,
-one at a time:
+**Linux (pre-built binary):**
+```
+curl -LO https://github.com/wetware/ww/releases/latest/download/ww-linux-x86_64
+chmod +x ww-linux-x86_64
+sudo mv ww-linux-x86_64 /usr/local/bin/ww
+ww perform install
+```
 
-1. `(perform host :id)` — "That's your peer identity.  Unique to this node."
-2. `(perform host :peers)` — "Connected peers.  Probably empty since you're
-   running solo."
-3. `(perform host :addrs)` — "Your listen addresses. If this works, the
-   whole stack is live: host, Membrane, kernel, shell."
-4. `(exit)` — done.
+`ww perform install` creates `~/.ww`, generates an identity,
+registers the background daemon, and wires MCP into Claude Code.
+It prints a summary with next steps.
 
-**Name the win**: "⚗️ You just booted a p2p capability-secured OS.
-That's the whole runtime — host, kernel, Membrane, shell."
+### If installed
 
-### Optional: what just happened?
+Check if setup is complete: `ww doctor`
 
-Don't dump this unsolicited.  Ask: "Want a quick look under the
-hood, or ready to move on?"
+Look at the "Install state" section.  If anything is missing
+(identity, daemon, MCP wiring), run `ww perform install` to fix it.
 
-If they want it, briefly cover:
-1. **Host** booted a libp2p swarm and served a Membrane
-2. **Kernel** (pid0) grafted onto the Membrane to get capabilities
-3. **Shell** gave you a REPL where capabilities are first-class
+If everything is OK, hand off to the quickstart.
 
-Point them at `doc/architecture.md` for the full picture.
+## Hand off to quickstart
 
----
+Once installed and configured, hand off to `mcp-quickstart.md`:
 
-## Hand off
+> You're all set.  Let's run the quickstart -- takes about 3 minutes.
+> You'll see your AI agent execute verified WASM with provenance
+> tracking.
 
-Recall what brought them here (from your first question) and route
-them accordingly:
+Read `.agents/skills/mcp-quickstart.md` and follow its instructions.
 
-- Building something specific → suggest **Build an app** (choice 5)
-- Exploring / curious → suggest **Concepts** (choice 1) or
-  **Examples** (choice 3)
-- Not sure → present the full menu
+## After quickstart
 
-Then show the menu from `.agents/prompt.md` and follow that file's
-instructions from there.
+Recall what brought them here (from your first question) and route:
+
+- Building something specific -> **Build an app** (`.agents/skills/build-app.md`)
+- Exploring / curious -> **Concepts** (`.agents/skills/explain-concepts.md`)
+  or **Examples** (`.agents/skills/study-examples.md`, in archive,
+  still works for reference)
+- Not sure -> present a slimmed menu:
+  1. Build an app -- design a Wetware application
+  2. Review an app -- audit for security and correctness
+  3. Deep dive -- explore concepts, architecture, examples
