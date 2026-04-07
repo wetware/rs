@@ -66,6 +66,7 @@ impl Loader for HostPathLoader {
 /// match an entry registered as `kernel/bin/main.wasm` if the request path ends
 /// with that key. This allows the loader to work regardless of how the image
 /// root path is constructed (absolute, relative, or sentinel).
+#[derive(Default)]
 pub struct EmbeddedLoader {
     entries: HashMap<&'static str, &'static [u8]>,
 }
@@ -270,14 +271,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_chain_host_overrides_embedded() {
-        // HostPath should win over Embedded when a local file exists
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        tmp.write_all(b"local-bytes").unwrap();
-        let path = tmp.path().to_str().unwrap().to_string();
+        // HostPath should win over Embedded when a local file exists.
+        // Write a temp file whose path ends with a known static suffix.
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("bin/main.wasm");
+        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        std::fs::write(&file_path, b"local-bytes").unwrap();
 
-        let embedded = EmbeddedLoader::new().insert(&path, b"embedded-bytes");
+        // Embedded has the same suffix registered.
+        let embedded = EmbeddedLoader::new().insert("bin/main.wasm", b"embedded-bytes");
         let chain = ChainLoader::new(vec![Box::new(HostPathLoader), Box::new(embedded)]);
-        let data = chain.load(&path).await.unwrap();
+        let data = chain.load(file_path.to_str().unwrap()).await.unwrap();
         assert_eq!(data, b"local-bytes", "HostPath should override Embedded");
     }
 
