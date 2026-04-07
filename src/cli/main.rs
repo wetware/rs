@@ -737,7 +737,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         println!("  src/lib.rs              — guest entry point");
         println!("  etc/init.d/{name}.glia  — kernel init script");
         println!();
-        println!("Next steps:");
+        println!("\u{2697}\u{fe0f} Next steps:");
         println!("  1. Edit {name}.capnp with your interface methods");
         println!("  2. Implement the server in src/lib.rs");
         println!("  3. ww build {name}");
@@ -1868,7 +1868,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         println!("  Data:      ~/.ww/");
         println!("  Version:   {}", env!("CARGO_PKG_VERSION"));
         println!();
-        println!("Next steps:");
+        println!("\u{2697}\u{fe0f} Next steps:");
         if !daemon_exists {
             if cfg!(target_os = "macos") {
                 println!(
