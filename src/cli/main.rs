@@ -1748,6 +1748,10 @@ wasip2::cli::command::export!({iface_name}Guest);
             println!("    Peer ID: {peer_id}");
         }
 
+        // Resolve our own absolute path once — used for daemon plist and MCP wiring.
+        let ww_bin = std::env::current_exe().context("cannot determine ww binary path")?;
+        let ww_bin_str = ww_bin.display().to_string();
+
         // Step 3: Register background daemon.
         let plist_path = home.join("Library/LaunchAgents/io.wetware.ww.plist");
         let systemd_path = home.join(".config/systemd/user/ww.service");
@@ -1756,7 +1760,8 @@ wasip2::cli::command::export!({iface_name}Guest);
         if daemon_exists {
             println!("  Background daemon ........... OK (already registered)");
         } else {
-            // Call daemon_install with defaults.
+            // TODO: daemon_install() prints its own status to stderr which is noisy
+            // when called from perform_install. Consider adding a quiet mode.
             Self::daemon_install(Some(identity_path.clone()), Some(2025), vec![]).await?;
             println!("  Background daemon ........... REGISTERED");
             if cfg!(target_os = "macos") {
@@ -1767,6 +1772,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         }
 
         // Step 4: Wire MCP into Claude Code (if installed).
+        // Use absolute path to our binary so PATH ambiguity doesn't matter.
         let claude_available = std::process::Command::new("claude")
             .args(["--version"])
             .stdout(std::process::Stdio::null())
@@ -1776,7 +1782,7 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         if claude_available {
             let status = std::process::Command::new("claude")
-                .args(["mcp", "add", "wetware", "--", "ww", "run", "--mcp"])
+                .args(["mcp", "add", "wetware", "--", &ww_bin_str, "run", "--mcp"])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
@@ -1786,13 +1792,16 @@ wasip2::cli::command::export!({iface_name}Guest);
                 }
                 _ => {
                     println!("  Claude Code MCP ............. FAILED (manual setup needed)");
-                    println!("    Run:  claude mcp add wetware -- ww run --mcp");
+                    println!(
+                        "    Run:  claude mcp add wetware -- {} run --mcp",
+                        ww_bin_str
+                    );
                 }
             }
         } else {
             println!("  Claude Code MCP ............. SKIPPED (claude CLI not found)");
             println!("    Install Claude Code, then run:");
-            println!("    claude mcp add wetware -- ww run --mcp");
+            println!("    claude mcp add wetware -- {} run --mcp", ww_bin_str);
         }
 
         // Step 5: Summary.
