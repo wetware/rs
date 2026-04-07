@@ -69,6 +69,16 @@ impl ValMap {
     }
 }
 
+impl<'a> IntoIterator for &'a ValMap {
+    type Item = (&'a Val, &'a Val);
+    type IntoIter = im::hashmap::Iter<'a, Val, Val>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 impl Default for ValMap {
     fn default() -> Self {
         ValMap::new()

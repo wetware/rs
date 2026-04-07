@@ -395,7 +395,7 @@ pub fn make_host_handler(host: system_capnp::host::Client) -> Val {
                                 Some(Val::Map(glia::ValMap::from_pairs(vec![
                                     (Val::Keyword("peer-id".into()), Val::Str(encoded)),
                                     (Val::Keyword("addrs".into()), Val::List(addrs)),
-                                ]))
+                                ])))
                             })
                             .collect();
                         call_resume(resume, Val::List(items))
@@ -506,7 +506,7 @@ pub fn make_ipfs_handler() -> Val {
                                         Some(Val::Map(glia::ValMap::from_pairs(vec![
                                             (Val::Keyword("name".into()), Val::Str(name)),
                                             (Val::Keyword("size".into()), Val::Int(size as i64)),
-                                        ]))
+                                        ])))
                                     })
                                     .collect();
                                 call_resume(resume, Val::List(items))
@@ -613,7 +613,7 @@ mod tests {
         IMPORT_CACHE.with(|cache| {
             cache
                 .borrow_mut()
-                .insert("/lib/test.glia".into(), Val::Map(glia::ValMap::new());
+                .insert("/lib/test.glia".into(), Val::Map(glia::ValMap::new()));
         });
         clear_import_cache();
         IMPORT_CACHE.with(|cache| {
