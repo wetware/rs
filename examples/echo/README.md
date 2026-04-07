@@ -38,7 +38,7 @@ Stack the echo layer on top of the kernel. The init.d script
 registers the echo cell with the host's `StreamListener`.
 
 ```sh
-ww run crates/kernel examples/echo
+ww run std/kernel examples/echo
 ```
 
 This drops you into the Glia shell.

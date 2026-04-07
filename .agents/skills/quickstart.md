@@ -18,7 +18,7 @@ examples.  First build is slower — tell the user that's normal.
 ## Step 2 of 3: Run (~30 sec)
 
 ```
-cargo run -- run crates/kernel
+cargo run -- run std/kernel
 ```
 
 Boots a libp2p swarm, loads the kernel WASM, drops into the Glia
@@ -41,7 +41,7 @@ host, kernel, Membrane, shell.
 `ww run` did three things:
 
 1. Started a **libp2p swarm** on the configured port
-2. Loaded `crates/kernel/bin/main.wasm` — the kernel Cell (pid0)
+2. Loaded `std/kernel/bin/main.wasm` — the kernel Cell (pid0)
 3. Spawned it with a **Membrane** — the capability hub that grants
    Host, Executor, IPFS, Routing, and Identity via Cap'n Proto RPC
 

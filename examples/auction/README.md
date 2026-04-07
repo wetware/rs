@@ -114,7 +114,7 @@ Stack the auction layer on top of the kernel. The init.d script
 registers the ComputeProvider cell with the host's `VatListener`.
 
 ```sh
-ww run --port=2025 crates/kernel examples/auction
+ww run --port=2025 std/kernel examples/auction
 ```
 
 This drops you into a Glia shell.
@@ -133,7 +133,7 @@ the schema CID on the DHT and re-provides periodically:
 Open a second terminal and boot a consumer node:
 
 ```sh
-ww run --port=2026 crates/kernel examples/auction
+ww run --port=2026 std/kernel examples/auction
 ```
 
 From the consumer's Glia shell, compare quotes across providers:

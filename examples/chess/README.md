@@ -41,10 +41,10 @@ registers the chess cell with the host's `VatListener`.
 
 ```sh
 # Terminal 1
-ww run --port=2025 crates/kernel examples/chess
+ww run --port=2025 std/kernel examples/chess
 
 # Terminal 2
-ww run --port=2026 crates/kernel examples/chess
+ww run --port=2026 std/kernel examples/chess
 ```
 
 Each terminal drops you into a Glia shell.
@@ -77,7 +77,7 @@ $WW_ROOT/
 │   └── init.d/
 │       └── chess.glia     <- from examples/chess
 ├── boot/
-│   └── main.wasm          <- from crates/kernel
+│   └── main.wasm          <- from std/kernel
 └── ...
 ```
 

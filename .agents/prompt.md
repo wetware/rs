@@ -220,7 +220,7 @@ agents without requiring Glia syntax knowledge.
 
 ~/.ww user layer:
 Run `ww perform install` to bootstrap `~/.ww/` (boot, bin, lib,
-etc/init.d).  Mount it: `ww run --mcp crates/kernel ~/.ww`.
+etc/init.d).  Mount it: `ww run --mcp std/kernel ~/.ww`.
 AI agents write files to `~/.ww/`; cells read from it.
 Generate identity: `ww keygen > ~/.ww/etc/identity`.
 
@@ -252,7 +252,7 @@ Quick start:
 ```
 rustup target add wasm32-wasip2
 make                             # builds everything (host + kernel + shell + examples)
-cargo run -- run crates/kernel   # drops into Glia shell
+cargo run -- run std/kernel   # drops into Glia shell
 ```
 
 Rebuilding after changes:

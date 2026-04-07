@@ -45,10 +45,10 @@ registers the greeter cell with the host's `VatListener`.
 
 ```sh
 # Terminal A -- boots Agent A, provides Greeter on DHT
-ww run --port=2025 crates/kernel examples/discovery
+ww run --port=2025 std/kernel examples/discovery
 
 # Terminal B -- boots Agent B, discovers A, calls greet()
-ww run --port=2026 crates/kernel examples/discovery
+ww run --port=2026 std/kernel examples/discovery
 ```
 
 Each terminal drops you into a Glia shell.
