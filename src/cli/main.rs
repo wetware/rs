@@ -1722,13 +1722,12 @@ wasip2::cli::command::export!({iface_name}Guest);
             "lib",
             "etc/init.d",
             "logs",
-            // Image roots for daemon: each is a proper FHS image with bin/main.wasm
+            // Image roots for daemon: each is a proper FHS image with bin/main.wasm.
+            // No etc/ dirs here — identity stays host-side only, accessed via
+            // the Signer capability in the Membrane, not the guest filesystem.
             "kernel/bin",
-            "kernel/etc",
             "shell/bin",
-            "shell/etc",
             "mcp/bin",
-            "mcp/etc",
         ];
         let mut created = Vec::new();
         for sub in &subdirs {
@@ -1758,8 +1757,9 @@ wasip2::cli::command::export!({iface_name}Guest);
             println!("    Peer ID: {peer_id}");
         }
 
-        // Step 2.5: Extract embedded WASM images and symlink identity.
-        // Each image root gets bin/main.wasm (from embedded) and etc/identity (symlink).
+        // Step 2.5: Extract embedded WASM images to ~/.ww/{kernel,shell,mcp}/bin/.
+        // Identity is NOT placed inside image roots — guests access signing only
+        // through the Signer capability in the Membrane, never via the filesystem.
         let image_cells: &[(&str, &str, &[u8])] = &[
             ("kernel", "main.wasm", EMBEDDED_KERNEL),
             ("shell", "shell.wasm", EMBEDDED_SHELL),
@@ -1780,17 +1780,9 @@ wasip2::cli::command::export!({iface_name}Guest);
             } else {
                 images_ok = false;
             }
-
-            // Symlink etc/identity -> ~/.ww/identity (relative: ../../identity)
-            let id_link = ww_dir.join(format!("{name}/etc/identity"));
-            if !id_link.exists() {
-                #[cfg(unix)]
-                std::os::unix::fs::symlink("../../identity", &id_link)
-                    .with_context(|| format!("symlink {}", id_link.display()))?;
-            }
         }
         if images_ok {
-            println!("  ~/.ww/{{kernel,shell,mcp}} ... OK (images + identity linked)");
+            println!("  ~/.ww/{{kernel,shell,mcp}} ... OK (images extracted)");
         } else {
             println!(
                 "  ~/.ww/{{kernel,shell,mcp}} ... PARTIAL (WASM not embedded, build from source)"
@@ -1809,7 +1801,8 @@ wasip2::cli::command::export!({iface_name}Guest);
         if daemon_exists {
             println!("  Background daemon ........... OK (already registered)");
         } else {
-            // Pass image roots as layers. Identity is already symlinked inside each.
+            // Pass image roots as layers. Identity is passed separately —
+            // daemon_install adds it as a :/etc/identity mount for the host to read.
             let image_layers: Vec<String> = ["kernel", "shell", "mcp"]
                 .iter()
                 .map(|name| ww_dir.join(name).display().to_string())
