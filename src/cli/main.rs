@@ -1716,7 +1716,20 @@ wasip2::cli::command::export!({iface_name}Guest);
         let ww_dir = home.join(".ww");
 
         // Step 1: Create ~/.ww directory structure.
-        let subdirs = ["boot", "bin", "lib", "etc/init.d", "logs", "images"];
+        let subdirs = [
+            "boot",
+            "bin",
+            "lib",
+            "etc/init.d",
+            "logs",
+            // Image roots for daemon: each is a proper FHS image with bin/main.wasm
+            "kernel/bin",
+            "kernel/etc",
+            "shell/bin",
+            "shell/etc",
+            "mcp/bin",
+            "mcp/etc",
+        ];
         let mut created = Vec::new();
         for sub in &subdirs {
             let dir = ww_dir.join(sub);
@@ -1730,9 +1743,6 @@ wasip2::cli::command::export!({iface_name}Guest);
             println!("  ~/.ww directories ........... OK (already exist)");
         } else {
             println!("  ~/.ww directories ........... CREATED");
-            for sub in &created {
-                println!("    ~/.ww/{sub}");
-            }
         }
 
         // Step 2: Generate Ed25519 identity at ~/.ww/identity (if missing).
@@ -1748,6 +1758,45 @@ wasip2::cli::command::export!({iface_name}Guest);
             println!("    Peer ID: {peer_id}");
         }
 
+        // Step 2.5: Extract embedded WASM images and symlink identity.
+        // Each image root gets bin/main.wasm (from embedded) and etc/identity (symlink).
+        let image_cells: &[(&str, &str, &[u8])] = &[
+            ("kernel", "main.wasm", EMBEDDED_KERNEL),
+            ("shell", "shell.wasm", EMBEDDED_SHELL),
+            ("mcp", "main.wasm", EMBEDDED_MCP),
+        ];
+        let mut images_ok = true;
+        for (name, wasm_name, bytes) in image_cells {
+            let wasm_dest = ww_dir.join(format!("{name}/bin/{wasm_name}"));
+            if !bytes.is_empty() {
+                if !wasm_dest.exists()
+                    || std::fs::metadata(&wasm_dest)
+                        .map(|m| m.len() == 0)
+                        .unwrap_or(true)
+                {
+                    std::fs::write(&wasm_dest, bytes)
+                        .with_context(|| format!("write {}", wasm_dest.display()))?;
+                }
+            } else {
+                images_ok = false;
+            }
+
+            // Symlink etc/identity -> ~/.ww/identity (relative: ../../identity)
+            let id_link = ww_dir.join(format!("{name}/etc/identity"));
+            if !id_link.exists() {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink("../../identity", &id_link)
+                    .with_context(|| format!("symlink {}", id_link.display()))?;
+            }
+        }
+        if images_ok {
+            println!("  ~/.ww/{{kernel,shell,mcp}} ... OK (images + identity linked)");
+        } else {
+            println!(
+                "  ~/.ww/{{kernel,shell,mcp}} ... PARTIAL (WASM not embedded, build from source)"
+            );
+        }
+
         // Resolve our own absolute path once — used for daemon plist and MCP wiring.
         let ww_bin = std::env::current_exe().context("cannot determine ww binary path")?;
         let ww_bin_str = ww_bin.display().to_string();
@@ -1760,9 +1809,14 @@ wasip2::cli::command::export!({iface_name}Guest);
         if daemon_exists {
             println!("  Background daemon ........... OK (already registered)");
         } else {
+            // Pass image roots as layers. Identity is already symlinked inside each.
+            let image_layers: Vec<String> = ["kernel", "shell", "mcp"]
+                .iter()
+                .map(|name| ww_dir.join(name).display().to_string())
+                .collect();
             // TODO: daemon_install() prints its own status to stderr which is noisy
             // when called from perform_install. Consider adding a quiet mode.
-            Self::daemon_install(Some(identity_path.clone()), Some(2025), vec![]).await?;
+            Self::daemon_install(Some(identity_path.clone()), Some(2025), image_layers).await?;
             println!("  Background daemon ........... REGISTERED");
             if cfg!(target_os = "macos") {
                 println!("    Activate:  launchctl load {}", plist_path.display());
