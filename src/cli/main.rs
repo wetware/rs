@@ -410,7 +410,7 @@ impl Commands {
                     identity,
                     port,
                     images,
-                } => Self::daemon_install(identity, port, images).await,
+                } => Self::daemon_install(identity, port, images, false).await,
                 DaemonAction::Uninstall => Self::daemon_uninstall().await,
             },
             Commands::Push {
@@ -933,10 +933,14 @@ wasip2::cli::command::export!({iface_name}Guest);
     }
 
     /// Register wetware as a user-level background service.
+    ///
+    /// When `quiet` is true, suppresses status output (used by `perform install`
+    /// which prints its own summary).
     async fn daemon_install(
         identity: Option<PathBuf>,
         port: Option<u16>,
         images: Vec<String>,
+        quiet: bool,
     ) -> Result<()> {
         let home = dirs::home_dir().context("cannot determine home directory")?;
         let ww_dir = home.join(".ww");
@@ -949,10 +953,12 @@ wasip2::cli::command::export!({iface_name}Guest);
             let sk = ww::keys::generate()?;
             ww::keys::save(&sk, &key_path)?;
 
-            let kp = ww::keys::to_libp2p(&sk)?;
-            eprintln!("Generated new identity: {}", key_path.display());
-            eprintln!("  Peer ID:     {}", kp.public().to_peer_id());
-        } else {
+            if !quiet {
+                let kp = ww::keys::to_libp2p(&sk)?;
+                eprintln!("Generated new identity: {}", key_path.display());
+                eprintln!("  Peer ID:     {}", kp.public().to_peer_id());
+            }
+        } else if !quiet {
             eprintln!("Using existing identity: {}", key_path.display());
         }
 
@@ -970,11 +976,13 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         // 3. Write config.
         config.write(&config_path)?;
-        eprintln!("Wrote config: {}", config_path.display());
+        if !quiet {
+            eprintln!("Wrote config: {}", config_path.display());
+        }
 
         // 4. Write platform service file.
         let ww_bin = std::env::current_exe().context("cannot determine ww binary path")?;
-        Self::write_service_file(&ww_bin, &config, &home)?;
+        Self::write_service_file(&ww_bin, &config, &home, quiet)?;
 
         Ok(())
     }
@@ -1019,6 +1027,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         ww_bin: &Path,
         config: &ww::daemon_config::DaemonConfig,
         home: &Path,
+        quiet: bool,
     ) -> Result<()> {
         // Identity as a --identity CLI flag (NOT a :/etc/identity mount).
         // The host reads it to create the signing key; it never enters
@@ -1030,9 +1039,9 @@ wasip2::cli::command::export!({iface_name}Guest);
             .unwrap_or_else(|| home.join(".ww/identity").display().to_string());
 
         if cfg!(target_os = "macos") {
-            Self::write_launchd_plist(ww_bin, config, home, &identity_path)
+            Self::write_launchd_plist(ww_bin, config, home, &identity_path, quiet)
         } else if cfg!(target_os = "linux") {
-            Self::write_systemd_unit(ww_bin, config, home, &identity_path)
+            Self::write_systemd_unit(ww_bin, config, home, &identity_path, quiet)
         } else {
             bail!("unsupported platform; only macOS and Linux are supported")
         }
@@ -1044,6 +1053,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         config: &ww::daemon_config::DaemonConfig,
         home: &Path,
         identity_path: &str,
+        quiet: bool,
     ) -> Result<()> {
         let plist_dir = home.join("Library/LaunchAgents");
         std::fs::create_dir_all(&plist_dir).context("create ~/Library/LaunchAgents")?;
@@ -1098,10 +1108,12 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         std::fs::write(&plist_path, plist)
             .with_context(|| format!("write plist: {}", plist_path.display()))?;
-        eprintln!("Wrote service: {}", plist_path.display());
-        eprintln!();
-        eprintln!("Activate with:");
-        eprintln!("  launchctl load {}", plist_path.display());
+        if !quiet {
+            eprintln!("Wrote service: {}", plist_path.display());
+            eprintln!();
+            eprintln!("Activate with:");
+            eprintln!("  launchctl load {}", plist_path.display());
+        }
 
         Ok(())
     }
@@ -1112,6 +1124,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         config: &ww::daemon_config::DaemonConfig,
         home: &Path,
         identity_path: &str,
+        quiet: bool,
     ) -> Result<()> {
         let unit_dir = home.join(".config/systemd/user");
         std::fs::create_dir_all(&unit_dir).context("create ~/.config/systemd/user")?;
@@ -1150,10 +1163,12 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         std::fs::write(&unit_path, unit)
             .with_context(|| format!("write unit: {}", unit_path.display()))?;
-        eprintln!("Wrote service: {}", unit_path.display());
-        eprintln!();
-        eprintln!("Activate with:");
-        eprintln!("  systemctl --user enable --now ww");
+        if !quiet {
+            eprintln!("Wrote service: {}", unit_path.display());
+            eprintln!();
+            eprintln!("Activate with:");
+            eprintln!("  systemctl --user enable --now ww");
+        }
 
         Ok(())
     }
@@ -1816,9 +1831,8 @@ wasip2::cli::command::export!({iface_name}Guest);
                 .iter()
                 .map(|name| ww_dir.join(name).display().to_string())
                 .collect();
-            // TODO: daemon_install() prints its own status to stderr which is noisy
-            // when called from perform_install. Consider adding a quiet mode.
-            Self::daemon_install(Some(identity_path.clone()), Some(2025), image_layers).await?;
+            Self::daemon_install(Some(identity_path.clone()), Some(2025), image_layers, true)
+                .await?;
             println!("  Background daemon ........... REGISTERED");
             if cfg!(target_os = "macos") {
                 println!("    Activate:  launchctl load {}", plist_path.display());
