@@ -45,7 +45,7 @@ registers the oracle cell on both transports.
 
 ```sh
 # Terminal 1 -- oracle provider
-ww run --http-listen 127.0.0.1:8080 --port=2025 crates/kernel examples/oracle
+ww run --http-listen 127.0.0.1:8080 --port=2025 std/kernel examples/oracle
 ```
 
 This drops you into a Glia shell. The oracle is now serving on:
@@ -94,7 +94,7 @@ Open a second terminal and boot a consumer node:
 
 ```sh
 # Terminal 2 -- price consumer
-WW_CONSUMER=1 ww run --port=2026 crates/kernel examples/oracle
+WW_CONSUMER=1 ww run --port=2026 std/kernel examples/oracle
 ```
 
 From the consumer's Glia shell:

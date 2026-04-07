@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Glia standard library (`std/lib/ww/`): 7 Clojure-aligned modules — core (combinators, threading macros), string, coll (collections), test (framework), json, ipfs, evm. Imported via `(perform import "ww/core")`.
+- `crates/README.md` and updated `std/README.md` documenting the std/ vs crates/ split.
 - Release pipeline: 4-platform binary matrix (linux x86_64/aarch64, macOS x86_64/aarch64) with GitHub Actions
 - Multi-arch container images (linux/amd64 + linux/arm64) pushed to ghcr.io/wetware/ww
 - Cosign keyless container image signing via GitHub OIDC
@@ -21,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - MCP wiring uses absolute binary path via `current_exe()`, fixing PATH ambiguity.
 
 ### Changed
+- **Breaking:** Kernel crate moved from `crates/kernel/` to `std/kernel/`. Now a standalone workspace-excluded crate (like shell/mcp). All path references updated.
 - Moved release builds from `rust.yml` to dedicated `release.yml` workflow
 - `ww perform install` suppresses internal daemon_install noise, shows clean checklist output.
 - Daemon plist/systemd unit passes `--identity` as a CLI flag instead of a `path:/etc/identity` mount.

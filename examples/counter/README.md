@@ -32,7 +32,7 @@ Stack the counter layer on top of the kernel. The init.d script
 registers the counter cell with the host's `HttpListener`.
 
 ```sh
-ww run crates/kernel examples/counter
+ww run std/kernel examples/counter
 ```
 
 This drops you into the Glia shell.

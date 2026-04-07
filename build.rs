@@ -74,7 +74,7 @@ fn main() {
     // In debug mode, emit a warning but don't fail (allows iterating on non-WASM code).
     // In release mode, fail with a clear error message.
     let embedded_wasm = [
-        "crates/kernel/bin/main.wasm",
+        "std/kernel/bin/main.wasm",
         "std/mcp/bin/main.wasm",
         "std/shell/bin/shell.wasm",
         "examples/echo/bin/echo.wasm",

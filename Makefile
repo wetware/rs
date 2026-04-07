@@ -20,9 +20,9 @@ host:
 std: kernel shell mcp
 
 kernel:
-	cargo build -p kernel --target $(WASM_TARGET) --release
-	@mkdir -p crates/kernel/bin
-	cp target/$(WASM_TARGET)/release/kernel.wasm crates/kernel/bin/main.wasm
+	cargo build -p kernel --target $(WASM_TARGET) --release --manifest-path std/kernel/Cargo.toml
+	@mkdir -p std/kernel/bin
+	cp std/kernel/target/$(WASM_TARGET)/release/kernel.wasm std/kernel/bin/main.wasm
 
 shell:
 	cargo build -p shell --target $(WASM_TARGET) --release --manifest-path std/shell/Cargo.toml
@@ -69,13 +69,13 @@ mindshare:
 # --- Run ---------------------------------------------------------------------
 
 run-kernel: kernel
-	cargo run -- run crates/kernel
+	cargo run -- run std/kernel
 
 # --- Clean -------------------------------------------------------------------
 
 clean:
 	cargo clean
-	rm -f crates/kernel/bin/main.wasm
+	rm -f std/kernel/bin/main.wasm
 	rm -f std/shell/bin/shell.wasm std/shell/bin/shell.schema
 	rm -f std/mcp/bin/mcp.wasm std/mcp/bin/main.wasm
 	$(MAKE) -C examples/chess clean
