@@ -16,8 +16,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `Containerfile.release` for fast container builds from pre-built binaries
 - Install script test suite (`tests/test_install.sh`)
 
+### Fixed
+- **Security:** Identity private key no longer exposed to WASM guests. `resolve_identity()` reads identity directly from `--identity` path, never from the merged FHS tree (which is preopened to guests via WASI and published to IPFS).
+- MCP wiring uses absolute binary path via `current_exe()`, fixing PATH ambiguity.
+
 ### Changed
 - Moved release builds from `rust.yml` to dedicated `release.yml` workflow
+- `ww perform install` suppresses internal daemon_install noise, shows clean checklist output.
+- Daemon plist/systemd unit passes `--identity` as a CLI flag instead of a `path:/etc/identity` mount.
+- `~/.ww/{kernel,shell,mcp}/bin/` image roots created and populated with embedded WASM on install.
 
 ## [0.0.5.0] - 2026-04-06
 

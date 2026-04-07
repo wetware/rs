@@ -381,17 +381,15 @@ impl Commands {
                 runtime_cache_policy,
                 with_http_admin,
             } => {
-                let mut mounts = ww::mount::parse_args(&mount_args)?;
-                // --identity PATH is sugar for PATH:/etc/identity mount.
-                // Appended last so it overrides any /etc/identity from image layers.
-                if let Some(id_path) = identity {
-                    mounts.push(ww::mount::Mount {
-                        source: id_path,
-                        target: PathBuf::from("/etc/identity"),
-                    });
-                }
+                let mounts = ww::mount::parse_args(&mount_args)?;
+                // Identity is passed separately — NOT as a mount.
+                // The host reads it to create the signing key for the Membrane.
+                // It must never enter the merged FHS tree (which is preopened
+                // to guests and published to IPFS).
+                let identity_path = identity.map(PathBuf::from);
                 Self::run_with_mounts(
                     mounts,
+                    identity_path,
                     port,
                     wasm_debug,
                     stem,
@@ -412,7 +410,7 @@ impl Commands {
                     identity,
                     port,
                     images,
-                } => Self::daemon_install(identity, port, images).await,
+                } => Self::daemon_install(identity, port, images, false).await,
                 DaemonAction::Uninstall => Self::daemon_uninstall().await,
             },
             Commands::Push {
@@ -739,7 +737,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         println!("  src/lib.rs              — guest entry point");
         println!("  etc/init.d/{name}.glia  — kernel init script");
         println!();
-        println!("Next steps:");
+        println!("\u{2697}\u{fe0f} Next steps:");
         println!("  1. Edit {name}.capnp with your interface methods");
         println!("  2. Implement the server in src/lib.rs");
         println!("  3. ww build {name}");
@@ -882,27 +880,33 @@ wasip2::cli::command::export!({iface_name}Guest);
         )
     }
 
-    /// Resolve the node's Ed25519 signing key from `/etc/identity` in the FHS.
+    /// Resolve the node's Ed25519 signing key.
     ///
-    /// If `/etc/identity` exists (placed by an image layer or a targeted mount
-    /// like `~/.ww/identity:/etc/identity`), the key is loaded from it.
-    /// Otherwise an ephemeral key is generated and injected so the guest
-    /// can still read `/etc/identity` via WASI.
+    /// If an explicit `identity_path` is provided, load the key from it.
+    /// Otherwise generate an ephemeral key (will be lost on exit).
+    ///
+    /// The identity file is intentionally kept OUT of the merged FHS tree
+    /// so that guests cannot read the private key via WASI filesystem access.
+    /// Guests access signing only through the Signer capability in the Membrane.
     ///
     /// Returns `(signing_key, verifying_key, source_description)`.
     fn resolve_identity(
-        merged_root: &std::path::Path,
+        identity_path: Option<&std::path::Path>,
     ) -> Result<(ed25519_dalek::SigningKey, VerifyingKey, &'static str)> {
-        let identity_path = merged_root.join("etc/identity");
-        if identity_path.exists() {
-            let path_str = identity_path
-                .to_str()
-                .context("/etc/identity path is non-UTF-8")?;
-            let sk = ww::keys::load(path_str)?;
-            let vk = sk.verifying_key();
-            Ok((sk, vk, "/etc/identity"))
+        if let Some(path) = identity_path {
+            if path.exists() {
+                let path_str = path.to_str().context("identity path is non-UTF-8")?;
+                let sk = ww::keys::load(path_str)?;
+                let vk = sk.verifying_key();
+                Ok((sk, vk, "file"))
+            } else {
+                tracing::warn!(path = %path.display(), "Identity file not found; using ephemeral key");
+                let sk = ww::keys::generate()?;
+                let vk = sk.verifying_key();
+                Ok((sk, vk, "ephemeral"))
+            }
         } else {
-            tracing::warn!("No /etc/identity found; using ephemeral key (will be lost on exit)");
+            tracing::warn!("No identity configured; using ephemeral key (will be lost on exit)");
             let sk = ww::keys::generate()?;
             let vk = sk.verifying_key();
             Ok((sk, vk, "ephemeral"))
@@ -929,10 +933,14 @@ wasip2::cli::command::export!({iface_name}Guest);
     }
 
     /// Register wetware as a user-level background service.
+    ///
+    /// When `quiet` is true, suppresses status output (used by `perform install`
+    /// which prints its own summary).
     async fn daemon_install(
         identity: Option<PathBuf>,
         port: Option<u16>,
         images: Vec<String>,
+        quiet: bool,
     ) -> Result<()> {
         let home = dirs::home_dir().context("cannot determine home directory")?;
         let ww_dir = home.join(".ww");
@@ -945,10 +953,12 @@ wasip2::cli::command::export!({iface_name}Guest);
             let sk = ww::keys::generate()?;
             ww::keys::save(&sk, &key_path)?;
 
-            let kp = ww::keys::to_libp2p(&sk)?;
-            eprintln!("Generated new identity: {}", key_path.display());
-            eprintln!("  Peer ID:     {}", kp.public().to_peer_id());
-        } else {
+            if !quiet {
+                let kp = ww::keys::to_libp2p(&sk)?;
+                eprintln!("Generated new identity: {}", key_path.display());
+                eprintln!("  Peer ID:     {}", kp.public().to_peer_id());
+            }
+        } else if !quiet {
             eprintln!("Using existing identity: {}", key_path.display());
         }
 
@@ -966,11 +976,13 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         // 3. Write config.
         config.write(&config_path)?;
-        eprintln!("Wrote config: {}", config_path.display());
+        if !quiet {
+            eprintln!("Wrote config: {}", config_path.display());
+        }
 
         // 4. Write platform service file.
         let ww_bin = std::env::current_exe().context("cannot determine ww binary path")?;
-        Self::write_service_file(&ww_bin, &config, &home)?;
+        Self::write_service_file(&ww_bin, &config, &home, quiet)?;
 
         Ok(())
     }
@@ -1015,18 +1027,21 @@ wasip2::cli::command::export!({iface_name}Guest);
         ww_bin: &Path,
         config: &ww::daemon_config::DaemonConfig,
         home: &Path,
+        quiet: bool,
     ) -> Result<()> {
-        // Identity as a mount arg: path:/etc/identity
-        let identity_mount = config
+        // Identity as a --identity CLI flag (NOT a :/etc/identity mount).
+        // The host reads it to create the signing key; it never enters
+        // the merged FHS tree visible to guests.
+        let identity_path = config
             .identity
             .as_ref()
-            .map(|p| format!("{}:/etc/identity", p.display()))
-            .unwrap_or_else(|| format!("{}:/etc/identity", home.join(".ww/identity").display()));
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| home.join(".ww/identity").display().to_string());
 
         if cfg!(target_os = "macos") {
-            Self::write_launchd_plist(ww_bin, config, home, &identity_mount)
+            Self::write_launchd_plist(ww_bin, config, home, &identity_path, quiet)
         } else if cfg!(target_os = "linux") {
-            Self::write_systemd_unit(ww_bin, config, home, &identity_mount)
+            Self::write_systemd_unit(ww_bin, config, home, &identity_path, quiet)
         } else {
             bail!("unsupported platform; only macOS and Linux are supported")
         }
@@ -1037,7 +1052,8 @@ wasip2::cli::command::export!({iface_name}Guest);
         ww_bin: &Path,
         config: &ww::daemon_config::DaemonConfig,
         home: &Path,
-        identity_mount: &str,
+        identity_path: &str,
+        quiet: bool,
     ) -> Result<()> {
         let plist_dir = home.join("Library/LaunchAgents");
         std::fs::create_dir_all(&plist_dir).context("create ~/Library/LaunchAgents")?;
@@ -1055,12 +1071,13 @@ wasip2::cli::command::export!({iface_name}Guest);
             format!("        <string>--port</string>"),
             format!("        <string>{}</string>", config.port),
         ];
+        // Identity as a --identity flag (host-side only, not a guest mount).
+        args.push("        <string>--identity</string>".to_string());
+        args.push(format!("        <string>{identity_path}</string>"));
         // Image layers (root mounts).
         for img in &config.images {
             args.push(format!("        <string>{}</string>", img.display()));
         }
-        // Identity as a targeted mount.
-        args.push(format!("        <string>{identity_mount}</string>"));
 
         let plist = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -1091,10 +1108,12 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         std::fs::write(&plist_path, plist)
             .with_context(|| format!("write plist: {}", plist_path.display()))?;
-        eprintln!("Wrote service: {}", plist_path.display());
-        eprintln!();
-        eprintln!("Activate with:");
-        eprintln!("  launchctl load {}", plist_path.display());
+        if !quiet {
+            eprintln!("Wrote service: {}", plist_path.display());
+            eprintln!();
+            eprintln!("Activate with:");
+            eprintln!("  launchctl load {}", plist_path.display());
+        }
 
         Ok(())
     }
@@ -1104,24 +1123,25 @@ wasip2::cli::command::export!({iface_name}Guest);
         ww_bin: &Path,
         config: &ww::daemon_config::DaemonConfig,
         home: &Path,
-        identity_mount: &str,
+        identity_path: &str,
+        quiet: bool,
     ) -> Result<()> {
         let unit_dir = home.join(".config/systemd/user");
         std::fs::create_dir_all(&unit_dir).context("create ~/.config/systemd/user")?;
 
         let unit_path = unit_dir.join("ww.service");
 
-        // Build positional args: images (root mounts) + identity mount.
+        // Build positional args: image layers only (identity is a flag, not a mount).
         let mut positional = Vec::new();
         for img in &config.images {
             positional.push(img.display().to_string());
         }
-        positional.push(identity_mount.to_string());
 
         let exec_start = format!(
-            "{} run --port {} {}",
+            "{} run --port {} --identity {} {}",
             ww_bin.display(),
             config.port,
+            identity_path,
             positional.join(" "),
         );
 
@@ -1143,10 +1163,12 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         std::fs::write(&unit_path, unit)
             .with_context(|| format!("write unit: {}", unit_path.display()))?;
-        eprintln!("Wrote service: {}", unit_path.display());
-        eprintln!();
-        eprintln!("Activate with:");
-        eprintln!("  systemctl --user enable --now ww");
+        if !quiet {
+            eprintln!("Wrote service: {}", unit_path.display());
+            eprintln!();
+            eprintln!("Activate with:");
+            eprintln!("  systemctl --user enable --now ww");
+        }
 
         Ok(())
     }
@@ -1155,6 +1177,7 @@ wasip2::cli::command::export!({iface_name}Guest);
     #[allow(clippy::too_many_arguments)]
     async fn run_with_mounts(
         mounts: Vec<ww::mount::Mount>,
+        identity: Option<PathBuf>,
         port: u16,
         wasm_debug: bool,
         stem: Option<String>,
@@ -1259,9 +1282,10 @@ wasip2::cli::command::export!({iface_name}Guest);
         let image_path = format!("/ipfs/{}", root_cid);
         tracing::debug!(root = %image_path, "image published");
 
-        // Resolve identity from /etc/identity in the merged FHS.
+        // Resolve identity from the explicit path (never from the merged FHS tree).
+        // The identity file is kept out of the merged tree so guests can't read it.
         tracing::debug!("resolving identity...");
-        let (sk, _verifying_key, identity_source) = Self::resolve_identity(merged.path())?;
+        let (sk, _verifying_key, identity_source) = Self::resolve_identity(identity.as_deref())?;
         tracing::info!(source = identity_source, "Node identity resolved");
         tracing::debug!(source = identity_source, "identity resolved");
 
@@ -1716,7 +1740,19 @@ wasip2::cli::command::export!({iface_name}Guest);
         let ww_dir = home.join(".ww");
 
         // Step 1: Create ~/.ww directory structure.
-        let subdirs = ["boot", "bin", "lib", "etc/init.d", "logs", "images"];
+        let subdirs = [
+            "boot",
+            "bin",
+            "lib",
+            "etc/init.d",
+            "logs",
+            // Image roots for daemon: each is a proper FHS image with bin/main.wasm.
+            // No etc/ dirs here — identity stays host-side only, accessed via
+            // the Signer capability in the Membrane, not the guest filesystem.
+            "kernel/bin",
+            "shell/bin",
+            "mcp/bin",
+        ];
         let mut created = Vec::new();
         for sub in &subdirs {
             let dir = ww_dir.join(sub);
@@ -1730,9 +1766,6 @@ wasip2::cli::command::export!({iface_name}Guest);
             println!("  ~/.ww directories ........... OK (already exist)");
         } else {
             println!("  ~/.ww directories ........... CREATED");
-            for sub in &created {
-                println!("    ~/.ww/{sub}");
-            }
         }
 
         // Step 2: Generate Ed25519 identity at ~/.ww/identity (if missing).
@@ -1748,6 +1781,42 @@ wasip2::cli::command::export!({iface_name}Guest);
             println!("    Peer ID: {peer_id}");
         }
 
+        // Step 2.5: Extract embedded WASM images to ~/.ww/{kernel,shell,mcp}/bin/.
+        // Identity is NOT placed inside image roots — guests access signing only
+        // through the Signer capability in the Membrane, never via the filesystem.
+        let image_cells: &[(&str, &str, &[u8])] = &[
+            ("kernel", "main.wasm", EMBEDDED_KERNEL),
+            ("shell", "shell.wasm", EMBEDDED_SHELL),
+            ("mcp", "main.wasm", EMBEDDED_MCP),
+        ];
+        let mut images_ok = true;
+        for (name, wasm_name, bytes) in image_cells {
+            let wasm_dest = ww_dir.join(format!("{name}/bin/{wasm_name}"));
+            if !bytes.is_empty() {
+                if !wasm_dest.exists()
+                    || std::fs::metadata(&wasm_dest)
+                        .map(|m| m.len() == 0)
+                        .unwrap_or(true)
+                {
+                    std::fs::write(&wasm_dest, bytes)
+                        .with_context(|| format!("write {}", wasm_dest.display()))?;
+                }
+            } else {
+                images_ok = false;
+            }
+        }
+        if images_ok {
+            println!("  ~/.ww/{{kernel,shell,mcp}} ... OK (images extracted)");
+        } else {
+            println!(
+                "  ~/.ww/{{kernel,shell,mcp}} ... PARTIAL (WASM not embedded, build from source)"
+            );
+        }
+
+        // Resolve our own absolute path once — used for daemon plist and MCP wiring.
+        let ww_bin = std::env::current_exe().context("cannot determine ww binary path")?;
+        let ww_bin_str = ww_bin.display().to_string();
+
         // Step 3: Register background daemon.
         let plist_path = home.join("Library/LaunchAgents/io.wetware.ww.plist");
         let systemd_path = home.join(".config/systemd/user/ww.service");
@@ -1756,8 +1825,14 @@ wasip2::cli::command::export!({iface_name}Guest);
         if daemon_exists {
             println!("  Background daemon ........... OK (already registered)");
         } else {
-            // Call daemon_install with defaults.
-            Self::daemon_install(Some(identity_path.clone()), Some(2025), vec![]).await?;
+            // Pass image roots as layers. Identity is passed separately —
+            // daemon_install adds it as a :/etc/identity mount for the host to read.
+            let image_layers: Vec<String> = ["kernel", "shell", "mcp"]
+                .iter()
+                .map(|name| ww_dir.join(name).display().to_string())
+                .collect();
+            Self::daemon_install(Some(identity_path.clone()), Some(2025), image_layers, true)
+                .await?;
             println!("  Background daemon ........... REGISTERED");
             if cfg!(target_os = "macos") {
                 println!("    Activate:  launchctl load {}", plist_path.display());
@@ -1767,6 +1842,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         }
 
         // Step 4: Wire MCP into Claude Code (if installed).
+        // Use absolute path to our binary so PATH ambiguity doesn't matter.
         let claude_available = std::process::Command::new("claude")
             .args(["--version"])
             .stdout(std::process::Stdio::null())
@@ -1776,7 +1852,7 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         if claude_available {
             let status = std::process::Command::new("claude")
-                .args(["mcp", "add", "wetware", "--", "ww", "run", "--mcp"])
+                .args(["mcp", "add", "wetware", "--", &ww_bin_str, "run", "--mcp"])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
@@ -1786,13 +1862,16 @@ wasip2::cli::command::export!({iface_name}Guest);
                 }
                 _ => {
                     println!("  Claude Code MCP ............. FAILED (manual setup needed)");
-                    println!("    Run:  claude mcp add wetware -- ww run --mcp");
+                    println!(
+                        "    Run:  claude mcp add wetware -- {} run --mcp",
+                        ww_bin_str
+                    );
                 }
             }
         } else {
             println!("  Claude Code MCP ............. SKIPPED (claude CLI not found)");
             println!("    Install Claude Code, then run:");
-            println!("    claude mcp add wetware -- ww run --mcp");
+            println!("    claude mcp add wetware -- {} run --mcp", ww_bin_str);
         }
 
         // Step 5: Summary.
@@ -1803,7 +1882,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         println!("  Data:      ~/.ww/");
         println!("  Version:   {}", env!("CARGO_PKG_VERSION"));
         println!();
-        println!("Next steps:");
+        println!("\u{2697}\u{fe0f} Next steps:");
         if !daemon_exists {
             if cfg!(target_os = "macos") {
                 println!(
@@ -2118,27 +2197,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_resolve_identity_ephemeral_no_disk_write() {
-        let dir = tempfile::TempDir::new().unwrap();
-        // No etc/identity in the directory.
-        let (_, _, source) = Commands::resolve_identity(dir.path()).unwrap();
+    fn test_resolve_identity_ephemeral_when_none() {
+        let (_, _, source) = Commands::resolve_identity(None).unwrap();
         assert_eq!(source, "ephemeral");
-        // Must NOT write back to disk.
-        assert!(!dir.path().join("etc/identity").exists());
+    }
+
+    #[test]
+    fn test_resolve_identity_ephemeral_when_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("nonexistent");
+        let (_, _, source) = Commands::resolve_identity(Some(missing.as_path())).unwrap();
+        assert_eq!(source, "ephemeral");
     }
 
     #[test]
     fn test_resolve_identity_loads_existing() {
         let dir = tempfile::TempDir::new().unwrap();
-        let etc = dir.path().join("etc");
-        std::fs::create_dir_all(&etc).unwrap();
+        let id_path = dir.path().join("identity");
         // Write a known key.
         let sk = ww::keys::generate().unwrap();
         let encoded = ww::keys::encode(&sk);
-        std::fs::write(etc.join("identity"), &encoded).unwrap();
+        std::fs::write(&id_path, &encoded).unwrap();
 
-        let (loaded_sk, _, source) = Commands::resolve_identity(dir.path()).unwrap();
-        assert_eq!(source, "/etc/identity");
+        let (loaded_sk, _, source) = Commands::resolve_identity(Some(id_path.as_path())).unwrap();
+        assert_eq!(source, "file");
         assert_eq!(ww::keys::encode(&loaded_sk), encoded);
     }
 }
