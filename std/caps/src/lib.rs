@@ -297,7 +297,7 @@ pub fn make_import_handler() -> Val {
                     .into_iter()
                     .map(|(name, val)| (Val::Keyword(name), val))
                     .collect();
-                let module_map = Val::Map(map_entries);
+                let module_map = Val::Map(glia::ValMap::from_pairs(map_entries));
 
                 // Cache the map
                 IMPORT_CACHE.with(|cache| {
