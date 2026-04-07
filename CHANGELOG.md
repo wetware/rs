@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- Release pipeline: 4-platform binary matrix (linux x86_64/aarch64, macOS x86_64/aarch64) with GitHub Actions
+- Multi-arch container images (linux/amd64 + linux/arm64) pushed to ghcr.io/wetware/ww
+- Cosign keyless container image signing via GitHub OIDC
+- CHECKSUMS.txt with multihash (BLAKE3 + SHA2-256) and raw sha256sum-compatible section
+- Install script (`scripts/install.sh`): one-liner installer with OS/arch detection and checksum verification
+- `Cross.toml` for Cap'n Proto cross-compilation on aarch64-unknown-linux-gnu
+- `Containerfile.release` for fast container builds from pre-built binaries
+- Install script test suite (`tests/test_install.sh`)
+
+### Changed
+- Moved release builds from `rust.yml` to dedicated `release.yml` workflow
+
 ## [0.0.5.0] - 2026-04-06
 
 ### Added
