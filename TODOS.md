@@ -1,5 +1,13 @@
 # TODOs
 
+## IPFS primary distribution (release pipeline follow-up)
+**What:** After the GitHub-based release pipeline ships, add IPFS as the primary distribution channel. Includes: `publish-ipfs` CI job (ipfs add release dir, pin on persistent node, ipns publish), `oci-export` WASM cell (`std/oci-export/`) that reads OCI layout from VFS and tars to stdout, IPNS release tracking, and IPFS-first path in `scripts/install.sh`.
+**Why:** The p2p runtime should distribute itself via p2p. Eliminates GHCR as single point of failure. Content-addressed distribution. Dogfoods IPFS.
+**Context:** Full design in CEO plan at `~/.gstack/projects/wetware-ww/ceo-plans/2026-04-06-release-pipeline.md`. Key decisions: IPNS points directly to latest release dir, older releases accessible by immutable CID. Need `skopeo copy --format oci` or `crane export` for OCI layout (not `docker save`, which produces legacy Docker format). Persistent IPFS node connectivity from CI is TBD (user to configure `IPFS_PIN_API_URL` secret).
+**Effort:** M (human) -> S-M (CC)
+**Priority:** P2
+**Depends on:** Release pipeline (feat/release-pipeline), persistent IPFS node setup
+
 ## Float equality: align with Clojure semantics (0.0 == -0.0)
 **What:** Normalize -0.0 to 0.0 in both `PartialEq` and `Hash` impls for `Val::Float`. Currently `0.0 != -0.0` because `PartialEq` uses `f64::to_bits()` (bitwise comparison). Clojure treats `(= 0.0 -0.0)` as true (IEEE 754 semantics).
 **Why:** Deviation from Clojure semantics. A map with key `0.0` won't find entries inserted with key `-0.0`. The current behavior is consistent (`Hash` and `PartialEq` agree on `to_bits()`), so no HashMap invariant violation, but it's a footgun for users coming from Clojure.
