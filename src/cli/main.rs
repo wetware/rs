@@ -1740,12 +1740,7 @@ wasip2::cli::command::export!({iface_name}Guest);
             println!("  Background daemon ........... OK (already registered)");
         } else {
             // Call daemon_install with defaults.
-            Self::daemon_install(
-                Some(identity_path.clone()),
-                Some(2025),
-                vec![],
-            )
-            .await?;
+            Self::daemon_install(Some(identity_path.clone()), Some(2025), vec![]).await?;
             println!("  Background daemon ........... REGISTERED");
             if cfg!(target_os = "macos") {
                 println!("    Activate:  launchctl load {}", plist_path.display());
@@ -1794,7 +1789,10 @@ wasip2::cli::command::export!({iface_name}Guest);
         println!("Next steps:");
         if !daemon_exists {
             if cfg!(target_os = "macos") {
-                println!("  1. Activate daemon:  launchctl load {}", plist_path.display());
+                println!(
+                    "  1. Activate daemon:  launchctl load {}",
+                    plist_path.display()
+                );
                 println!("  2. Open Claude Code and say: \"Run the wetware quickstart\"");
             } else {
                 println!("  1. Activate daemon:  systemctl --user enable --now ww");
@@ -1890,10 +1888,12 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         println!();
         println!("Wetware uninstalled.");
-        println!("  Binary at {} not removed (delete manually if desired).",
+        println!(
+            "  Binary at {} not removed (delete manually if desired).",
             std::env::current_exe()
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "unknown".to_string()));
+                .unwrap_or_else(|_| "unknown".to_string())
+        );
 
         Ok(())
     }
@@ -2040,7 +2040,9 @@ wasip2::cli::command::export!({iface_name}Guest);
                     }
                 }
             } else {
-                println!("  Background daemon ........... NOT REGISTERED (run: ww perform install)");
+                println!(
+                    "  Background daemon ........... NOT REGISTERED (run: ww perform install)"
+                );
             }
         }
 
