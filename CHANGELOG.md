@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 - **Security:** Identity private key no longer exposed to WASM guests. `resolve_identity()` reads identity directly from `--identity` path, never from the merged FHS tree (which is preopened to guests via WASI and published to IPFS).
 - MCP wiring uses absolute binary path via `current_exe()`, fixing PATH ambiguity.
+- `claude mcp add/remove` now handles idempotent exit codes (server already exists / not found) without erroring.
 
 ### Changed
 - Moved release builds from `rust.yml` to dedicated `release.yml` workflow
