@@ -34,6 +34,6 @@ back so the host can expose it to external peers.
 
 ## Relationship to the kernel
 
-The kernel (`crates/kernel`) uses `serve()` to export an attenuated Membrane back
+The kernel (`std/kernel`) uses `serve()` to export an attenuated Membrane back
 to the host. Other agents that only need to *use* capabilities (not re-export them)
 use `run()`.

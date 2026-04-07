@@ -22,9 +22,9 @@ use ww::loaders::{ChainLoader, EmbeddedLoader, HostPathLoader, IpfsUnixfsLoader}
 // build.rs sets cfg flags (has_wasm_*) when each file exists and is non-empty.
 // In debug/test builds without `make std`, these are empty slices and the
 // EmbeddedLoader gracefully falls through to the next loader in the chain.
-#[cfg(has_wasm_crates_kernel_bin_main_wasm)]
-const EMBEDDED_KERNEL: &[u8] = include_bytes!("../../crates/kernel/bin/main.wasm");
-#[cfg(not(has_wasm_crates_kernel_bin_main_wasm))]
+#[cfg(has_wasm_std_kernel_bin_main_wasm)]
+const EMBEDDED_KERNEL: &[u8] = include_bytes!("../../std/kernel/bin/main.wasm");
+#[cfg(not(has_wasm_std_kernel_bin_main_wasm))]
 const EMBEDDED_KERNEL: &[u8] = b"";
 
 #[cfg(has_wasm_std_shell_bin_shell_wasm)]
@@ -737,11 +737,11 @@ wasip2::cli::command::export!({iface_name}Guest);
         println!("  src/lib.rs              — guest entry point");
         println!("  etc/init.d/{name}.glia  — kernel init script");
         println!();
-        println!("\u{2697}\u{fe0f} Next steps:");
+        println!("\u{2697}\u{fe0f}  Next steps:");
         println!("  1. Edit {name}.capnp with your interface methods");
         println!("  2. Implement the server in src/lib.rs");
         println!("  3. ww build {name}");
-        println!("  4. ww run crates/kernel {name}");
+        println!("  4. ww run std/kernel {name}");
         Ok(())
     }
 
@@ -1892,7 +1892,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         println!("  Data:      ~/.ww/");
         println!("  Version:   {}", env!("CARGO_PKG_VERSION"));
         println!();
-        println!("\u{2697}\u{fe0f} Next steps:");
+        println!("\u{2697}\u{fe0f}  Next steps:");
         if !daemon_exists {
             if cfg!(target_os = "macos") {
                 println!(

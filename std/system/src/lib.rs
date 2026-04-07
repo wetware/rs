@@ -232,17 +232,31 @@ pub struct StreamPollables {
 /// (stdin, listeners, extra channels, etc.).
 pub struct PollSet {
     pollables: Vec<WasiPollable>,
+    /// Keeps source objects (streams, readers, etc.) alive so their child
+    /// pollables remain valid for the lifetime of the poll set.
+    _keep_alive: Vec<Box<dyn std::any::Any>>,
 }
 
 impl PollSet {
     pub fn new() -> Self {
         Self {
             pollables: Vec::new(),
+            _keep_alive: Vec::new(),
         }
     }
 
     pub fn push(&mut self, p: WasiPollable) {
         self.pollables.push(p);
+    }
+
+    /// Push a pollable along with the source object it was derived from.
+    ///
+    /// The source is kept alive for the lifetime of the `PollSet`, preventing
+    /// WASI "resource has children" errors when the parent stream would
+    /// otherwise be dropped before its child pollable.
+    pub fn push_with_source<T: 'static>(&mut self, p: WasiPollable, source: T) {
+        self.pollables.push(p);
+        self._keep_alive.push(Box::new(source));
     }
 }
 
@@ -341,16 +355,25 @@ impl<C: FromClientHook> RpcSession<C> {
         self
     }
 
-    /// Leak resources to avoid WASI cleanup panics at process exit.
+    /// Clean up resources in WASI-safe order at process exit.
     ///
-    /// Cap'n Proto destructors try to close handles that are already dead
-    /// when the host tears down the RPC channel. This is a WASI-P2 wart;
-    /// revisit when wasmtime/WASI stabilises resource cleanup ordering.
+    /// WASI-P2 enforces that child resources (pollables) are dropped
+    /// before their parents (streams).  Pollables are children of the
+    /// streams inside `rpc_system`, so we drop them first.
+    ///
+    /// Cap'n Proto destructors are then leaked (`mem::forget`) because
+    /// they try to close handles that the host has already torn down.
+    ///
+    /// Note: `serve_and_run` uses the same pattern inline (not this method)
+    /// because it also owns a `future` that must be dropped between
+    /// `poll_set` and `pollables`. See the teardown block in that function.
     pub fn forget(self) {
+        // 1. Drop child resources (pollables) before parent streams.
+        drop(self.poll_set);
+        drop(self.pollables);
+        // 2. Leak Cap'n Proto objects to avoid close-after-teardown panics.
         std::mem::forget(self.client);
         std::mem::forget(self.rpc_system);
-        std::mem::forget(self.pollables);
-        std::mem::forget(self.poll_set);
     }
 }
 
@@ -520,7 +543,12 @@ pub fn serve_stdio(bootstrap: capnp::capability::Client) {
         _ => {}
     }
 
-    // Forget resources to avoid WASI cleanup errors.
+    // WASI-P2 teardown: leak Cap'n Proto objects to avoid close-after-teardown
+    // panics. At process exit the host reclaims all handles; running Cap'n Proto
+    // destructors would try to close handles the host already tore down.
+    // Pollables are also leaked here (no user future owns them, so no
+    // parent-before-child ordering issue unlike serve_and_run / Session::forget).
+    // See also: Session::forget() and the serve_and_run teardown block below.
     std::mem::forget(rpc_system);
     std::mem::forget(pollables);
 }
@@ -616,8 +644,28 @@ where
         }
     }
 
-    // Forget to avoid dropping Cap'n Proto objects which would trigger
-    // WASI resource cleanup errors.
-    std::mem::forget(future);
-    session.forget();
+    // WASI-P2 teardown — resource ordering matters.
+    //
+    // WASI-P2 enforces that child resources (pollables) must be dropped before
+    // their parents (streams inside rpc_system). Rust's default drop order
+    // (reverse declaration) doesn't guarantee this, so we do it manually.
+    //
+    // Order:
+    //   1. poll_set    — owns references to pollables, must go first
+    //   2. future      — may capture streams whose pollables are in poll_set
+    //   3. pollables   — children of streams in rpc_system
+    //   4. forget client + rpc_system — leak Cap'n Proto objects; their
+    //      destructors try to close handles the host has already torn down
+    //      at process exit, causing panics
+    //
+    // This is the same pattern as Session::forget(), but we also own `future`
+    // which must be dropped between poll_set and pollables.
+    // See also: Session::forget() and the serve_stdio teardown above.
+    let poll_set = session.poll_set;
+    let pollables = session.pollables;
+    drop(poll_set);
+    drop(future);
+    drop(pollables);
+    std::mem::forget(session.client);
+    std::mem::forget(session.rpc_system);
 }

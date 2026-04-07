@@ -94,7 +94,7 @@ registers the Mindshare cell with the host's `VatListener` and grants
 it an `HttpClient` capability for local LLM queries.
 
 ```sh
-ww run --port=2025 crates/kernel examples/mindshare
+ww run --port=2025 std/kernel examples/mindshare
 ```
 
 This drops you into a Glia shell.
@@ -113,7 +113,7 @@ schema CID on the DHT:
 Open a second terminal:
 
 ```sh
-ww run --port=2026 crates/kernel examples/mindshare
+ww run --port=2026 std/kernel examples/mindshare
 ```
 
 From the second Glia shell, start the service and connect:
