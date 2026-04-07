@@ -1851,16 +1851,26 @@ wasip2::cli::command::export!({iface_name}Guest);
             .is_ok();
 
         if claude_available {
-            let status = std::process::Command::new("claude")
+            let output = std::process::Command::new("claude")
                 .args(["mcp", "add", "wetware", "--", &ww_bin_str, "run", "--mcp"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            match status {
-                Ok(s) if s.success() => {
+                .output();
+            match output {
+                Ok(o) if o.status.success() => {
                     println!("  Claude Code MCP ............. WIRED");
                 }
-                _ => {
+                Ok(o) => {
+                    let msg = String::from_utf8_lossy(&o.stdout);
+                    if msg.contains("already exists") {
+                        println!("  Claude Code MCP ............. OK (already configured)");
+                    } else {
+                        println!("  Claude Code MCP ............. FAILED (manual setup needed)");
+                        println!(
+                            "    Run:  claude mcp add wetware -- {} run --mcp",
+                            ww_bin_str
+                        );
+                    }
+                }
+                Err(_) => {
                     println!("  Claude Code MCP ............. FAILED (manual setup needed)");
                     println!(
                         "    Run:  claude mcp add wetware -- {} run --mcp",
@@ -1949,16 +1959,23 @@ wasip2::cli::command::export!({iface_name}Guest);
             .is_ok();
 
         if claude_available {
-            let status = std::process::Command::new("claude")
+            let output = std::process::Command::new("claude")
                 .args(["mcp", "remove", "wetware"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            match status {
-                Ok(s) if s.success() => {
+                .output();
+            match output {
+                Ok(o) if o.status.success() => {
                     println!("  Claude Code MCP ............. REMOVED");
                 }
-                _ => {
+                Ok(o) => {
+                    let msg = String::from_utf8_lossy(&o.stdout);
+                    if msg.contains("No MCP server found") || msg.contains("not found") {
+                        println!("  Claude Code MCP ............. OK (not configured)");
+                    } else {
+                        println!("  Claude Code MCP ............. FAILED (remove manually)");
+                        println!("    Run:  claude mcp remove wetware");
+                    }
+                }
+                Err(_) => {
                     println!("  Claude Code MCP ............. FAILED (remove manually)");
                     println!("    Run:  claude mcp remove wetware");
                 }
