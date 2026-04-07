@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use std::io::Write as _;
 
 use clap::{Parser, Subcommand};
 use ed25519_dalek::VerifyingKey;
@@ -14,7 +15,41 @@ use ww::cell::CellBuilder;
 use ww::host;
 use ww::image;
 use ww::ipfs;
-use ww::loaders::{ChainLoader, HostPathLoader, IpfsUnixfsLoader};
+use ww::loaders::{ChainLoader, EmbeddedLoader, HostPathLoader, IpfsUnixfsLoader};
+
+// Embedded WASM blobs — compiled into the binary so `ww run --mcp` works
+// without requiring `make std` on the user's machine.
+// build.rs sets cfg flags (has_wasm_*) when each file exists and is non-empty.
+// In debug/test builds without `make std`, these are empty slices and the
+// EmbeddedLoader gracefully falls through to the next loader in the chain.
+#[cfg(has_wasm_crates_kernel_bin_main_wasm)]
+const EMBEDDED_KERNEL: &[u8] = include_bytes!("../../crates/kernel/bin/main.wasm");
+#[cfg(not(has_wasm_crates_kernel_bin_main_wasm))]
+const EMBEDDED_KERNEL: &[u8] = b"";
+
+#[cfg(has_wasm_std_shell_bin_shell_wasm)]
+const EMBEDDED_SHELL: &[u8] = include_bytes!("../../std/shell/bin/shell.wasm");
+#[cfg(not(has_wasm_std_shell_bin_shell_wasm))]
+const EMBEDDED_SHELL: &[u8] = b"";
+
+#[cfg(has_wasm_std_mcp_bin_main_wasm)]
+const EMBEDDED_MCP: &[u8] = include_bytes!("../../std/mcp/bin/main.wasm");
+#[cfg(not(has_wasm_std_mcp_bin_main_wasm))]
+const EMBEDDED_MCP: &[u8] = b"";
+
+#[cfg(has_wasm_examples_echo_bin_echo_wasm)]
+const EMBEDDED_ECHO: &[u8] = include_bytes!("../../examples/echo/bin/echo.wasm");
+#[cfg(not(has_wasm_examples_echo_bin_echo_wasm))]
+const EMBEDDED_ECHO: &[u8] = b"";
+
+/// Build the standard embedded loader with all bundled WASM images.
+fn embedded_loader() -> EmbeddedLoader {
+    EmbeddedLoader::new()
+        .insert("kernel/bin/main.wasm", EMBEDDED_KERNEL)
+        .insert("shell/bin/shell.wasm", EMBEDDED_SHELL)
+        .insert("mcp/bin/main.wasm", EMBEDDED_MCP)
+        .insert("echo/bin/echo.wasm", EMBEDDED_ECHO)
+}
 
 #[derive(Parser)]
 #[command(name = "ww")]
@@ -246,21 +281,25 @@ enum DaemonAction {
 
 #[derive(Subcommand)]
 enum PerformAction {
-    /// Bootstrap the ~/.ww user layer.
+    /// Bootstrap the ~/.ww user layer, daemon, and MCP wiring.
     ///
-    /// Creates the FHS-compatible directory structure that serves as the
-    /// user's persistent Wetware environment. Cells read from ~/.ww;
-    /// the operator (or Claude Code) writes to it.
+    /// Idempotent: re-running skips completed steps, retries failed ones.
     ///
-    /// Idempotent: creates missing directories, skips existing ones.
-    /// Never overwrites files.
-    ///
-    /// Directory structure:
-    ///   ~/.ww/boot/         kernel override (optional)
-    ///   ~/.ww/bin/          user WASM binaries
-    ///   ~/.ww/lib/          shared Glia modules
-    ///   ~/.ww/etc/init.d/   user init scripts
+    /// Steps:
+    ///   1. Create ~/.ww directory structure
+    ///   2. Generate Ed25519 identity at ~/.ww/identity (if missing)
+    ///   3. Register background daemon (launchd/systemd)
+    ///   4. Wire MCP into Claude Code (if installed)
+    ///   5. Print summary with next steps
     Install,
+
+    /// Remove wetware daemon, MCP wiring, and optionally ~/.ww.
+    ///
+    /// Steps:
+    ///   1. Stop and remove background daemon
+    ///   2. Remove MCP config from Claude Code
+    ///   3. Optionally remove ~/.ww (prompts for confirmation)
+    Uninstall,
 }
 
 /// Strip the `/p2p/<peer-id>` suffix from a multiaddr string, if present.
@@ -390,6 +429,7 @@ impl Commands {
             }
             Commands::Perform { action } => match action {
                 PerformAction::Install => Self::perform_install().await,
+                PerformAction::Uninstall => Self::perform_uninstall().await,
             },
             Commands::Doctor => Self::doctor().await,
         }
@@ -1146,13 +1186,17 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         ww::config::init_tracing_to_stderr(mcp);
 
-        // Build a chain loader: try IPFS first (if reachable), fall back to host FS.
+        // Build a chain loader: HostPath > Embedded > IPFS.
+        // HostPath first so local files can override embedded WASM (enables hot-patches).
+        // Embedded second as fallback for pre-built binary distribution.
+        // IPFS last for content-addressed network resolution.
         let ipfs_client = ipfs::HttpClient::new("http://localhost:5001".into());
         let content_store: std::sync::Arc<dyn ipfs::ContentStore> =
             std::sync::Arc::new(ipfs_client.clone());
         let loader = ChainLoader::new(vec![
-            Box::new(IpfsUnixfsLoader::new(ipfs_client.clone())),
             Box::new(HostPathLoader),
+            Box::new(embedded_loader()),
+            Box::new(IpfsUnixfsLoader::new(ipfs_client.clone())),
         ]);
 
         // If --stem is provided, read the on-chain head and prepend it
@@ -1446,9 +1490,11 @@ wasip2::cli::command::export!({iface_name}Guest);
             tracing::info!(image = %mcp_image, "Resolved MCP cell image");
 
             // Build a loader for the MCP cell.
+            // Same priority as main loader: HostPath > Embedded > IPFS.
             let mcp_loader = ChainLoader::new(vec![
-                Box::new(IpfsUnixfsLoader::new(ipfs_client.clone())),
                 Box::new(HostPathLoader),
+                Box::new(embedded_loader()),
+                Box::new(IpfsUnixfsLoader::new(ipfs_client.clone())),
             ]);
             let mcp_cell = CellBuilder::new(mcp_image)
                 .with_loader(Box::new(mcp_loader))
@@ -1551,10 +1597,12 @@ wasip2::cli::command::export!({iface_name}Guest);
     /// Searches for `bin/main.wasm` in:
     /// 1. `std/mcp/` relative to CWD (dev mode)
     /// 2. `../std/mcp/` relative to the host binary (installed mode)
+    /// 3. `~/.ww/images/mcp/` (user install layer)
+    /// 4. Falls back to `mcp` (sentinel for EmbeddedLoader, if WASM is embedded)
     ///
     /// Returns the image path as a string suitable for `CellBuilder::new()`.
     fn find_mcp_image() -> Result<String> {
-        let candidates = [
+        let mut candidates = vec![
             PathBuf::from("std/mcp"),
             std::env::current_exe()
                 .unwrap_or_default()
@@ -1563,10 +1611,23 @@ wasip2::cli::command::export!({iface_name}Guest);
                 .join("../std/mcp"),
         ];
 
+        // Check the user install layer (~/.ww/images/mcp)
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join(".ww/images/mcp"));
+        }
+
         for candidate in &candidates {
             if candidate.join("bin/main.wasm").exists() {
                 return Ok(candidate.display().to_string());
             }
+        }
+
+        // Fall back to the sentinel path that EmbeddedLoader can resolve.
+        // The embedded loader matches by suffix, so "mcp/bin/main.wasm"
+        // will match the registered "mcp/bin/main.wasm" entry.
+        if !EMBEDDED_MCP.is_empty() {
+            tracing::info!("Using embedded MCP cell image");
+            return Ok("mcp".to_string());
         }
 
         bail!(
@@ -1646,15 +1707,17 @@ wasip2::cli::command::export!({iface_name}Guest);
         Ok(())
     }
 
-    /// Bootstrap the ~/.ww user layer.
+    /// Bootstrap the ~/.ww user layer, daemon, and MCP wiring.
+    ///
+    /// Idempotent: re-running skips completed steps, retries failed ones.
     #[allow(clippy::unused_async)]
     async fn perform_install() -> Result<()> {
         let home = dirs::home_dir().context("Cannot determine home directory")?;
         let ww_dir = home.join(".ww");
 
-        let subdirs = ["boot", "bin", "lib", "etc/init.d"];
+        // Step 1: Create ~/.ww directory structure.
+        let subdirs = ["boot", "bin", "lib", "etc/init.d", "logs", "images"];
         let mut created = Vec::new();
-
         for sub in &subdirs {
             let dir = ww_dir.join(sub);
             if !dir.exists() {
@@ -1663,17 +1726,191 @@ wasip2::cli::command::export!({iface_name}Guest);
                 created.push(*sub);
             }
         }
-
         if created.is_empty() {
-            println!("~/.ww already exists (all directories present).");
+            println!("  ~/.ww directories ........... OK (already exist)");
         } else {
-            println!("Created ~/.ww user layer:");
+            println!("  ~/.ww directories ........... CREATED");
             for sub in &created {
-                println!("  ~/.ww/{sub}");
+                println!("    ~/.ww/{sub}");
             }
-            println!("\nMount with:  ww run crates/kernel ~/.ww");
-            println!("Generate identity:  ww keygen > ~/.ww/etc/identity");
         }
+
+        // Step 2: Generate Ed25519 identity at ~/.ww/identity (if missing).
+        let identity_path = ww_dir.join("identity");
+        if identity_path.exists() {
+            println!("  ~/.ww/identity .............. OK (already exists)");
+        } else {
+            let sk = ww::keys::generate()?;
+            ww::keys::save(&sk, &identity_path)?;
+            let kp = ww::keys::to_libp2p(&sk)?;
+            let peer_id = kp.public().to_peer_id();
+            println!("  ~/.ww/identity .............. CREATED");
+            println!("    Peer ID: {peer_id}");
+        }
+
+        // Step 3: Register background daemon.
+        let plist_path = home.join("Library/LaunchAgents/io.wetware.ww.plist");
+        let systemd_path = home.join(".config/systemd/user/ww.service");
+        let daemon_exists = plist_path.exists() || systemd_path.exists();
+
+        if daemon_exists {
+            println!("  Background daemon ........... OK (already registered)");
+        } else {
+            // Call daemon_install with defaults.
+            Self::daemon_install(Some(identity_path.clone()), Some(2025), vec![]).await?;
+            println!("  Background daemon ........... REGISTERED");
+            if cfg!(target_os = "macos") {
+                println!("    Activate:  launchctl load {}", plist_path.display());
+            } else if cfg!(target_os = "linux") {
+                println!("    Activate:  systemctl --user enable --now ww");
+            }
+        }
+
+        // Step 4: Wire MCP into Claude Code (if installed).
+        let claude_available = std::process::Command::new("claude")
+            .args(["--version"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok();
+
+        if claude_available {
+            let status = std::process::Command::new("claude")
+                .args(["mcp", "add", "wetware", "--", "ww", "run", "--mcp"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    println!("  Claude Code MCP ............. WIRED");
+                }
+                _ => {
+                    println!("  Claude Code MCP ............. FAILED (manual setup needed)");
+                    println!("    Run:  claude mcp add wetware -- ww run --mcp");
+                }
+            }
+        } else {
+            println!("  Claude Code MCP ............. SKIPPED (claude CLI not found)");
+            println!("    Install Claude Code, then run:");
+            println!("    claude mcp add wetware -- ww run --mcp");
+        }
+
+        // Step 5: Summary.
+        println!();
+        println!("Wetware installed.");
+        println!();
+        println!("  Identity:  ~/.ww/identity");
+        println!("  Data:      ~/.ww/");
+        println!("  Version:   {}", env!("CARGO_PKG_VERSION"));
+        println!();
+        println!("Next steps:");
+        if !daemon_exists {
+            if cfg!(target_os = "macos") {
+                println!(
+                    "  1. Activate daemon:  launchctl load {}",
+                    plist_path.display()
+                );
+                println!("  2. Open Claude Code and say: \"Run the wetware quickstart\"");
+            } else {
+                println!("  1. Activate daemon:  systemctl --user enable --now ww");
+                println!("  2. Open Claude Code and say: \"Run the wetware quickstart\"");
+            }
+        } else {
+            println!("  1. Open Claude Code and say: \"Run the wetware quickstart\"");
+        }
+        println!();
+        println!("Uninstall:  ww perform uninstall");
+
+        Ok(())
+    }
+
+    /// Remove wetware daemon, MCP wiring, and optionally ~/.ww.
+    #[allow(clippy::unused_async)]
+    async fn perform_uninstall() -> Result<()> {
+        let home = dirs::home_dir().context("Cannot determine home directory")?;
+        let ww_dir = home.join(".ww");
+
+        // Step 1: Stop and remove daemon.
+        if cfg!(target_os = "macos") {
+            let plist_path = home.join("Library/LaunchAgents/io.wetware.ww.plist");
+            if plist_path.exists() {
+                // Try to unload (may fail if not loaded, that's ok).
+                let _ = std::process::Command::new("launchctl")
+                    .args(["unload", &plist_path.display().to_string()])
+                    .status();
+                std::fs::remove_file(&plist_path)
+                    .with_context(|| format!("remove {}", plist_path.display()))?;
+                println!("  Daemon ...................... REMOVED");
+            } else {
+                println!("  Daemon ...................... NOT FOUND (already removed)");
+            }
+        } else if cfg!(target_os = "linux") {
+            let unit_path = home.join(".config/systemd/user/ww.service");
+            if unit_path.exists() {
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "stop", "ww"])
+                    .status();
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "disable", "ww"])
+                    .status();
+                std::fs::remove_file(&unit_path)
+                    .with_context(|| format!("remove {}", unit_path.display()))?;
+                println!("  Daemon ...................... REMOVED");
+            } else {
+                println!("  Daemon ...................... NOT FOUND (already removed)");
+            }
+        }
+
+        // Step 2: Remove MCP config from Claude Code.
+        let claude_available = std::process::Command::new("claude")
+            .args(["--version"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok();
+
+        if claude_available {
+            let status = std::process::Command::new("claude")
+                .args(["mcp", "remove", "wetware"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    println!("  Claude Code MCP ............. REMOVED");
+                }
+                _ => {
+                    println!("  Claude Code MCP ............. FAILED (remove manually)");
+                    println!("    Run:  claude mcp remove wetware");
+                }
+            }
+        } else {
+            println!("  Claude Code MCP ............. SKIPPED (claude CLI not found)");
+        }
+
+        // Step 3: Optionally remove ~/.ww.
+        if ww_dir.exists() {
+            print!("  Remove ~/.ww? This deletes your identity and all data. [y/N] ");
+            std::io::stdout().flush().ok();
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            if input.trim().eq_ignore_ascii_case("y") {
+                std::fs::remove_dir_all(&ww_dir)
+                    .with_context(|| format!("remove {}", ww_dir.display()))?;
+                println!("  ~/.ww ....................... REMOVED");
+            } else {
+                println!("  ~/.ww ....................... KEPT");
+            }
+        }
+
+        println!();
+        println!("Wetware uninstalled.");
+        println!(
+            "  Binary at {} not removed (delete manually if desired).",
+            std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "unknown".to_string())
+        );
 
         Ok(())
     }
@@ -1761,14 +1998,87 @@ wasip2::cli::command::export!({iface_name}Guest);
             }
         }
 
-        // Optional: ~/.ww
+        // --- Install state checks ---
+        println!();
+        println!("Install state:");
+
         let home = dirs::home_dir();
-        match home {
-            Some(h) if h.join(".ww").exists() => {
+        let ww_dir = home.as_ref().map(|h| h.join(".ww"));
+
+        // ~/.ww directory
+        match &ww_dir {
+            Some(d) if d.exists() => {
                 println!("  ~/.ww ....................... OK");
             }
             _ => {
                 println!("  ~/.ww ....................... NOT FOUND (run: ww perform install)");
+            }
+        }
+
+        // Identity
+        match &ww_dir {
+            Some(d) if d.join("identity").exists() => {
+                println!("  ~/.ww/identity .............. OK");
+            }
+            _ => {
+                println!("  ~/.ww/identity .............. NOT FOUND");
+            }
+        }
+
+        // Daemon registered
+        if let Some(ref h) = home {
+            let plist = h.join("Library/LaunchAgents/io.wetware.ww.plist");
+            let systemd = h.join(".config/systemd/user/ww.service");
+            if plist.exists() || systemd.exists() {
+                // Check if daemon is actually running.
+                let running = if cfg!(target_os = "macos") {
+                    std::process::Command::new("launchctl")
+                        .args(["list", "io.wetware.ww"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false)
+                } else {
+                    std::process::Command::new("systemctl")
+                        .args(["--user", "is-active", "--quiet", "ww"])
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false)
+                };
+                if running {
+                    println!("  Background daemon ........... RUNNING");
+                } else {
+                    println!("  Background daemon ........... REGISTERED (not running)");
+                    if cfg!(target_os = "macos") {
+                        println!("    Start: launchctl load {}", plist.display());
+                    } else {
+                        println!("    Start: systemctl --user start ww");
+                    }
+                }
+            } else {
+                println!(
+                    "  Background daemon ........... NOT REGISTERED (run: ww perform install)"
+                );
+            }
+        }
+
+        // Claude Code MCP
+        let claude_check = std::process::Command::new("claude")
+            .args(["mcp", "list"])
+            .output();
+        match claude_check {
+            Ok(out) if out.status.success() => {
+                let list = String::from_utf8_lossy(&out.stdout);
+                if list.contains("wetware") {
+                    println!("  Claude Code MCP ............. CONFIGURED");
+                } else {
+                    println!("  Claude Code MCP ............. NOT CONFIGURED");
+                    println!("    Fix: claude mcp add wetware -- ww run --mcp");
+                }
+            }
+            _ => {
+                println!("  Claude Code MCP ............. UNKNOWN (claude CLI not found)");
             }
         }
 

@@ -431,6 +431,9 @@ impl Cell {
         if !guest_env.iter().any(|v| v.starts_with("WW_ROOT=")) {
             guest_env.push(format!("WW_ROOT={}", path));
         }
+        if !guest_env.iter().any(|v| v.starts_with("WW_CELL_CID=")) {
+            guest_env.push(format!("WW_CELL_CID={}", wasm_cid));
+        }
 
         let mut builder = builder
             .with_wasm_debug(wasm_debug)

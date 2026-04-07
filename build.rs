@@ -69,6 +69,58 @@ fn main() {
     // Set the environment variable for use in Rust code
     println!("cargo:rustc-env=DEFAULT_KERNEL_CID={cid_value}");
     println!("cargo:rerun-if-changed={}", cid_file.display());
+
+    // Check for WASM files that will be embedded via include_bytes!() in release builds.
+    // In debug mode, emit a warning but don't fail (allows iterating on non-WASM code).
+    // In release mode, fail with a clear error message.
+    let embedded_wasm = [
+        "crates/kernel/bin/main.wasm",
+        "std/mcp/bin/main.wasm",
+        "std/shell/bin/shell.wasm",
+        "examples/echo/bin/echo.wasm",
+    ];
+    let mut missing = Vec::new();
+    for wasm_path in &embedded_wasm {
+        let full = manifest_path.join(wasm_path);
+        println!("cargo:rerun-if-changed={}", full.display());
+        if !full.exists() {
+            missing.push(*wasm_path);
+        }
+    }
+    // Declare expected cfg flags so rustc doesn't warn about unexpected cfgs.
+    for wasm_path in &embedded_wasm {
+        let flag = wasm_path.replace(['/', '.'], "_");
+        println!("cargo:rustc-check-cfg=cfg(has_wasm_{flag})");
+    }
+
+    // Set a cfg flag for each WASM file that exists, so the CLI can
+    // conditionally include_bytes!() only when the files are available.
+    // This avoids writing empty stubs to the source tree (which would
+    // break tests that check file existence to decide whether to skip).
+    for wasm_path in &embedded_wasm {
+        let full = manifest_path.join(wasm_path);
+        if full.exists() && fs::metadata(&full).map(|m| m.len() > 0).unwrap_or(false) {
+            // Convert path to a valid cfg identifier: replace / and . with _
+            let flag = wasm_path.replace(['/', '.'], "_");
+            println!("cargo:rustc-cfg=has_wasm_{flag}");
+        }
+    }
+    if !missing.is_empty() {
+        let profile = env::var("PROFILE").unwrap_or_default();
+        let msg = format!(
+            "Missing WASM files for embedding:\n{}\n\nRun `make std` to build them.",
+            missing
+                .iter()
+                .map(|p| format!("  {p}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        if profile == "release" {
+            panic!("{msg}");
+        } else {
+            println!("cargo:warning={msg}");
+        }
+    }
 }
 
 /// Scan a raw CodeGeneratorRequest for an interface node with the given

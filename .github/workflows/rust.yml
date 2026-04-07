@@ -188,9 +188,15 @@ jobs:
     - name: Install Cap'n Proto
       run: sudo cp -a /tmp/capnp-install/. /usr/local/
 
+    - name: Add wasm32-wasip2 target
+      run: rustup target add wasm32-wasip2
+
     - uses: Swatinem/rust-cache@v2
 
-    - name: Build release
+    - name: Build WASM images (std + examples)
+      run: make std
+
+    - name: Build release (embeds WASM via include_bytes)
       run: cargo build --release
 
     - name: Create release artifacts
@@ -198,36 +204,44 @@ jobs:
         mkdir -p dist
         cp target/release/ww dist/ww-linux-x86_64
         tar -czf dist/ww-linux-x86_64.tar.gz -C target/release ww
+        shasum -a 256 dist/ww-linux-x86_64 > dist/checksums.txt
 
     - name: Upload release artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: release-artifacts
         path: dist/
+
+    - name: Upload binaries to GitHub Release
+      if: github.event_name == 'release'
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          dist/ww-linux-x86_64
+          dist/ww-linux-x86_64.tar.gz
+          dist/checksums.txt
 
     - name: Build Podman image
       run: |
         podman build \
           --build-arg GIT_COMMIT=$(echo ${{ github.sha }} | cut -c1-7) \
-          -t wetware:${{ github.event.release.tag_name }} .
-        podman tag wetware:${{ github.event.release.tag_name }} wetware:latest
+          -t ghcr.io/wetware/ww:${{ github.event.release.tag_name }} .
+        podman tag ghcr.io/wetware/ww:${{ github.event.release.tag_name }} ghcr.io/wetware/ww:latest
 
     - name: Smoke test container
-      run: podman run --rm wetware:${{ github.event.release.tag_name }} --help
+      run: podman run --rm ghcr.io/wetware/ww:${{ github.event.release.tag_name }} --help
 
-    - name: Set up Podman Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Login to Container Registry
+    - name: Login to GitHub Container Registry
       uses: docker/login-action@v3
       with:
-        username: ${{ secrets.CONTAINER_USERNAME }}
-        password: ${{ secrets.CONTAINER_PASSWORD }}
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Push Container image
+    - name: Push container image to ghcr.io
       run: |
-        podman push wetware:${{ github.event.release.tag_name }}
-        podman push wetware:latest
+        podman push ghcr.io/wetware/ww:${{ github.event.release.tag_name }}
+        podman push ghcr.io/wetware/ww:latest
 
   # container-build: disabled — no Dockerfile yet.
   # Re-enable when container packaging is ready.

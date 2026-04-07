@@ -19,6 +19,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `ww perform install`: full bootstrap (dirs, identity, daemon, MCP wiring, summary).
+- `ww perform uninstall`: clean removal of daemon, MCP config, optional ~/.ww deletion.
+- `EmbeddedLoader`: WASM images embedded in binary via `include_bytes!()` for pre-built distribution. ChainLoader priority: HostPath > Embedded > IPFS (local files override embedded for hot-patching).
+- MCP tool responses now include `[CID: ...]` content hash for provenance tracking. CID computed from WASM bytecode via blake3, passed to guest via `WW_CELL_CID` env var.
+- `ww doctor` install state checks: identity, daemon running, Claude Code MCP configured.
+- CI: WASM images built before host binary (embedded via include_bytes). Container pushed to ghcr.io.
+- `.agents/skills/mcp-quickstart.md`: 3-minute quickstart demonstrating provenance and capability security.
+- build.rs: clear compile error when WASM files missing in release mode, empty stubs in debug mode.
+
+### Changed
+- `ww perform install` now generates identity at `~/.ww/identity` (was `~/.ww/etc/identity`).
+- CI container registry switched from private registry to ghcr.io (uses GITHUB_TOKEN).
+- `.agents/skills/onboard-new-user.md` rewritten for binary-first install flow.
+
+### Removed
+- `VERSION` file (version source of truth is now `Cargo.toml` only).
+- `.agents/skills/{explain-concepts,browse-reference,study-examples}.md` moved to archive.
+
 ### Changed
 - Val::Map now backed by persistent CHAMP trie (im::HashMap) via ValMap wrapper. O(1) clone, O(log N) insert, O(1) lookup for maps with 32+ entries (77-92% improvement). ValMap is the future seam for IPLD-backed persistent maps.
 - `extract_method` moved to glia crate (was duplicated in kernel and caps), returns `(&str, &[Val])` instead of `(String, Vec<Val>)` for zero-alloc capability dispatch.
