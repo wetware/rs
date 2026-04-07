@@ -19,11 +19,28 @@ use ww::loaders::{ChainLoader, EmbeddedLoader, HostPathLoader, IpfsUnixfsLoader}
 
 // Embedded WASM blobs — compiled into the binary so `ww run --mcp` works
 // without requiring `make std` on the user's machine.
-// In debug mode, build.rs creates empty stubs if these don't exist yet.
+// build.rs sets cfg flags (has_wasm_*) when each file exists and is non-empty.
+// In debug/test builds without `make std`, these are empty slices and the
+// EmbeddedLoader gracefully falls through to the next loader in the chain.
+#[cfg(has_wasm_crates_kernel_bin_main_wasm)]
 const EMBEDDED_KERNEL: &[u8] = include_bytes!("../../crates/kernel/bin/main.wasm");
+#[cfg(not(has_wasm_crates_kernel_bin_main_wasm))]
+const EMBEDDED_KERNEL: &[u8] = b"";
+
+#[cfg(has_wasm_std_shell_bin_shell_wasm)]
 const EMBEDDED_SHELL: &[u8] = include_bytes!("../../std/shell/bin/shell.wasm");
+#[cfg(not(has_wasm_std_shell_bin_shell_wasm))]
+const EMBEDDED_SHELL: &[u8] = b"";
+
+#[cfg(has_wasm_std_mcp_bin_main_wasm)]
 const EMBEDDED_MCP: &[u8] = include_bytes!("../../std/mcp/bin/main.wasm");
+#[cfg(not(has_wasm_std_mcp_bin_main_wasm))]
+const EMBEDDED_MCP: &[u8] = b"";
+
+#[cfg(has_wasm_examples_echo_bin_echo_wasm)]
 const EMBEDDED_ECHO: &[u8] = include_bytes!("../../examples/echo/bin/echo.wasm");
+#[cfg(not(has_wasm_examples_echo_bin_echo_wasm))]
+const EMBEDDED_ECHO: &[u8] = b"";
 
 /// Build the standard embedded loader with all bundled WASM images.
 fn embedded_loader() -> EmbeddedLoader {

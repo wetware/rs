@@ -87,6 +87,24 @@ fn main() {
             missing.push(*wasm_path);
         }
     }
+    // Declare expected cfg flags so rustc doesn't warn about unexpected cfgs.
+    for wasm_path in &embedded_wasm {
+        let flag = wasm_path.replace('/', "_").replace('.', "_");
+        println!("cargo:rustc-check-cfg=cfg(has_wasm_{flag})");
+    }
+
+    // Set a cfg flag for each WASM file that exists, so the CLI can
+    // conditionally include_bytes!() only when the files are available.
+    // This avoids writing empty stubs to the source tree (which would
+    // break tests that check file existence to decide whether to skip).
+    for wasm_path in &embedded_wasm {
+        let full = manifest_path.join(wasm_path);
+        if full.exists() && fs::metadata(&full).map(|m| m.len() > 0).unwrap_or(false) {
+            // Convert path to a valid cfg identifier: replace / and . with _
+            let flag = wasm_path.replace('/', "_").replace('.', "_");
+            println!("cargo:rustc-cfg=has_wasm_{flag}");
+        }
+    }
     if !missing.is_empty() {
         let profile = env::var("PROFILE").unwrap_or_default();
         let msg = format!(
@@ -101,14 +119,6 @@ fn main() {
             panic!("{msg}");
         } else {
             println!("cargo:warning={msg}");
-            // In debug mode, create empty stubs so include_bytes!() doesn't fail.
-            for wasm_path in &missing {
-                let full = manifest_path.join(wasm_path);
-                if let Some(parent) = full.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                let _ = fs::write(&full, b"");
-            }
         }
     }
 }
