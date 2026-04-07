@@ -1,0 +1,91 @@
+;; ww/test — minimal test framework
+;;
+;; Usage: (def t (perform import "ww/test"))
+;;        (t :deftest "addition" (fn []
+;;          (t :assert= 4 (+ 2 2))
+;;          (t :assert-true (> 3 1))))
+;;        (t :run-tests)
+;;
+;; Tests are registered with deftest and executed with run-tests.
+;; Failures throw with :fail; run-tests catches and reports.
+
+;; --- Test registry ---
+
+(def *tests* (list))
+
+;; deftest — register a named test function
+;; (deftest "my-test" (fn [] (assert= 1 1)))
+(defn deftest [test-name test-fn]
+  (def *tests* (concat *tests* (list {:name test-name :fn test-fn}))))
+
+;; --- Assertions ---
+
+;; assert= — assert two values are equal
+(defn assert= [expected actual]
+  (when-not (= expected actual)
+    (throw (ex-info "assertion failed"
+                    {:type :assert=
+                     :expected expected
+                     :actual actual}))))
+
+;; assert-true — assert value is truthy
+(defn assert-true [val]
+  (when-not val
+    (throw (ex-info "assertion failed"
+                    {:type :assert-true
+                     :value val}))))
+
+;; assert-false — assert value is falsy
+(defn assert-false [val]
+  (when val
+    (throw (ex-info "assertion failed"
+                    {:type :assert-false
+                     :value val}))))
+
+;; assert-nil — assert value is nil
+(defn assert-nil [val]
+  (when-not (nil? val)
+    (throw (ex-info "assertion failed"
+                    {:type :assert-nil
+                     :value val}))))
+
+;; assert-throws — assert that body throws an error
+;; (assert-throws (fn [] (throw "boom")))
+(defn assert-throws [thunk]
+  (let [result (try (thunk))]
+    (when (nil? (get result :err))
+      (throw (ex-info "expected throw, got success"
+                      {:type :assert-throws
+                       :value (get result :ok)})))))
+
+;; --- Runner ---
+
+;; run-tests — execute all registered tests, print results
+;; Returns {:passed N :failed N :errors [...]}
+(defn run-tests []
+  (let [results
+        (map
+          (fn [test]
+            (let [test-name (get test :name)
+                  test-fn (get test :fn)
+                  result (try (test-fn))]
+              (if (nil? (get result :err))
+                (do
+                  (println (str "  PASS  " test-name))
+                  {:name test-name :status :pass})
+                (do
+                  (println (str "  FAIL  " test-name ": " (get result :err)))
+                  {:name test-name :status :fail :error (get result :err)}))))
+          *tests*)
+        passed (count (filter (fn [r] (= (get r :status) :pass)) results))
+        failed (count (filter (fn [r] (= (get r :status) :fail)) results))
+        errors (filter (fn [r] (= (get r :status) :fail)) results)]
+    (println "")
+    (println (str passed " passed, " failed " failed, " (count *tests*) " total"))
+    {:passed passed
+     :failed failed
+     :errors (map (fn [e] {:name (get e :name) :error (get e :error)}) errors)}))
+
+;; reset-tests — clear the test registry
+(defn reset-tests []
+  (def *tests* (list)))
