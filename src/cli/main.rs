@@ -381,17 +381,15 @@ impl Commands {
                 runtime_cache_policy,
                 with_http_admin,
             } => {
-                let mut mounts = ww::mount::parse_args(&mount_args)?;
-                // --identity PATH is sugar for PATH:/etc/identity mount.
-                // Appended last so it overrides any /etc/identity from image layers.
-                if let Some(id_path) = identity {
-                    mounts.push(ww::mount::Mount {
-                        source: id_path,
-                        target: PathBuf::from("/etc/identity"),
-                    });
-                }
+                let mounts = ww::mount::parse_args(&mount_args)?;
+                // Identity is passed separately — NOT as a mount.
+                // The host reads it to create the signing key for the Membrane.
+                // It must never enter the merged FHS tree (which is preopened
+                // to guests and published to IPFS).
+                let identity_path = identity.map(PathBuf::from);
                 Self::run_with_mounts(
                     mounts,
+                    identity_path,
                     port,
                     wasm_debug,
                     stem,
@@ -882,27 +880,33 @@ wasip2::cli::command::export!({iface_name}Guest);
         )
     }
 
-    /// Resolve the node's Ed25519 signing key from `/etc/identity` in the FHS.
+    /// Resolve the node's Ed25519 signing key.
     ///
-    /// If `/etc/identity` exists (placed by an image layer or a targeted mount
-    /// like `~/.ww/identity:/etc/identity`), the key is loaded from it.
-    /// Otherwise an ephemeral key is generated and injected so the guest
-    /// can still read `/etc/identity` via WASI.
+    /// If an explicit `identity_path` is provided, load the key from it.
+    /// Otherwise generate an ephemeral key (will be lost on exit).
+    ///
+    /// The identity file is intentionally kept OUT of the merged FHS tree
+    /// so that guests cannot read the private key via WASI filesystem access.
+    /// Guests access signing only through the Signer capability in the Membrane.
     ///
     /// Returns `(signing_key, verifying_key, source_description)`.
     fn resolve_identity(
-        merged_root: &std::path::Path,
+        identity_path: Option<&std::path::Path>,
     ) -> Result<(ed25519_dalek::SigningKey, VerifyingKey, &'static str)> {
-        let identity_path = merged_root.join("etc/identity");
-        if identity_path.exists() {
-            let path_str = identity_path
-                .to_str()
-                .context("/etc/identity path is non-UTF-8")?;
-            let sk = ww::keys::load(path_str)?;
-            let vk = sk.verifying_key();
-            Ok((sk, vk, "/etc/identity"))
+        if let Some(path) = identity_path {
+            if path.exists() {
+                let path_str = path.to_str().context("identity path is non-UTF-8")?;
+                let sk = ww::keys::load(path_str)?;
+                let vk = sk.verifying_key();
+                Ok((sk, vk, "file"))
+            } else {
+                tracing::warn!(path = %path.display(), "Identity file not found; using ephemeral key");
+                let sk = ww::keys::generate()?;
+                let vk = sk.verifying_key();
+                Ok((sk, vk, "ephemeral"))
+            }
         } else {
-            tracing::warn!("No /etc/identity found; using ephemeral key (will be lost on exit)");
+            tracing::warn!("No identity configured; using ephemeral key (will be lost on exit)");
             let sk = ww::keys::generate()?;
             let vk = sk.verifying_key();
             Ok((sk, vk, "ephemeral"))
@@ -1016,17 +1020,19 @@ wasip2::cli::command::export!({iface_name}Guest);
         config: &ww::daemon_config::DaemonConfig,
         home: &Path,
     ) -> Result<()> {
-        // Identity as a mount arg: path:/etc/identity
-        let identity_mount = config
+        // Identity as a --identity CLI flag (NOT a :/etc/identity mount).
+        // The host reads it to create the signing key; it never enters
+        // the merged FHS tree visible to guests.
+        let identity_path = config
             .identity
             .as_ref()
-            .map(|p| format!("{}:/etc/identity", p.display()))
-            .unwrap_or_else(|| format!("{}:/etc/identity", home.join(".ww/identity").display()));
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| home.join(".ww/identity").display().to_string());
 
         if cfg!(target_os = "macos") {
-            Self::write_launchd_plist(ww_bin, config, home, &identity_mount)
+            Self::write_launchd_plist(ww_bin, config, home, &identity_path)
         } else if cfg!(target_os = "linux") {
-            Self::write_systemd_unit(ww_bin, config, home, &identity_mount)
+            Self::write_systemd_unit(ww_bin, config, home, &identity_path)
         } else {
             bail!("unsupported platform; only macOS and Linux are supported")
         }
@@ -1037,7 +1043,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         ww_bin: &Path,
         config: &ww::daemon_config::DaemonConfig,
         home: &Path,
-        identity_mount: &str,
+        identity_path: &str,
     ) -> Result<()> {
         let plist_dir = home.join("Library/LaunchAgents");
         std::fs::create_dir_all(&plist_dir).context("create ~/Library/LaunchAgents")?;
@@ -1055,12 +1061,13 @@ wasip2::cli::command::export!({iface_name}Guest);
             format!("        <string>--port</string>"),
             format!("        <string>{}</string>", config.port),
         ];
+        // Identity as a --identity flag (host-side only, not a guest mount).
+        args.push("        <string>--identity</string>".to_string());
+        args.push(format!("        <string>{identity_path}</string>"));
         // Image layers (root mounts).
         for img in &config.images {
             args.push(format!("        <string>{}</string>", img.display()));
         }
-        // Identity as a targeted mount.
-        args.push(format!("        <string>{identity_mount}</string>"));
 
         let plist = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -1104,24 +1111,24 @@ wasip2::cli::command::export!({iface_name}Guest);
         ww_bin: &Path,
         config: &ww::daemon_config::DaemonConfig,
         home: &Path,
-        identity_mount: &str,
+        identity_path: &str,
     ) -> Result<()> {
         let unit_dir = home.join(".config/systemd/user");
         std::fs::create_dir_all(&unit_dir).context("create ~/.config/systemd/user")?;
 
         let unit_path = unit_dir.join("ww.service");
 
-        // Build positional args: images (root mounts) + identity mount.
+        // Build positional args: image layers only (identity is a flag, not a mount).
         let mut positional = Vec::new();
         for img in &config.images {
             positional.push(img.display().to_string());
         }
-        positional.push(identity_mount.to_string());
 
         let exec_start = format!(
-            "{} run --port {} {}",
+            "{} run --port {} --identity {} {}",
             ww_bin.display(),
             config.port,
+            identity_path,
             positional.join(" "),
         );
 
@@ -1155,6 +1162,7 @@ wasip2::cli::command::export!({iface_name}Guest);
     #[allow(clippy::too_many_arguments)]
     async fn run_with_mounts(
         mounts: Vec<ww::mount::Mount>,
+        identity: Option<PathBuf>,
         port: u16,
         wasm_debug: bool,
         stem: Option<String>,
@@ -1259,9 +1267,10 @@ wasip2::cli::command::export!({iface_name}Guest);
         let image_path = format!("/ipfs/{}", root_cid);
         tracing::debug!(root = %image_path, "image published");
 
-        // Resolve identity from /etc/identity in the merged FHS.
+        // Resolve identity from the explicit path (never from the merged FHS tree).
+        // The identity file is kept out of the merged tree so guests can't read it.
         tracing::debug!("resolving identity...");
-        let (sk, _verifying_key, identity_source) = Self::resolve_identity(merged.path())?;
+        let (sk, _verifying_key, identity_source) = Self::resolve_identity(identity.as_deref())?;
         tracing::info!(source = identity_source, "Node identity resolved");
         tracing::debug!(source = identity_source, "identity resolved");
 
@@ -2174,27 +2183,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_resolve_identity_ephemeral_no_disk_write() {
-        let dir = tempfile::TempDir::new().unwrap();
-        // No etc/identity in the directory.
-        let (_, _, source) = Commands::resolve_identity(dir.path()).unwrap();
+    fn test_resolve_identity_ephemeral_when_none() {
+        let (_, _, source) = Commands::resolve_identity(None).unwrap();
         assert_eq!(source, "ephemeral");
-        // Must NOT write back to disk.
-        assert!(!dir.path().join("etc/identity").exists());
+    }
+
+    #[test]
+    fn test_resolve_identity_ephemeral_when_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("nonexistent");
+        let (_, _, source) = Commands::resolve_identity(Some(missing.as_path())).unwrap();
+        assert_eq!(source, "ephemeral");
     }
 
     #[test]
     fn test_resolve_identity_loads_existing() {
         let dir = tempfile::TempDir::new().unwrap();
-        let etc = dir.path().join("etc");
-        std::fs::create_dir_all(&etc).unwrap();
+        let id_path = dir.path().join("identity");
         // Write a known key.
         let sk = ww::keys::generate().unwrap();
         let encoded = ww::keys::encode(&sk);
-        std::fs::write(etc.join("identity"), &encoded).unwrap();
+        std::fs::write(&id_path, &encoded).unwrap();
 
-        let (loaded_sk, _, source) = Commands::resolve_identity(dir.path()).unwrap();
-        assert_eq!(source, "/etc/identity");
+        let (loaded_sk, _, source) = Commands::resolve_identity(Some(id_path.as_path())).unwrap();
+        assert_eq!(source, "file");
         assert_eq!(ww::keys::encode(&loaded_sk), encoded);
     }
 }
