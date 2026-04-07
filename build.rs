@@ -89,7 +89,7 @@ fn main() {
     }
     // Declare expected cfg flags so rustc doesn't warn about unexpected cfgs.
     for wasm_path in &embedded_wasm {
-        let flag = wasm_path.replace('/', "_").replace('.', "_");
+        let flag = wasm_path.replace(['/', '.'], "_");
         println!("cargo:rustc-check-cfg=cfg(has_wasm_{flag})");
     }
 
@@ -101,7 +101,7 @@ fn main() {
         let full = manifest_path.join(wasm_path);
         if full.exists() && fs::metadata(&full).map(|m| m.len() > 0).unwrap_or(false) {
             // Convert path to a valid cfg identifier: replace / and . with _
-            let flag = wasm_path.replace('/', "_").replace('.', "_");
+            let flag = wasm_path.replace(['/', '.'], "_");
             println!("cargo:rustc-cfg=has_wasm_{flag}");
         }
     }
