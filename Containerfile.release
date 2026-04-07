@@ -1,0 +1,17 @@
+# Minimal runtime container from pre-built binaries.
+# Used by release.yml — builds from artifacts produced by build-binaries matrix.
+# For local development builds, use the full Containerfile instead.
+#
+# Usage: docker buildx build --platform linux/amd64,linux/arm64 \
+#          -f Containerfile.release -t wetware:latest .
+
+FROM gcr.io/distroless/static-debian12
+
+ARG TARGETARCH
+
+COPY ww-${TARGETARCH} /usr/local/bin/ww
+
+USER 1000:1000
+EXPOSE 2025 2026 2080
+
+ENTRYPOINT ["/usr/local/bin/ww"]

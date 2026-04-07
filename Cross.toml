@@ -1,0 +1,7 @@
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "apt-get update && apt-get install -y g++ cmake curl",
+    "curl -fsSL https://capnproto.org/capnproto-c++-1.1.0.tar.gz | tar xz",
+    "cd capnproto-c++-1.1.0 && ./configure --prefix=/usr/local && make -j$(nproc) && make install",
+    "cd .. && rm -rf capnproto-c++-1.1.0"
+]
