@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `claude mcp add/remove` now handles idempotent exit codes (server already exists / not found) without erroring.
 
 ### Changed
+- Cap'n Proto crates bumped from 0.23 to 0.25 (capnp, capnp-rpc, capnpc). Generated code now uses `GeneratedCodeArena`, removing `unsafe` from all `*_capnp.rs` output.
 - **Breaking:** Kernel crate moved from `crates/kernel/` to `std/kernel/`. Now a standalone workspace-excluded crate (like shell/mcp). All path references updated.
 - Moved release builds from `rust.yml` to dedicated `release.yml` workflow
 - `ww perform install` suppresses internal daemon_install noise, shows clean checklist output.
