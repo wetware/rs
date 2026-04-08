@@ -2152,8 +2152,8 @@ wasip2::cli::command::export!({iface_name}Guest);
             println!("  Add one: ww ns add <name> --ipns <key>");
             return Ok(());
         }
-        println!("{:<12} {:<50} BOOTSTRAP", "NAME", "IPNS");
-        println!("{:<12} {:<50} ---------", "----", "----");
+        println!("{:<12} {:<24} {:<24} PATH", "NAME", "IPNS", "BOOTSTRAP");
+        println!("{:<12} {:<24} {:<24} ----", "----", "----", "---------");
         for config in &configs {
             let ipns = if config.ipns.is_empty() {
                 "-".to_string()
@@ -2165,7 +2165,8 @@ wasip2::cli::command::export!({iface_name}Guest);
             } else {
                 config.bootstrap.clone()
             };
-            println!("{:<12} {:<50} {}", config.name, ipns, bootstrap);
+            let path = config.ipfs_path().unwrap_or_else(|| "-".to_string());
+            println!("{:<12} {:<24} {:<24} {path}", config.name, ipns, bootstrap);
         }
         Ok(())
     }
