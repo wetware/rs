@@ -13,7 +13,8 @@ RUN apk add --no-cache \
     g++ \
     make \
     cmake \
-    curl
+    curl \
+    linux-headers
 
 # Cap'n Proto 1.1.0 from source (must match capnpc crate version)
 RUN curl -fsSL https://capnproto.org/capnproto-c++-1.1.0.tar.gz | tar xz \
