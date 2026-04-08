@@ -102,20 +102,6 @@ struct Session {
     cwd: String,
 }
 
-/// Resolve the IPFS path for a relative reference.
-///
-/// If `path` starts with `/ipfs/`, it is returned as-is.
-/// Otherwise, prepend `$WW_ROOT/` so that paths like `"bin/chess-demo.wasm"`
-/// resolve to `<WW_ROOT>/bin/chess-demo.wasm`.
-fn resolve_ipfs_path(path: &str) -> String {
-    if path.starts_with("/ipfs/") {
-        return path.to_string();
-    }
-    let root = std::env::var("WW_ROOT").unwrap_or_default();
-    let root = root.trim_end_matches('/');
-    let path = path.trim_start_matches('/');
-    format!("{root}/{path}")
-}
 
 // ---------------------------------------------------------------------------
 // Cap extraction — get type-erased capnp Client from Val::Cap.inner
@@ -422,8 +408,10 @@ fn make_host_handler(
                                                         {
                                                             return Some((name.as_str(), client));
                                                         }
-                                                        log::warn!(
-                                                            "host :listen — cap '{name}' has unknown inner type, skipping"
+                                                        // Not all caps are capnp clients (e.g. ipfs
+                                                        // is a VFS placeholder). Skip silently.
+                                                        log::debug!(
+                                                            "host :listen — cap '{name}' is not a capnp client, skipping"
                                                         );
                                                     }
                                                     None
@@ -722,60 +710,6 @@ fn make_runtime_handler(runtime: system_capnp::runtime::Client) -> Val {
     }
 }
 
-/// Build the `ipfs` effect handler that reads content through the WASI virtual FS.
-///
-/// All IPFS content access goes through the WASI filesystem — the host-side CidTree
-/// resolves paths lazily through the IPFS DAG. `cat` reads files, `ls` lists dirs.
-/// `add` is not supported (content publishing goes through the stem contract).
-fn make_ipfs_handler() -> Val {
-    Val::AsyncNativeFn {
-        name: "ipfs-handler".into(),
-        func: Rc::new(move |args: Vec<Val>| {
-            Box::pin(async move {
-                let (method, rest) = extract_method(&args[0])?;
-                let resume = &args[1];
-                let result = match method {
-                    "cat" => {
-                        let raw_path = match rest.first() {
-                            Some(Val::Str(s)) => s.clone(),
-                            _ => return Err(Val::from("ipfs :cat — expected string path")),
-                        };
-                        let path = resolve_ipfs_path(&raw_path);
-                        let data = std::fs::read(&path)
-                            .map_err(|e| Val::from(format!("ipfs :cat {path}: {e}")))?;
-                        Val::Bytes(data)
-                    }
-                    "ls" => {
-                        let raw_path = match rest.first() {
-                            Some(Val::Str(s)) => s.clone(),
-                            _ => return Err(Val::from("ipfs :ls — expected string path")),
-                        };
-                        let path = resolve_ipfs_path(&raw_path);
-                        let entries = std::fs::read_dir(&path)
-                            .map_err(|e| Val::from(format!("ipfs :ls {path}: {e}")))?;
-                        let items: Vec<Val> = entries
-                            .filter_map(|entry| {
-                                let entry = entry.ok()?;
-                                let name = entry.file_name().to_str()?.to_string();
-                                let size = entry.metadata().ok()?.len();
-                                Some(Val::List(vec![Val::Str(name), Val::Sym(size.to_string())]))
-                            })
-                            .collect();
-                        Val::List(items)
-                    }
-                    "add" => {
-                        return Err(Val::from(
-                            "ipfs :add is no longer supported — content publishing goes through the stem contract",
-                        ));
-                    }
-                    _ => return Err(Val::from(format!("ipfs: unknown method :{method}"))),
-                };
-                call_resume(resume, result)
-            })
-        }),
-    }
-}
-
 /// ProviderSink that collects streamed results into a channel.
 struct CollectorSink {
     tx: std::sync::mpsc::Sender<(Vec<u8>, Vec<Vec<u8>>)>,
@@ -919,6 +853,31 @@ fn make_routing_handler(routing: routing_capnp::routing::Client) -> Val {
                             .map_err(|e| Val::from(e.to_string()))?;
                         Val::Str(key.to_string())
                     }
+                    "resolve" => {
+                        let name = match rest.first() {
+                            Some(Val::Str(s)) => s.clone(),
+                            _ => {
+                                return Err(Val::from(
+                                    "routing :resolve — expected IPNS name string",
+                                ))
+                            }
+                        };
+                        let mut req = routing.resolve_request();
+                        req.get().set_name(&name);
+                        let resp = req
+                            .send()
+                            .promise
+                            .await
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        let path = resp
+                            .get()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .get_path()
+                            .map_err(|e| Val::from(e.to_string()))?
+                            .to_str()
+                            .map_err(|e| Val::from(e.to_string()))?;
+                        Val::Str(path.to_string())
+                    }
                     _ => return Err(Val::from(format!("routing: unknown method :{method}"))),
                 };
                 call_resume(resume, result)
@@ -1039,12 +998,10 @@ Capabilities (via perform):
 
   (perform runtime :run <wasm> :env {})      Spawn foreground process
 
-  (perform ipfs :cat \"<path>\")               Fetch IPFS content (bytes)
-  (perform ipfs :ls \"<path>\")                List IPFS directory
-
   (perform routing :provide \"<name>\")        Announce to DHT (hashes internally)
   (perform routing :find \"<name>\" :count N)  Discover providers (default 20)
   (perform routing :hash \"<data>\")           Hash data to CID
+  (perform routing :resolve \"<ipns-name>\")   Resolve IPNS name to /ipfs/ path
 
 Effects:
   (perform :load \"<path>\")                   Load bytes from virtual filesystem
@@ -1115,7 +1072,7 @@ fn wrap_with_handlers(form: &Val) -> Val {
     ]);
 
     // Wrap in cap handlers (innermost to outermost).
-    let caps = ["routing", "ipfs", "runtime", "host"];
+    let caps = ["routing", "runtime", "host"];
     let mut wrapped = with_load;
     for cap_name in &caps {
         let handler_name = format!("{cap_name}-handler");
@@ -1381,77 +1338,72 @@ fn run_impl() {
         let dispatch = build_dispatch();
         let mut env = Env::new();
 
-        // Bind capability values + their effect handlers in the environment.
-        // Scripts use (perform cap :method args...) to invoke capabilities.
-        // The with-effect-handler wrapping (in wrap_with_handlers) routes
-        // performs to these handlers via the effect system.
+        // Bind graft caps + effect handlers from the membrane response.
+        // The membrane exports a flat list of named capabilities; we iterate
+        // it, downcast each to its typed client, and bind both a Val::Cap
+        // (for collect_caps / :listen forwarding) and an effect handler
+        // (for `(perform cap :method ...)` in Glia).
         {
             let s = ctx.borrow();
-            let caps_list: [(&str, &str, Rc<dyn std::any::Any>, Val); 4] = [
-                (
-                    "host",
-                    schema_ids::HOST_CID,
-                    Rc::new(s.host.clone()),
-                    make_host_handler(s.host.clone(), s.runtime.clone(), s.http_client.clone()),
-                ),
-                (
-                    "runtime",
-                    schema_ids::RUNTIME_CID,
-                    Rc::new(s.runtime.clone()),
-                    make_runtime_handler(s.runtime.clone()),
-                ),
-                (
-                    // ipfs handler now reads through WASI virtual FS, not RPC.
-                    // The capability value is a placeholder — all actual I/O
-                    // goes through std::fs calls intercepted by the host CidTree.
-                    "ipfs",
-                    schema_ids::IPFS_CID,
-                    Rc::new(()),
-                    make_ipfs_handler(),
-                ),
-                (
-                    "routing",
-                    schema_ids::ROUTING_CID,
-                    Rc::new(s.routing.clone()),
-                    make_routing_handler(s.routing.clone()),
-                ),
-            ];
-            for (name, cid, inner, handler) in caps_list {
+            for i in 0..caps.len() {
+                let entry = caps.get(i);
+                let cap_name = entry
+                    .get_name()?
+                    .to_str()
+                    .map_err(|e| capnp::Error::failed(e.to_string()))?;
+
+                let (schema_cid, inner, handler): (&str, Rc<dyn std::any::Any>, Val) =
+                    match cap_name {
+                        "host" => (
+                            schema_ids::HOST_CID,
+                            Rc::new(s.host.clone()),
+                            make_host_handler(
+                                s.host.clone(),
+                                s.runtime.clone(),
+                                s.http_client.clone(),
+                            ),
+                        ),
+                        "runtime" => (
+                            schema_ids::RUNTIME_CID,
+                            Rc::new(s.runtime.clone()),
+                            make_runtime_handler(s.runtime.clone()),
+                        ),
+                        "routing" => (
+                            schema_ids::ROUTING_CID,
+                            Rc::new(s.routing.clone()),
+                            make_routing_handler(s.routing.clone()),
+                        ),
+                        "identity" => {
+                            // Identity is stored in the Session but has no
+                            // Glia effect handler — skip env binding.
+                            continue;
+                        }
+                        "http-client" => (
+                            schema_ids::HTTP_CLIENT_CID,
+                            Rc::new(s.http_client.clone()),
+                            // No standalone handler — http-client is accessed
+                            // via (perform host :http-client).
+                            Val::Nil,
+                        ),
+                        other => {
+                            log::warn!("graft: unknown cap '{other}', skipping");
+                            continue;
+                        }
+                    };
+
                 env.set(
-                    name.to_string(),
+                    cap_name.to_string(),
                     Val::Cap {
-                        name: name.into(),
-                        schema_cid: cid.to_string(),
+                        name: cap_name.into(),
+                        schema_cid: schema_cid.to_string(),
                         inner,
                     },
                 );
-                env.set(format!("{name}-handler"), handler);
+                if !matches!(handler, Val::Nil) {
+                    env.set(format!("{cap_name}-handler"), handler);
+                }
             }
-        }
 
-        // Auto-inject ALL graft caps into the Glia environment as named Val::Cap entries.
-        // This way init.d scripts can use any graft cap by name without explicit (def ...) bindings.
-        for i in 0..caps.len() {
-            let entry = caps.get(i);
-            let cap_name = entry
-                .get_name()?
-                .to_str()
-                .map_err(|e| capnp::Error::failed(e.to_string()))?;
-            // Skip caps already bound above with explicit handlers.
-            if matches!(
-                cap_name,
-                "host" | "runtime" | "routing" | "ipfs" | "identity"
-            ) {
-                continue;
-            }
-            env.set(
-                cap_name.to_string(),
-                Val::Cap {
-                    name: cap_name.into(),
-                    schema_cid: String::new(),
-                    inner: Rc::new(()),
-                },
-            );
         }
 
         // Load the prelude (standard macros: when, and, or, defn, cond, not).
@@ -1494,48 +1446,6 @@ wasip2::cli::command::export!(Kernel);
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn resolve_ipfs_path_absolute_passthrough() {
-        let p = "/ipfs/QmXXX/bin/main.wasm";
-        assert_eq!(resolve_ipfs_path(p), p);
-    }
-
-    #[test]
-    fn resolve_ipfs_path_relative() {
-        std::env::set_var("WW_ROOT", "/ipfs/QmABC");
-        assert_eq!(
-            resolve_ipfs_path("bin/chess-demo.wasm"),
-            "/ipfs/QmABC/bin/chess-demo.wasm"
-        );
-    }
-
-    #[test]
-    fn resolve_ipfs_path_trailing_slash_no_double() {
-        std::env::set_var("WW_ROOT", "/ipfs/QmABC/");
-        assert_eq!(
-            resolve_ipfs_path("bin/chess-demo.wasm"),
-            "/ipfs/QmABC/bin/chess-demo.wasm"
-        );
-    }
-
-    #[test]
-    fn resolve_ipfs_path_leading_slash_trimmed() {
-        std::env::set_var("WW_ROOT", "/ipfs/QmABC");
-        assert_eq!(
-            resolve_ipfs_path("/bin/chess-demo.wasm"),
-            "/ipfs/QmABC/bin/chess-demo.wasm"
-        );
-    }
-
-    #[test]
-    fn resolve_ipfs_path_empty_root() {
-        std::env::remove_var("WW_ROOT");
-        assert_eq!(
-            resolve_ipfs_path("bin/chess-demo.wasm"),
-            "/bin/chess-demo.wasm"
-        );
-    }
 
     // --- init.d parse + SysV error recovery ---
 
@@ -1814,6 +1724,15 @@ mod tests {
             _params: routing_capnp::routing::ProvideParams,
             _results: routing_capnp::routing::ProvideResults,
         ) -> Promise<(), capnp::Error> {
+            Promise::ok(())
+        }
+
+        fn resolve(
+            self: capnp::capability::Rc<Self>,
+            _params: routing_capnp::routing::ResolveParams,
+            mut results: routing_capnp::routing::ResolveResults,
+        ) -> Promise<(), capnp::Error> {
+            results.get().set_path("/ipfs/bafyrei-test-resolved");
             Promise::ok(())
         }
 
@@ -2433,9 +2352,11 @@ mod tests {
                     assert_eq!(providers.len(), 2);
                     match &providers[0] {
                         Val::Map(entries) => {
-                            assert_eq!(entries[0].0, Val::Keyword("peer-id".into()));
+                            let peer_id = entries
+                                .get(&Val::Keyword("peer-id".into()))
+                                .expect("missing :peer-id key");
                             assert_eq!(
-                                entries[0].1,
+                                *peer_id,
                                 Val::Str(bs58::encode(b"peer-0").into_string())
                             );
                         }
@@ -2533,11 +2454,37 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn test_routing_resolve_succeeds() {
+        run_local(async {
+            let s = test_session();
+            let handler = make_routing_handler(s.routing.clone());
+            let result =
+                call_handler(&handler, "resolve", &[Val::Str("/ipns/k51qzi-test".into())])
+                    .await
+                    .unwrap();
+            assert_eq!(result, Val::Str("/ipfs/bafyrei-test-resolved".into()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_routing_resolve_missing_name() {
+        run_local(async {
+            let s = test_session();
+            let handler = make_routing_handler(s.routing.clone());
+            let err = call_handler(&handler, "resolve", &[]).await.unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("routing :resolve"), "got: {msg}");
+        })
+        .await;
+    }
+
     // --- perform :load effect round-trip ---
 
     /// Helper: bind all caps + handlers in env (same as kernel boot).
     fn bind_caps_in_env(env: &mut Env, session: &Session) {
-        let caps: [(&str, &str, Rc<dyn std::any::Any>, Val); 4] = [
+        let caps: [(&str, &str, Rc<dyn std::any::Any>, Val); 3] = [
             (
                 "host",
                 "test-host-cid",
@@ -2553,13 +2500,6 @@ mod tests {
                 "test-runtime-cid",
                 Rc::new(session.runtime.clone()),
                 make_runtime_handler(session.runtime.clone()),
-            ),
-            // ipfs handler reads through WASI virtual FS, no capability needed
-            (
-                "ipfs",
-                "test-ipfs-cid",
-                Rc::new(Val::Nil),
-                make_ipfs_handler(),
             ),
             (
                 "routing",
@@ -2579,6 +2519,16 @@ mod tests {
             );
             env.set(format!("{name}-handler"), handler);
         }
+
+        // http-client with real capnp client.
+        env.set(
+            "http-client".to_string(),
+            Val::Cap {
+                name: "http-client".into(),
+                schema_cid: "test-http-cid".into(),
+                inner: Rc::new(session.http_client.clone()),
+            },
+        );
     }
 
     /// Verify that (perform :load "path") inside wrap_with_handlers

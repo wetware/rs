@@ -2,38 +2,24 @@
 ;;
 ;; Usage: (def ipfs (perform import "ww/ipfs"))
 ;;        (ipfs :cat "/ipfs/QmFoo...")
-;;        (ipfs :add "hello world")
 ;;
-;; Wraps the IPFS capability from the membrane graft.
-;; Requires the `ipfs` capability to be in scope.
+;; IPFS content is accessed through the WASI virtual filesystem.
+;; The host-side CidTree resolves /ipfs/ paths lazily through the DAG.
 
 ;; cat — read content by CID or IPFS path
 ;; (cat "/ipfs/QmFoo...") => bytes
 (defn cat [path]
-  (perform ipfs :cat path))
-
-;; add — store content, return CID
-;; (add "hello world") => "bafyrei..."
-(defn add [content]
-  (perform ipfs :add content))
-
-;; pin — pin a CID so it won't be garbage collected
-(defn pin [cid]
-  (perform ipfs :pin cid))
-
-;; unpin — unpin a CID
-(defn unpin [cid]
-  (perform ipfs :unpin cid))
+  (load path))
 
 ;; ls — list directory contents at an IPFS path
-;; Returns list of {:name "file.txt" :cid "bafyrei..." :size 42}
+;; Returns list of [name size] pairs.
 (defn ls [path]
-  (perform ipfs :ls path))
+  (perform :fs-readdir path))
 
-;; resolve — resolve an IPNS name to a CID
+;; resolve — resolve an IPNS name to an IPFS path
 ;; (resolve "/ipns/k51qzi...") => "/ipfs/bafyrei..."
 (defn resolve [ipns-name]
-  (perform ipfs :resolve ipns-name))
+  (perform routing :resolve ipns-name))
 
 ;; --- Path utilities (pure Glia) ---
 
