@@ -247,6 +247,15 @@ enum Commands {
     /// Exit code 0 if all required checks pass; 1 otherwise.
     /// Optional checks never cause a non-zero exit.
     Doctor,
+
+    /// Manage wetware namespaces.
+    ///
+    /// Namespaces map names (like `ww`) to IPFS UnixFS trees that are mounted
+    /// as FHS layers at boot. The standard library ships as the `ww` namespace.
+    Ns {
+        #[command(subcommand)]
+        action: NsAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -300,6 +309,43 @@ enum PerformAction {
     ///   2. Remove MCP config from Claude Code
     ///   3. Optionally remove ~/.ww (prompts for confirmation)
     Uninstall,
+}
+
+#[derive(Subcommand)]
+enum NsAction {
+    /// List configured namespaces.
+    List,
+
+    /// Add or update a namespace.
+    ///
+    /// Writes a config file to ~/.ww/etc/ns/<name>.
+    Add {
+        /// Namespace name (e.g., 'ww', 'myorg')
+        #[arg(value_name = "NAME")]
+        name: String,
+
+        /// IPNS key for live resolution
+        #[arg(long, value_name = "KEY")]
+        ipns: Option<String>,
+
+        /// Bootstrap IPFS path (e.g., /ipfs/bafyrei...)
+        #[arg(long, value_name = "PATH")]
+        bootstrap: Option<String>,
+    },
+
+    /// Remove a namespace.
+    Remove {
+        /// Namespace name to remove
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+
+    /// Resolve a namespace to its current IPFS CID.
+    Resolve {
+        /// Namespace name to resolve
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
 }
 
 /// Strip the `/p2p/<peer-id>` suffix from a multiaddr string, if present.
@@ -430,6 +476,16 @@ impl Commands {
                 PerformAction::Uninstall => Self::perform_uninstall().await,
             },
             Commands::Doctor => Self::doctor().await,
+            Commands::Ns { action } => match action {
+                NsAction::List => Self::ns_list().await,
+                NsAction::Add {
+                    name,
+                    ipns,
+                    bootstrap,
+                } => Self::ns_add(name, ipns, bootstrap).await,
+                NsAction::Remove { name } => Self::ns_remove(name).await,
+                NsAction::Resolve { name } => Self::ns_resolve(name).await,
+            },
         }
     }
 
@@ -1267,7 +1323,37 @@ wasip2::cli::command::export!({iface_name}Guest);
             None
         };
 
-        // Append user-specified mounts after the on-chain base.
+        // Resolve namespace mounts from etc/ns/ in user-specified local paths.
+        // Namespace layers sit between stem (on-chain base) and user mounts.
+        let local_roots: Vec<&std::path::Path> = mounts
+            .iter()
+            .filter(|m| m.is_root() && !ww::ipfs::is_ipfs_path(&m.source))
+            .map(|m| std::path::Path::new(&m.source))
+            .collect();
+        let ns_configs = match ww::ns::scan_namespace_configs(&local_roots) {
+            Ok(configs) => configs,
+            Err(e) => {
+                tracing::warn!("Failed to scan namespace configs: {e}");
+                Vec::new()
+            }
+        };
+        if !ns_configs.is_empty() {
+            let resolved = ww::ns::resolve_namespaces(&ns_configs, &ipfs_client).await;
+            for (name, ipfs_path) in &resolved {
+                tracing::info!(ns = %name, path = %ipfs_path, "Mounting namespace");
+                // Pin the namespace tree so subsequent boots use the local copy.
+                if let Err(e) = ipfs_client.pin_add(ipfs_path).await {
+                    tracing::warn!(ns = %name, path = %ipfs_path, "Failed to pin namespace: {e}");
+                }
+                all_mounts.push(ww::mount::Mount {
+                    source: ipfs_path.clone(),
+                    target: PathBuf::from("/"),
+                });
+            }
+        }
+
+        // Append user-specified mounts after namespace layers.
+        // User mounts are highest priority — they override everything.
         all_mounts.extend(mounts);
 
         // Apply all mounts into a single FHS root.
@@ -1745,6 +1831,7 @@ wasip2::cli::command::export!({iface_name}Guest);
             "bin",
             "lib",
             "etc/init.d",
+            "etc/ns",
             "logs",
             // Image roots for daemon: each is a proper FHS image with bin/main.wasm.
             // No etc/ dirs here — identity stays host-side only, accessed via
@@ -1811,6 +1898,48 @@ wasip2::cli::command::export!({iface_name}Guest);
             println!(
                 "  ~/.ww/{{kernel,shell,mcp}} ... PARTIAL (WASM not embedded, build from source)"
             );
+        }
+
+        // Step 2.6: Write ww namespace config to ~/.ww/etc/ns/ww.
+        // This tells `ww run` where to find the standard library via IPFS.
+        // The bootstrap CID comes from the build (WW_STD_CID), and on boot
+        // the host tries IPNS first for live updates, then falls back here.
+        {
+            let ns_path = ww_dir.join("etc/ns/ww");
+            let std_cid = ww::namespace::WW_STD_CID;
+            if ns_path.exists() {
+                println!("  ~/.ww/etc/ns/ww ............. OK (already exists)");
+            } else if std_cid.is_empty() {
+                // Local dev build without `make publish-std` — no CID available.
+                println!("  ~/.ww/etc/ns/ww ............. SKIPPED (no std CID in this build)");
+            } else {
+                let config = ww::ns::NamespaceConfig {
+                    name: "ww".to_string(),
+                    ipns: String::new(), // IPNS key set by org, not by install
+                    bootstrap: std_cid.to_string(),
+                };
+                config.write_to(&ns_path)?;
+                println!("  ~/.ww/etc/ns/ww ............. CREATED (bootstrap: {std_cid})");
+            }
+        }
+
+        // Check for Kubo availability — namespace resolution needs it.
+        {
+            let kubo_ok = std::process::Command::new("ipfs")
+                .arg("version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if kubo_ok {
+                println!("  Kubo (IPFS) ................. OK");
+            } else {
+                println!("  Kubo (IPFS) ................. NOT FOUND");
+                println!("    Namespace resolution requires Kubo. Install from:");
+                println!("    https://docs.ipfs.tech/install/");
+                println!("    (Embedded WASM fallback will still work without it)");
+            }
         }
 
         // Resolve our own absolute path once — used for daemon plist and MCP wiring.
@@ -2011,6 +2140,129 @@ wasip2::cli::command::export!({iface_name}Guest);
         Ok(())
     }
 
+    /// List configured namespaces from ~/.ww/etc/ns/.
+    #[allow(clippy::unused_async)]
+    async fn ns_list() -> Result<()> {
+        let home = dirs::home_dir().context("Cannot determine home directory")?;
+        let ns_dir = home.join(".ww/etc/ns");
+        let configs = ww::ns::list_configs(&ns_dir)?;
+        if configs.is_empty() {
+            println!("No namespaces configured.");
+            println!("  Add one: ww ns add <name> --ipns <key>");
+            return Ok(());
+        }
+        println!("{:<12} {:<50} {}", "NAME", "IPNS", "BOOTSTRAP");
+        println!("{:<12} {:<50} {}", "----", "----", "---------");
+        for config in &configs {
+            let ipns = if config.ipns.is_empty() {
+                "-".to_string()
+            } else {
+                config.ipns.clone()
+            };
+            let bootstrap = if config.bootstrap.is_empty() {
+                "-".to_string()
+            } else {
+                config.bootstrap.clone()
+            };
+            println!("{:<12} {:<50} {}", config.name, ipns, bootstrap);
+        }
+        Ok(())
+    }
+
+    /// Add or update a namespace config.
+    #[allow(clippy::unused_async)]
+    async fn ns_add(name: String, ipns: Option<String>, bootstrap: Option<String>) -> Result<()> {
+        ww::ns::validate_name(&name)?;
+        let home = dirs::home_dir().context("Cannot determine home directory")?;
+        let ns_dir = home.join(".ww/etc/ns");
+        std::fs::create_dir_all(&ns_dir)?;
+        let ns_path = ns_dir.join(&name);
+
+        // Read existing config if present, then overlay provided values.
+        let mut config = if ns_path.exists() {
+            let content = std::fs::read_to_string(&ns_path)?;
+            ww::ns::NamespaceConfig::parse(&name, &content)
+        } else {
+            ww::ns::NamespaceConfig {
+                name: name.clone(),
+                ipns: String::new(),
+                bootstrap: String::new(),
+            }
+        };
+
+        if let Some(key) = ipns {
+            config.ipns = key;
+        }
+        if let Some(cid) = bootstrap {
+            config.bootstrap = cid;
+        }
+
+        if config.ipns.is_empty() && config.bootstrap.is_empty() {
+            bail!("At least one of --ipns or --bootstrap is required");
+        }
+
+        config.write_to(&ns_path)?;
+        println!("Namespace '{name}' configured at {}", ns_path.display());
+        Ok(())
+    }
+
+    /// Remove a namespace config.
+    #[allow(clippy::unused_async)]
+    async fn ns_remove(name: String) -> Result<()> {
+        ww::ns::validate_name(&name)?;
+        let home = dirs::home_dir().context("Cannot determine home directory")?;
+        let ns_path = home.join(".ww/etc/ns").join(&name);
+        if ns_path.exists() {
+            std::fs::remove_file(&ns_path)?;
+            println!("Namespace '{name}' removed.");
+        } else {
+            println!("Namespace '{name}' not found.");
+        }
+        Ok(())
+    }
+
+    /// Resolve a namespace to its current IPFS CID.
+    async fn ns_resolve(name: String) -> Result<()> {
+        ww::ns::validate_name(&name)?;
+        let home = dirs::home_dir().context("Cannot determine home directory")?;
+        let ns_path = home.join(".ww/etc/ns").join(&name);
+        if !ns_path.exists() {
+            bail!("Namespace '{name}' not configured. Run: ww ns add {name} --ipns <key>");
+        }
+        let content = std::fs::read_to_string(&ns_path)?;
+        let config = ww::ns::NamespaceConfig::parse(&name, &content);
+
+        // Try IPNS resolution
+        if !config.ipns.is_empty() {
+            let ipfs_client = ipfs::HttpClient::new("http://localhost:5001".into());
+            let ipns_path = format!("/ipns/{}", config.ipns);
+            match ipfs_client.name_resolve(&ipns_path).await {
+                Ok(resolved) => {
+                    println!("{resolved}");
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("IPNS resolution failed: {e}");
+                    eprintln!("Falling back to bootstrap CID...");
+                }
+            }
+        }
+
+        // Fall back to bootstrap
+        if !config.bootstrap.is_empty() {
+            let path = if config.bootstrap.starts_with("/ipfs/") {
+                config.bootstrap.clone()
+            } else {
+                format!("/ipfs/{}", config.bootstrap)
+            };
+            println!("{path}");
+        } else {
+            bail!("Namespace '{name}' has no IPNS name or bootstrap CID");
+        }
+
+        Ok(())
+    }
+
     /// Check the development environment.
     #[allow(clippy::unused_async)]
     async fn doctor() -> Result<()> {
@@ -2176,6 +2428,58 @@ wasip2::cli::command::export!({iface_name}Guest);
             _ => {
                 println!("  Claude Code MCP ............. UNKNOWN (claude CLI not found)");
             }
+        }
+
+        // --- Namespace checks ---
+        println!();
+        println!("Namespaces:");
+
+        // Check ~/.ww/etc/ns/ exists and has entries
+        let ns_dir = ww_dir.as_ref().map(|d| d.join("etc/ns"));
+        match &ns_dir {
+            Some(d) if d.is_dir() => match ww::ns::list_configs(d) {
+                Ok(configs) if configs.is_empty() => {
+                    println!("  ~/.ww/etc/ns/ ............... EMPTY (no namespaces configured)");
+                    println!("    Fix: ww perform install (or: ww ns add ww --ipns <key>)");
+                }
+                Ok(configs) => {
+                    for config in &configs {
+                        let source = if !config.ipns.is_empty() {
+                            format!("ipns={}", &config.ipns[..config.ipns.len().min(20)])
+                        } else if !config.bootstrap.is_empty() {
+                            format!(
+                                "bootstrap={}",
+                                &config.bootstrap[..config.bootstrap.len().min(20)]
+                            )
+                        } else {
+                            "unconfigured".to_string()
+                        };
+                        println!("  ns/{} {:<22} OK ({})", config.name, ".", source);
+                    }
+                }
+                Err(_) => {
+                    println!("  ~/.ww/etc/ns/ ............... ERROR (cannot read)");
+                }
+            },
+            _ => {
+                println!("  ~/.ww/etc/ns/ ............... NOT FOUND (run: ww perform install)");
+            }
+        }
+
+        // Check if Kubo is reachable (daemon running, not just installed)
+        let kubo_reachable = std::process::Command::new("ipfs")
+            .args(["id", "-f", "<id>"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if kubo_reachable {
+            println!("  Kubo daemon ................. REACHABLE");
+        } else {
+            println!("  Kubo daemon ................. NOT REACHABLE");
+            println!("    Start with: ipfs daemon &");
+            println!("    (Namespace resolution uses embedded fallback without Kubo)");
         }
 
         if all_required_ok {
