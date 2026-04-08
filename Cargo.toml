@@ -64,8 +64,8 @@ nix = { version = "0.30.1", features = ["socket"] }
 wasmtime = { version = "40.0.0", features = ["call-hook"] }
 wasmtime-wasi = "40.0.0"
 wasmtime-wasi-io = "40.0.0"
-capnp = "0.23.2"
-capnp-rpc = "0.23.0"
+capnp = "0.25.3"
+capnp-rpc = "0.25.0"
 membrane = { path = "crates/membrane" }
 atom = { path = "crates/atom" }
 stem = { path = "crates/stem" }
@@ -110,8 +110,8 @@ name = "kernel_dispatch"
 harness = false
 
 [build-dependencies]
-capnpc    = "0.23.3"
-capnp     = "0.23.2"
+capnpc = "0.25.3"
+capnp = "0.25.3"
 schema-id = { path = "crates/schema-id" }
 
 # Optimise WASM guests for size; host binary overridden below.

@@ -7,8 +7,8 @@ edition = "2021"
 
 [dependencies]
 bs58 = "0.5"
-capnp = "0.23.2"
-capnp-rpc = "0.23.0"
+capnp = "0.25.3"
+capnp-rpc = "0.25.0"
 log = "0.4.29"
 multiaddr = "0.18"
 wasip2 = "1.0.2"
@@ -24,5 +24,5 @@ tempfile = "3"
 crate-type = ["cdylib"]
 
 [build-dependencies]
-capnpc = "0.23.3"
+capnpc = "0.25.3"
 schema-id = { path = "../../crates/schema-id" }

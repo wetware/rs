@@ -5,11 +5,11 @@ edition = "2021"
 description = "Epoch-scoped capability primitives over Cap'n Proto RPC"
 
 [build-dependencies]
-capnpc = "0.23.3"
+capnpc = "0.25.3"
 
 [dependencies]
-capnp = "0.23.2"
-capnp-rpc = "0.23.0"
+capnp = "0.25.3"
+capnp-rpc = "0.25.0"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hex = "0.4"
 libp2p-core = "0.43"
