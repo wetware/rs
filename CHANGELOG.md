@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Agent skill files renamed with `ww-` prefix (e.g. `quickstart.md` → `ww-quickstart.md`) for multi-tool clarity.
+- `generate.sh` script to produce `.claude/skills/` from `.agents/skills/`.
+- `doc/ai-context.md` for AI tool context injection.
+- `make agent-skills` target for regenerating Claude Code skills from source.
 - Glia standard library (`std/lib/ww/`): 7 Clojure-aligned modules — core (combinators, threading macros), string, coll (collections), test (framework), json, ipfs, evm. Imported via `(perform import "ww/core")`.
 - `crates/README.md` and updated `std/README.md` documenting the std/ vs crates/ split.
 - Release pipeline: 4-platform binary matrix (linux x86_64/aarch64, macOS x86_64/aarch64) with GitHub Actions
