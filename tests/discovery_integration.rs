@@ -37,6 +37,7 @@ fn setup_runtime() -> system_capnp::runtime::Client {
         None, // no signing key
         None,
         CachePolicy::Shared,
+        ww::ipfs::HttpClient::new("http://localhost:5001".into()),
     )
 }
 
