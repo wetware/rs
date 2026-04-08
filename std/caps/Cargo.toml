@@ -6,8 +6,8 @@ edition = "2021"
 [workspace]  # standalone — not part of the host workspace
 
 [dependencies]
-capnp     = "0.23.2"
-capnp-rpc = "0.23.0"
+capnp = "0.25.3"
+capnp-rpc = "0.25.0"
 glia      = { path = "../../crates/glia" }
 bs58      = "0.5"
 multiaddr = "0.18.2"
@@ -16,5 +16,5 @@ multiaddr = "0.18.2"
 crate-type = ["rlib"]
 
 [build-dependencies]
-capnpc    = "0.23.3"
-capnp     = "0.23.2"
+capnpc = "0.25.3"
+capnp = "0.25.3"
