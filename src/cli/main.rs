@@ -1820,12 +1820,29 @@ wasip2::cli::command::export!({iface_name}Guest);
     /// Bootstrap the ~/.ww user layer, daemon, and MCP wiring.
     ///
     /// Idempotent: re-running skips completed steps, retries failed ones.
-    #[allow(clippy::unused_async)]
     async fn perform_install() -> Result<()> {
+        use indicatif::{ProgressBar, ProgressStyle};
+        use std::time::Duration;
+
+        // Spinner for slow operations. Subtle, one line, clears on finish.
+        let spin = || {
+            let pb = ProgressBar::new_spinner();
+            pb.set_style(
+                ProgressStyle::default_spinner()
+                    .template("  ⚙ {msg}")
+                    .expect("valid template"),
+            );
+            pb.enable_steady_tick(Duration::from_millis(80));
+            pb
+        };
+        let done = |msg: String| println!("  \u{2713} {msg}");
+        let skip = |msg: String| println!("  · {msg}");
+        let fail = |msg: String| println!("  \u{2717} {msg}");
+
         let home = dirs::home_dir().context("Cannot determine home directory")?;
         let ww_dir = home.join(".ww");
 
-        // Step 1: Create ~/.ww directory structure.
+        // ── Directories ──────────────────────────────────────────────
         let subdirs = [
             "boot",
             "bin",
@@ -1833,44 +1850,38 @@ wasip2::cli::command::export!({iface_name}Guest);
             "etc/init.d",
             "etc/ns",
             "logs",
-            // Image roots for daemon: each is a proper FHS image with bin/main.wasm.
-            // No etc/ dirs here — identity stays host-side only, accessed via
-            // the Signer capability in the Membrane, not the guest filesystem.
             "kernel/bin",
             "shell/bin",
             "mcp/bin",
         ];
-        let mut created = Vec::new();
+        let mut any_created = false;
         for sub in &subdirs {
             let dir = ww_dir.join(sub);
             if !dir.exists() {
                 std::fs::create_dir_all(&dir)
                     .with_context(|| format!("Failed to create {}", dir.display()))?;
-                created.push(*sub);
+                any_created = true;
             }
         }
-        if created.is_empty() {
-            println!("  ~/.ww directories ........... OK (already exist)");
+        if any_created {
+            done("Directories".into());
         } else {
-            println!("  ~/.ww directories ........... CREATED");
+            skip("Directories".into());
         }
 
-        // Step 2: Generate Ed25519 identity at ~/.ww/identity (if missing).
+        // ── Identity ─────────────────────────────────────────────────
         let identity_path = ww_dir.join("identity");
         if identity_path.exists() {
-            println!("  ~/.ww/identity .............. OK (already exists)");
+            skip("Identity".into());
         } else {
             let sk = ww::keys::generate()?;
             ww::keys::save(&sk, &identity_path)?;
             let kp = ww::keys::to_libp2p(&sk)?;
             let peer_id = kp.public().to_peer_id();
-            println!("  ~/.ww/identity .............. CREATED");
-            println!("    Peer ID: {peer_id}");
+            done(format!("Identity ({peer_id})"));
         }
 
-        // Step 2.5: Extract embedded WASM images to ~/.ww/{kernel,shell,mcp}/bin/.
-        // Identity is NOT placed inside image roots — guests access signing only
-        // through the Signer capability in the Membrane, never via the filesystem.
+        // ── WASM images ──────────────────────────────────────────────
         let image_cells: &[(&str, &str, &[u8])] = &[
             ("kernel", "main.wasm", EMBEDDED_KERNEL),
             ("shell", "shell.wasm", EMBEDDED_SHELL),
@@ -1893,152 +1904,211 @@ wasip2::cli::command::export!({iface_name}Guest);
             }
         }
         if images_ok {
-            println!("  ~/.ww/{{kernel,shell,mcp}} ... OK (images extracted)");
+            done("WASM images".into());
         } else {
-            println!(
-                "  ~/.ww/{{kernel,shell,mcp}} ... PARTIAL (WASM not embedded, build from source)"
-            );
+            skip("WASM images (not embedded, build from source)".into());
         }
 
-        // Step 2.6: Write ww namespace config to ~/.ww/etc/ns/ww.
-        // The ww namespace always exists — it's the standard library.
-        // The bootstrap CID comes from the build (WW_STD_CID). Local dev
-        // builds have an empty CID; release builds embed the real one.
+        // ── Kubo probe ───────────────────────────────────────────────
+        let ipfs_client = ipfs::HttpClient::new("http://localhost:5001".into());
+        let kubo_ok = ipfs_client.kubo_info().await.is_ok();
+
+        // ── Namespace + IPNS key + publish ───────────────────────────
         {
             let ns_path = ww_dir.join("etc/ns/ww");
             let std_cid = ww::namespace::WW_STD_CID;
-            if ns_path.exists() {
-                println!("  ~/.ww/etc/ns/ww ............. OK (already exists)");
+
+            // Read existing config or start fresh.
+            let mut config = if ns_path.exists() {
+                let content = std::fs::read_to_string(&ns_path)?;
+                ww::ns::NamespaceConfig::parse("ww", &content)
             } else {
-                let config = ww::ns::NamespaceConfig {
+                ww::ns::NamespaceConfig {
                     name: "ww".to_string(),
-                    ipns: String::new(), // IPNS key set by org, not by install
+                    ipns: String::new(),
                     bootstrap: std_cid.to_string(),
-                };
-                config.write_to(&ns_path)?;
-                if std_cid.is_empty() {
-                    println!("  ~/.ww/etc/ns/ww ............. CREATED (no bootstrap CID yet)");
-                } else {
-                    println!("  ~/.ww/etc/ns/ww ............. CREATED (bootstrap: {std_cid})");
                 }
-            }
-        }
+            };
 
-        // Check for Kubo availability — namespace resolution needs it.
-        {
-            let kubo_ok = std::process::Command::new("ipfs")
-                .arg("version")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+            // Provision IPNS key if Kubo is available.
             if kubo_ok {
-                println!("  Kubo (IPFS) ................. OK");
+                let keys = ipfs_client.key_list().await.unwrap_or_default();
+                if keys.iter().any(|k| k == "ww") {
+                    skip("IPNS key".into());
+                } else {
+                    let sp = spin();
+                    sp.set_message("Generating IPNS key...");
+                    match ipfs_client.key_gen("ww").await {
+                        Ok(id) => {
+                            config.ipns = id.clone();
+                            sp.finish_and_clear();
+                            done(format!("IPNS key ({id})"));
+                        }
+                        Err(e) => {
+                            sp.finish_and_clear();
+                            fail(format!("IPNS key ({e})"));
+                        }
+                    }
+                }
+
+                // Publish std to IPFS if images are available.
+                if images_ok {
+                    let sp = spin();
+                    sp.set_message("Publishing standard library...");
+
+                    // Assemble namespace tree in temp dir.
+                    let tmp = tempfile::TempDir::new()?;
+                    let tree = tmp.path();
+                    let lib_dir = tree.join("lib/ww");
+                    std::fs::create_dir_all(&lib_dir)?;
+                    std::fs::create_dir_all(tree.join("kernel/bin"))?;
+                    std::fs::create_dir_all(tree.join("shell/bin"))?;
+                    std::fs::create_dir_all(tree.join("mcp/bin"))?;
+
+                    // Copy Glia stdlib if present on disk.
+                    let glia_src = std::path::Path::new("std/lib/ww");
+                    if glia_src.is_dir() {
+                        for entry in std::fs::read_dir(glia_src)? {
+                            let entry = entry?;
+                            let path = entry.path();
+                            if path.extension().and_then(|e| e.to_str()) == Some("glia") {
+                                if let Some(name) = path.file_name() {
+                                    std::fs::copy(&path, lib_dir.join(name))?;
+                                }
+                            }
+                        }
+                    }
+
+                    // Copy embedded WASM into the tree.
+                    for (name, wasm_name, bytes) in image_cells {
+                        if !bytes.is_empty() {
+                            std::fs::write(tree.join(format!("{name}/bin/{wasm_name}")), bytes)?;
+                        }
+                    }
+
+                    // Publish to IPFS.
+                    match ipfs_client.add_dir(tree).await {
+                        Ok(cid) => {
+                            let ipfs_path = format!("/ipfs/{cid}");
+                            config.bootstrap = ipfs_path.clone();
+
+                            // Pin for offline access.
+                            let _ = ipfs_client.pin_add(&ipfs_path).await;
+
+                            // Publish to IPNS if we have a key.
+                            if !config.ipns.is_empty() {
+                                let _ = ipfs_client.name_publish(&ipfs_path, "ww").await;
+                            }
+
+                            sp.finish_and_clear();
+                            done(format!("Standard library ({ipfs_path})"));
+                        }
+                        Err(e) => {
+                            sp.finish_and_clear();
+                            fail(format!("Standard library ({e})"));
+                        }
+                    }
+                }
             } else {
-                println!("  Kubo (IPFS) ................. NOT FOUND");
-                println!("    Namespace resolution requires Kubo. Install from:");
-                println!("    https://docs.ipfs.tech/install/");
-                println!("    (Embedded WASM fallback will still work without it)");
+                skip("IPNS (Kubo not running)".into());
+            }
+
+            // Always write the config.
+            config.write_to(&ns_path)?;
+            if config.ipns.is_empty() && config.bootstrap.is_empty() {
+                done("Namespace ww".into());
+            } else {
+                let detail = if !config.ipns.is_empty() {
+                    format!("ipns={}", config.ipns)
+                } else {
+                    format!("bootstrap={}", config.bootstrap)
+                };
+                done(format!("Namespace ww ({detail})"));
             }
         }
 
-        // Resolve our own absolute path once — used for daemon plist and MCP wiring.
+        // ── Daemon ───────────────────────────────────────────────────
         let ww_bin = std::env::current_exe().context("cannot determine ww binary path")?;
         let ww_bin_str = ww_bin.display().to_string();
 
-        // Step 3: Register background daemon.
         let plist_path = home.join("Library/LaunchAgents/io.wetware.ww.plist");
         let systemd_path = home.join(".config/systemd/user/ww.service");
         let daemon_exists = plist_path.exists() || systemd_path.exists();
 
         if daemon_exists {
-            println!("  Background daemon ........... OK (already registered)");
+            skip("Background daemon".into());
         } else {
-            // Pass image roots as layers. Identity is passed separately —
-            // daemon_install adds it as a :/etc/identity mount for the host to read.
+            let sp = spin();
+            sp.set_message("Registering daemon...");
             let image_layers: Vec<String> = ["kernel", "shell", "mcp"]
                 .iter()
                 .map(|name| ww_dir.join(name).display().to_string())
                 .collect();
             Self::daemon_install(Some(identity_path.clone()), Some(2025), image_layers, true)
                 .await?;
-            println!("  Background daemon ........... REGISTERED");
+            sp.finish_and_clear();
+            done("Background daemon".into());
             if cfg!(target_os = "macos") {
-                println!("    Activate:  launchctl load {}", plist_path.display());
+                println!("    launchctl load {}", plist_path.display());
             } else if cfg!(target_os = "linux") {
-                println!("    Activate:  systemctl --user enable --now ww");
+                println!("    systemctl --user enable --now ww");
             }
         }
 
-        // Step 4: Wire MCP into Claude Code (if installed).
-        // Use absolute path to our binary so PATH ambiguity doesn't matter.
+        // ── Claude Code MCP ──────────────────────────────────────────
         let claude_available = std::process::Command::new("claude")
             .args(["--version"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .is_ok();
+            .map(|s| s.success())
+            .unwrap_or(false);
 
         if claude_available {
             let output = std::process::Command::new("claude")
                 .args(["mcp", "add", "wetware", "--", &ww_bin_str, "run", "--mcp"])
                 .output();
             match output {
-                Ok(o) if o.status.success() => {
-                    println!("  Claude Code MCP ............. WIRED");
-                }
+                Ok(o) if o.status.success() => done("Claude Code MCP".into()),
                 Ok(o) => {
-                    let msg = String::from_utf8_lossy(&o.stdout);
+                    let msg = format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&o.stdout),
+                        String::from_utf8_lossy(&o.stderr)
+                    );
                     if msg.contains("already exists") {
-                        println!("  Claude Code MCP ............. OK (already configured)");
+                        skip("Claude Code MCP".into());
                     } else {
-                        println!("  Claude Code MCP ............. FAILED (manual setup needed)");
-                        println!(
-                            "    Run:  claude mcp add wetware -- {} run --mcp",
-                            ww_bin_str
-                        );
+                        fail("Claude Code MCP".into());
+                        println!("    claude mcp add wetware -- {} run --mcp", ww_bin_str);
                     }
                 }
                 Err(_) => {
-                    println!("  Claude Code MCP ............. FAILED (manual setup needed)");
-                    println!(
-                        "    Run:  claude mcp add wetware -- {} run --mcp",
-                        ww_bin_str
-                    );
+                    fail("Claude Code MCP".into());
+                    println!("    claude mcp add wetware -- {} run --mcp", ww_bin_str);
                 }
             }
         } else {
-            println!("  Claude Code MCP ............. SKIPPED (claude CLI not found)");
-            println!("    Install Claude Code, then run:");
-            println!("    claude mcp add wetware -- {} run --mcp", ww_bin_str);
+            skip("Claude Code MCP (claude CLI not found)".into());
         }
 
-        // Step 5: Summary.
+        // ── Summary ──────────────────────────────────────────────────
         println!();
-        println!("Wetware installed.");
+        println!("\u{2697}\u{fe0f}  Wetware installed.");
         println!();
-        println!("  Identity:  ~/.ww/identity");
-        println!("  Data:      ~/.ww/");
-        println!("  Version:   {}", env!("CARGO_PKG_VERSION"));
-        println!();
-        println!("\u{2697}\u{fe0f}  Next steps:");
+        println!("  Identity  ~/.ww/identity");
+        println!("  Data      ~/.ww/");
+        println!("  Version   {}", env!("CARGO_PKG_VERSION"));
         if !daemon_exists {
+            println!();
             if cfg!(target_os = "macos") {
-                println!(
-                    "  1. Activate daemon:  launchctl load {}",
-                    plist_path.display()
-                );
-                println!("  2. Open Claude Code and say: \"Run the wetware quickstart\"");
+                println!("  Next: launchctl load {}", plist_path.display());
             } else {
-                println!("  1. Activate daemon:  systemctl --user enable --now ww");
-                println!("  2. Open Claude Code and say: \"Run the wetware quickstart\"");
+                println!("  Next: systemctl --user enable --now ww");
             }
-        } else {
-            println!("  1. Open Claude Code and say: \"Run the wetware quickstart\"");
         }
         println!();
-        println!("Uninstall:  ww perform uninstall");
+        println!("  Uninstall:  ww perform uninstall");
 
         Ok(())
     }
