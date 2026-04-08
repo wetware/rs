@@ -6,10 +6,10 @@
 WASM_TARGET := wasm32-wasip2
 
 .PHONY: all host std kernel shell mcp examples chess echo counter discovery oracle auction mindshare clean run-kernel
-.PHONY: publish-std
+.PHONY: publish-std try-publish-std
 .PHONY: container-build container-run container-dev container-clean
 
-all: std examples host
+all: std try-publish-std examples host
 
 # --- Host --------------------------------------------------------------------
 
@@ -76,6 +76,12 @@ mindshare:
 #   make publish-std IPNS_KEY=wetware   # also publish to IPNS name
 
 IPNS_KEY ?=
+
+# Best-effort publish: runs as part of `make all`. If Kubo isn't running,
+# the build continues without a CID (HostPathLoader fallback).
+try-publish-std: std
+	@$(MAKE) publish-std 2>/dev/null && echo "  std namespace published to IPFS" \
+		|| echo "  std namespace publish skipped (Kubo not running)"
 
 publish-std: std
 	@echo "Assembling std namespace tree..."

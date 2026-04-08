@@ -1901,17 +1901,14 @@ wasip2::cli::command::export!({iface_name}Guest);
         }
 
         // Step 2.6: Write ww namespace config to ~/.ww/etc/ns/ww.
-        // This tells `ww run` where to find the standard library via IPFS.
-        // The bootstrap CID comes from the build (WW_STD_CID), and on boot
-        // the host tries IPNS first for live updates, then falls back here.
+        // The ww namespace always exists — it's the standard library.
+        // The bootstrap CID comes from the build (WW_STD_CID). Local dev
+        // builds have an empty CID; release builds embed the real one.
         {
             let ns_path = ww_dir.join("etc/ns/ww");
             let std_cid = ww::namespace::WW_STD_CID;
             if ns_path.exists() {
                 println!("  ~/.ww/etc/ns/ww ............. OK (already exists)");
-            } else if std_cid.is_empty() {
-                // Local dev build without `make publish-std` — no CID available.
-                println!("  ~/.ww/etc/ns/ww ............. SKIPPED (no std CID in this build)");
             } else {
                 let config = ww::ns::NamespaceConfig {
                     name: "ww".to_string(),
@@ -1919,7 +1916,11 @@ wasip2::cli::command::export!({iface_name}Guest);
                     bootstrap: std_cid.to_string(),
                 };
                 config.write_to(&ns_path)?;
-                println!("  ~/.ww/etc/ns/ww ............. CREATED (bootstrap: {std_cid})");
+                if std_cid.is_empty() {
+                    println!("  ~/.ww/etc/ns/ww ............. CREATED (no bootstrap CID yet)");
+                } else {
+                    println!("  ~/.ww/etc/ns/ww ............. CREATED (bootstrap: {std_cid})");
+                }
             }
         }
 
