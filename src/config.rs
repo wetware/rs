@@ -15,6 +15,7 @@ Exports:
 /// Default log level depends on context:
 /// - TTY (interactive shell): `ww=warn` — keep the Glia REPL clean
 /// - Non-TTY (daemon/pipe): `ww=info` — standard Rust log behavior
+///
 /// `RUST_LOG` always takes precedence when set.
 ///
 /// When `stderr` is true, logs are written to stderr instead of stdout.

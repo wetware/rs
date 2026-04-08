@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `routing.resolve`: resolve IPNS names to `/ipfs/` paths via Kubo. Available as `(perform routing :resolve "/ipns/...")` in Glia and `(resolve ...)` in the `ww/ipfs` stdlib.
+
+### Changed
+- TTY-aware log levels: interactive shell defaults to `ww=warn` (clean REPL), daemon/pipe defaults to `ww=info`. `RUST_LOG` overrides both.
+- Kernel capability binding: membrane graft caps are now iterated directly instead of via a skip-list. `http-client` carries its real capnp client.
+
+### Removed
+- Phantom `ipfs` capability from kernel. IPFS content access goes through WASI VFS only. `make_ipfs_handler()` and `resolve_ipfs_path()` removed.
+
+### Added
 - **AI skill system**: `.agents/skills/` restructured as vendor-neutral skills with YAML frontmatter. `generate.sh` produces `.claude/skills/ww-*/SKILL.md` for native `/ww-*` slash commands. Archived skills revived. Embedded encyclopedia extracted to `doc/ai-context.md`. `make agent-skills` target.
 - **Namespace resolution**: `ww` standard library ships as an IPFS UnixFS tree under an IPNS name. On boot, namespaces configured in `etc/ns/` are resolved and mounted as FHS layers. Local dev builds fall back to HostPathLoader.
 - `ww ns` CLI: `list`, `add`, `remove`, `resolve` subcommands for managing namespaces.

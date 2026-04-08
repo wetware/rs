@@ -263,9 +263,9 @@ impl CellBuilder {
             route_registry: self.route_registry,
             cache_policy: self.cache_policy,
             suppress_stdin: self.suppress_stdin,
-            ipfs_client: self.ipfs_client.unwrap_or_else(|| {
-                crate::ipfs::HttpClient::new("http://localhost:5001".into())
-            }),
+            ipfs_client: self
+                .ipfs_client
+                .unwrap_or_else(|| crate::ipfs::HttpClient::new("http://localhost:5001".into())),
         }
     }
 }

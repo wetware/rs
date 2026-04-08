@@ -259,13 +259,12 @@ impl GraftBuilder for HostGraftBuilder {
         }
         let host: system_capnp::host::Client = capnp_rpc::new_client(host_impl);
 
-        let routing: routing_capnp::routing::Client = capnp_rpc::new_client(
-            super::routing::RoutingImpl::new(
+        let routing: routing_capnp::routing::Client =
+            capnp_rpc::new_client(super::routing::RoutingImpl::new(
                 self.swarm_cmd_tx.clone(),
                 guard.clone(),
                 self.ipfs_client.clone(),
-            ),
-        );
+            ));
 
         let http_client: http_capnp::http_client::Client =
             capnp_rpc::new_client(super::http_client::EpochGuardedHttpProxy::new(
