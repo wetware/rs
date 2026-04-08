@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Namespace resolution**: `ww` standard library ships as an IPFS UnixFS tree under an IPNS name. On boot, namespaces configured in `etc/ns/` are resolved and mounted as FHS layers. Local dev builds fall back to HostPathLoader.
+- `ww ns` CLI: `list`, `add`, `remove`, `resolve` subcommands for managing namespaces.
+- `make publish-std` target: assembles the `ww` namespace tree, publishes to IPFS, writes CID for embedding in the host binary.
+- `ww doctor` now checks namespace config and Kubo daemon reachability.
+- `ww perform install` writes `~/.ww/etc/ns/ww` with the build-time bootstrap CID, and checks for Kubo availability.
 - Glia standard library (`std/lib/ww/`): 7 Clojure-aligned modules — core (combinators, threading macros), string, coll (collections), test (framework), json, ipfs, evm. Imported via `(perform import "ww/core")`.
 - `crates/README.md` and updated `std/README.md` documenting the std/ vs crates/ split.
 - Release pipeline: 4-platform binary matrix (linux x86_64/aarch64, macOS x86_64/aarch64) with GitHub Actions

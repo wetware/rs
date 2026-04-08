@@ -6,6 +6,7 @@
 WASM_TARGET := wasm32-wasip2
 
 .PHONY: all host std kernel shell mcp examples chess echo counter discovery oracle auction mindshare clean run-kernel
+.PHONY: publish-std
 .PHONY: container-build container-run container-dev container-clean
 
 all: std examples host
@@ -65,6 +66,38 @@ auction:
 
 mindshare:
 	$(MAKE) -C examples/mindshare
+
+# --- Publish std namespace to IPFS ------------------------------------------
+# CI-only: assembles the ww namespace tree, publishes to IPFS, writes CID.
+# Local builds skip this — empty CID triggers HostPathLoader fallback.
+#
+# Usage:
+#   make publish-std                    # publish and write CID
+#   make publish-std IPNS_KEY=wetware   # also publish to IPNS name
+
+IPNS_KEY ?=
+
+publish-std: std
+	@echo "Assembling std namespace tree..."
+	$(eval STD_TREE := $(shell mktemp -d))
+	@mkdir -p $(STD_TREE)/lib/ww
+	@mkdir -p $(STD_TREE)/kernel/bin
+	@mkdir -p $(STD_TREE)/shell/bin
+	@mkdir -p $(STD_TREE)/mcp/bin
+	@cp std/lib/ww/*.glia $(STD_TREE)/lib/ww/
+	@cp std/kernel/bin/main.wasm $(STD_TREE)/kernel/bin/main.wasm
+	@cp std/shell/bin/shell.wasm $(STD_TREE)/shell/bin/shell.wasm
+	@cp std/mcp/bin/main.wasm $(STD_TREE)/mcp/bin/main.wasm
+	@echo "Publishing to IPFS..."
+	@CID=$$(ipfs add -r --cid-version=1 -Q $(STD_TREE)) && \
+		echo "$$CID" > target/std-namespace.cid && \
+		echo "  CID: $$CID" && \
+		if [ -n "$(IPNS_KEY)" ]; then \
+			echo "Publishing to IPNS key $(IPNS_KEY)..." && \
+			ipfs name publish --key=$(IPNS_KEY) /ipfs/$$CID; \
+		fi
+	@rm -rf $(STD_TREE)
+	@echo "CID written to target/std-namespace.cid"
 
 # --- Run ---------------------------------------------------------------------
 
