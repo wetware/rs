@@ -70,6 +70,27 @@ fn main() {
     println!("cargo:rustc-env=DEFAULT_KERNEL_CID={cid_value}");
     println!("cargo:rerun-if-changed={}", cid_file.display());
 
+    // Read the std namespace CID (same pattern as above).
+    // Written by `make publish-std` in CI; absent for local builds.
+    let std_cid_file = target_dir.join("std-namespace.cid");
+    let std_cid_value = if std_cid_file.exists() {
+        match fs::read_to_string(&std_cid_file) {
+            Ok(content) => {
+                let cid = content.trim();
+                if cid.is_empty() {
+                    String::new()
+                } else {
+                    format!("/ipfs/{cid}")
+                }
+            }
+            Err(_) => String::new(),
+        }
+    } else {
+        String::new()
+    };
+    println!("cargo:rustc-env=WW_STD_CID={std_cid_value}");
+    println!("cargo:rerun-if-changed={}", std_cid_file.display());
+
     // Check for WASM files that will be embedded via include_bytes!() in release builds.
     // In debug mode, emit a warning but don't fail (allows iterating on non-WASM code).
     // In release mode, fail with a clear error message.
