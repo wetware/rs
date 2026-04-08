@@ -41,7 +41,6 @@ COPY crates/atom/Cargo.toml crates/atom/Cargo.toml
 COPY crates/glia/Cargo.toml crates/glia/build.rs crates/glia/
 COPY crates/membrane/Cargo.toml crates/membrane/build.rs crates/membrane/
 COPY crates/guest/auth/Cargo.toml crates/guest/auth/Cargo.toml
-COPY crates/kernel/Cargo.toml crates/kernel/build.rs crates/kernel/
 COPY std/shell/Cargo.toml std/shell/Cargo.toml
 COPY std/system/Cargo.toml std/system/Cargo.toml
 COPY examples/chess/Cargo.toml examples/chess/build.rs examples/chess/
@@ -52,7 +51,6 @@ RUN mkdir -p src/cli && echo 'fn main() {}' > src/cli/main.rs \
     && mkdir -p crates/glia/src && echo '' > crates/glia/src/lib.rs \
     && mkdir -p crates/membrane/src && echo '' > crates/membrane/src/lib.rs \
     && mkdir -p crates/guest/auth/src && echo '' > crates/guest/auth/src/lib.rs \
-    && mkdir -p crates/kernel/src && echo 'fn main() {}' > crates/kernel/src/main.rs \
     && mkdir -p std/shell/src && echo 'fn main() {}' > std/shell/src/main.rs \
     && mkdir -p std/system/src && echo '' > std/system/src/lib.rs \
     && mkdir -p examples/chess/src && echo 'fn main() {}' > examples/chess/src/main.rs
