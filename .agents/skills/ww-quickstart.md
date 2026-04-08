@@ -1,7 +1,14 @@
+---
+name: ww-quickstart
+description: Build and run Wetware in 5 minutes (from source)
+reads:
+  - doc/ai-context.md
+---
+
 # Quickstart
 
 Build and run Wetware in five minutes.  For first-time setup and
-orientation, see `onboard-new-user.md` instead.
+orientation, see `/ww-onboard` instead.
 
 ⚗️ Three steps.  ~5 minutes total.
 
@@ -53,4 +60,4 @@ capabilities, and launched the Glia shell.
 > Ready to go deeper?  We can explore concepts, study an example,
 > or start building something.
 
-Present the main menu from `.agents/prompt.md`.
+Suggest `/ww-concepts`, `/ww-examples`, or `/ww-build-app`.

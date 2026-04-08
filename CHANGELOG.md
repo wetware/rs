@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **AI skill system**: `.agents/skills/` restructured as vendor-neutral skills with YAML frontmatter. `generate.sh` produces `.claude/skills/ww-*/SKILL.md` for native `/ww-*` slash commands. Archived skills revived. Embedded encyclopedia extracted to `doc/ai-context.md`. `make agent-skills` target.
 - **Namespace resolution**: `ww` standard library ships as an IPFS UnixFS tree under an IPNS name. On boot, namespaces configured in `etc/ns/` are resolved and mounted as FHS layers. Local dev builds fall back to HostPathLoader.
 - `ww ns` CLI: `list`, `add`, `remove`, `resolve` subcommands for managing namespaces.
 - `make publish-std` target: assembles the `ww` namespace tree, publishes to IPFS, writes CID for embedding in the host binary.

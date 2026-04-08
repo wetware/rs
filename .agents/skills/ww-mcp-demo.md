@@ -1,3 +1,10 @@
+---
+name: ww-mcp-demo
+description: 3-minute MCP demo -- verified WASM execution with provenance
+reads:
+  - doc/ai-context.md
+---
+
 # MCP Quickstart
 
 Get from installed to "my AI agent just executed verified WASM" in
@@ -72,6 +79,6 @@ When the second call fails, explain:
 
 Ask what brought them here and route accordingly:
 
-- Building something specific → suggest **Build an app** (`.agents/skills/build-app.md`)
-- Want to understand the architecture → suggest **Concepts** (`.agents/skills/explain-concepts.md`)
-- Want to review existing code → suggest **Review** (`.agents/skills/review-app.md`)
+- Building something specific -> `/ww-build-app`
+- Want to understand the architecture -> `/ww-concepts`
+- Want to review existing code -> `/ww-review-app`

@@ -1,3 +1,13 @@
+---
+name: ww-review-app
+description: Audit a Wetware app for security and correctness
+reads:
+  - doc/ai-context.md
+  - doc/capabilities.md
+  - doc/architecture.md
+  - doc/images.md
+---
+
 # Review an App
 
 Audit a Wetware application for capability hygiene, security, and
@@ -110,5 +120,7 @@ it first.  Momentum matters.
 
 When done:
 
-> ⚗️ That's the review.  Want to dig into any of these findings?
-> Or head back to the main menu?
+> That's the review.  Want to dig into any of these findings?
+> Or try something else?
+
+Suggest other `/ww-*` skills as appropriate.

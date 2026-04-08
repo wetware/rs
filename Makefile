@@ -8,6 +8,7 @@ WASM_TARGET := wasm32-wasip2
 .PHONY: all host std kernel shell mcp examples chess echo counter discovery oracle auction mindshare clean run-kernel
 .PHONY: publish-std try-publish-std
 .PHONY: container-build container-run container-dev container-clean
+.PHONY: agent-skills
 
 all: std try-publish-std examples host
 
@@ -133,6 +134,12 @@ clean:
 	$(MAKE) -C examples/oracle clean
 	$(MAKE) -C examples/auction clean
 	$(MAKE) -C examples/mindshare clean
+
+# --- Agent skills ------------------------------------------------------------
+# Generate .claude/skills/ from .agents/skills/ (vendor-neutral source of truth).
+
+agent-skills:
+	bash .agents/generate.sh
 
 # --- Container ---------------------------------------------------------------
 

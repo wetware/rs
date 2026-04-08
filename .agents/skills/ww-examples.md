@@ -1,3 +1,13 @@
+---
+name: ww-examples
+description: Walk through echo, counter, and chess example apps
+reads:
+  - doc/ai-context.md
+  - examples/echo/src/lib.rs
+  - examples/counter/src/lib.rs
+  - examples/chess/src/lib.rs
+  - examples/chess/chess.capnp
+---
 # Study Examples
 
 Walk through real examples together to see how Cells work in
@@ -134,4 +144,4 @@ step:
 > Want to dig into a specific pattern?  Try another example?
 > Or move on to building something of your own?
 
-Always offer the exit back to the main menu.
+Suggest `/ww-build-app` or other `/ww-*` skills.
