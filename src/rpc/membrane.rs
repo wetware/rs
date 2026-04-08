@@ -194,6 +194,8 @@ pub struct HostGraftBuilder {
     /// Named capabilities from init.d `with` block, forwarded to the child
     /// cell's graft response as `extras`.
     extras: Vec<(String, capnp::capability::Client)>,
+    /// IPFS HTTP client for Kubo API calls (e.g. IPNS resolution).
+    ipfs_client: crate::ipfs::HttpClient,
 }
 
 impl HostGraftBuilder {
@@ -206,6 +208,7 @@ impl HostGraftBuilder {
         stream_control: libp2p_stream::Control,
         allowed_hosts: Vec<String>,
         runtime_client: system_capnp::runtime::Client,
+        ipfs_client: crate::ipfs::HttpClient,
     ) -> Self {
         Self {
             network_state,
@@ -217,6 +220,7 @@ impl HostGraftBuilder {
             route_registry: None,
             runtime_client,
             extras: Vec::new(),
+            ipfs_client,
         }
     }
 
@@ -256,7 +260,11 @@ impl GraftBuilder for HostGraftBuilder {
         let host: system_capnp::host::Client = capnp_rpc::new_client(host_impl);
 
         let routing: routing_capnp::routing::Client = capnp_rpc::new_client(
-            super::routing::RoutingImpl::new(self.swarm_cmd_tx.clone(), guard.clone()),
+            super::routing::RoutingImpl::new(
+                self.swarm_cmd_tx.clone(),
+                guard.clone(),
+                self.ipfs_client.clone(),
+            ),
         );
 
         let http_client: http_capnp::http_client::Client =
@@ -352,6 +360,7 @@ pub fn build_membrane_rpc<R, W>(
     route_registry: Option<crate::dispatcher::server::RouteRegistry>,
     runtime_client: system_capnp::runtime::Client,
     extras: Vec<(String, capnp::capability::Client)>,
+    ipfs_client: crate::ipfs::HttpClient,
 ) -> (RpcSystem<Side>, GuestMembrane)
 where
     R: AsyncRead + Unpin + 'static,
@@ -365,6 +374,7 @@ where
         stream_control,
         Vec::new(), // allowed_hosts: empty = allow all (default)
         runtime_client,
+        ipfs_client,
     );
     if !extras.is_empty() {
         sess_builder = sess_builder.with_extras(extras);

@@ -667,6 +667,8 @@ pub struct RuntimeImpl {
     /// ExecutorImpl so child cells receive the same Runtime through their
     /// membrane graft.
     self_client: Rc<RefCell<Option<system_capnp::runtime::Client>>>,
+    /// IPFS HTTP client for Kubo API calls (e.g. IPNS resolution via routing).
+    ipfs_client: crate::ipfs::HttpClient,
 }
 
 impl RuntimeImpl {
@@ -694,6 +696,7 @@ impl RuntimeImpl {
             signing_key: self.signing_key.clone(),
             stream_control: self.stream_control.clone(),
             runtime_client,
+            ipfs_client: self.ipfs_client.clone(),
         })
     }
 }
@@ -713,6 +716,7 @@ pub fn create_runtime_client(
     signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
     stream_control: Option<libp2p_stream::Control>,
     cache_policy: CachePolicy,
+    ipfs_client: crate::ipfs::HttpClient,
 ) -> system_capnp::runtime::Client {
     let self_client = Rc::new(RefCell::new(None));
     let runtime = RuntimeImpl {
@@ -726,6 +730,7 @@ pub fn create_runtime_client(
         cache_policy,
         executor_cache: RefCell::new(HashMap::new()),
         self_client: self_client.clone(),
+        ipfs_client,
     };
     let client: system_capnp::runtime::Client = capnp_rpc::new_client(runtime);
     *self_client.borrow_mut() = Some(client.clone());
@@ -834,6 +839,8 @@ pub struct ExecutorImpl {
     stream_control: Option<libp2p_stream::Control>,
     /// Runtime client (singleton) — passed to child cells through their membrane graft.
     runtime_client: system_capnp::runtime::Client,
+    /// IPFS HTTP client — passed to child cells through their membrane graft.
+    ipfs_client: crate::ipfs::HttpClient,
 }
 
 #[allow(refining_impl_trait)]
@@ -901,6 +908,7 @@ impl system_capnp::executor::Server for ExecutorImpl {
         let signing_key = self.signing_key.clone();
         let stream_control = self.stream_control.clone();
         let runtime_client = self.runtime_client.clone();
+        let ipfs_client = self.ipfs_client.clone();
 
         Promise::from_future(async move {
             let (host_stderr, guest_stderr) = io::duplex(64 * 1024);
@@ -946,6 +954,7 @@ impl system_capnp::executor::Server for ExecutorImpl {
                     None, // route_registry: spawned cells don't get HTTP routes
                     runtime_client,
                     extra_caps,
+                    ipfs_client,
                 );
                 bootstrap_cap = Some(guest.client);
                 rpc

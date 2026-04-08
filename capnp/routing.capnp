@@ -34,4 +34,8 @@ interface Routing {
   hash @2 (data :Data) -> (key :Text);
   # Compute a deterministic CID (v1, raw codec, sha256) from data.
   # Local operation — does not touch the network or Kubo.
+
+  resolve @3 (name :Text) -> (path :Text);
+  # Resolve an IPNS name to an IPFS path via Kubo.
+  # Returns e.g. "/ipfs/bafyrei..."
 }

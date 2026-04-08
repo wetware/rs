@@ -136,13 +136,19 @@ impl routing_capnp::routing::Server for LocalRouting {
 pub struct RoutingImpl {
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     guard: EpochGuard,
+    ipfs_client: crate::ipfs::HttpClient,
 }
 
 impl RoutingImpl {
-    pub fn new(swarm_cmd_tx: mpsc::Sender<SwarmCommand>, guard: EpochGuard) -> Self {
+    pub fn new(
+        swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
+        guard: EpochGuard,
+        ipfs_client: crate::ipfs::HttpClient,
+    ) -> Self {
         Self {
             swarm_cmd_tx,
             guard,
+            ipfs_client,
         }
     }
 }
@@ -233,6 +239,26 @@ impl routing_capnp::routing::Server for RoutingImpl {
         results.get().set_key(c.to_string());
         Promise::ok(())
     }
+
+    fn resolve(
+        self: capnp::capability::Rc<Self>,
+        params: routing_capnp::routing::ResolveParams,
+        mut results: routing_capnp::routing::ResolveResults,
+    ) -> Promise<(), capnp::Error> {
+        pry!(self.guard.check());
+        let name = pry!(pry!(params.get()).get_name())
+            .to_string()
+            .unwrap_or_default();
+        let ipfs_client = self.ipfs_client.clone();
+        Promise::from_future(async move {
+            let path = ipfs_client
+                .name_resolve(&name)
+                .await
+                .map_err(|e| capnp::Error::failed(format!("IPNS resolve failed: {e}")))?;
+            results.get().set_path(&path);
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -275,7 +301,11 @@ mod tests {
         let (server_read, server_write) = io::split(server_stream);
 
         let (swarm_tx, swarm_rx) = mpsc::channel(16);
-        let routing_impl = RoutingImpl::new(swarm_tx, guard);
+        let routing_impl = RoutingImpl::new(
+            swarm_tx,
+            guard,
+            crate::ipfs::HttpClient::new("http://localhost:5001".into()),
+        );
         let routing_server: routing_capnp::routing::Client = capnp_rpc::new_client(routing_impl);
 
         let server_network = VatNetwork::new(

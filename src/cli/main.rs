@@ -1553,7 +1553,8 @@ wasip2::cli::command::export!({iface_name}Guest);
             .with_signing_key(signing_key.clone())
             .with_cache_policy(cache_policy)
             .with_wasmtime_engine(executor_pool.engine())
-            .with_suppress_stdin(mcp);
+            .with_suppress_stdin(mcp)
+            .with_ipfs_client(ipfs_client.clone());
 
         if let Some(registry) = route_registry {
             builder = builder.with_route_registry(registry);
@@ -1616,6 +1617,7 @@ wasip2::cli::command::export!({iface_name}Guest);
                 .with_signing_key(signing_key)
                 .with_cache_policy(cache_policy)
                 .with_wasmtime_engine(executor_pool.engine())
+                .with_ipfs_client(ipfs_client)
                 .build();
 
             let (mcp_tx, mcp_rx) = tokio::sync::oneshot::channel();

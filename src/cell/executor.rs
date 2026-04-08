@@ -75,6 +75,7 @@ pub struct CellBuilder {
     route_registry: Option<crate::dispatcher::server::RouteRegistry>,
     cache_policy: crate::rpc::CachePolicy,
     suppress_stdin: bool,
+    ipfs_client: Option<crate::ipfs::HttpClient>,
 }
 
 impl CellBuilder {
@@ -101,6 +102,7 @@ impl CellBuilder {
             route_registry: None,
             cache_policy: crate::rpc::CachePolicy::default(),
             suppress_stdin: false,
+            ipfs_client: None,
         }
     }
 
@@ -110,6 +112,12 @@ impl CellBuilder {
         registry: crate::dispatcher::server::RouteRegistry,
     ) -> Self {
         self.route_registry = Some(registry);
+        self
+    }
+
+    /// Set the IPFS HTTP client for Kubo API calls.
+    pub fn with_ipfs_client(mut self, client: crate::ipfs::HttpClient) -> Self {
+        self.ipfs_client = Some(client);
         self
     }
 
@@ -255,6 +263,9 @@ impl CellBuilder {
             route_registry: self.route_registry,
             cache_policy: self.cache_policy,
             suppress_stdin: self.suppress_stdin,
+            ipfs_client: self.ipfs_client.unwrap_or_else(|| {
+                crate::ipfs::HttpClient::new("http://localhost:5001".into())
+            }),
         }
     }
 }
@@ -286,6 +297,8 @@ pub struct Cell {
     pub cache_policy: crate::rpc::CachePolicy,
     /// When true, the cell receives an empty stdin instead of bridging host stdin.
     pub suppress_stdin: bool,
+    /// IPFS HTTP client for Kubo API calls (e.g. IPNS resolution via routing).
+    pub ipfs_client: crate::ipfs::HttpClient,
 }
 
 /// Result of spawning a cell with RPC: exit code, guest membrane, and optional epoch sender.
@@ -343,6 +356,7 @@ impl Cell {
             route_registry: _,
             cache_policy: _,
             suppress_stdin,
+            ipfs_client: _,
         } = self;
 
         crate::config::init_tracing();
@@ -474,6 +488,7 @@ impl Cell {
         let pre_epoch_rx = self.epoch_rx.take();
         let route_registry = self.route_registry.take();
         let cache_policy = self.cache_policy;
+        let ipfs_client = self.ipfs_client.clone();
         let initial_epoch = self.initial_epoch.clone().unwrap_or(Epoch {
             seq: 0,
             head: vec![],
@@ -515,6 +530,7 @@ impl Cell {
             signing_key.clone(),
             Some(membrane_stream_control.clone()),
             cache_policy,
+            ipfs_client.clone(),
         );
 
         // Clone epoch receiver for Terminal auth before it's moved into the RPC system.
@@ -532,6 +548,7 @@ impl Cell {
             route_registry,
             runtime_client,
             Vec::new(), // pid0 gets full membrane, no extras
+            ipfs_client,
         );
 
         tracing::debug!("Starting streams RPC server for guest");
