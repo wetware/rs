@@ -1,3 +1,15 @@
+---
+name: ww-reference
+description: Capability schemas, CLI flags, shell commands, and API reference
+reads:
+  - doc/ai-context.md
+  - doc/cli.md
+  - doc/shell.md
+  - doc/capabilities.md
+  - doc/rpc-transport.md
+  - doc/keys.md
+  - doc/guest-runtime.md
+---
 # Browse Reference
 
 Deep-dive into schemas, CLI, and shell commands.
@@ -75,6 +87,6 @@ the process boundary — anything not wrapped in an effect is local.
 ## After each topic
 
 > Found what you needed?  Want to look at something else, or
-> head back to the main menu?
+> try a different skill?
 
-Don't assume they want the next topic in sequence — ask.
+Suggest other `/ww-*` skills as appropriate.

@@ -29,6 +29,8 @@ pub mod metrics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mount;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod ns;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod rpc;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runtime;
@@ -66,6 +68,7 @@ pub mod shell_capnp {
 // Modules available for both host and guest
 pub mod config;
 pub mod default_kernel;
+pub mod namespace;
 
 // Re-export the Glia language crate
 pub use glia;

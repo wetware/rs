@@ -1,3 +1,13 @@
+---
+name: ww-build-app
+description: Design a new Wetware app with structured guidance
+reads:
+  - doc/ai-context.md
+  - doc/capabilities.md
+  - doc/architecture.md
+  - doc/images.md
+---
+
 # Build an App
 
 Design a Wetware application together.  This is a conversation,
@@ -96,4 +106,4 @@ When done:
 > ⚗️ Design's ready.  Want to review it for security issues?  Or
 > head back to the main menu?
 
-Offer **Review an app** or the main menu from `.agents/prompt.md`.
+Suggest `/ww-review-app` or other `/ww-*` skills.

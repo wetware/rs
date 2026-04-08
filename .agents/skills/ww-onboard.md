@@ -1,3 +1,10 @@
+---
+name: ww-onboard
+description: First-time setup and orientation for new Wetware users
+reads:
+  - doc/ai-context.md
+---
+
 # Onboard New User
 
 One-time setup and orientation for someone who just arrived.
@@ -52,23 +59,19 @@ If everything is OK, hand off to the quickstart.
 
 ## Hand off to quickstart
 
-Once installed and configured, hand off to `mcp-quickstart.md`:
+Once installed and configured, hand off to `/ww-mcp-demo`:
 
 > You're all set.  Let's run the quickstart -- takes about 3 minutes.
 > You'll see your AI agent execute verified WASM with provenance
 > tracking.
 
-Read `.agents/skills/mcp-quickstart.md` and follow its instructions.
-
 ## After quickstart
 
 Recall what brought them here (from your first question) and route:
 
-- Building something specific -> **Build an app** (`.agents/skills/build-app.md`)
-- Exploring / curious -> **Concepts** (`.agents/skills/explain-concepts.md`)
-  or **Examples** (`.agents/skills/study-examples.md`, in archive,
-  still works for reference)
+- Building something specific -> `/ww-build-app`
+- Exploring / curious -> `/ww-concepts` or `/ww-examples`
 - Not sure -> present a slimmed menu:
-  1. Build an app -- design a Wetware application
-  2. Review an app -- audit for security and correctness
-  3. Deep dive -- explore concepts, architecture, examples
+  1. Build an app -- `/ww-build-app`
+  2. Review an app -- `/ww-review-app`
+  3. Deep dive -- `/ww-concepts`, `/ww-examples`, `/ww-reference`

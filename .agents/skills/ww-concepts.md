@@ -1,3 +1,13 @@
+---
+name: ww-concepts
+description: Deep-dive into why Wetware exists and how it thinks
+reads:
+  - doc/ai-context.md
+  - doc/architecture.md
+  - doc/capabilities.md
+  - doc/rpc-transport.md
+  - doc/images.md
+---
 # Explain Concepts
 
 Walk the user through *why* Wetware exists and the mental model
@@ -296,4 +306,4 @@ Check in:
 > Make sense?  Want to go deeper on this, try a different topic,
 > or move on to something else?
 
-Always offer the escape hatch back to the main menu.
+Suggest other `/ww-*` skills as appropriate.

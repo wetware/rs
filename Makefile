@@ -6,9 +6,11 @@
 WASM_TARGET := wasm32-wasip2
 
 .PHONY: all host std kernel shell mcp examples chess echo counter discovery oracle auction mindshare clean run-kernel
+.PHONY: publish-std try-publish-std
 .PHONY: container-build container-run container-dev container-clean
+.PHONY: agent-skills
 
-all: std examples host
+all: std try-publish-std examples host
 
 # --- Host --------------------------------------------------------------------
 
@@ -66,6 +68,53 @@ auction:
 mindshare:
 	$(MAKE) -C examples/mindshare
 
+# --- Publish std namespace to IPFS ------------------------------------------
+# CI-only: assembles the ww namespace tree, publishes to IPFS, writes CID.
+# Local builds skip this — empty CID triggers HostPathLoader fallback.
+#
+# Usage:
+#   make publish-std                    # publish and write CID
+#   make publish-std IPNS_KEY=wetware   # also publish to IPNS name
+
+IPNS_KEY ?=
+
+# Best-effort publish: runs as part of `make all`. If Kubo isn't running,
+# the build continues without a CID (HostPathLoader fallback).
+# Reads IPNS key from ~/.ww/etc/ns/ww if available (provisioned by `ww perform install`).
+try-publish-std: std
+	@KEY=$$(grep '^ipns=' ~/.ww/etc/ns/ww 2>/dev/null | cut -d= -f2 | tr -d ' '); \
+	if [ -n "$$KEY" ]; then \
+		$(MAKE) publish-std IPNS_KEY=ww 2>/dev/null \
+			&& echo "  std namespace published to IPFS" \
+			|| echo "  std namespace publish skipped (Kubo not running)"; \
+	else \
+		$(MAKE) publish-std 2>/dev/null \
+			&& echo "  std namespace published to IPFS (no IPNS key)" \
+			|| echo "  std namespace publish skipped (Kubo not running)"; \
+	fi
+
+publish-std: std
+	@echo "Assembling std namespace tree..."
+	$(eval STD_TREE := $(shell mktemp -d))
+	@mkdir -p $(STD_TREE)/lib/ww
+	@mkdir -p $(STD_TREE)/kernel/bin
+	@mkdir -p $(STD_TREE)/shell/bin
+	@mkdir -p $(STD_TREE)/mcp/bin
+	@cp std/lib/ww/*.glia $(STD_TREE)/lib/ww/
+	@cp std/kernel/bin/main.wasm $(STD_TREE)/kernel/bin/main.wasm
+	@cp std/shell/bin/shell.wasm $(STD_TREE)/shell/bin/shell.wasm
+	@cp std/mcp/bin/main.wasm $(STD_TREE)/mcp/bin/main.wasm
+	@echo "Publishing to IPFS..."
+	@CID=$$(ipfs add -r --cid-version=1 -Q $(STD_TREE)) && \
+		echo "$$CID" > target/std-namespace.cid && \
+		echo "  CID: $$CID" && \
+		if [ -n "$(IPNS_KEY)" ]; then \
+			echo "Publishing to IPNS key $(IPNS_KEY)..." && \
+			ipfs name publish --key=$(IPNS_KEY) /ipfs/$$CID; \
+		fi
+	@rm -rf $(STD_TREE)
+	@echo "CID written to target/std-namespace.cid"
+
 # --- Run ---------------------------------------------------------------------
 
 run-kernel: kernel
@@ -85,6 +134,12 @@ clean:
 	$(MAKE) -C examples/oracle clean
 	$(MAKE) -C examples/auction clean
 	$(MAKE) -C examples/mindshare clean
+
+# --- Agent skills ------------------------------------------------------------
+# Generate .claude/skills/ from .agents/skills/ (vendor-neutral source of truth).
+
+agent-skills:
+	bash .agents/generate.sh
 
 # --- Container ---------------------------------------------------------------
 
