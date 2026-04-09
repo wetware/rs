@@ -3,7 +3,7 @@
 # Usage: make -C examples/counter
 
 # Default to rustup cargo so `make -C examples/counter` works without shell profile
-CARGO ?= $(HOME)/.cargo/bin/cargo
+CARGO ?= cargo
 
 WASM_TARGET := wasm32-wasip2
 

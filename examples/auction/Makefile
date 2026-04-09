@@ -3,7 +3,7 @@
 # Usage: make -C examples/auction
 
 # Default to rustup cargo so `make -C examples/auction` works without shell profile
-CARGO ?= $(HOME)/.cargo/bin/cargo
+CARGO ?= cargo
 
 WASM_TARGET := wasm32-wasip2
 

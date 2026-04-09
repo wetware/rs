@@ -3,7 +3,7 @@
 # Usage: make -C examples/discovery
 
 # Default to rustup cargo so `make -C examples/discovery` works without shell profile
-CARGO ?= $(HOME)/.cargo/bin/cargo
+CARGO ?= cargo
 
 WASM_TARGET := wasm32-wasip2
 ROOT := ../..
