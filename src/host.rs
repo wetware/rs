@@ -964,6 +964,7 @@ fn is_circuit_addr(addr: &Multiaddr) -> bool {
 }
 
 /// Handle Identify Received events: discover relay-capable peers.
+#[allow(clippy::too_many_arguments)]
 fn handle_identify_received(
     peer_id: PeerId,
     info: &libp2p::identify::Info,
@@ -1034,6 +1035,7 @@ fn handle_identify_received(
 }
 
 /// Handle AutoNAT v1 status change.
+#[allow(clippy::too_many_arguments)]
 async fn handle_autonat_v1_status(
     _old: &libp2p::autonat::v1::NatStatus,
     new: &libp2p::autonat::v1::NatStatus,
