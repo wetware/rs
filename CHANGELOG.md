@@ -13,6 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - TTY-aware log levels: interactive shell defaults to `ww=warn` (clean REPL), daemon/pipe defaults to `ww=info`. `RUST_LOG` overrides both.
 - Kernel capability binding: membrane graft caps are now iterated directly instead of via a skip-list. `http-client` carries its real capnp client.
 
+### Fixed
+- Containerfile: add `linux-headers` for Cap'n Proto compilation on Alpine (fixes missing `<linux/futex.h>`).
+- `discovery_integration` tests rewritten to use `ExecutorPool` (matching prod topology), fixing a deadlock that prevented the WASM cell from calling `system::serve()`.
+
 ### Removed
 - Phantom `ipfs` capability from kernel. IPFS content access goes through WASI VFS only. `make_ipfs_handler()` and `resolve_ipfs_path()` removed.
 
