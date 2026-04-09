@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - Container build: add `crates/schema-id` to Containerfile dependency cache layer and dummy source block, fixing workspace resolution failure during Docker builds.
+- Container build: declare `wasm32-wasip2` target in `rust-toolchain.toml` so rustup installs it for whichever stable toolchain is active, fixing `can't find crate for core` during WASM compilation.
 
 ## [0.0.1.0] - 2026-04-08
 
