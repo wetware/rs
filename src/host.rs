@@ -292,10 +292,8 @@ impl Libp2pHost {
             }
         }
 
-        let identify_config = libp2p::identify::Config::new(
-            "wetware/0.1.0".to_string(),
-            keypair.public(),
-        );
+        let identify_config =
+            libp2p::identify::Config::new("wetware/0.1.0".to_string(), keypair.public());
         let local_peer_id = peer_id;
 
         let mut swarm = SwarmBuilder::with_existing_identity(keypair)
@@ -306,10 +304,7 @@ impl Libp2pHost {
                 libp2p::yamux::Config::default,
             )?
             .with_quic()
-            .with_relay_client(
-                libp2p::noise::Config::new,
-                libp2p::yamux::Config::default,
-            )?
+            .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
             .with_behaviour(|_keypair, relay_client| {
                 Ok(WetwareBehaviour {
                     identify: libp2p::identify::Behaviour::new(identify_config),
@@ -325,7 +320,9 @@ impl Libp2pHost {
                     dcutr: libp2p::dcutr::Behaviour::new(local_peer_id),
                 })
             })?
-            .with_swarm_config(|c: libp2p::swarm::Config| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .with_swarm_config(|c: libp2p::swarm::Config| {
+                c.with_idle_connection_timeout(Duration::from_secs(60))
+            })
             .build();
 
         // Listen on TCP (required) and QUIC/IPv6 (best-effort).
@@ -1053,32 +1050,28 @@ async fn handle_autonat_v1_status(
                 *nat_status = NatReachability::Public;
                 network_state.set_nat_status(NatReachability::Public).await;
                 // Promote WAN Kad to server mode — we can serve DHT queries.
-                swarm
-                    .behaviour_mut()
-                    .kad
-                    .set_mode(Some(kad::Mode::Server));
+                swarm.behaviour_mut().kad.set_mode(Some(kad::Mode::Server));
                 tracing::info!("WAN Kad promoted to server mode");
             }
         }
         libp2p::autonat::v1::NatStatus::Private => {
             if *nat_status != NatReachability::Private {
                 let was_public = *nat_status == NatReachability::Public;
-                tracing::info!(
-                    was_public,
-                    "AutoNAT: node is behind NAT, seeking relay"
-                );
+                tracing::info!(was_public, "AutoNAT: node is behind NAT, seeking relay");
                 *nat_status = NatReachability::Private;
                 network_state.set_nat_status(NatReachability::Private).await;
                 // Demote Kad back to client mode if we were previously public.
                 if was_public {
-                    swarm
-                        .behaviour_mut()
-                        .kad
-                        .set_mode(Some(kad::Mode::Client));
+                    swarm.behaviour_mut().kad.set_mode(Some(kad::Mode::Client));
                     tracing::info!("WAN Kad demoted to client mode");
                 }
                 // Try to reserve from any candidates we've already seen.
-                try_reserve_relay(relay_candidates, active_relay_reservations, inflight_relay_requests, swarm);
+                try_reserve_relay(
+                    relay_candidates,
+                    active_relay_reservations,
+                    inflight_relay_requests,
+                    swarm,
+                );
             }
         }
         libp2p::autonat::v1::NatStatus::Unknown => {
@@ -1440,7 +1433,10 @@ mod tests {
         ];
         for addr_str in &cases {
             let addr: Multiaddr = addr_str.parse().unwrap();
-            assert!(!is_unspecified_addr(&addr), "{addr_str} should not be unspecified");
+            assert!(
+                !is_unspecified_addr(&addr),
+                "{addr_str} should not be unspecified"
+            );
         }
     }
 
@@ -1512,10 +1508,8 @@ impl ClientSwarm {
         let stream_behaviour = libp2p_stream::Behaviour::new();
         let stream_control = stream_behaviour.new_control();
 
-        let identify_config = libp2p::identify::Config::new(
-            "wetware-shell/0.1.0".to_string(),
-            keypair.public(),
-        );
+        let identify_config =
+            libp2p::identify::Config::new("wetware-shell/0.1.0".to_string(), keypair.public());
 
         let swarm = SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
@@ -1525,10 +1519,7 @@ impl ClientSwarm {
                 libp2p::yamux::Config::default,
             )?
             .with_quic()
-            .with_relay_client(
-                libp2p::noise::Config::new,
-                libp2p::yamux::Config::default,
-            )?
+            .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
             .with_behaviour(|_keypair, relay_client| {
                 Ok(ClientBehaviour {
                     identify: libp2p::identify::Behaviour::new(identify_config),
@@ -1536,7 +1527,9 @@ impl ClientSwarm {
                     relay_client,
                 })
             })?
-            .with_swarm_config(|c: libp2p::swarm::Config| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .with_swarm_config(|c: libp2p::swarm::Config| {
+                c.with_idle_connection_timeout(Duration::from_secs(60))
+            })
             .build();
 
         Ok(Self {
