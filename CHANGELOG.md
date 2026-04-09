@@ -4,21 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.0.1.0] - 2026-04-08
 
 ### Added
+- **NAT traversal stack**: AutoNAT v1/v2 client detects public reachability and promotes WAN Kad to server mode. Relay client obtains relayed addresses from Amino DHT peers (max 2 concurrent reservations with lifecycle tracking). DCUtR upgrades relayed connections to direct via hole-punching.
+- **QUIC transport**: UDP-based connections alongside TCP, with ~80-90% hole-punch success rate vs ~30-40% for TCP only.
+- **IPv6 dual-stack**: listens on both IPv4 and IPv6 for TCP and QUIC.
+- **NAT status introspection**: `NatReachability` exposed via `NetworkState` for cells to query.
 - `routing.resolve`: resolve IPNS names to `/ipfs/` paths via Kubo. Available as `(perform routing :resolve "/ipns/...")` in Glia and `(resolve ...)` in the `ww/ipfs` stdlib.
 
 ### Changed
+- WAN Kad periodic re-bootstrap enabled (5-minute interval) to keep DHT routing table fresh.
+- ClientSwarm (`ww shell`) gains relay + QUIC transport for dialing NATted nodes.
 - TTY-aware log levels: interactive shell defaults to `ww=warn` (clean REPL), daemon/pipe defaults to `ww=info`. `RUST_LOG` overrides both.
 - Kernel capability binding: membrane graft caps are now iterated directly instead of via a skip-list. `http-client` carries its real capnp client.
 
 ### Fixed
+- Stop promoting unspecified addresses (0.0.0.0, ::) as external. Only routable addresses are advertised.
 - Containerfile: add `linux-headers` for Cap'n Proto compilation on Alpine (fixes missing `<linux/futex.h>`).
-- `discovery_integration` tests rewritten to use `ExecutorPool` (matching prod topology), fixing a deadlock that prevented the WASM cell from calling `system::serve()`.
+- `discovery_integration` tests rewritten to use `ExecutorPool` (matching prod topology), fixing a deadlock.
 
 ### Removed
-- Phantom `ipfs` capability from kernel. IPFS content access goes through WASI VFS only. `make_ipfs_handler()` and `resolve_ipfs_path()` removed.
+- Phantom `ipfs` capability from kernel. IPFS content access goes through WASI VFS only.
 
 ### Added
 - **AI skill system**: `.agents/skills/` restructured as vendor-neutral skills with YAML frontmatter. `generate.sh` produces `.claude/skills/ww-*/SKILL.md` for native `/ww-*` slash commands. Archived skills revived. Embedded encyclopedia extracted to `doc/ai-context.md`. `make agent-skills` target.

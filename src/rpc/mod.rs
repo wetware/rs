@@ -184,6 +184,15 @@ pub struct NetworkSnapshot {
     pub local_peer_id: Vec<u8>,
     pub listen_addrs: Vec<Vec<u8>>,
     pub known_peers: Vec<PeerInfo>,
+    pub nat_status: NatReachability,
+}
+
+/// NAT reachability status as determined by AutoNAT.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NatReachability {
+    Unknown,
+    Public,
+    Private,
 }
 
 #[derive(Clone, Debug)]
@@ -212,6 +221,7 @@ impl NetworkState {
             local_peer_id: peer_id,
             listen_addrs: Vec::new(),
             known_peers: Vec::new(),
+            nat_status: NatReachability::Unknown,
         };
         Self {
             inner: Arc::new(RwLock::new(snapshot)),
@@ -242,6 +252,15 @@ impl NetworkState {
     pub async fn set_known_peers(&self, peers: Vec<PeerInfo>) {
         let mut guard = self.inner.write().await;
         guard.known_peers = peers;
+    }
+
+    pub async fn set_nat_status(&self, status: NatReachability) {
+        let mut guard = self.inner.write().await;
+        guard.nat_status = status;
+    }
+
+    pub async fn nat_status(&self) -> NatReachability {
+        self.inner.read().await.nat_status
     }
 }
 
