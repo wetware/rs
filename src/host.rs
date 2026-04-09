@@ -328,11 +328,16 @@ impl Libp2pHost {
             .with_swarm_config(|c: libp2p::swarm::Config| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
 
-        // Listen on TCP and QUIC (UDP).
-        let tcp_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
-        swarm.listen_on(tcp_addr)?;
-        let quic_addr: Multiaddr = format!("/ip4/0.0.0.0/udp/{port}/quic-v1").parse()?;
-        swarm.listen_on(quic_addr)?;
+        // Listen on TCP and QUIC (UDP), both IPv4 and IPv6.
+        for listen in &[
+            format!("/ip4/0.0.0.0/tcp/{port}"),
+            format!("/ip6/::/tcp/{port}"),
+            format!("/ip4/0.0.0.0/udp/{port}/quic-v1"),
+            format!("/ip6/::/udp/{port}/quic-v1"),
+        ] {
+            let addr: Multiaddr = listen.parse()?;
+            swarm.listen_on(addr)?;
+        }
 
         Ok(Self {
             swarm,
