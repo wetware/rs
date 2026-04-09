@@ -328,15 +328,21 @@ impl Libp2pHost {
             .with_swarm_config(|c: libp2p::swarm::Config| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
 
-        // Listen on TCP and QUIC (UDP), both IPv4 and IPv6.
+        // Listen on TCP (required) and QUIC/IPv6 (best-effort).
+        // IPv4 TCP is required; everything else logs a warning on failure
+        // (IPv6 may be disabled, UDP port may be unavailable).
+        let tcp4: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
+        swarm.listen_on(tcp4)?;
+
         for listen in &[
-            format!("/ip4/0.0.0.0/tcp/{port}"),
             format!("/ip6/::/tcp/{port}"),
             format!("/ip4/0.0.0.0/udp/{port}/quic-v1"),
             format!("/ip6/::/udp/{port}/quic-v1"),
         ] {
             let addr: Multiaddr = listen.parse()?;
-            swarm.listen_on(addr)?;
+            if let Err(e) = swarm.listen_on(addr.clone()) {
+                tracing::warn!(%addr, error = %e, "Optional listen address failed (continuing)");
+            }
         }
 
         Ok(Self {
@@ -386,8 +392,11 @@ impl Libp2pHost {
         // --- NAT traversal state ---
         let mut nat_status = NatReachability::Unknown;
         let mut active_relay_reservations: usize = 0;
+        let mut inflight_relay_requests: usize = 0;
         // Relay-capable peers discovered via Identify but not yet reserved.
         let mut relay_candidates: Vec<(PeerId, Multiaddr)> = Vec::new();
+        // Peers already seen as relay candidates (dedup).
+        let mut seen_relay_peers: HashSet<PeerId> = HashSet::new();
 
         // Self-announcement on both DHTs.
         let beh = self.swarm.behaviour_mut();
@@ -424,6 +433,7 @@ impl Libp2pHost {
                                 try_reserve_relay(
                                     &mut relay_candidates,
                                     &mut active_relay_reservations,
+                                    &mut inflight_relay_requests,
                                     &mut self.swarm,
                                 );
                             }
@@ -538,7 +548,9 @@ impl Libp2pHost {
                                 peer_id, &info,
                                 nat_status,
                                 &mut active_relay_reservations,
+                                &mut inflight_relay_requests,
                                 &mut relay_candidates,
+                                &mut seen_relay_peers,
                                 &mut self.swarm,
                             );
                         }
@@ -553,6 +565,7 @@ impl Libp2pHost {
                                 &mut self.swarm,
                                 &network_state,
                                 &mut active_relay_reservations,
+                                &mut inflight_relay_requests,
                                 &mut relay_candidates,
                             ).await;
                         }
@@ -569,6 +582,8 @@ impl Libp2pHost {
                                 ..
                             },
                         )) => {
+                            inflight_relay_requests =
+                                inflight_relay_requests.saturating_sub(1);
                             if !renewal {
                                 active_relay_reservations =
                                     active_relay_reservations.saturating_add(1);
@@ -954,11 +969,18 @@ fn handle_identify_received(
     info: &libp2p::identify::Info,
     nat_status: NatReachability,
     active_relay_reservations: &mut usize,
+    inflight_relay_requests: &mut usize,
     relay_candidates: &mut Vec<(PeerId, Multiaddr)>,
+    seen_relay_peers: &mut HashSet<PeerId>,
     swarm: &mut libp2p::swarm::Swarm<WetwareBehaviour>,
 ) {
     // Check if this peer can serve as a relay.
     if !is_relay_capable(&info.protocols) {
+        return;
+    }
+
+    // Deduplicate: skip peers we've already seen.
+    if !seen_relay_peers.insert(peer_id) {
         return;
     }
 
@@ -989,7 +1011,8 @@ fn handle_identify_received(
     }
 
     // Try to reserve if we're NATted or status is unknown.
-    if *active_relay_reservations < MAX_RELAY_RESERVATIONS {
+    // Count both active and in-flight to avoid overshooting the cap.
+    if *active_relay_reservations + *inflight_relay_requests < MAX_RELAY_RESERVATIONS {
         tracing::info!(
             relay = %peer_id,
             addr = %circuit_addr,
@@ -1001,6 +1024,8 @@ fn handle_identify_received(
                 error = %e,
                 "Failed to request relay reservation"
             );
+        } else {
+            *inflight_relay_requests += 1;
         }
     } else {
         // Save for later in case a reservation expires.
@@ -1016,6 +1041,7 @@ async fn handle_autonat_v1_status(
     swarm: &mut libp2p::swarm::Swarm<WetwareBehaviour>,
     network_state: &NetworkState,
     active_relay_reservations: &mut usize,
+    inflight_relay_requests: &mut usize,
     relay_candidates: &mut Vec<(PeerId, Multiaddr)>,
 ) {
     match new {
@@ -1033,12 +1059,24 @@ async fn handle_autonat_v1_status(
             }
         }
         libp2p::autonat::v1::NatStatus::Private => {
-            if *nat_status == NatReachability::Unknown {
-                tracing::info!("AutoNAT: node is behind NAT, seeking relay");
+            if *nat_status != NatReachability::Private {
+                let was_public = *nat_status == NatReachability::Public;
+                tracing::info!(
+                    was_public,
+                    "AutoNAT: node is behind NAT, seeking relay"
+                );
                 *nat_status = NatReachability::Private;
                 network_state.set_nat_status(NatReachability::Private).await;
+                // Demote Kad back to client mode if we were previously public.
+                if was_public {
+                    swarm
+                        .behaviour_mut()
+                        .kad
+                        .set_mode(Some(kad::Mode::Client));
+                    tracing::info!("WAN Kad demoted to client mode");
+                }
                 // Try to reserve from any candidates we've already seen.
-                try_reserve_relay(relay_candidates, active_relay_reservations, swarm);
+                try_reserve_relay(relay_candidates, active_relay_reservations, inflight_relay_requests, swarm);
             }
         }
         libp2p::autonat::v1::NatStatus::Unknown => {
@@ -1051,9 +1089,10 @@ async fn handle_autonat_v1_status(
 fn try_reserve_relay(
     relay_candidates: &mut Vec<(PeerId, Multiaddr)>,
     active_relay_reservations: &mut usize,
+    inflight_relay_requests: &mut usize,
     swarm: &mut libp2p::swarm::Swarm<WetwareBehaviour>,
 ) {
-    while *active_relay_reservations < MAX_RELAY_RESERVATIONS {
+    while *active_relay_reservations + *inflight_relay_requests < MAX_RELAY_RESERVATIONS {
         let Some((peer_id, circuit_addr)) = relay_candidates.pop() else {
             break;
         };
@@ -1068,6 +1107,8 @@ fn try_reserve_relay(
                 error = %e,
                 "Failed to request relay reservation"
             );
+        } else {
+            *inflight_relay_requests += 1;
         }
     }
 }
