@@ -15,7 +15,17 @@ use libp2p::{Multiaddr, PeerId, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::{Config as WasmConfig, Engine};
 
-use crate::rpc::{NetworkState, PeerInfo};
+use crate::rpc::{NatReachability, NetworkState, PeerInfo};
+
+// ---------------------------------------------------------------------------
+// NAT traversal constants
+// ---------------------------------------------------------------------------
+
+/// Maximum number of concurrent relay reservations to maintain.
+const MAX_RELAY_RESERVATIONS: usize = 2;
+
+/// The relay v2 hop protocol advertised by peers that can serve as relays.
+const RELAY_HOP_PROTOCOL: &str = "/libp2p/circuit/relay/0.2.0/hop";
 
 // ---------------------------------------------------------------------------
 // Dual DHT types
@@ -130,6 +140,25 @@ fn is_lan_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Returns true if the multiaddr contains an unspecified IP (0.0.0.0 or ::).
+/// These should not be promoted as external addresses.
+fn is_unspecified_addr(addr: &Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+    for proto in addr.iter() {
+        match proto {
+            Protocol::Ip4(ip) => return ip.is_unspecified(),
+            Protocol::Ip6(ip) => return ip.is_unspecified(),
+            _ => continue,
+        }
+    }
+    false
+}
+
+/// Returns true if the peer's protocol list includes the relay v2 hop protocol.
+fn is_relay_capable(protocols: &[libp2p::StreamProtocol]) -> bool {
+    protocols.iter().any(|p| p.as_ref() == RELAY_HOP_PROTOCOL)
+}
+
 /// Bootstrap info for the in-process Kad client.
 ///
 /// Obtained by calling [`crate::ipfs::HttpClient::kubo_info`] and parsing the
@@ -169,11 +198,21 @@ pub struct WetwareBehaviour {
     pub identify: libp2p::identify::Behaviour,
     pub stream: libp2p_stream::Behaviour,
     /// WAN Kademlia DHT client (Amino protocol `/ipfs/kad/1.0.0`).
-    /// Runs in client mode.  Bootstrapped against Kubo's public peers.
+    /// Runs in client mode initially.  Promoted to server when AutoNAT confirms
+    /// public reachability.
     pub kad: kad::Behaviour<kad::store::MemoryStore>,
     /// LAN Kademlia DHT server (`/ipfs/lan/kad/1.0.0`).
     /// Runs in server mode.  Bootstrapped against Kubo's private/loopback peers.
     pub kad_lan: kad::Behaviour<kad::store::MemoryStore>,
+    /// AutoNAT v1 client -- probes peers to determine NAT reachability.
+    /// Authoritative source for NAT status (has built-in threshold logic).
+    pub autonat: libp2p::autonat::v1::Behaviour,
+    /// AutoNAT v2 client -- supplementary NAT probes for newer peers.
+    pub autonat_v2: libp2p::autonat::v2::client::Behaviour,
+    /// Relay client -- enables relayed connections and circuit addresses.
+    pub relay_client: libp2p::relay::client::Behaviour,
+    /// DCUtR -- upgrades relayed connections to direct via hole-punching.
+    pub dcutr: libp2p::dcutr::Behaviour,
 }
 
 /// Libp2p host wrapper for Wetware.
@@ -205,7 +244,7 @@ impl Libp2pHost {
         // ---- WAN Kademlia (Amino DHT, client mode) ----
         let kad_store = kad::store::MemoryStore::new(peer_id);
         let mut kad_config = kad::Config::new(kad::PROTOCOL_NAME);
-        kad_config.set_periodic_bootstrap_interval(None);
+        kad_config.set_periodic_bootstrap_interval(Some(Duration::from_secs(300)));
         let mut kad_wan = kad::Behaviour::with_config(peer_id, kad_store, kad_config);
         kad_wan.set_mode(Some(kad::Mode::Client));
 
@@ -253,15 +292,9 @@ impl Libp2pHost {
             }
         }
 
-        let behaviour = WetwareBehaviour {
-            identify: libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
-                "wetware/0.1.0".to_string(),
-                keypair.public(),
-            )),
-            stream: stream_behaviour,
-            kad: kad_wan,
-            kad_lan,
-        };
+        let identify_config =
+            libp2p::identify::Config::new("wetware/0.1.0".to_string(), keypair.public());
+        let local_peer_id = peer_id;
 
         let mut swarm = SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
@@ -270,12 +303,44 @@ impl Libp2pHost {
                 libp2p::noise::Config::new,
                 libp2p::yamux::Config::default,
             )?
-            .with_behaviour(|_| behaviour)?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .with_quic()
+            .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
+            .with_behaviour(|_keypair, relay_client| {
+                Ok(WetwareBehaviour {
+                    identify: libp2p::identify::Behaviour::new(identify_config),
+                    stream: stream_behaviour,
+                    kad: kad_wan,
+                    kad_lan,
+                    autonat: libp2p::autonat::v1::Behaviour::new(
+                        local_peer_id,
+                        libp2p::autonat::v1::Config::default(),
+                    ),
+                    autonat_v2: libp2p::autonat::v2::client::Behaviour::default(),
+                    relay_client,
+                    dcutr: libp2p::dcutr::Behaviour::new(local_peer_id),
+                })
+            })?
+            .with_swarm_config(|c: libp2p::swarm::Config| {
+                c.with_idle_connection_timeout(Duration::from_secs(60))
+            })
             .build();
 
-        let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
-        swarm.listen_on(listen_addr)?;
+        // Listen on TCP (required) and QUIC/IPv6 (best-effort).
+        // IPv4 TCP is required; everything else logs a warning on failure
+        // (IPv6 may be disabled, UDP port may be unavailable).
+        let tcp4: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
+        swarm.listen_on(tcp4)?;
+
+        for listen in &[
+            format!("/ip6/::/tcp/{port}"),
+            format!("/ip4/0.0.0.0/udp/{port}/quic-v1"),
+            format!("/ip6/::/udp/{port}/quic-v1"),
+        ] {
+            let addr: Multiaddr = listen.parse()?;
+            if let Err(e) = swarm.listen_on(addr.clone()) {
+                tracing::warn!(%addr, error = %e, "Optional listen address failed (continuing)");
+            }
+        }
 
         Ok(Self {
             swarm,
@@ -321,6 +386,15 @@ impl Libp2pHost {
         // Peers already routed, scoped per logical find request.
         let mut routed_peers: HashMap<u64, HashSet<PeerId>> = HashMap::new();
 
+        // --- NAT traversal state ---
+        let mut nat_status = NatReachability::Unknown;
+        let mut active_relay_reservations: usize = 0;
+        let mut inflight_relay_requests: usize = 0;
+        // Relay-capable peers discovered via Identify but not yet reserved.
+        let mut relay_candidates: Vec<(PeerId, Multiaddr)> = Vec::new();
+        // Peers already seen as relay candidates (dedup).
+        let mut seen_relay_peers: HashSet<PeerId> = HashSet::new();
+
         // Self-announcement on both DHTs.
         let beh = self.swarm.behaviour_mut();
         beh.kad.get_closest_peers(self.local_peer_id);
@@ -332,13 +406,34 @@ impl Libp2pHost {
                 event = self.swarm.select_next_some() => {
                     match event {
                         SwarmEvent::NewListenAddr { address, .. } => {
-                            tracing::debug!(%address, "Promoting listen address to external");
-                            self.swarm.add_external_address(address.clone());
+                            if !is_unspecified_addr(&address) {
+                                tracing::debug!(%address, "Promoting listen address to external");
+                                self.swarm.add_external_address(address.clone());
+                            } else {
+                                tracing::debug!(%address, "Skipping unspecified listen address");
+                            }
                             network_state.add_listen_addr(address.to_vec()).await;
                         }
                         SwarmEvent::ExpiredListenAddr { address, .. } => {
                             self.swarm.remove_external_address(&address);
                             network_state.remove_listen_addr(&address.to_vec()).await;
+                            // Track relay reservation expiry.
+                            if is_circuit_addr(&address) {
+                                active_relay_reservations =
+                                    active_relay_reservations.saturating_sub(1);
+                                tracing::info!(
+                                    %address,
+                                    active = active_relay_reservations,
+                                    "Relay reservation expired"
+                                );
+                                // Try to replace the expired reservation.
+                                try_reserve_relay(
+                                    &mut relay_candidates,
+                                    &mut active_relay_reservations,
+                                    &mut inflight_relay_requests,
+                                    &mut self.swarm,
+                                );
+                            }
                         }
                         SwarmEvent::ConnectionEstablished {
                             peer_id,
@@ -442,6 +537,85 @@ impl Libp2pHost {
                         SwarmEvent::Behaviour(WetwareBehaviourEvent::KadLan(ref ev)) => {
                             tracing::debug!("LAN Kad event: {ev:?}");
                         }
+                        // --- Identify: relay discovery ---
+                        SwarmEvent::Behaviour(WetwareBehaviourEvent::Identify(
+                            libp2p::identify::Event::Received { peer_id, info, .. },
+                        )) => {
+                            handle_identify_received(
+                                peer_id, &info,
+                                nat_status,
+                                &mut active_relay_reservations,
+                                &mut inflight_relay_requests,
+                                &mut relay_candidates,
+                                &mut seen_relay_peers,
+                                &mut self.swarm,
+                            );
+                        }
+                        SwarmEvent::Behaviour(WetwareBehaviourEvent::Identify(_)) => {}
+                        // --- AutoNAT v1: authoritative NAT status ---
+                        SwarmEvent::Behaviour(WetwareBehaviourEvent::Autonat(
+                            libp2p::autonat::v1::Event::StatusChanged { old, new },
+                        )) => {
+                            handle_autonat_v1_status(
+                                &old, &new,
+                                &mut nat_status,
+                                &mut self.swarm,
+                                &network_state,
+                                &mut active_relay_reservations,
+                                &mut inflight_relay_requests,
+                                &mut relay_candidates,
+                            ).await;
+                        }
+                        SwarmEvent::Behaviour(WetwareBehaviourEvent::Autonat(_)) => {}
+                        // --- AutoNAT v2: supplementary probes ---
+                        SwarmEvent::Behaviour(WetwareBehaviourEvent::AutonatV2(ev)) => {
+                            tracing::debug!("AutoNAT v2 probe: {ev:?}");
+                        }
+                        // --- Relay client ---
+                        SwarmEvent::Behaviour(WetwareBehaviourEvent::RelayClient(
+                            libp2p::relay::client::Event::ReservationReqAccepted {
+                                relay_peer_id,
+                                renewal,
+                                ..
+                            },
+                        )) => {
+                            inflight_relay_requests =
+                                inflight_relay_requests.saturating_sub(1);
+                            if !renewal {
+                                active_relay_reservations =
+                                    active_relay_reservations.saturating_add(1);
+                            }
+                            tracing::info!(
+                                relay = %relay_peer_id,
+                                renewal,
+                                active = active_relay_reservations,
+                                "Relay reservation accepted"
+                            );
+                        }
+                        SwarmEvent::Behaviour(WetwareBehaviourEvent::RelayClient(ev)) => {
+                            tracing::debug!("Relay client event: {ev:?}");
+                        }
+                        // --- DCUtR: hole-punch results ---
+                        SwarmEvent::Behaviour(WetwareBehaviourEvent::Dcutr(ev)) => {
+                            match &ev.result {
+                                Ok(conn_id) => {
+                                    tracing::info!(
+                                        peer = %ev.remote_peer_id,
+                                        connection = ?conn_id,
+                                        "DCUtR hole-punch succeeded"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        peer = %ev.remote_peer_id,
+                                        error = %e,
+                                        "DCUtR hole-punch failed (relayed connection remains)"
+                                    );
+                                }
+                            }
+                        }
+                        // --- Stream behaviour has no events ---
+                        SwarmEvent::Behaviour(WetwareBehaviourEvent::Stream(_)) => {}
                         _ => {}
                     }
                 }
@@ -776,6 +950,164 @@ fn cleanup_query(
     pending_peer_routing.remove(&key);
 }
 
+// ---------------------------------------------------------------------------
+// NAT traversal helpers
+// ---------------------------------------------------------------------------
+
+/// Returns true if the multiaddr contains a `/p2p-circuit` component.
+fn is_circuit_addr(addr: &Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+    addr.iter().any(|p| matches!(p, Protocol::P2pCircuit))
+}
+
+/// Handle Identify Received events: discover relay-capable peers.
+#[allow(clippy::too_many_arguments)]
+fn handle_identify_received(
+    peer_id: PeerId,
+    info: &libp2p::identify::Info,
+    nat_status: NatReachability,
+    active_relay_reservations: &mut usize,
+    inflight_relay_requests: &mut usize,
+    relay_candidates: &mut Vec<(PeerId, Multiaddr)>,
+    seen_relay_peers: &mut HashSet<PeerId>,
+    swarm: &mut libp2p::swarm::Swarm<WetwareBehaviour>,
+) {
+    // Check if this peer can serve as a relay.
+    if !is_relay_capable(&info.protocols) {
+        return;
+    }
+
+    // Deduplicate: skip peers we've already seen.
+    if !seen_relay_peers.insert(peer_id) {
+        return;
+    }
+
+    tracing::debug!(peer = %peer_id, "Discovered relay-capable peer");
+
+    // Build the relay address from the peer's listen addresses.
+    // Pick the first non-LAN address (or any address as fallback).
+    let relay_addr = info
+        .listen_addrs
+        .iter()
+        .find(|a| !is_lan_addr(a))
+        .or_else(|| info.listen_addrs.first());
+
+    let Some(base_addr) = relay_addr else {
+        tracing::debug!(peer = %peer_id, "Relay-capable peer has no addresses");
+        return;
+    };
+
+    let circuit_addr = base_addr
+        .clone()
+        .with(libp2p::multiaddr::Protocol::P2p(peer_id))
+        .with(libp2p::multiaddr::Protocol::P2pCircuit);
+
+    // If we're known-public, just track the candidate for later.
+    if nat_status == NatReachability::Public {
+        relay_candidates.push((peer_id, circuit_addr));
+        return;
+    }
+
+    // Try to reserve if we're NATted or status is unknown.
+    // Count both active and in-flight to avoid overshooting the cap.
+    if *active_relay_reservations + *inflight_relay_requests < MAX_RELAY_RESERVATIONS {
+        tracing::info!(
+            relay = %peer_id,
+            addr = %circuit_addr,
+            "Requesting relay reservation"
+        );
+        if let Err(e) = swarm.listen_on(circuit_addr.clone()) {
+            tracing::warn!(
+                relay = %peer_id,
+                error = %e,
+                "Failed to request relay reservation"
+            );
+        } else {
+            *inflight_relay_requests += 1;
+        }
+    } else {
+        // Save for later in case a reservation expires.
+        relay_candidates.push((peer_id, circuit_addr));
+    }
+}
+
+/// Handle AutoNAT v1 status change.
+#[allow(clippy::too_many_arguments)]
+async fn handle_autonat_v1_status(
+    _old: &libp2p::autonat::v1::NatStatus,
+    new: &libp2p::autonat::v1::NatStatus,
+    nat_status: &mut NatReachability,
+    swarm: &mut libp2p::swarm::Swarm<WetwareBehaviour>,
+    network_state: &NetworkState,
+    active_relay_reservations: &mut usize,
+    inflight_relay_requests: &mut usize,
+    relay_candidates: &mut Vec<(PeerId, Multiaddr)>,
+) {
+    match new {
+        libp2p::autonat::v1::NatStatus::Public(addr) => {
+            if *nat_status != NatReachability::Public {
+                tracing::info!(%addr, "AutoNAT: confirmed public reachability");
+                *nat_status = NatReachability::Public;
+                network_state.set_nat_status(NatReachability::Public).await;
+                // Promote WAN Kad to server mode — we can serve DHT queries.
+                swarm.behaviour_mut().kad.set_mode(Some(kad::Mode::Server));
+                tracing::info!("WAN Kad promoted to server mode");
+            }
+        }
+        libp2p::autonat::v1::NatStatus::Private => {
+            if *nat_status != NatReachability::Private {
+                let was_public = *nat_status == NatReachability::Public;
+                tracing::info!(was_public, "AutoNAT: node is behind NAT, seeking relay");
+                *nat_status = NatReachability::Private;
+                network_state.set_nat_status(NatReachability::Private).await;
+                // Demote Kad back to client mode if we were previously public.
+                if was_public {
+                    swarm.behaviour_mut().kad.set_mode(Some(kad::Mode::Client));
+                    tracing::info!("WAN Kad demoted to client mode");
+                }
+                // Try to reserve from any candidates we've already seen.
+                try_reserve_relay(
+                    relay_candidates,
+                    active_relay_reservations,
+                    inflight_relay_requests,
+                    swarm,
+                );
+            }
+        }
+        libp2p::autonat::v1::NatStatus::Unknown => {
+            tracing::debug!("AutoNAT: status reset to Unknown");
+        }
+    }
+}
+
+/// Try to reserve relay slots from accumulated candidates.
+fn try_reserve_relay(
+    relay_candidates: &mut Vec<(PeerId, Multiaddr)>,
+    active_relay_reservations: &mut usize,
+    inflight_relay_requests: &mut usize,
+    swarm: &mut libp2p::swarm::Swarm<WetwareBehaviour>,
+) {
+    while *active_relay_reservations + *inflight_relay_requests < MAX_RELAY_RESERVATIONS {
+        let Some((peer_id, circuit_addr)) = relay_candidates.pop() else {
+            break;
+        };
+        tracing::info!(
+            relay = %peer_id,
+            addr = %circuit_addr,
+            "Requesting relay reservation (from candidate pool)"
+        );
+        if let Err(e) = swarm.listen_on(circuit_addr) {
+            tracing::warn!(
+                relay = %peer_id,
+                error = %e,
+                "Failed to request relay reservation"
+            );
+        } else {
+            *inflight_relay_requests += 1;
+        }
+    }
+}
+
 /// Shared Wasmtime runtime state for Wetware hosts.
 pub struct WasmtimeHost {
     engine: Arc<Engine>,
@@ -1074,6 +1406,73 @@ mod tests {
         // Channel is closed now — recv returns None
         assert!(rx.try_recv().is_err());
     }
+
+    // -------------------------------------------------------------------
+    // NAT traversal helpers
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_is_unspecified_addr_ipv4() {
+        let addr: Multiaddr = "/ip4/0.0.0.0/tcp/2025".parse().unwrap();
+        assert!(is_unspecified_addr(&addr));
+    }
+
+    #[test]
+    fn test_is_unspecified_addr_ipv6() {
+        let addr: Multiaddr = "/ip6/::/tcp/2025".parse().unwrap();
+        assert!(is_unspecified_addr(&addr));
+    }
+
+    #[test]
+    fn test_is_unspecified_addr_real_ip() {
+        let cases = [
+            "/ip4/192.168.1.1/tcp/2025",
+            "/ip4/8.8.8.8/tcp/2025",
+            "/ip6/2001:db8::1/tcp/2025",
+            "/ip4/127.0.0.1/tcp/2025",
+        ];
+        for addr_str in &cases {
+            let addr: Multiaddr = addr_str.parse().unwrap();
+            assert!(
+                !is_unspecified_addr(&addr),
+                "{addr_str} should not be unspecified"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_unspecified_addr_no_ip() {
+        let addr: Multiaddr = "/memory/1234".parse().unwrap();
+        assert!(!is_unspecified_addr(&addr));
+    }
+
+    #[test]
+    fn test_is_circuit_addr() {
+        let relay: Multiaddr = "/ip4/1.2.3.4/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN/p2p-circuit"
+            .parse()
+            .unwrap();
+        assert!(is_circuit_addr(&relay));
+
+        let direct: Multiaddr = "/ip4/1.2.3.4/tcp/4001".parse().unwrap();
+        assert!(!is_circuit_addr(&direct));
+    }
+
+    #[test]
+    fn test_is_relay_capable() {
+        let with_relay = vec![
+            libp2p::StreamProtocol::new("/ipfs/kad/1.0.0"),
+            libp2p::StreamProtocol::new(RELAY_HOP_PROTOCOL),
+        ];
+        assert!(is_relay_capable(&with_relay));
+
+        let without_relay = vec![
+            libp2p::StreamProtocol::new("/ipfs/kad/1.0.0"),
+            libp2p::StreamProtocol::new("/ipfs/id/1.0.0"),
+        ];
+        assert!(!is_relay_capable(&without_relay));
+
+        assert!(!is_relay_capable(&[]));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1082,11 +1481,13 @@ mod tests {
 
 /// Minimal network behaviour for client-only operation.
 /// Identify for peer info exchange + libp2p_stream for VatClient dialing.
+/// Relay client for connecting to NATted nodes via relayed addresses.
 /// No Kademlia, no mDNS, no listeners.
 #[derive(libp2p::swarm::NetworkBehaviour)]
 pub struct ClientBehaviour {
     identify: libp2p::identify::Behaviour,
     stream: libp2p_stream::Behaviour,
+    relay_client: libp2p::relay::client::Behaviour,
 }
 
 /// A lightweight libp2p swarm for dialing peers and consuming vat services.
@@ -1098,21 +1499,17 @@ pub struct ClientSwarm {
 }
 
 impl ClientSwarm {
-    /// Build a client-mode swarm with TCP + Noise + Yamux (same stack as host).
+    /// Build a client-mode swarm with TCP + QUIC + Relay (same stack as host).
     /// No listeners are registered — this swarm only dials outgoing connections.
+    /// Relay transport enables dialing NATted nodes via their relayed addresses.
     pub fn new(keypair: libp2p::identity::Keypair) -> Result<Self> {
         let peer_id = keypair.public().to_peer_id();
 
         let stream_behaviour = libp2p_stream::Behaviour::new();
         let stream_control = stream_behaviour.new_control();
 
-        let behaviour = ClientBehaviour {
-            identify: libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
-                "wetware-shell/0.1.0".to_string(),
-                keypair.public(),
-            )),
-            stream: stream_behaviour,
-        };
+        let identify_config =
+            libp2p::identify::Config::new("wetware-shell/0.1.0".to_string(), keypair.public());
 
         let swarm = SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
@@ -1121,8 +1518,18 @@ impl ClientSwarm {
                 libp2p::noise::Config::new,
                 libp2p::yamux::Config::default,
             )?
-            .with_behaviour(|_| behaviour)?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .with_quic()
+            .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
+            .with_behaviour(|_keypair, relay_client| {
+                Ok(ClientBehaviour {
+                    identify: libp2p::identify::Behaviour::new(identify_config),
+                    stream: stream_behaviour,
+                    relay_client,
+                })
+            })?
+            .with_swarm_config(|c: libp2p::swarm::Config| {
+                c.with_idle_connection_timeout(Duration::from_secs(60))
+            })
             .build();
 
         Ok(Self {
