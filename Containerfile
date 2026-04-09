@@ -48,6 +48,7 @@ COPY crates/guest/auth/Cargo.toml crates/guest/auth/Cargo.toml
 COPY std/shell/Cargo.toml std/shell/Cargo.toml
 COPY std/system/Cargo.toml std/system/Cargo.toml
 COPY examples/chess/Cargo.toml examples/chess/build.rs examples/chess/
+COPY examples/discovery/Cargo.toml examples/discovery/build.rs examples/discovery/
 
 # Dummy source files so cargo can resolve the workspace
 RUN mkdir -p src/cli && echo 'fn main() {}' > src/cli/main.rs \
@@ -60,7 +61,8 @@ RUN mkdir -p src/cli && echo 'fn main() {}' > src/cli/main.rs \
     && mkdir -p crates/guest/auth/src && echo '' > crates/guest/auth/src/lib.rs \
     && mkdir -p std/shell/src && echo 'fn main() {}' > std/shell/src/main.rs \
     && mkdir -p std/system/src && echo '' > std/system/src/lib.rs \
-    && mkdir -p examples/chess/src && echo 'fn main() {}' > examples/chess/src/main.rs
+    && mkdir -p examples/chess/src && echo '' > examples/chess/src/lib.rs \
+    && mkdir -p examples/discovery/src && echo '' > examples/discovery/src/lib.rs
 
 # Warm the dependency cache (errors expected from dummy sources; || true)
 RUN cargo build --release || true
@@ -83,7 +85,7 @@ FROM gcr.io/distroless/static-debian12
 COPY --from=builder /usr/src/app/target/release/ww /usr/local/bin/ww
 
 # Kernel layer (FHS: bin/main.wasm)
-COPY --from=builder /usr/src/app/crates/kernel/bin/main.wasm \
+COPY --from=builder /usr/src/app/std/kernel/bin/main.wasm \
      /usr/share/wetware/kernel/bin/main.wasm
 
 # Shell layer (WASM + schema + init.d)
