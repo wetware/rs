@@ -114,7 +114,8 @@ async fn spawn_greeter_on_pool(
         }),
         result_tx: None,
     })
-    .map_err(|_| ()).expect("pool rejected spawn");
+    .map_err(|_| ())
+    .expect("pool rejected spawn");
 
     // Set up the test-side capnp client over the duplex.
     let (test_read, test_write) = tokio::io::split(test_end);
@@ -158,13 +159,10 @@ async fn test_discovery_cell_greet() {
             // Call greet() and verify the response.
             let mut req = greeter.greet_request();
             req.get().set_name("integration-test");
-            let resp = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                req.send().promise,
-            )
-            .await
-            .expect("greet timed out")
-            .expect("greet RPC failed");
+            let resp = tokio::time::timeout(std::time::Duration::from_secs(10), req.send().promise)
+                .await
+                .expect("greet timed out")
+                .expect("greet RPC failed");
             let greeting = resp
                 .get()
                 .unwrap()
@@ -212,13 +210,11 @@ async fn test_discovery_cell_greet_multiple() {
             for name in &["Alice", "Bob", "Charlie"] {
                 let mut req = greeter.greet_request();
                 req.get().set_name(name);
-                let resp = tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
-                    req.send().promise,
-                )
-                .await
-                .expect("greet timed out")
-                .expect("greet RPC failed");
+                let resp =
+                    tokio::time::timeout(std::time::Duration::from_secs(10), req.send().promise)
+                        .await
+                        .expect("greet timed out")
+                        .expect("greet RPC failed");
                 let greeting = resp
                     .get()
                     .unwrap()
