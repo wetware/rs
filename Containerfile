@@ -70,8 +70,8 @@ COPY . .
 # GIT_COMMIT set after cache-warming so the hash doesn't bust dep cache.
 ENV GIT_COMMIT=${GIT_COMMIT}
 
-# Build host binary + kernel/shell WASM (skip examples)
-RUN make std host
+# Build std + echo example (embedded by build.rs), then host binary
+RUN make std echo host
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────
 FROM gcr.io/distroless/static-debian12
