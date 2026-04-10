@@ -15,6 +15,7 @@ use ww::cell::CellBuilder;
 use ww::host;
 use ww::image;
 use ww::ipfs;
+use ww::ipfs::ContentStore as _;
 use ww::loaders::{ChainLoader, EmbeddedLoader, HostPathLoader, IpfsUnixfsLoader};
 
 // Embedded WASM blobs — compiled into the binary so `ww run --mcp` works
@@ -165,10 +166,6 @@ enum Commands {
         /// Example: --with-http-admin 127.0.0.1:2026
         #[arg(long, value_name = "ADDR")]
         with_http_admin: Option<String>,
-
-        /// IPFS HTTP API endpoint
-        #[arg(long, default_value = "http://localhost:5001", env = "IPFS_API")]
-        ipfs_url: String,
     },
 
     /// Generate a new Ed25519 identity secret.
@@ -260,6 +257,12 @@ enum Commands {
         #[command(subcommand)]
         action: NsAction,
     },
+
+    /// OCI container image operations via IPFS.
+    Oci {
+        #[command(subcommand)]
+        action: OciAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -313,6 +316,43 @@ enum PerformAction {
     ///   2. Remove MCP config from Claude Code
     ///   3. Optionally remove ~/.ww (prompts for confirmation)
     Uninstall,
+
+    /// Self-update the ww binary via IPNS.
+    ///
+    /// Resolves /ipns/releases.wetware.run/Cargo.toml to check for a
+    /// newer version, then fetches the platform binary and atomically
+    /// replaces the running executable.
+    Upgrade {
+        /// IPFS HTTP API endpoint.
+        #[arg(long, default_value = "http://localhost:5001", env = "IPFS_API")]
+        ipfs_url: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum OciAction {
+    /// Pull the wetware container image from IPFS and load it into Docker/podman.
+    ///
+    /// Resolves the OCI tar from /ipns/releases.wetware.run/oci/image.tar
+    /// and pipes it to `docker load` or `podman load`.
+    ///
+    /// Examples:
+    ///   ww oci import
+    ///   ww oci import --cid QmHash...
+    ///   ww oci import --stdout | podman load
+    Import {
+        /// Use a specific CID instead of resolving IPNS.
+        #[arg(long)]
+        cid: Option<String>,
+
+        /// Write the image tar to stdout instead of loading automatically.
+        #[arg(long)]
+        stdout: bool,
+
+        /// IPFS HTTP API endpoint.
+        #[arg(long, default_value = "http://localhost:5001", env = "IPFS_API")]
+        ipfs_url: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -430,7 +470,6 @@ impl Commands {
                 http_listen,
                 runtime_cache_policy,
                 with_http_admin,
-                ipfs_url,
             } => {
                 let mounts = ww::mount::parse_args(&mount_args)?;
                 // Identity is passed separately — NOT as a mount.
@@ -453,7 +492,6 @@ impl Commands {
                     http_listen,
                     runtime_cache_policy,
                     with_http_admin,
-                    ipfs_url,
                 )
                 .await
             }
@@ -480,8 +518,16 @@ impl Commands {
             Commands::Perform { action } => match action {
                 PerformAction::Install => Self::perform_install().await,
                 PerformAction::Uninstall => Self::perform_uninstall().await,
+                PerformAction::Upgrade { ipfs_url } => Self::perform_upgrade(ipfs_url).await,
             },
             Commands::Doctor => Self::doctor().await,
+            Commands::Oci { action } => match action {
+                OciAction::Import {
+                    cid,
+                    stdout,
+                    ipfs_url,
+                } => Self::oci_import(cid, stdout, ipfs_url).await,
+            },
             Commands::Ns { action } => match action {
                 NsAction::List => Self::ns_list().await,
                 NsAction::Add {
@@ -1252,7 +1298,6 @@ wasip2::cli::command::export!({iface_name}Guest);
         http_listen: Option<String>,
         runtime_cache_policy: String,
         with_http_admin: Option<String>,
-        ipfs_url: String,
     ) -> Result<()> {
         // Dev-mode compat: if a single local root mount has boot/main.wasm
         // but not bin/main.wasm, copy it over (the runtime expects bin/).
@@ -1276,7 +1321,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         // HostPath first so local files can override embedded WASM (enables hot-patches).
         // Embedded second as fallback for pre-built binary distribution.
         // IPFS last for content-addressed network resolution.
-        let ipfs_client = ipfs::HttpClient::new(ipfs_url);
+        let ipfs_client = ipfs::HttpClient::new("http://localhost:5001".into());
         let content_store: std::sync::Arc<dyn ipfs::ContentStore> =
             std::sync::Arc::new(ipfs_client.clone());
         let loader = ChainLoader::new(vec![
@@ -2218,6 +2263,290 @@ wasip2::cli::command::export!({iface_name}Guest);
         );
 
         Ok(())
+    }
+
+    /// Pull a container image from IPFS and load it into Docker/podman.
+    async fn oci_import(cid: Option<String>, to_stdout: bool, ipfs_url: String) -> Result<()> {
+        let ipfs_client = ipfs::HttpClient::new(ipfs_url);
+
+        // Resolve the image tar path.
+        let ipfs_path = if let Some(ref cid) = cid {
+            format!("/ipfs/{}/oci/image.tar", cid.trim_start_matches("/ipfs/"))
+        } else {
+            // Resolve IPNS to get latest release.
+            eprintln!("Resolving /ipns/releases.wetware.run ...");
+            let resolved = ipfs_client
+                .name_resolve("/ipns/releases.wetware.run")
+                .await
+                .context(
+                    "IPNS resolution failed.\n\
+                     \n\
+                     Make sure Kubo is running (`ipfs daemon`) and connected to the DHT.\n\
+                     Alternatively, specify a CID directly: ww oci import --cid <CID>",
+                )?;
+            format!("{}/oci/image.tar", resolved.trim_end_matches('/'))
+        };
+
+        eprintln!("Fetching {ipfs_path} ...");
+        let tar_bytes = ipfs_client
+            .cat(&ipfs_path)
+            .await
+            .context("Failed to fetch OCI image tar from IPFS")?;
+
+        if to_stdout {
+            // Write raw tar to stdout for manual piping.
+            use std::io::Write;
+            let mut out = std::io::stdout().lock();
+            out.write_all(&tar_bytes)
+                .context("Failed to write image tar to stdout")?;
+            out.flush()?;
+            return Ok(());
+        }
+
+        // Detect container runtime.
+        let runtime = Self::detect_container_runtime()?;
+        eprintln!("Loading image via {runtime} ...");
+
+        let mut child = std::process::Command::new(&runtime)
+            .arg("load")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .with_context(|| format!("Failed to start `{runtime} load`"))?;
+
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().context("Failed to open stdin pipe")?;
+            stdin
+                .write_all(&tar_bytes)
+                .context("Failed to write image data to container runtime")?;
+        }
+
+        let status = child.wait().context("Failed to wait on container runtime")?;
+        if !status.success() {
+            bail!("`{runtime} load` exited with status {status}");
+        }
+
+        println!("Loaded wetware/ww:latest from IPFS");
+        Ok(())
+    }
+
+    /// Detect whether Docker or podman is available.
+    fn detect_container_runtime() -> Result<String> {
+        for runtime in &["docker", "podman"] {
+            if std::process::Command::new(runtime)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+            {
+                return Ok(runtime.to_string());
+            }
+        }
+        bail!(
+            "Neither docker nor podman found in PATH.\n\
+             \n\
+             Install one of:\n\
+             - Docker: https://docs.docker.com/get-docker/\n\
+             - Podman: https://podman.io/getting-started/installation"
+        )
+    }
+
+    /// Self-update the ww binary via IPNS.
+    async fn perform_upgrade(ipfs_url: String) -> Result<()> {
+        let ipfs_client = ipfs::HttpClient::new(ipfs_url);
+
+        // 1. Resolve IPNS to get latest release tree.
+        eprintln!("Resolving /ipns/releases.wetware.run ...");
+        let resolved = ipfs_client
+            .name_resolve("/ipns/releases.wetware.run")
+            .await
+            .context(
+                "IPNS resolution failed.\n\
+                 \n\
+                 Make sure Kubo is running (`ipfs daemon`) and connected to the DHT.\n\
+                 If IPNS is slow, try again — DHT resolution can take 10-60s on a fresh node.",
+            )?;
+        let base = resolved.trim_end_matches('/');
+
+        // 2. Fetch Cargo.toml and parse version.
+        let cargo_toml_path = format!("{base}/Cargo.toml");
+        eprintln!("Checking latest version ...");
+        let cargo_toml_bytes = ipfs_client
+            .cat(&cargo_toml_path)
+            .await
+            .context("Failed to fetch Cargo.toml from IPFS release")?;
+        let cargo_toml = String::from_utf8(cargo_toml_bytes)
+            .context("Cargo.toml is not valid UTF-8")?;
+
+        let remote_version = Self::parse_version_from_cargo_toml(&cargo_toml)
+            .context("Failed to parse version from remote Cargo.toml")?;
+
+        // 3. Compare with running version.
+        let current_version = env!("CARGO_PKG_VERSION");
+        if remote_version == current_version {
+            println!("Already up to date ({current_version}).");
+            return Ok(());
+        }
+
+        eprintln!("Upgrade available: {current_version} -> {remote_version}");
+
+        // 4. Detect platform.
+        let os = match std::env::consts::OS {
+            "linux" => "linux",
+            "macos" => "macos",
+            os => bail!("Unsupported OS for upgrade: {os}"),
+        };
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "x86_64",
+            "aarch64" => "aarch64",
+            arch => bail!("Unsupported architecture for upgrade: {arch}"),
+        };
+
+        // 5. Fetch binary.
+        let binary_path = format!("{base}/bin/{os}/{arch}/ww");
+        eprintln!("Fetching {binary_path} ...");
+        let binary = ipfs_client
+            .cat(&binary_path)
+            .await
+            .with_context(|| format!("Failed to fetch binary for {os}/{arch}"))?;
+
+        // 6. Fetch and verify checksums.
+        let checksums_path = format!("{base}/CHECKSUMS.txt");
+        let checksums_bytes = ipfs_client
+            .cat(&checksums_path)
+            .await
+            .context("Failed to fetch CHECKSUMS.txt")?;
+        let checksums = String::from_utf8(checksums_bytes)
+            .context("CHECKSUMS.txt is not valid UTF-8")?;
+
+        Self::verify_checksum(&binary, &format!("bin/{os}/{arch}/ww"), &checksums)
+            .context("Checksum verification failed — aborting upgrade")?;
+
+        // 7. Atomic replace of current binary.
+        let current_exe =
+            std::env::current_exe().context("Cannot determine path of running binary")?;
+        let current_exe = current_exe
+            .canonicalize()
+            .unwrap_or_else(|_| current_exe.clone());
+        let old_exe = current_exe.with_extension("old");
+
+        // On Linux, rename the running binary first (rename(2) works on
+        // running binaries — the old inode stays alive until the process
+        // exits). On macOS this also works fine.
+        std::fs::rename(&current_exe, &old_exe).with_context(|| {
+            format!(
+                "Failed to rename {} to {}.\n\
+                 \n\
+                 If permission denied, try: sudo ww perform upgrade",
+                current_exe.display(),
+                old_exe.display()
+            )
+        })?;
+
+        if let Err(e) = std::fs::write(&current_exe, &binary) {
+            // Restore old binary on failure.
+            let _ = std::fs::rename(&old_exe, &current_exe);
+            return Err(e).context("Failed to write new binary — old binary restored");
+        }
+
+        // chmod +x
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(&current_exe, perms)
+                .context("Failed to set executable permissions on new binary")?;
+        }
+
+        // Clean up old binary (best-effort; on Linux the running process
+        // still holds the inode, but the directory entry is removed).
+        let _ = std::fs::remove_file(&old_exe);
+
+        println!("Upgraded ww to {remote_version}. Restart any running daemon.");
+        Ok(())
+    }
+
+    /// Parse `version = "x.y.z"` from the [package] section of Cargo.toml.
+    fn parse_version_from_cargo_toml(content: &str) -> Result<String> {
+        // Simple line-based parser: find `version = "..."` in the
+        // [package] section (before any other `[` section header).
+        let mut in_package = false;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed == "[package]" {
+                in_package = true;
+                continue;
+            }
+            if trimmed.starts_with('[') {
+                if in_package {
+                    break; // Left [package] section.
+                }
+                continue;
+            }
+            if in_package && trimmed.starts_with("version") {
+                // Match: version = "x.y.z"
+                if let Some(start) = trimmed.find('"') {
+                    if let Some(end) = trimmed[start + 1..].find('"') {
+                        return Ok(trimmed[start + 1..start + 1 + end].to_string());
+                    }
+                }
+            }
+        }
+        bail!("No version field found in [package] section")
+    }
+
+    /// Verify a binary against CHECKSUMS.txt (blake3 or sha256).
+    fn verify_checksum(binary: &[u8], filename: &str, checksums: &str) -> Result<()> {
+        // CHECKSUMS.txt format (produced by b3sum and sha256sum):
+        //   <hash>  <filename>
+        // Try blake3 first (above the "# sha256" separator), then sha256.
+        for line in checksums.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // Split on whitespace: "<hash>  <file>" or "<hash> <file>"
+            let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            let expected_hash = parts[0];
+            let file = parts[1].trim();
+            if file != filename {
+                continue;
+            }
+
+            // Determine hash type by length: blake3 = 64 hex chars, sha256 = 64 hex chars.
+            // Both are 64 hex chars, so try blake3 first.
+            let actual_hash = {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(binary);
+                hasher.finalize().to_hex().to_string()
+            };
+
+            if actual_hash == expected_hash {
+                eprintln!("Checksum OK (blake3)");
+                return Ok(());
+            }
+
+            // Try sha256.
+            // sha256 is not in deps; blake3 match above should cover it.
+            // If blake3 didn't match, report mismatch.
+            bail!(
+                "Checksum mismatch for {filename}:\n  expected: {expected_hash}\n  got:      {actual_hash}\n\
+                 \n\
+                 The downloaded binary may be corrupted. Aborting upgrade."
+            );
+        }
+
+        bail!(
+            "No checksum found for {filename} in CHECKSUMS.txt.\n\
+             Cannot verify integrity — aborting upgrade."
+        )
     }
 
     /// List configured namespaces from ~/.ww/etc/ns/.
