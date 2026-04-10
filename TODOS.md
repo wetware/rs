@@ -211,3 +211,11 @@
 **Effort:** S-M
 **Priority:** P3
 **Depends on:** macOS pre-built binary in CI (Phase 2)
+
+## Release stem (on-chain distribution anchoring)
+**What:** Atomic stem type holding source + binary distribution trees, anchored on-chain via EVM. IPNS is the v1 coordination primitive; the release stem replaces it with on-chain anchoring. Publishing a release = updating the stem. Every node watching the stem sees the new release.
+**Why:** Completes the dogfooding story. Distribution becomes a first-class primitive in the runtime, not external tooling. Source and binaries share a CID root, providing provenance by construction.
+**Context:** The IPFS-first distribution plan (CEO plan: `2026-04-10-ipfs-distribution.md`) establishes the repo-tree-as-artifact layout and IPNS as v1. The release stem preserves the same directory layout but changes the update mechanism from IPNS to on-chain state. Connects to the stem taxonomy (atomic stems = on-chain coordination primitives).
+**Effort:** L (human) → M (CC)
+**Priority:** P3
+**Depends on:** IPFS-first distribution (this plan), stem infrastructure
