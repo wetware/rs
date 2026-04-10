@@ -166,6 +166,10 @@ enum Commands {
         /// Example: --with-http-admin 127.0.0.1:2026
         #[arg(long, value_name = "ADDR")]
         with_http_admin: Option<String>,
+
+        /// IPFS HTTP API endpoint
+        #[arg(long, default_value = "http://localhost:5001", env = "IPFS_API")]
+        ipfs_url: String,
     },
 
     /// Generate a new Ed25519 identity secret.
@@ -470,6 +474,7 @@ impl Commands {
                 http_listen,
                 runtime_cache_policy,
                 with_http_admin,
+                ipfs_url,
             } => {
                 let mounts = ww::mount::parse_args(&mount_args)?;
                 // Identity is passed separately — NOT as a mount.
@@ -492,6 +497,7 @@ impl Commands {
                     http_listen,
                     runtime_cache_policy,
                     with_http_admin,
+                    ipfs_url,
                 )
                 .await
             }
@@ -1298,6 +1304,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         http_listen: Option<String>,
         runtime_cache_policy: String,
         with_http_admin: Option<String>,
+        ipfs_url: String,
     ) -> Result<()> {
         // Dev-mode compat: if a single local root mount has boot/main.wasm
         // but not bin/main.wasm, copy it over (the runtime expects bin/).
@@ -1321,7 +1328,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         // HostPath first so local files can override embedded WASM (enables hot-patches).
         // Embedded second as fallback for pre-built binary distribution.
         // IPFS last for content-addressed network resolution.
-        let ipfs_client = ipfs::HttpClient::new("http://localhost:5001".into());
+        let ipfs_client = ipfs::HttpClient::new(ipfs_url);
         let content_store: std::sync::Arc<dyn ipfs::ContentStore> =
             std::sync::Arc::new(ipfs_client.clone());
         let loader = ChainLoader::new(vec![
