@@ -202,6 +202,24 @@ jobs:
           ghcr.io/wetware/ww:${{ github.event.release.tag_name }}
           ghcr.io/wetware/ww:latest
 
+    - name: Build single-arch image for IPFS artifact
+      uses: docker/build-push-action@v6
+      with:
+        context: docker-context
+        file: docker-context/Containerfile
+        platforms: linux/amd64
+        load: true
+        tags: ww-ipfs-export:latest
+
+    - name: Save container image tar
+      run: docker save ww-ipfs-export:latest -o ww-image.tar
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ww-image
+        path: ww-image.tar
+        retention-days: 1
+
     - name: Smoke test
       run: |
         docker run --rm \
@@ -226,3 +244,73 @@ jobs:
       run: |
         cosign sign --yes \
           ghcr.io/wetware/ww@${{ needs.build-container.outputs.digest }}
+
+  publish-ipfs:
+    name: Publish to IPFS
+    needs: [build-binaries, build-container]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install IPFS
+      run: |
+        wget -qO- https://dist.ipfs.tech/kubo/v0.32.1/kubo_v0.32.1_linux-amd64.tar.gz | tar xz
+        sudo mv kubo/ipfs /usr/local/bin/
+        ipfs init --profile server
+        ipfs daemon &
+        for i in $(seq 1 30); do ipfs id >/dev/null 2>&1 && break || sleep 1; done
+
+    - uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+        merge-multiple: true
+
+    - name: Install b3sum
+      run: |
+        curl -fsSL https://github.com/BLAKE3-team/BLAKE3/releases/latest/download/b3sum_linux_x64_bin -o /usr/local/bin/b3sum
+        chmod +x /usr/local/bin/b3sum
+
+    - name: Assemble release tree
+      run: |
+        STAGE=/tmp/release-tree
+        rsync -a --exclude .git --exclude target . "$STAGE/"
+        cd "$STAGE"
+
+        mkdir -p bin/linux/x86_64 bin/linux/aarch64 bin/macos/aarch64
+        tar xzf "$GITHUB_WORKSPACE/artifacts/ww-linux-x86_64.tar.gz" -C bin/linux/x86_64/
+        tar xzf "$GITHUB_WORKSPACE/artifacts/ww-linux-aarch64.tar.gz" -C bin/linux/aarch64/
+        tar xzf "$GITHUB_WORKSPACE/artifacts/ww-macos-aarch64.tar.gz" -C bin/macos/aarch64/
+
+        mkdir -p oci
+        cp "$GITHUB_WORKSPACE/artifacts/ww-image.tar" oci/image.tar
+
+        find bin/ oci/ -type f | sort | xargs b3sum > CHECKSUMS.txt
+        echo "" >> CHECKSUMS.txt
+        echo "# sha256" >> CHECKSUMS.txt
+        find bin/ oci/ -type f | sort | xargs sha256sum >> CHECKSUMS.txt
+
+    - name: Publish to IPFS
+      run: |
+        CID=$(ipfs add -rQ /tmp/release-tree/)
+        echo "Release CID: $CID"
+        echo "CID=$CID" >> "$GITHUB_ENV"
+
+    - name: Connect CI node to K8s Kubo pod
+      run: ipfs swarm connect ${{ secrets.KUBO_MULTIADDR }}
+
+    - name: Pin + IPNS publish via SSH proxy
+      run: |
+        ssh ${{ secrets.VPS_SSH }} "kubectl exec ipfs-daemon-0 -- \
+          timeout 600 ipfs pin add ${{ env.CID }}"
+        echo "Pin confirmed on persistent node"
+        ssh ${{ secrets.VPS_SSH }} "kubectl exec ipfs-daemon-0 -- \
+          ipfs name publish --key=ww-release /ipfs/${{ env.CID }}"
+        echo "IPNS updated on persistent node"
+
+    - name: Record release CID
+      run: |
+        echo "## IPFS Release" >> "$GITHUB_STEP_SUMMARY"
+        echo "- CID: \`${{ env.CID }}\`" >> "$GITHUB_STEP_SUMMARY"
+        echo "- IPNS: \`/ipns/${{ secrets.IPNS_KEY_ID }}\`" >> "$GITHUB_STEP_SUMMARY"
