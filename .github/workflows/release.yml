@@ -297,15 +297,22 @@ jobs:
         echo "Release CID: $CID"
         echo "CID=$CID" >> "$GITHUB_ENV"
 
+    - name: Set up SSH
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+        chmod 600 ~/.ssh/deploy_key
+        echo "${{ secrets.DEPLOY_SSH_HOST_KEY }}" > ~/.ssh/known_hosts
+
     - name: Connect CI node to K8s Kubo pod
       run: ipfs swarm connect ${{ secrets.KUBO_MULTIADDR }}
 
     - name: Pin + IPNS publish via SSH proxy
       run: |
-        ssh ${{ secrets.VPS_SSH }} "kubectl exec ipfs-daemon-0 -- \
+        ssh -i ~/.ssh/deploy_key ${{ secrets.VPS_SSH }} "kubectl exec ipfs-daemon-0 -- \
           timeout 600 ipfs pin add ${{ env.CID }}"
         echo "Pin confirmed on persistent node"
-        ssh ${{ secrets.VPS_SSH }} "kubectl exec ipfs-daemon-0 -- \
+        ssh -i ~/.ssh/deploy_key ${{ secrets.VPS_SSH }} "kubectl exec ipfs-daemon-0 -- \
           ipfs name publish --key=ww-release /ipfs/${{ env.CID }}"
         echo "IPNS updated on persistent node"
 
