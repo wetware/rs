@@ -2330,7 +2330,9 @@ wasip2::cli::command::export!({iface_name}Guest);
                 .context("Failed to write image data to container runtime")?;
         }
 
-        let status = child.wait().context("Failed to wait on container runtime")?;
+        let status = child
+            .wait()
+            .context("Failed to wait on container runtime")?;
         if !status.success() {
             bail!("`{runtime} load` exited with status {status}");
         }
@@ -2386,8 +2388,8 @@ wasip2::cli::command::export!({iface_name}Guest);
             .cat(&cargo_toml_path)
             .await
             .context("Failed to fetch Cargo.toml from IPFS release")?;
-        let cargo_toml = String::from_utf8(cargo_toml_bytes)
-            .context("Cargo.toml is not valid UTF-8")?;
+        let cargo_toml =
+            String::from_utf8(cargo_toml_bytes).context("Cargo.toml is not valid UTF-8")?;
 
         let remote_version = Self::parse_version_from_cargo_toml(&cargo_toml)
             .context("Failed to parse version from remote Cargo.toml")?;
@@ -2427,8 +2429,8 @@ wasip2::cli::command::export!({iface_name}Guest);
             .cat(&checksums_path)
             .await
             .context("Failed to fetch CHECKSUMS.txt")?;
-        let checksums = String::from_utf8(checksums_bytes)
-            .context("CHECKSUMS.txt is not valid UTF-8")?;
+        let checksums =
+            String::from_utf8(checksums_bytes).context("CHECKSUMS.txt is not valid UTF-8")?;
 
         Self::verify_checksum(&binary, &format!("bin/{os}/{arch}/ww"), &checksums)
             .context("Checksum verification failed — aborting upgrade")?;
