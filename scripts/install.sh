@@ -1,29 +1,30 @@
 #!/bin/sh
-# Wetware installer
+# Wetware installer (IPFS-first)
 # Usage: curl -sSf https://raw.githubusercontent.com/wetware/ww/master/scripts/install.sh | sh
-#   or:  curl -sSf ... | sh -s -- --version v0.2.0 --prefix /opt/bin
+#   or:  curl -sSf ... | sh -s -- --version <CID>
 set -eu
 
-REPO="wetware/ww"
-VERSION=""
-PREFIX="${HOME}/.local/bin"
+IPNS_NAME="/ipns/releases.wetware.run"
+GATEWAY_BASE="https://dweb.link/ipns/releases.wetware.run"
+IPNS_TIMEOUT=30
+VERSION_CID=""
+WW_HOME="${HOME}/.ww"
 
 # Parse arguments
 while [ $# -gt 0 ]; do
   case "$1" in
-    --version) VERSION="$2"; shift 2 ;;
-    --prefix)  PREFIX="$2"; shift 2 ;;
+    --version) VERSION_CID="$2"; shift 2 ;;
     --help)
-      echo "Usage: install.sh [--version VERSION] [--prefix PATH]"
-      echo "  --version  Specific release tag (default: latest)"
-      echo "  --prefix   Install directory (default: ~/.local/bin)"
+      echo "Usage: install.sh [--version CID]"
+      echo "  --version  Install a specific release by immutable CID"
+      echo "             (default: resolve latest via IPNS)"
       exit 0
       ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
 
-# Detect OS
+# --- Step 1: Detect platform ---
 OS="$(uname -s)"
 case "$OS" in
   Linux)  OS_NAME="linux" ;;
@@ -35,10 +36,9 @@ case "$OS" in
     ;;
 esac
 
-# Detect architecture (normalize macOS arm64 -> aarch64)
 ARCH="$(uname -m)"
 case "$ARCH" in
-  x86_64|amd64) ARCH_NAME="x86_64" ;;
+  x86_64|amd64)  ARCH_NAME="x86_64" ;;
   aarch64|arm64) ARCH_NAME="aarch64" ;;
   *)
     echo "Error: unsupported architecture: $ARCH"
@@ -47,50 +47,98 @@ case "$ARCH" in
     ;;
 esac
 
-ARTIFACT="ww-${OS_NAME}-${ARCH_NAME}.tar.gz"
+echo "Detected platform: ${OS_NAME}/${ARCH_NAME}"
 
-# Resolve version
-if [ -z "$VERSION" ]; then
-  echo "Fetching latest release..."
-  VERSION=$(curl -sSf "https://api.github.com/repos/${REPO}/releases/latest" \
-    | grep '"tag_name"' | head -1 | cut -d'"' -f4)
-  if [ -z "$VERSION" ]; then
-    echo "Error: could not determine latest release version"
-    exit 1
+# --- Step 2: Check IPFS availability ---
+if ! command -v ipfs >/dev/null 2>&1; then
+  echo "Error: Wetware requires IPFS. Install Kubo: https://docs.ipfs.tech/install/"
+  exit 1
+fi
+
+if ! ipfs id >/dev/null 2>&1; then
+  echo "Error: IPFS daemon is not running."
+  echo "Start it with: ipfs daemon &"
+  echo "Install Kubo if needed: https://docs.ipfs.tech/install/"
+  exit 1
+fi
+
+# --- Step 3: Resolve IPNS base path ---
+USE_GATEWAY=0
+
+if [ -n "$VERSION_CID" ]; then
+  # Version pinning: use CID directly, skip IPNS resolution
+  IPFS_BASE="/ipfs/${VERSION_CID}"
+  echo "Installing pinned release: ${VERSION_CID}"
+else
+  echo "Resolving latest release via IPNS (may take up to ${IPNS_TIMEOUT}s on first run)..."
+  RESOLVED_CID=$(timeout "$IPNS_TIMEOUT" ipfs name resolve "$IPNS_NAME" 2>/dev/null) || true
+
+  if [ -n "$RESOLVED_CID" ]; then
+    IPFS_BASE="$RESOLVED_CID"
+    echo "Resolved: ${IPFS_BASE}"
+  else
+    echo "IPNS resolution timed out. Falling back to HTTP gateway..."
+    USE_GATEWAY=1
   fi
 fi
 
-echo "Installing wetware ${VERSION} (${OS_NAME}/${ARCH_NAME})..."
-
-BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# Download binary and checksums
-echo "Downloading ${ARTIFACT}..."
-curl -fSL "${BASE_URL}/${ARTIFACT}" -o "${TMPDIR}/${ARTIFACT}" || {
-  echo "Error: download failed: ${BASE_URL}/${ARTIFACT}"
+# Helper: fetch a file from IPFS (local or gateway fallback)
+ipfs_cat() {
+  _path="$1"
+  if [ "$USE_GATEWAY" -eq 1 ]; then
+    curl -sSf "${GATEWAY_BASE}${_path}"
+  else
+    ipfs cat "${IPFS_BASE}${_path}"
+  fi
+}
+
+# Helper: fetch a directory from IPFS (local or gateway fallback)
+ipfs_get_dir() {
+  _path="$1"
+  _output="$2"
+  if [ "$USE_GATEWAY" -eq 1 ]; then
+    # Gateway fallback: download individual files is impractical for dirs.
+    # Use ipfs get with the gateway-resolved path instead.
+    echo "Warning: directory fetch via gateway is not supported."
+    echo "Please ensure your IPFS daemon can resolve IPNS, or use --version <CID>."
+    exit 1
+  else
+    ipfs get "${IPFS_BASE}${_path}" -o "$_output"
+  fi
+}
+
+# --- Step 4: Fetch binary ---
+BIN_PATH="/bin/${OS_NAME}/${ARCH_NAME}/ww"
+echo "Fetching binary (${OS_NAME}/${ARCH_NAME})..."
+ipfs_cat "$BIN_PATH" > "${TMPDIR}/ww" || {
+  echo ""
+  echo "Error: could not fetch binary from IPFS."
+  echo "The release may not exist or IPFS content is unavailable."
+  echo ""
+  echo "Fallback: download manually from GitHub Releases:"
+  echo "  https://github.com/wetware/ww/releases"
   exit 1
 }
 
-echo "Downloading checksums..."
-curl -fSL "${BASE_URL}/CHECKSUMS.txt" -o "${TMPDIR}/CHECKSUMS.txt" || {
-  echo "Warning: could not download checksums. Skipping verification."
+# --- Step 5: Fetch and verify checksums ---
+echo "Fetching checksums..."
+ipfs_cat "/CHECKSUMS.txt" > "${TMPDIR}/CHECKSUMS.txt" || {
+  echo "Warning: could not fetch checksums. Skipping verification."
 }
 
-# Verify checksum
 if [ -f "${TMPDIR}/CHECKSUMS.txt" ]; then
   echo "Verifying checksum..."
   if command -v b3sum >/dev/null 2>&1; then
-    # Verify via blake3 multihash
-    EXPECTED=$(grep "^1e20" "${TMPDIR}/CHECKSUMS.txt" | grep "$ARTIFACT" | head -1 | awk '{print $1}' | cut -c5-)
-    ACTUAL=$(b3sum --no-names "${TMPDIR}/${ARTIFACT}")
+    EXPECTED=$(grep "$BIN_PATH" "${TMPDIR}/CHECKSUMS.txt" | grep -v "^#" | head -1 | awk '{print $1}')
+    ACTUAL=$(b3sum --no-names "${TMPDIR}/ww")
     ALGO="blake3"
   else
-    # Fall back to sha256 (raw section at bottom of CHECKSUMS.txt)
-    EXPECTED=$(grep -v "^#" "${TMPDIR}/CHECKSUMS.txt" | grep -v "^1" | grep "$ARTIFACT" | head -1 | awk '{print $1}')
-    ACTUAL=$(sha256sum "${TMPDIR}/${ARTIFACT}" 2>/dev/null || shasum -a 256 "${TMPDIR}/${ARTIFACT}" | awk '{print $1}')
-    # sha256sum output includes filename, extract just hash
+    # Fall back to sha256 (listed after "# sha256" marker in CHECKSUMS.txt)
+    EXPECTED=$(sed -n '/^# sha256/,$ p' "${TMPDIR}/CHECKSUMS.txt" | grep "$BIN_PATH" | head -1 | awk '{print $1}')
+    ACTUAL=$(sha256sum "${TMPDIR}/ww" 2>/dev/null || shasum -a 256 "${TMPDIR}/ww")
     ACTUAL=$(echo "$ACTUAL" | awk '{print $1}')
     ALGO="sha256"
   fi
@@ -99,33 +147,58 @@ if [ -f "${TMPDIR}/CHECKSUMS.txt" ]; then
     echo "Error: checksum mismatch (${ALGO})"
     echo "  expected: ${EXPECTED}"
     echo "  got:      ${ACTUAL}"
-    rm -f "${TMPDIR}/${ARTIFACT}"
+    echo ""
+    echo "The download may be corrupted. Try again, or download manually:"
+    echo "  https://github.com/wetware/ww/releases"
+    rm -f "${TMPDIR}/ww"
     exit 1
   elif [ -n "$EXPECTED" ]; then
     echo "Checksum OK (${ALGO})"
   else
-    echo "Warning: could not find checksum for ${ARTIFACT} in CHECKSUMS.txt"
+    echo "Warning: could not find checksum for ${BIN_PATH} in CHECKSUMS.txt"
   fi
 fi
 
-# Install
-mkdir -p "$PREFIX"
-tar xzf "${TMPDIR}/${ARTIFACT}" -C "$PREFIX"
-chmod +x "${PREFIX}/ww"
+# --- Step 6: Install binary ---
+mkdir -p "${WW_HOME}/bin"
+mv "${TMPDIR}/ww" "${WW_HOME}/bin/ww"
+chmod +x "${WW_HOME}/bin/ww"
+echo "Installed binary to ${WW_HOME}/bin/ww"
 
+# --- Step 7: Fetch standard library ---
+echo "Fetching standard library..."
+mkdir -p "${WW_HOME}/lib"
+ipfs_get_dir "/std/" "${WW_HOME}/lib/std/" || {
+  echo "Warning: could not fetch standard library. You can fetch it later with:"
+  echo "  ipfs get ${IPFS_BASE}/std/ -o ~/.ww/lib/std/"
+}
+
+# --- Step 8: Fetch config template ---
+echo "Fetching config template..."
+mkdir -p "${WW_HOME}/etc"
+ipfs_cat "/etc/config.toml.default" > "${WW_HOME}/etc/config.toml.default" 2>/dev/null || {
+  echo "Warning: could not fetch config template."
+}
+
+# --- Step 9: PATH warning ---
 echo ""
-echo "Installed ww ${VERSION} to ${PREFIX}/ww"
-
-# Check PATH
 case ":$PATH:" in
-  *":${PREFIX}:"*) ;;
+  *":${WW_HOME}/bin:"*) ;;
   *)
+    echo "Warning: ${WW_HOME}/bin is not in your PATH."
+    echo "Add it to your shell config:"
     echo ""
-    echo "Warning: ${PREFIX} is not in your PATH."
-    echo "Add it with:"
-    echo "  export PATH=\"${PREFIX}:\$PATH\""
+    echo "  # bash (~/.bashrc)"
+    echo "  export PATH=\"${WW_HOME}/bin:\$PATH\""
+    echo ""
+    echo "  # zsh (~/.zshrc)"
+    echo "  export PATH=\"${WW_HOME}/bin:\$PATH\""
+    echo ""
+    echo "  # fish (~/.config/fish/config.fish)"
+    echo "  fish_add_path ${WW_HOME}/bin"
+    echo ""
     ;;
 esac
 
-echo ""
-echo "Run 'ww --help' to get started."
+# --- Step 10: Engagement prompt ---
+echo "Installed ww from IPFS. Run 'ww join' to connect to a network."
