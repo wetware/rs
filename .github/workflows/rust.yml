@@ -90,7 +90,7 @@ jobs:
       run: forge test -vvv
 
   build:
-    name: Build
+    name: Build (host)
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -133,7 +133,7 @@ jobs:
       run: cargo build --tests
 
   test:
-    name: Test
+    name: Test (host)
     needs: [build]
     runs-on: ubuntu-latest
     steps:
