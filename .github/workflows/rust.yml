@@ -248,15 +248,15 @@ jobs:
         tar cf - -C "$STAGE" . | ssh -i ~/.ssh/deploy_key ${{ secrets.VPS_SSH }} '
           STAGE=$(mktemp -d)
           tar xf - -C "$STAGE"
-          CID=$(kubectl exec -i ipfs-daemon-0 -- ipfs add -rQ --cid-version=1 /dev/stdin < <(tar cf - -C "$STAGE" .)) || {
+          CID=$(kubectl exec -i deployment/ipfs-daemon -- ipfs add -rQ --cid-version=1 /dev/stdin < <(tar cf - -C "$STAGE" .)) || {
             # Fallback: copy into pod, add from there
-            kubectl cp "$STAGE" ipfs-daemon-0:/tmp/release-tree
-            CID=$(kubectl exec ipfs-daemon-0 -- ipfs add -rQ --cid-version=1 /tmp/release-tree/)
-            kubectl exec ipfs-daemon-0 -- rm -rf /tmp/release-tree
+            kubectl cp "$STAGE" $(kubectl get pod -l app=ipfs-daemon -o jsonpath="{.items[0].metadata.name}"):/tmp/release-tree
+            CID=$(kubectl exec deployment/ipfs-daemon -- ipfs add -rQ --cid-version=1 /tmp/release-tree/)
+            kubectl exec deployment/ipfs-daemon -- rm -rf /tmp/release-tree
           }
           echo "CID=$CID"
-          kubectl exec ipfs-daemon-0 -- ipfs pin add "$CID"
-          kubectl exec ipfs-daemon-0 -- ipfs name publish --key=ww-release "/ipfs/$CID"
+          kubectl exec deployment/ipfs-daemon -- ipfs pin add "$CID"
+          kubectl exec deployment/ipfs-daemon -- ipfs name publish --key=ww-release "/ipfs/$CID"
           rm -rf "$STAGE"
         ' | tee /tmp/ipfs-publish-output.txt
 
