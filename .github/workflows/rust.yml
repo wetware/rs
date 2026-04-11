@@ -221,10 +221,63 @@ jobs:
         echo "Deploy failed after 2 attempts"
         exit 1
 
+  build-wasm:
+    name: Build WASM components
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [build-and-deploy]
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32-wasip2
+
+    - name: Cache Cap'n Proto
+      id: capnp-cache
+      uses: actions/cache@v4
+      with:
+        path: /tmp/capnp-install
+        key: capnp-1.1.0-linux-wasm
+
+    - name: Build Cap'n Proto
+      if: steps.capnp-cache.outputs.cache-hit != 'true'
+      run: |
+        curl -fsSL "https://capnproto.org/capnproto-c++-1.1.0.tar.gz" | tar xz
+        cd capnproto-c++-1.1.0
+        ./configure --prefix=/tmp/capnp-install
+        make -j$(nproc)
+        make install
+        cd .. && rm -rf capnproto-c++-1.1.0
+
+    - name: Install Cap'n Proto
+      run: sudo cp -a /tmp/capnp-install/. /usr/local/
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: wasm-std
+
+    - name: Build WASM std + examples
+      run: make std && make examples
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: wasm-artifacts
+        path: |
+          std/kernel/bin/main.wasm
+          std/shell/bin/shell.wasm
+          std/mcp/bin/main.wasm
+          examples/echo/bin/echo.wasm
+        retention-days: 1
+
   build-binaries:
     name: Build ${{ matrix.artifact }}
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [build-and-deploy]
+    needs: [build-wasm]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -259,10 +312,14 @@ jobs:
       with:
         submodules: recursive
 
+    - uses: actions/download-artifact@v4
+      with:
+        name: wasm-artifacts
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
-        targets: ${{ matrix.target }}, wasm32-wasip2
+        targets: ${{ matrix.target }}
 
     - name: Cache Cap'n Proto
       if: ${{ !matrix.use_cross }}
@@ -284,12 +341,7 @@ jobs:
 
     - name: Install Cap'n Proto
       if: ${{ !matrix.use_cross }}
-      run: |
-        if [ "$RUNNER_OS" = "Linux" ]; then
-          sudo cp -a /tmp/capnp-install/. /usr/local/
-        else
-          sudo cp -R /tmp/capnp-install/. /usr/local/
-        fi
+      run: sudo cp -R /tmp/capnp-install/. /usr/local/
 
     - name: Install cross
       if: ${{ matrix.use_cross }}
@@ -298,16 +350,6 @@ jobs:
     - uses: Swatinem/rust-cache@v2
       with:
         key: master-${{ matrix.target }}
-
-    - name: Build std (WASM components)
-      if: ${{ !matrix.use_cross }}
-      run: make std
-
-    - name: Build std (WASM components, cross)
-      if: ${{ matrix.use_cross }}
-      run: |
-        # WASM std is platform-independent; build with native cargo, not cross
-        make std
 
     - name: Build (native)
       if: ${{ !matrix.use_cross }}
