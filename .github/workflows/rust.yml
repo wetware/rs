@@ -221,4 +221,59 @@ jobs:
         echo "Deploy failed after 2 attempts"
         exit 1
 
+  publish-ipfs:
+    name: Publish to IPFS
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [build-and-deploy]
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install IPFS
+      run: |
+        wget -qO- https://dist.ipfs.tech/kubo/v0.32.1/kubo_v0.32.1_linux-amd64.tar.gz | tar xz
+        sudo mv kubo/ipfs /usr/local/bin/
+        ipfs init --profile server
+        ipfs daemon &
+        for i in $(seq 1 30); do ipfs id >/dev/null 2>&1 && break || sleep 1; done
+
+    - name: Assemble release tree
+      run: |
+        STAGE=/tmp/release-tree
+        rsync -a --exclude .git --exclude target . "$STAGE/"
+
+    - name: Publish to IPFS
+      run: |
+        CID=$(ipfs add -rQ /tmp/release-tree/)
+        echo "Release CID: $CID"
+        echo "CID=$CID" >> "$GITHUB_ENV"
+
+    - name: Set up SSH
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+        chmod 600 ~/.ssh/deploy_key
+        echo "${{ secrets.DEPLOY_SSH_HOST_KEY }}" > ~/.ssh/known_hosts
+
+    - name: Connect to Kubo pod
+      run: ipfs swarm connect ${{ secrets.KUBO_MULTIADDR }}
+
+    - name: Pin + IPNS publish via SSH
+      run: |
+        ssh -i ~/.ssh/deploy_key ${{ secrets.VPS_SSH }} "kubectl exec ipfs-daemon-0 -- \
+          timeout 600 ipfs pin add ${{ env.CID }}"
+        echo "Pin confirmed"
+        ssh -i ~/.ssh/deploy_key ${{ secrets.VPS_SSH }} "kubectl exec ipfs-daemon-0 -- \
+          ipfs name publish --key=ww-release /ipfs/${{ env.CID }}"
+        echo "IPNS updated"
+
+    - name: Record CID
+      run: |
+        echo "## IPFS Publish" >> "$GITHUB_STEP_SUMMARY"
+        echo "- CID: \`${{ env.CID }}\`" >> "$GITHUB_STEP_SUMMARY"
+        echo "- IPNS: \`/ipns/${{ secrets.IPNS_KEY_ID }}\`" >> "$GITHUB_STEP_SUMMARY"
+
   # Release builds moved to .github/workflows/release.yml
