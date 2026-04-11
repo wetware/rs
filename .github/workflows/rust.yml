@@ -262,7 +262,7 @@ jobs:
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
-        targets: ${{ matrix.target }}
+        targets: ${{ matrix.target }}, wasm32-wasip2
 
     - name: Cache Cap'n Proto
       if: ${{ !matrix.use_cross }}
@@ -288,7 +288,7 @@ jobs:
         if [ "$RUNNER_OS" = "Linux" ]; then
           sudo cp -a /tmp/capnp-install/. /usr/local/
         else
-          cp -a /tmp/capnp-install/. /usr/local/
+          sudo cp -R /tmp/capnp-install/. /usr/local/
         fi
 
     - name: Install cross
@@ -298,6 +298,16 @@ jobs:
     - uses: Swatinem/rust-cache@v2
       with:
         key: master-${{ matrix.target }}
+
+    - name: Build std (WASM components)
+      if: ${{ !matrix.use_cross }}
+      run: make std
+
+    - name: Build std (WASM components, cross)
+      if: ${{ matrix.use_cross }}
+      run: |
+        # WASM std is platform-independent; build with native cargo, not cross
+        make std
 
     - name: Build (native)
       if: ${{ !matrix.use_cross }}
