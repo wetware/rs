@@ -193,7 +193,7 @@ jobs:
   build-wasm:
     name: Build WASM components
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [fmt, clippy, solidity, build, test]
+    needs: [fmt, clippy, solidity, build]
     runs-on: ubuntu-latest
 
     steps:
@@ -342,7 +342,7 @@ jobs:
   deploy:
     name: Deploy to master.wetware.run
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [fmt, clippy, solidity, build, test]
+    needs: [fmt, clippy, solidity, build]
     runs-on: ubuntu-latest
     environment: master
     permissions:
@@ -406,7 +406,7 @@ jobs:
   publish-ipfs:
     name: Publish to IPFS
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [build-binaries, build-wasm, deploy]
+    needs: [test, build-binaries, build-wasm, deploy]
     runs-on: ubuntu-latest
 
     steps:
