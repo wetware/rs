@@ -92,7 +92,6 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    needs: [fmt]
     steps:
     - uses: actions/checkout@v4
       with:
@@ -158,7 +157,7 @@ jobs:
   build-wasm:
     name: Build WASM components
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [test]
+    needs: [fmt, clippy, solidity, test]
     runs-on: ubuntu-latest
 
     steps:
@@ -211,7 +210,7 @@ jobs:
   build-binaries:
     name: Build ${{ matrix.artifact }}
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [test, build-wasm]
+    needs: [build-wasm]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -307,7 +306,7 @@ jobs:
   deploy:
     name: Deploy to master.wetware.run
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [test]
+    needs: [fmt, clippy, solidity, test]
     runs-on: ubuntu-latest
     environment: master
     permissions:
