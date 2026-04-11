@@ -132,7 +132,12 @@ publish: host
 	@rsync -a --exclude .git --exclude target . "$(RELEASE_TREE)/"
 	@mkdir -p "$(RELEASE_TREE)/bin/$$(uname -s | tr A-Z a-z)/$$(uname -m)"
 	@cp target/release/ww "$(RELEASE_TREE)/bin/$$(uname -s | tr A-Z a-z)/$$(uname -m)/ww"
-	@cd "$(RELEASE_TREE)" && find bin/ -type f | sort | xargs b3sum > CHECKSUMS.txt
+	@cd "$(RELEASE_TREE)" && \
+		if command -v b3sum >/dev/null 2>&1; then \
+			find bin/ -type f | sort | xargs b3sum > CHECKSUMS.txt; \
+		else \
+			find bin/ -type f | sort | xargs shasum -a 256 > CHECKSUMS.txt; \
+		fi
 	@echo "Publishing to IPFS..."
 	@CID=$$(ipfs add -rQ --cid-version=1 "$(RELEASE_TREE)") && \
 		echo "  CID: $$CID" && \
