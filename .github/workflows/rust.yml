@@ -232,13 +232,21 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Install IPFS
+    - name: Install and start IPFS
       run: |
         wget -qO- https://dist.ipfs.tech/kubo/v0.32.1/kubo_v0.32.1_linux-amd64.tar.gz | tar xz
         sudo mv kubo/ipfs /usr/local/bin/
         ipfs init --profile server
-        ipfs daemon &
-        for i in $(seq 1 30); do ipfs id >/dev/null 2>&1 && break || sleep 1; done
+        sleep 1
+        nohup ipfs daemon &>/tmp/ipfs-daemon.log &
+        echo "Waiting for IPFS daemon..."
+        for i in $(seq 1 30); do
+          if ipfs swarm peers >/dev/null 2>&1; then
+            echo "IPFS daemon ready"
+            break
+          fi
+          sleep 1
+        done
 
     - name: Assemble release tree
       run: |
