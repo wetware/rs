@@ -5,8 +5,7 @@
 set -eu
 
 IPNS_NAME="/ipns/releases.wetware.run"
-GATEWAY_BASE="https://dweb.link/ipns/releases.wetware.run"
-IPNS_TIMEOUT=30
+IPNS_TIMEOUT=60
 VERSION_CID=""
 WW_HOME="${HOME}/.ww"
 
@@ -63,60 +62,62 @@ if ! ipfs id >/dev/null 2>&1; then
 fi
 
 # --- Step 3: Resolve IPNS base path ---
-USE_GATEWAY=0
-
 if [ -n "$VERSION_CID" ]; then
   # Version pinning: use CID directly, skip IPNS resolution
   IPFS_BASE="/ipfs/${VERSION_CID}"
   echo "Installing pinned release: ${VERSION_CID}"
 else
   echo "Resolving latest release via IPNS (may take up to ${IPNS_TIMEOUT}s on first run)..."
-  RESOLVED_CID=$(timeout "$IPNS_TIMEOUT" ipfs name resolve "$IPNS_NAME" 2>/dev/null) || true
+
+  # macOS doesn't have timeout(1), use a background process
+  RESOLVED_CID=""
+  ipfs name resolve "$IPNS_NAME" > /tmp/ww-ipns-resolve.$$ 2>/dev/null &
+  RESOLVE_PID=$!
+
+  i=0
+  while [ $i -lt $IPNS_TIMEOUT ]; do
+    if ! kill -0 "$RESOLVE_PID" 2>/dev/null; then
+      # Process finished
+      RESOLVED_CID=$(cat /tmp/ww-ipns-resolve.$$ 2>/dev/null || true)
+      break
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+
+  # Kill if still running
+  kill "$RESOLVE_PID" 2>/dev/null || true
+  rm -f /tmp/ww-ipns-resolve.$$
 
   if [ -n "$RESOLVED_CID" ]; then
     IPFS_BASE="$RESOLVED_CID"
     echo "Resolved: ${IPFS_BASE}"
   else
-    echo "IPNS resolution timed out. Falling back to HTTP gateway..."
-    USE_GATEWAY=1
+    echo ""
+    echo "Error: IPNS resolution failed."
+    echo ""
+    echo "Your IPFS node could not resolve releases.wetware.run."
+    echo "This usually means the IPNS record has not propagated to your"
+    echo "region of the DHT yet. Try again in a few minutes."
+    echo ""
+    echo "Alternatively, install a specific version by CID:"
+    echo "  curl -sSf .../install.sh | sh -s -- --version <CID>"
+    echo ""
+    echo "Find release CIDs at: https://github.com/wetware/ww/releases"
+    exit 1
   fi
 fi
 
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# Helper: fetch a file from IPFS (local or gateway fallback)
-ipfs_cat() {
-  _path="$1"
-  if [ "$USE_GATEWAY" -eq 1 ]; then
-    curl -sSf "${GATEWAY_BASE}${_path}"
-  else
-    ipfs cat "${IPFS_BASE}${_path}"
-  fi
-}
-
-# Helper: fetch a directory from IPFS (local or gateway fallback)
-ipfs_get_dir() {
-  _path="$1"
-  _output="$2"
-  if [ "$USE_GATEWAY" -eq 1 ]; then
-    # Gateway fallback: download individual files is impractical for dirs.
-    # Use ipfs get with the gateway-resolved path instead.
-    echo "Warning: directory fetch via gateway is not supported."
-    echo "Please ensure your IPFS daemon can resolve IPNS, or use --version <CID>."
-    exit 1
-  else
-    ipfs get "${IPFS_BASE}${_path}" -o "$_output"
-  fi
-}
-
 # --- Step 4: Fetch binary ---
 BIN_PATH="/bin/${OS_NAME}/${ARCH_NAME}/ww"
 echo "Fetching binary (${OS_NAME}/${ARCH_NAME})..."
-ipfs_cat "$BIN_PATH" > "${TMPDIR}/ww" || {
+ipfs cat "${IPFS_BASE}${BIN_PATH}" > "${TMPDIR}/ww" 2>/dev/null || {
   echo ""
   echo "Error: could not fetch binary from IPFS."
-  echo "The release may not exist or IPFS content is unavailable."
+  echo "The release may not include a binary for ${OS_NAME}/${ARCH_NAME}."
   echo ""
   echo "Fallback: download manually from GitHub Releases:"
   echo "  https://github.com/wetware/ww/releases"
@@ -125,19 +126,19 @@ ipfs_cat "$BIN_PATH" > "${TMPDIR}/ww" || {
 
 # --- Step 5: Fetch and verify checksums ---
 echo "Fetching checksums..."
-ipfs_cat "/CHECKSUMS.txt" > "${TMPDIR}/CHECKSUMS.txt" || {
+ipfs cat "${IPFS_BASE}/CHECKSUMS.txt" > "${TMPDIR}/CHECKSUMS.txt" 2>/dev/null || {
   echo "Warning: could not fetch checksums. Skipping verification."
 }
 
-if [ -f "${TMPDIR}/CHECKSUMS.txt" ]; then
+if [ -f "${TMPDIR}/CHECKSUMS.txt" ] && [ -s "${TMPDIR}/CHECKSUMS.txt" ]; then
   echo "Verifying checksum..."
   if command -v b3sum >/dev/null 2>&1; then
-    EXPECTED=$(grep "$BIN_PATH" "${TMPDIR}/CHECKSUMS.txt" | grep -v "^#" | head -1 | awk '{print $1}')
+    EXPECTED=$(grep "${BIN_PATH}" "${TMPDIR}/CHECKSUMS.txt" | grep -v "^#" | head -1 | awk '{print $1}')
     ACTUAL=$(b3sum --no-names "${TMPDIR}/ww")
     ALGO="blake3"
   else
     # Fall back to sha256 (listed after "# sha256" marker in CHECKSUMS.txt)
-    EXPECTED=$(sed -n '/^# sha256/,$ p' "${TMPDIR}/CHECKSUMS.txt" | grep "$BIN_PATH" | head -1 | awk '{print $1}')
+    EXPECTED=$(sed -n '/^# sha256/,$ p' "${TMPDIR}/CHECKSUMS.txt" | grep "${BIN_PATH}" | head -1 | awk '{print $1}')
     ACTUAL=$(sha256sum "${TMPDIR}/ww" 2>/dev/null || shasum -a 256 "${TMPDIR}/ww")
     ACTUAL=$(echo "$ACTUAL" | awk '{print $1}')
     ALGO="sha256"
@@ -168,7 +169,7 @@ echo "Installed binary to ${WW_HOME}/bin/ww"
 # --- Step 7: Fetch standard library ---
 echo "Fetching standard library..."
 mkdir -p "${WW_HOME}/lib"
-ipfs_get_dir "/std/" "${WW_HOME}/lib/std/" || {
+ipfs get "${IPFS_BASE}/std/" -o "${WW_HOME}/lib/std/" 2>/dev/null || {
   echo "Warning: could not fetch standard library. You can fetch it later with:"
   echo "  ipfs get ${IPFS_BASE}/std/ -o ~/.ww/lib/std/"
 }
@@ -176,7 +177,7 @@ ipfs_get_dir "/std/" "${WW_HOME}/lib/std/" || {
 # --- Step 8: Fetch config template ---
 echo "Fetching config template..."
 mkdir -p "${WW_HOME}/etc"
-ipfs_cat "/etc/config.toml.default" > "${WW_HOME}/etc/config.toml.default" 2>/dev/null || {
+ipfs cat "${IPFS_BASE}/etc/config.toml.default" > "${WW_HOME}/etc/config.toml.default" 2>/dev/null || {
   echo "Warning: could not fetch config template."
 }
 
