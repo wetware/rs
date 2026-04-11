@@ -16,7 +16,7 @@ jobs:
     name: Check formatting
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
@@ -32,7 +32,7 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
@@ -43,7 +43,7 @@ jobs:
 
     - name: Cache Cap'n Proto
       id: capnp-cache
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: /tmp/capnp-install
         key: capnp-1.1.0-linux-x86_64
@@ -70,7 +70,7 @@ jobs:
     name: Solidity (Foundry)
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
@@ -93,7 +93,7 @@ jobs:
     name: Build ww binary
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
@@ -104,7 +104,7 @@ jobs:
 
     - name: Cache Cap'n Proto
       id: capnp-cache
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: /tmp/capnp-install
         key: capnp-1.1.0-linux-x86_64
@@ -137,7 +137,7 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
@@ -148,7 +148,7 @@ jobs:
 
     - name: Cache Cap'n Proto
       id: capnp-cache
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: /tmp/capnp-install
         key: capnp-1.1.0-linux-x86_64
@@ -197,7 +197,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
@@ -208,7 +208,7 @@ jobs:
 
     - name: Cache Cap'n Proto
       id: capnp-cache
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: /tmp/capnp-install
         key: capnp-1.1.0-linux-wasm
@@ -233,7 +233,7 @@ jobs:
     - name: Build WASM std + examples
       run: make std && make examples
 
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v5
       with:
         name: wasm-artifacts
         path: |
@@ -277,11 +277,11 @@ jobs:
             use_cross: false
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
-    - uses: actions/download-artifact@v4
+    - uses: actions/download-artifact@v5
       with:
         name: wasm-artifacts
 
@@ -293,7 +293,7 @@ jobs:
     - name: Cache Cap'n Proto
       if: ${{ !matrix.use_cross }}
       id: capnp-cache
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: /tmp/capnp-install
         key: capnp-1.1.0-${{ runner.os }}-${{ matrix.target }}
@@ -333,7 +333,7 @@ jobs:
         mkdir -p ${{ matrix.bin_path }}
         cp target/${{ matrix.target }}/release/ww ${{ matrix.bin_path }}/ww
 
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v5
       with:
         name: ${{ matrix.artifact }}
         path: ${{ matrix.bin_path }}/ww
@@ -350,7 +350,7 @@ jobs:
       packages: write
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
@@ -410,11 +410,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
-    - uses: actions/download-artifact@v4
+    - uses: actions/download-artifact@v5
       with:
         path: artifacts
 

@@ -42,7 +42,7 @@ jobs:
             use_cross: false
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
@@ -54,7 +54,7 @@ jobs:
     - name: Cache Cap'n Proto
       if: ${{ !matrix.use_cross }}
       id: capnp-cache
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: /tmp/capnp-install
         key: capnp-1.1.0-${{ runner.os }}-${{ matrix.target }}
@@ -100,7 +100,7 @@ jobs:
         tar -czf dist/${{ matrix.artifact }}.tar.gz \
           -C target/${{ matrix.target }}/release ww
 
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v5
       with:
         name: ${{ matrix.artifact }}
         path: dist/${{ matrix.artifact }}.tar.gz
@@ -111,7 +111,7 @@ jobs:
     needs: build-binaries
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/download-artifact@v4
+    - uses: actions/download-artifact@v5
       with:
         path: artifacts
         merge-multiple: true
@@ -159,11 +159,11 @@ jobs:
     outputs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
-    - uses: actions/download-artifact@v4
+    - uses: actions/download-artifact@v5
       with:
         path: artifacts
         merge-multiple: true
@@ -214,7 +214,7 @@ jobs:
     - name: Save container image tar
       run: docker save ww-ipfs-export:latest -o ww-image.tar
 
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v5
       with:
         name: ww-image
         path: ww-image.tar
@@ -250,7 +250,7 @@ jobs:
     needs: [build-binaries, build-container]
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: recursive
 
@@ -262,7 +262,7 @@ jobs:
         ipfs daemon &
         for i in $(seq 1 30); do ipfs id >/dev/null 2>&1 && break || sleep 1; done
 
-    - uses: actions/download-artifact@v4
+    - uses: actions/download-artifact@v5
       with:
         path: artifacts
         merge-multiple: true
