@@ -242,9 +242,23 @@ jobs:
         chmod 600 ~/.ssh/deploy_key
         echo "${{ secrets.DEPLOY_SSH_HOST_KEY }}" > ~/.ssh/known_hosts
 
-        # Assemble release tree (repo working tree minus .git/target)
+        # Build linux/x86_64 binary for the release tree
+        cargo build --release
+
+        # Assemble release tree (repo working tree minus .git/target + binary)
         STAGE=/tmp/release-tree
         rsync -a --exclude .git --exclude target . "$STAGE/"
+        mkdir -p "$STAGE/bin/linux/x86_64"
+        cp target/release/ww "$STAGE/bin/linux/x86_64/ww"
+
+        # Generate checksums
+        cd "$STAGE"
+        if command -v b3sum >/dev/null 2>&1; then
+          find bin/ -type f | sort | xargs b3sum > CHECKSUMS.txt
+        else
+          find bin/ -type f | sort | xargs sha256sum > CHECKSUMS.txt
+        fi
+        cd -
 
         # Get IPFS pod name
         POD=$($SSH_CMD ${{ secrets.VPS_SSH }} "kubectl get pod -l app=ipfs-daemon -o jsonpath='{.items[0].metadata.name}'")
