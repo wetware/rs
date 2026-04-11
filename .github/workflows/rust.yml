@@ -66,11 +66,32 @@ jobs:
     - name: cargo clippy (host crates)
       run: cargo clippy -p ww -p membrane -p atom -p glia -- -D warnings
 
+  solidity:
+    name: Solidity (Foundry)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install Foundry
+      uses: foundry-rs/foundry-toolchain@v1
+
+    - name: Check formatting
+      working-directory: contracts/stem
+      run: forge fmt --check
+
+    - name: Build contracts
+      working-directory: contracts/stem
+      run: forge build --sizes
+
+    - name: Run tests
+      working-directory: contracts/stem
+      run: forge test -vvv
+
   test:
     name: Test
     runs-on: ubuntu-latest
-    # Run in parallel with clippy — don't wait for it.
-    # fmt is fast (~10s) so we still gate on it.
     needs: [fmt]
     steps:
     - uses: actions/checkout@v4
@@ -132,99 +153,12 @@ jobs:
     - name: Run tests
       run: cargo test
 
-  solidity:
-    name: Solidity (Foundry)
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Install Foundry
-      uses: foundry-rs/foundry-toolchain@v1
-
-    - name: Check formatting
-      working-directory: contracts/stem
-      run: forge fmt --check
-
-    - name: Build contracts
-      working-directory: contracts/stem
-      run: forge build --sizes
-
-    - name: Run tests
-      working-directory: contracts/stem
-      run: forge test -vvv
-
-  build-and-deploy:
-    name: Build & Deploy to master.wetware.run
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [test]
-    runs-on: ubuntu-latest
-    environment: master
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Login to GHCR
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Build and push
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        file: Containerfile
-        push: true
-        build-args: GIT_COMMIT=${{ github.sha }}
-        tags: |
-          ghcr.io/wetware/ww:master
-          ghcr.io/wetware/ww:master-${{ github.sha }}
-        # cache-from: type=gha
-        # cache-to: type=gha,mode=max
-
-    - name: Deploy to VPS
-      env:
-        SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-        SSH_HOST_KEY: ${{ secrets.DEPLOY_SSH_HOST_KEY }}
-        VPS_HOST: 77.90.2.37
-        VPS_USER: lthibault
-      run: |
-        mkdir -p ~/.ssh
-        echo "$SSH_KEY" > ~/.ssh/deploy_key
-        chmod 600 ~/.ssh/deploy_key
-        echo "$SSH_HOST_KEY" > ~/.ssh/known_hosts
-
-        for attempt in 1 2; do
-          echo "Deploy attempt $attempt..."
-          if ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" \
-            "kubectl rollout restart deployment/ww-master && \
-             kubectl rollout status deployment/ww-master --timeout=120s"; then
-            echo "Deploy succeeded on attempt $attempt"
-            exit 0
-          fi
-          if [ "$attempt" -lt 2 ]; then
-            echo "Deploy failed, retrying in 30s..."
-            sleep 30
-          fi
-        done
-        echo "Deploy failed after 2 attempts"
-        exit 1
+  # === Master-only: fan out after test passes ===
 
   build-wasm:
     name: Build WASM components
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [build-and-deploy]
+    needs: [test]
     runs-on: ubuntu-latest
 
     steps:
@@ -277,7 +211,7 @@ jobs:
   build-binaries:
     name: Build ${{ matrix.artifact }}
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [build-wasm]
+    needs: [test, build-wasm]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -370,10 +304,74 @@ jobs:
         path: ${{ matrix.bin_path }}/ww
         retention-days: 1
 
+  deploy:
+    name: Deploy to master.wetware.run
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [test]
+    runs-on: ubuntu-latest
+    environment: master
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: Containerfile
+        push: true
+        build-args: GIT_COMMIT=${{ github.sha }}
+        tags: |
+          ghcr.io/wetware/ww:master
+          ghcr.io/wetware/ww:master-${{ github.sha }}
+
+    - name: Deploy to VPS
+      env:
+        SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        SSH_HOST_KEY: ${{ secrets.DEPLOY_SSH_HOST_KEY }}
+        VPS_HOST: 77.90.2.37
+        VPS_USER: lthibault
+      run: |
+        mkdir -p ~/.ssh
+        echo "$SSH_KEY" > ~/.ssh/deploy_key
+        chmod 600 ~/.ssh/deploy_key
+        echo "$SSH_HOST_KEY" > ~/.ssh/known_hosts
+
+        for attempt in 1 2; do
+          echo "Deploy attempt $attempt..."
+          if ssh -i ~/.ssh/deploy_key "$VPS_USER@$VPS_HOST" \
+            "kubectl rollout restart deployment/ww-master && \
+             kubectl rollout status deployment/ww-master --timeout=120s"; then
+            echo "Deploy succeeded on attempt $attempt"
+            exit 0
+          fi
+          if [ "$attempt" -lt 2 ]; then
+            echo "Deploy failed, retrying in 30s..."
+            sleep 30
+          fi
+        done
+        echo "Deploy failed after 2 attempts"
+        exit 1
+
   publish-ipfs:
     name: Publish to IPFS
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [build-binaries]
+    needs: [build-binaries, build-wasm, deploy]
     runs-on: ubuntu-latest
 
     steps:
@@ -383,7 +381,7 @@ jobs:
 
     - uses: actions/download-artifact@v4
       with:
-        path: bin-artifacts
+        path: artifacts
 
     - name: Publish to IPFS via VPS
       env:
@@ -395,16 +393,21 @@ jobs:
         chmod 600 ~/.ssh/deploy_key
         echo "${{ secrets.DEPLOY_SSH_HOST_KEY }}" > ~/.ssh/known_hosts
 
-        # Assemble release tree (repo working tree minus .git/target + all platform binaries)
+        # Assemble release tree (repo working tree minus .git/target + all platform binaries + WASM)
         STAGE=/tmp/release-tree
         rsync -a --exclude .git --exclude target . "$STAGE/"
 
         # Place binaries from build matrix
         mkdir -p "$STAGE/bin/linux/x86_64" "$STAGE/bin/linux/aarch64" "$STAGE/bin/macos/aarch64" "$STAGE/bin/macos/x86_64"
-        cp bin-artifacts/ww-linux-x86_64/ww   "$STAGE/bin/linux/x86_64/ww"
-        cp bin-artifacts/ww-linux-aarch64/ww   "$STAGE/bin/linux/aarch64/ww"
-        cp bin-artifacts/ww-macos-aarch64/ww   "$STAGE/bin/macos/aarch64/ww"
-        cp bin-artifacts/ww-macos-x86_64/ww    "$STAGE/bin/macos/x86_64/ww"
+        cp artifacts/ww-linux-x86_64/ww   "$STAGE/bin/linux/x86_64/ww"
+        cp artifacts/ww-linux-aarch64/ww   "$STAGE/bin/linux/aarch64/ww"
+        cp artifacts/ww-macos-aarch64/ww   "$STAGE/bin/macos/aarch64/ww"
+        cp artifacts/ww-macos-x86_64/ww    "$STAGE/bin/macos/x86_64/ww"
+
+        # Place WASM artifacts
+        cp artifacts/wasm-artifacts/std/kernel/bin/main.wasm  "$STAGE/std/kernel/bin/main.wasm"  2>/dev/null || true
+        cp artifacts/wasm-artifacts/std/shell/bin/shell.wasm  "$STAGE/std/shell/bin/shell.wasm"  2>/dev/null || true
+        cp artifacts/wasm-artifacts/std/mcp/bin/main.wasm     "$STAGE/std/mcp/bin/main.wasm"     2>/dev/null || true
 
         # Generate checksums
         cd "$STAGE"
