@@ -89,8 +89,8 @@ jobs:
       working-directory: contracts/stem
       run: forge test -vvv
 
-  test:
-    name: Test
+  build:
+    name: Build
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -122,6 +122,40 @@ jobs:
     - name: Install Cap'n Proto
       run: sudo cp -a /tmp/capnp-install/. /usr/local/
 
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: build-test
+
+    - name: Build WASI example binaries
+      run: make -C examples/echo
+
+    - name: Build (compile all crates + test binaries)
+      run: cargo build --tests
+
+  test:
+    name: Test
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-unknown-linux-gnu, wasm32-wasip2
+
+    - name: Cache Cap'n Proto
+      id: capnp-cache
+      uses: actions/cache@v4
+      with:
+        path: /tmp/capnp-install
+        key: capnp-1.1.0-linux-x86_64
+
+    - name: Install Cap'n Proto
+      run: sudo cp -a /tmp/capnp-install/. /usr/local/
+
     - name: Install Foundry
       uses: foundry-rs/foundry-toolchain@v1
 
@@ -145,11 +179,13 @@ jobs:
         IPFS_PEER_ADDR: ${{ secrets.IPFS_PEER_ADDR }}
 
     - uses: Swatinem/rust-cache@v2
+      with:
+        key: build-test
 
     - name: Build WASI example binaries
       run: make -C examples/echo
 
-    - name: Run tests
+    - name: Run tests (hot cache from build job)
       run: cargo test
 
   # === Master-only: fan out after test passes ===
@@ -157,7 +193,7 @@ jobs:
   build-wasm:
     name: Build WASM components
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [fmt, clippy, solidity, test]
+    needs: [fmt, clippy, solidity, build, test]
     runs-on: ubuntu-latest
 
     steps:
@@ -306,7 +342,7 @@ jobs:
   deploy:
     name: Deploy to master.wetware.run
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [fmt, clippy, solidity, test]
+    needs: [fmt, clippy, solidity, build, test]
     runs-on: ubuntu-latest
     environment: master
     permissions:
