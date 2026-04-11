@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.1] - 2026-04-10
+
+### Added
+- IPFS-first distribution: install script fetches binaries from `/ipns/releases.wetware.run` with gateway fallback. Install to `~/.ww/` directory convention.
+- `ww oci import`: pull container images from IPFS and load into Docker/podman. Supports `--cid` for version pinning and `--stdout` for manual piping.
+- `ww perform upgrade`: self-update via IPNS. Compares running version against Cargo.toml on IPNS, fetches platform binary, verifies blake3 checksum, atomic replace.
+- CI `publish-ipfs` job: assembles repo working tree as IPFS release artifact with binaries by os/arch and container tar, pins to K8s Kubo pod via SSH proxy, publishes IPNS.
+- DNSLink at `releases.wetware.run` for human-readable IPFS install path.
+- `scripts/uninstall.sh` for clean removal of `~/.ww/`.
+- Release stem TODO for future on-chain distribution anchoring.
+
+### Removed
+- `VERSION` file (redundant with `Cargo.toml` as single source of truth).
+
 ## [0.0.1.2] - 2026-04-10
 
 ### Added
