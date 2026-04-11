@@ -6,7 +6,7 @@
 WASM_TARGET := wasm32-wasip2
 
 .PHONY: all host std kernel shell mcp examples chess echo counter discovery oracle auction mindshare clean run-kernel
-.PHONY: publish-std try-publish-std
+.PHONY: publish-std try-publish-std publish
 .PHONY: container-build container-run container-dev container-clean
 .PHONY: agent-skills
 
@@ -114,6 +114,37 @@ publish-std: std
 		fi
 	@rm -rf $(STD_TREE)
 	@echo "CID written to target/std-namespace.cid"
+
+# --- Publish release tree to IPFS --------------------------------------------
+# Local equivalent of CI publish-ipfs. Publishes the repo working tree
+# (minus .git/target) with your local binary at bin/{os}/{arch}/ww.
+# Updates IPNS at releases.wetware.run if ww-release key exists.
+#
+# Usage:
+#   make publish          # publish tree + pin + IPNS update
+#   make publish SKIP_PIN=1  # publish tree only (no remote pin)
+
+SKIP_PIN ?=
+
+publish: host
+	@echo "Assembling release tree..."
+	$(eval RELEASE_TREE := $(shell mktemp -d))
+	@rsync -a --exclude .git --exclude target . "$(RELEASE_TREE)/"
+	@mkdir -p "$(RELEASE_TREE)/bin/$$(uname -s | tr A-Z a-z)/$$(uname -m)"
+	@cp target/release/ww "$(RELEASE_TREE)/bin/$$(uname -s | tr A-Z a-z)/$$(uname -m)/ww"
+	@cd "$(RELEASE_TREE)" && find bin/ -type f | sort | xargs b3sum > CHECKSUMS.txt
+	@echo "Publishing to IPFS..."
+	@CID=$$(ipfs add -rQ --cid-version=1 "$(RELEASE_TREE)") && \
+		echo "  CID: $$CID" && \
+		echo "$$CID" > target/release.cid && \
+		if [ -z "$(SKIP_PIN)" ] && ipfs key list | grep -q ww-release 2>/dev/null; then \
+			echo "Pinning and publishing to IPNS..." && \
+			ipfs name publish --key=ww-release /ipfs/$$CID; \
+		else \
+			echo "  (skip pin/IPNS — no ww-release key or SKIP_PIN set)"; \
+		fi
+	@rm -rf "$(RELEASE_TREE)"
+	@echo "Done. CID written to target/release.cid"
 
 # --- Run ---------------------------------------------------------------------
 
