@@ -10,13 +10,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `ww shell` now auto-discovers local nodes via Kubo's LAN DHT when `--addr` is omitted. The daemon advertises a well-known discovery CID; the shell queries Kubo's `findprovs` API to find it.
 - Admin HTTP server (`--with-http-admin`) now exposes `GET /host/id` (peer ID) and `GET /host/addrs` (listen addresses). `MetricsService` renamed to `AdminService`.
 
-### Fixed
-- `host :listen` now gives a clear error when passed an undefined variable instead of a cell (e.g. when `load` fails). Previously showed misleading "runtime capability required".
-
 ### Changed
 - Outbound HTTP access for cells now requires explicit `--http-dial` flag. No flag means no `http-client` capability. Supports exact hosts, subdomain globs (`*.example.com`), and `*` for unrestricted access.
 
 ### Fixed
+- `host :listen` now gives a clear error when passed an undefined variable instead of a cell (e.g. when `load` fails). Previously showed misleading "runtime capability required".
 - IPFS release tree now includes all example WASM binaries (oracle, counter, chess, etc.), not just echo. Previously `make examples` built them but the CI artifact upload and publish steps dropped them, so `ww run /ipns/<key>/examples/oracle` failed with missing `bin/oracle.wasm`.
 
 ## [0.1.2] - 2026-04-12
