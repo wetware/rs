@@ -415,7 +415,28 @@ jobs:
 
     - uses: actions/download-artifact@v5
       with:
-        path: artifacts
+        name: wasm-artifacts
+        path: artifacts/wasm-artifacts
+
+    - uses: actions/download-artifact@v5
+      with:
+        name: ww-linux-x86_64
+        path: artifacts/ww-linux-x86_64
+
+    - uses: actions/download-artifact@v5
+      with:
+        name: ww-linux-aarch64
+        path: artifacts/ww-linux-aarch64
+
+    - uses: actions/download-artifact@v5
+      with:
+        name: ww-macos-aarch64
+        path: artifacts/ww-macos-aarch64
+
+    - uses: actions/download-artifact@v5
+      with:
+        name: ww-macos-x86_64
+        path: artifacts/ww-macos-x86_64
 
     - name: Publish to IPFS via VPS
       env:
