@@ -132,19 +132,31 @@ ipfs cat "${IPFS_BASE}/CHECKSUMS.txt" > "${TMPDIR}/CHECKSUMS.txt" 2>/dev/null ||
 
 if [ -f "${TMPDIR}/CHECKSUMS.txt" ] && [ -s "${TMPDIR}/CHECKSUMS.txt" ]; then
   echo "Verifying checksum..."
-  if command -v b3sum >/dev/null 2>&1; then
-    EXPECTED=$(grep "${BIN_PATH}" "${TMPDIR}/CHECKSUMS.txt" | grep -v "^#" | head -1 | awk '{print $1}')
-    ACTUAL=$(b3sum --no-names "${TMPDIR}/ww")
-    ALGO="blake3"
-  else
-    # Fall back to sha256 (listed after "# sha256" marker in CHECKSUMS.txt)
-    EXPECTED=$(sed -n '/^# sha256/,$ p' "${TMPDIR}/CHECKSUMS.txt" | grep "${BIN_PATH}" | head -1 | awk '{print $1}')
-    ACTUAL=$(sha256sum "${TMPDIR}/ww" 2>/dev/null || shasum -a 256 "${TMPDIR}/ww")
-    ACTUAL=$(echo "$ACTUAL" | awk '{print $1}')
-    ALGO="sha256"
+
+  EXPECTED=""
+  ACTUAL=""
+  ALGO=""
+
+  # Prefer BLAKE3 if b3sum is available and CHECKSUMS.txt has a blake3 section
+  if command -v b3sum >/dev/null 2>&1 && grep -q "^# blake3" "${TMPDIR}/CHECKSUMS.txt"; then
+    EXPECTED=$(sed -n '/^# blake3/,/^$/p' "${TMPDIR}/CHECKSUMS.txt" | grep "${BIN_PATH}" | head -1 | awk '{print $1}')
+    if [ -n "$EXPECTED" ]; then
+      ACTUAL=$(b3sum --no-names "${TMPDIR}/ww")
+      ALGO="blake3"
+    fi
   fi
 
-  if [ -n "$EXPECTED" ] && [ "$EXPECTED" != "$ACTUAL" ]; then
+  # Fall back to SHA-256 (always available on macOS and Linux)
+  if [ -z "$ALGO" ] && grep -q "^# sha256" "${TMPDIR}/CHECKSUMS.txt"; then
+    EXPECTED=$(sed -n '/^# sha256/,/^$/p' "${TMPDIR}/CHECKSUMS.txt" | grep "${BIN_PATH}" | head -1 | awk '{print $1}')
+    if [ -n "$EXPECTED" ]; then
+      ACTUAL=$(sha256sum "${TMPDIR}/ww" 2>/dev/null || shasum -a 256 "${TMPDIR}/ww")
+      ACTUAL=$(echo "$ACTUAL" | awk '{print $1}')
+      ALGO="sha256"
+    fi
+  fi
+
+  if [ -n "$ALGO" ] && [ "$EXPECTED" != "$ACTUAL" ]; then
     echo "Error: checksum mismatch (${ALGO})"
     echo "  expected: ${EXPECTED}"
     echo "  got:      ${ACTUAL}"
@@ -153,7 +165,7 @@ if [ -f "${TMPDIR}/CHECKSUMS.txt" ] && [ -s "${TMPDIR}/CHECKSUMS.txt" ]; then
     echo "  https://github.com/wetware/ww/releases"
     rm -f "${TMPDIR}/ww"
     exit 1
-  elif [ -n "$EXPECTED" ]; then
+  elif [ -n "$ALGO" ]; then
     echo "Checksum OK (${ALGO})"
   else
     echo "Warning: could not find checksum for ${BIN_PATH} in CHECKSUMS.txt"
