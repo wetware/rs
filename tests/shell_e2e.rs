@@ -63,6 +63,7 @@ async fn spawn_shell_on_pool(pool: &ExecutorPool) -> Result<shell_capnp::shell::
                     Some(stream_control),
                     CachePolicy::Shared,
                     ww::ipfs::HttpClient::new("http://localhost:5001".into()),
+                    Vec::new(),
                 );
 
                 eprintln!("  [worker] loading WASM ({} bytes)", wasm.len());

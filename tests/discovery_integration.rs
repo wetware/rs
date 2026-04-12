@@ -66,6 +66,7 @@ async fn spawn_greeter_on_pool(
                     Some(stream_control),
                     CachePolicy::Shared,
                     ww::ipfs::HttpClient::new("http://localhost:5001".into()),
+                    Vec::new(), // no outbound HTTP access
                 );
 
                 // Load WASM via runtime to get an Executor.

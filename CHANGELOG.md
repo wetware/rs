@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+- Outbound HTTP access for cells now requires explicit `--http-dial` flag. No flag means no `http-client` capability. Supports exact hosts, subdomain globs (`*.example.com`), and `*` for unrestricted access.
+
 ## [0.1.2] - 2026-04-12
 
 ### Changed

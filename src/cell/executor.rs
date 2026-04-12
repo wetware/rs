@@ -76,6 +76,7 @@ pub struct CellBuilder {
     cache_policy: crate::rpc::CachePolicy,
     suppress_stdin: bool,
     ipfs_client: Option<crate::ipfs::HttpClient>,
+    http_dial: Vec<String>,
 }
 
 impl CellBuilder {
@@ -103,6 +104,7 @@ impl CellBuilder {
             cache_policy: crate::rpc::CachePolicy::default(),
             suppress_stdin: false,
             ipfs_client: None,
+            http_dial: Vec::new(),
         }
     }
 
@@ -237,6 +239,13 @@ impl CellBuilder {
         self
     }
 
+    /// Set allowed outbound HTTP hosts for cells.
+    /// Non-empty enables the http-client capability; empty means no HTTP access.
+    pub fn with_http_dial(mut self, hosts: Vec<String>) -> Self {
+        self.http_dial = hosts;
+        self
+    }
+
     /// Build the Cell.
     ///
     /// # Panics
@@ -266,6 +275,7 @@ impl CellBuilder {
             ipfs_client: self
                 .ipfs_client
                 .unwrap_or_else(|| crate::ipfs::HttpClient::new("http://localhost:5001".into())),
+            http_dial: self.http_dial,
         }
     }
 }
@@ -299,6 +309,8 @@ pub struct Cell {
     pub suppress_stdin: bool,
     /// IPFS HTTP client for Kubo API calls (e.g. IPNS resolution via routing).
     pub ipfs_client: crate::ipfs::HttpClient,
+    /// Allowed outbound HTTP hosts. Non-empty enables the http-client capability.
+    pub http_dial: Vec<String>,
 }
 
 /// Result of spawning a cell with RPC: exit code, guest membrane, and optional epoch sender.
@@ -357,6 +369,7 @@ impl Cell {
             cache_policy: _,
             suppress_stdin,
             ipfs_client: _,
+            http_dial: _,
         } = self;
 
         crate::config::init_tracing();
@@ -489,6 +502,7 @@ impl Cell {
         let route_registry = self.route_registry.take();
         let cache_policy = self.cache_policy;
         let ipfs_client = self.ipfs_client.clone();
+        let http_dial = self.http_dial.clone();
         let initial_epoch = self.initial_epoch.clone().unwrap_or(Epoch {
             seq: 0,
             head: vec![],
@@ -531,6 +545,7 @@ impl Cell {
             Some(membrane_stream_control.clone()),
             cache_policy,
             ipfs_client.clone(),
+            http_dial.clone(),
         );
 
         // Clone epoch receiver for Terminal auth before it's moved into the RPC system.
@@ -549,6 +564,7 @@ impl Cell {
             runtime_client,
             Vec::new(), // pid0 gets full membrane, no extras
             ipfs_client,
+            http_dial,
         );
 
         tracing::debug!("Starting streams RPC server for guest");
