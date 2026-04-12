@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 - Outbound HTTP access for cells now requires explicit `--http-dial` flag. No flag means no `http-client` capability. Supports exact hosts, subdomain globs (`*.example.com`), and `*` for unrestricted access.
+- Documentation overhaul: README rewritten with quick start, cell modes, AI integration, roadmap. CLI reference now covers all 12 commands. Architecture doc updated for `List(Export)` membrane, virtual WASI FS, state management, and distribution model.
 
 ### Fixed
 - `host :listen` now gives a clear error when passed an undefined variable instead of a cell (e.g. when `load` fails). Previously showed misleading "runtime capability required".
