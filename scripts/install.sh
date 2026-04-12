@@ -272,38 +272,9 @@ fi
 mkdir -p "${WW_HOME}/etc"
 ipfs cat "${IPFS_BASE}/etc/config.toml.default" > "${WW_HOME}/etc/config.toml.default" 2>/dev/null || true
 
-# --- Full node setup (identity, namespace, daemon, MCP) ---
+# --- Full node setup (identity, namespace, daemon, MCP, PATH) ---
 printf '\n'
 if ! "${WW_HOME}/bin/ww" perform install; then
   warn "Some setup steps failed.  You can retry with:"
   printf '  %s/bin/ww perform install\n' "$WW_HOME"
 fi
-
-# --- Next steps ---
-printf '\n'
-
-# PATH warning first if needed, then the call to action.
-PATH_CMD=""
-case ":${PATH}:" in
-  *":${WW_HOME}/bin:"*) ;;
-  *)
-    SHELL_NAME="${SHELL:-}"
-    case "$SHELL_NAME" in
-      */fish)  PATH_CMD="fish_add_path ${WW_HOME}/bin" ;;
-      */zsh)   PATH_CMD="export PATH=\"${WW_HOME}/bin:\$PATH\"" ;;
-      *)       PATH_CMD="export PATH=\"${WW_HOME}/bin:\$PATH\"" ;;
-    esac
-    ;;
-esac
-
-if $IS_TTY; then
-  printf '\342\232\227\357\270\217  Next steps:\n'
-else
-  printf 'Next steps:\n'
-fi
-printf '\n'
-if [ -n "$PATH_CMD" ]; then
-  printf '  %s\n' "$PATH_CMD"
-fi
-printf '  ww shell\n'
-printf '\n'

@@ -2192,15 +2192,33 @@ wasip2::cli::command::export!({iface_name}Guest);
             skip("Claude Code MCP (claude CLI not found)".into());
         }
 
+        // ── PATH ──────────────────────────────────────────────────────
+        let ww_bin_dir = ww_dir.join("bin");
+        let in_path = std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .any(|p| std::path::Path::new(p) == ww_bin_dir);
+
+        let path_cmd = if !in_path {
+            let shell = std::env::var("SHELL").unwrap_or_default();
+            if shell.ends_with("/fish") {
+                Some(format!("fish_add_path {}", ww_bin_dir.display()))
+            } else {
+                Some(format!("export PATH=\"{}:$PATH\"", ww_bin_dir.display()))
+            }
+        } else {
+            None
+        };
+
         // ── Summary ──────────────────────────────────────────────────
         println!();
-        println!("\u{2697}\u{fe0f}  Wetware installed.");
+        println!("\u{2697}\u{fe0f}  Next steps:");
         println!();
-        println!("  Identity  ~/.ww/identity");
-        println!("  Data      ~/.ww/");
-        println!("  Version   {}", env!("CARGO_PKG_VERSION"));
+        if let Some(cmd) = &path_cmd {
+            println!("  {cmd}");
+        }
+        println!("  ww shell");
         println!();
-        println!("  Connect:    ww shell");
         println!("  Uninstall:  ww perform uninstall");
 
         Ok(())
