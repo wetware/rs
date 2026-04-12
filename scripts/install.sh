@@ -272,33 +272,12 @@ fi
 mkdir -p "${WW_HOME}/etc"
 ipfs cat "${IPFS_BASE}/etc/config.toml.default" > "${WW_HOME}/etc/config.toml.default" 2>/dev/null || true
 
-# --- Detect installed version ---
-INSTALLED_VERSION=""
-if "${WW_HOME}/bin/ww" --version >/dev/null 2>&1; then
-  INSTALLED_VERSION=$("${WW_HOME}/bin/ww" --version 2>/dev/null | awk '{print $NF}')
+# --- Full node setup (identity, namespace, daemon, MCP) ---
+printf '\n'
+if ! "${WW_HOME}/bin/ww" perform install; then
+  warn "Some setup steps failed.  You can retry with:"
+  printf '  %s/bin/ww perform install\n' "$WW_HOME"
 fi
-
-VERSION_DISPLAY="${INSTALLED_VERSION:-unknown}"
-
-# --- Summary ---
-printf '\n'
-if $IS_TTY; then
-  printf '\342\232\227\357\270\217  wetware installed successfully\n'
-else
-  printf 'wetware installed successfully\n'
-fi
-printf '\n'
-printf '  ww v%s (%s/%s)\n' "$VERSION_DISPLAY" "$OS_NAME" "$ARCH_NAME"
-printf '  %s/bin/ww\n' "$WW_HOME"
-printf '\n'
-if $IS_TTY; then
-  printf '  AI agents:    ipfs cat /ipns/releases.wetware.run/.agents/prompt.md\n'
-else
-  printf '  AI agents: ipfs cat /ipns/releases.wetware.run/.agents/prompt.md\n'
-fi
-printf '\n'
-printf '  Get started:  ww --help\n'
-printf '  Join network: ww perform install\n'
 
 # --- PATH warning (shell-specific) ---
 case ":${PATH}:" in

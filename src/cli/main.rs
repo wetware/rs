@@ -2015,7 +2015,7 @@ wasip2::cli::command::export!({iface_name}Guest);
                 // Publish std to IPFS if images are available.
                 if images_ok {
                     let sp = spin();
-                    sp.set_message("Publishing standard library...");
+                    sp.set_message("Indexing standard library...");
 
                     // Assemble namespace tree in temp dir.
                     let tmp = tempfile::TempDir::new()?;
@@ -2109,10 +2109,49 @@ wasip2::cli::command::export!({iface_name}Guest);
                 .await?;
             sp.finish_and_clear();
             done("Background daemon".into());
-            if cfg!(target_os = "macos") {
-                println!("    launchctl load {}", plist_path.display());
-            } else if cfg!(target_os = "linux") {
-                println!("    systemctl --user enable --now ww");
+        }
+
+        // ── Start daemon ─────────────────────────────────────────────
+        {
+            let already_running = if cfg!(target_os = "macos") {
+                std::process::Command::new("launchctl")
+                    .args(["list", "io.wetware.ww"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            } else {
+                std::process::Command::new("systemctl")
+                    .args(["--user", "is-active", "--quiet", "ww"])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            };
+
+            if already_running {
+                skip("Daemon running".into());
+            } else if cfg!(target_os = "macos") && plist_path.exists() {
+                match std::process::Command::new("launchctl")
+                    .args(["load", &plist_path.display().to_string()])
+                    .status()
+                {
+                    Ok(s) if s.success() => done("Daemon started".into()),
+                    _ => fail(
+                        "Daemon start (try: launchctl load {})"
+                            .replace("{}", &plist_path.display().to_string()),
+                    ),
+                }
+            } else if cfg!(target_os = "linux") && systemd_path.exists() {
+                match std::process::Command::new("systemctl")
+                    .args(["--user", "enable", "--now", "ww"])
+                    .status()
+                {
+                    Ok(s) if s.success() => done("Daemon started".into()),
+                    _ => fail("Daemon start (try: systemctl --user enable --now ww)".into()),
+                }
+            } else {
+                skip("Daemon start (no service file)".into());
             }
         }
 
@@ -2160,15 +2199,8 @@ wasip2::cli::command::export!({iface_name}Guest);
         println!("  Identity  ~/.ww/identity");
         println!("  Data      ~/.ww/");
         println!("  Version   {}", env!("CARGO_PKG_VERSION"));
-        if !daemon_exists {
-            println!();
-            if cfg!(target_os = "macos") {
-                println!("  Next: launchctl load {}", plist_path.display());
-            } else {
-                println!("  Next: systemctl --user enable --now ww");
-            }
-        }
         println!();
+        println!("  Connect:    ww shell");
         println!("  Uninstall:  ww perform uninstall");
 
         Ok(())
