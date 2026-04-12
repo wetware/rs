@@ -4,8 +4,10 @@
 //! peer, bootstraps Cap'n Proto RPC on the shell protocol, and enters a
 //! rustyline REPL loop.
 //!
-//! When `--addr` is omitted, discovers a local wetware node by querying
-//! Kubo's LAN DHT for providers of the well-known discovery CID.
+//! Accepts an optional multiaddr as a positional argument:
+//!   - `/ip4/.../tcp/.../p2p/...` — dial directly
+//!   - `/dnsaddr/...` — resolve via DNS TXT records, then dial
+//!   - *(omitted)* — discover a local node via Kubo's LAN DHT
 
 use anyhow::{Context, Result};
 use libp2p::Multiaddr;
@@ -91,27 +93,44 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
         }
     };
 
-    // 3. Extract peer ID from the multiaddr (/p2p/<peer-id> component).
-    let peer_id = addr
-        .iter()
-        .find_map(|proto| match proto {
-            libp2p::multiaddr::Protocol::P2p(id) => Some(id),
-            _ => None,
-        })
-        .context("multiaddr must include /p2p/<peer-id> component")?;
-
-    // 4. Build client swarm.
+    // 3. Build client swarm and extract peer ID from the address.
+    //    For /dnsaddr/ multiaddrs, the peer ID is discovered after the DNS
+    //    transport resolves the address and the connection is established.
     let mut client = ww::host::ClientSwarm::new(keypair)?;
-    // Strip the /p2p/ component to get the transport address.
-    let transport_addr: Multiaddr = addr
-        .iter()
-        .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
-        .collect();
-    client.add_peer_addr(peer_id, transport_addr);
     let mut stream_control = client.stream_control();
 
-    // 5. Spawn swarm event loop.
-    tokio::task::spawn_local(client.run());
+    let peer_id_from_addr = addr.iter().find_map(|proto| match proto {
+        libp2p::multiaddr::Protocol::P2p(id) => Some(id),
+        _ => None,
+    });
+
+    let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
+
+    if let Some(peer_id) = peer_id_from_addr {
+        let transport_addr: Multiaddr = addr
+            .iter()
+            .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+            .collect();
+        client.add_peer_addr(peer_id, transport_addr);
+    } else {
+        client
+            .dial(addr.clone())
+            .map_err(|e| anyhow::anyhow!("failed to dial {addr}: {e}"))?;
+    }
+
+    // 4. Spawn swarm event loop (reports first connected peer via channel).
+    tokio::task::spawn_local(client.run(Some(connected_tx)));
+
+    // 5. Resolve peer ID: either known from the multiaddr or discovered via connection.
+    let peer_id = if let Some(id) = peer_id_from_addr {
+        id
+    } else {
+        eprintln!("Resolving {addr}...");
+        tokio::time::timeout(std::time::Duration::from_secs(30), connected_rx)
+            .await
+            .map_err(|_| anyhow::anyhow!("connection timeout (30s) — is the address correct?"))?
+            .map_err(|_| anyhow::anyhow!("swarm event loop ended before connection"))?
+    };
 
     // 6. Compute the shell protocol from schema bytes.
     // The schema bytes are compiled into the shell cell's build output.

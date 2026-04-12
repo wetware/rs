@@ -1531,6 +1531,7 @@ impl ClientSwarm {
                 libp2p::yamux::Config::default,
             )?
             .with_quic()
+            .with_dns()?
             .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
             .with_behaviour(|_keypair, relay_client| {
                 Ok(ClientBehaviour {
@@ -1571,13 +1572,29 @@ impl ClientSwarm {
         }
     }
 
+    /// Dial a multiaddr directly (e.g. /dnsaddr/...).
+    ///
+    /// DNS and dnsaddr resolution happens inside the swarm's transport.
+    /// Use this when the peer ID is not yet known.
+    pub fn dial(&mut self, addr: Multiaddr) -> Result<(), libp2p::swarm::DialError> {
+        self.swarm.dial(addr)
+    }
+
     /// Drive the swarm event loop. Spawn this as a background task.
-    pub async fn run(mut self) {
+    ///
+    /// If `connected_tx` is provided, the peer ID of the first established
+    /// connection is sent through it (useful for dnsaddr dialing where the
+    /// peer ID is not known upfront).
+    pub async fn run(mut self, connected_tx: Option<tokio::sync::oneshot::Sender<PeerId>>) {
         use libp2p::swarm::SwarmEvent;
+        let mut connected_tx = connected_tx;
         loop {
             match self.swarm.next().await {
                 Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
                     tracing::debug!(peer = %peer_id, "Client connection established");
+                    if let Some(tx) = connected_tx.take() {
+                        let _ = tx.send(peer_id);
+                    }
                 }
                 Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
                     tracing::debug!(peer = %peer_id, "Client connection closed");
