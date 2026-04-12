@@ -29,7 +29,7 @@ ww run . --stem 0xAddr --rpc-url http://... --ws-url ws://...
 | `ww run [MOUNT...]` | Boot a node; mounts are `source[:target]` |
 | `ww push [PATH]` | Snapshot FHS tree to IPFS, optionally update on-chain HEAD |
 | `ww keygen` | Generate Ed25519 identity (prints to stdout) |
-| `ww shell --addr MULTIADDR` | Glia REPL on a running node |
+| `ww shell [MULTIADDR]` | Glia REPL on a running node |
 | `ww doctor` | Check dev environment (Rust, wasm target, Kubo) |
 | `ww perform install` | Bootstrap ~/.ww, daemon, MCP wiring |
 | `ww perform upgrade` | Self-update binary via IPNS |

@@ -7,7 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
-- `ww shell` now auto-discovers local nodes via Kubo's LAN DHT when `--addr` is omitted. The daemon advertises a well-known discovery CID; the shell queries Kubo's `findprovs` API to find it.
+- `ww shell` now auto-discovers local nodes via Kubo's LAN DHT when no address is given. The daemon advertises a well-known discovery CID; the shell queries Kubo's `findprovs` API to find it.
+- `ww shell` accepts `/dnsaddr/` multiaddrs (e.g. `ww shell /dnsaddr/master.wetware.run`). Address is now a positional argument instead of `--addr`.
 - Admin HTTP server (`--with-http-admin`) now exposes `GET /host/id` (peer ID) and `GET /host/addrs` (listen addresses). `MetricsService` renamed to `AdminService`.
 
 ### Changed
