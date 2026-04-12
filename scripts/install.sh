@@ -212,24 +212,35 @@ CHECKSUM_ALGO=""
 ipfs cat "${IPFS_BASE}/CHECKSUMS.txt" > "${TMPDIR}/CHECKSUMS.txt" 2>/dev/null || true
 
 if [ -f "${TMPDIR}/CHECKSUMS.txt" ] && [ -s "${TMPDIR}/CHECKSUMS.txt" ]; then
-  if command -v b3sum >/dev/null 2>&1; then
-    EXPECTED=$(grep "${BIN_PATH}" "${TMPDIR}/CHECKSUMS.txt" | grep -v "^#" | head -1 | awk '{print $1}')
-    ACTUAL=$(b3sum --no-names "${TMPDIR}/ww")
-    CHECKSUM_ALGO="blake3"
-  else
-    EXPECTED=$(sed -n '/^# sha256/,$ p' "${TMPDIR}/CHECKSUMS.txt" | grep "${BIN_PATH}" | head -1 | awk '{print $1}')
-    ACTUAL=$(sha256sum "${TMPDIR}/ww" 2>/dev/null || shasum -a 256 "${TMPDIR}/ww")
-    ACTUAL=$(echo "$ACTUAL" | awk '{print $1}')
-    CHECKSUM_ALGO="sha256"
+  EXPECTED=""
+  ACTUAL=""
+
+  # Prefer BLAKE3 if b3sum is available and CHECKSUMS.txt has a blake3 section
+  if command -v b3sum >/dev/null 2>&1 && grep -q "^# blake3" "${TMPDIR}/CHECKSUMS.txt"; then
+    EXPECTED=$(sed -n '/^# blake3/,/^$/p' "${TMPDIR}/CHECKSUMS.txt" | grep "${BIN_PATH}" | head -1 | awk '{print $1}')
+    if [ -n "$EXPECTED" ]; then
+      ACTUAL=$(b3sum --no-names "${TMPDIR}/ww")
+      CHECKSUM_ALGO="blake3"
+    fi
   fi
 
-  if [ -n "$EXPECTED" ] && [ "$EXPECTED" != "$ACTUAL" ]; then
+  # Fall back to SHA-256 (always available on macOS and Linux)
+  if [ -z "$CHECKSUM_ALGO" ] && grep -q "^# sha256" "${TMPDIR}/CHECKSUMS.txt"; then
+    EXPECTED=$(sed -n '/^# sha256/,/^$/p' "${TMPDIR}/CHECKSUMS.txt" | grep "${BIN_PATH}" | head -1 | awk '{print $1}')
+    if [ -n "$EXPECTED" ]; then
+      ACTUAL=$(sha256sum "${TMPDIR}/ww" 2>/dev/null || shasum -a 256 "${TMPDIR}/ww")
+      ACTUAL=$(echo "$ACTUAL" | awk '{print $1}')
+      CHECKSUM_ALGO="sha256"
+    fi
+  fi
+
+  if [ -n "$CHECKSUM_ALGO" ] && [ "$EXPECTED" != "$ACTUAL" ]; then
     die "Checksum mismatch (${CHECKSUM_ALGO})" \
       "expected: ${EXPECTED}" \
       "got:      ${ACTUAL}" \
       "Download may be corrupted.  Try again or download manually:" \
       "  https://github.com/wetware/ww/releases"
-  elif [ -n "$EXPECTED" ]; then
+  elif [ -n "$CHECKSUM_ALGO" ]; then
     if $IS_TTY; then
       printf '  \342\234\223 Checksum OK (%s)\n' "$CHECKSUM_ALGO" >&2
     else
