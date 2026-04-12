@@ -11,6 +11,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.1.2] - 2026-04-12
 
+### Changed
+- Install is now a single command. `curl | sh` calls `ww perform install` automatically — no separate setup step. Identity, namespace, daemon, and MCP wiring all happen in one shot.
+- `ww perform install` auto-starts the daemon via launchd (macOS) or systemd (Linux) instead of printing manual activation commands.
+- "Publishing standard library" spinner renamed to "Indexing standard library" (it's a local IPFS operation, not a network publish).
+- Post-install summary now shows `ww shell` as the next step.
+
 ### Fixed
 - Checksum verification during install. CHECKSUMS.txt now includes both SHA-256 (universal) and BLAKE3 (when available) under labeled sections. The install script prefers BLAKE3 when `b3sum` is present, falling back to SHA-256. Previously only one format was written with no section markers, so verification silently failed on machines missing `b3sum`.
 

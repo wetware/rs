@@ -101,6 +101,7 @@ pub async fn run_shell(addr: Multiaddr, identity: Option<PathBuf>) -> Result<()>
 
     eprintln!("{}", glia::banner());
     eprintln!("Connected to {peer_id}");
+    eprintln!("AI agents:  ipfs cat /ipns/releases.wetware.run/.agents/prompt.md");
 
     // 8. REPL loop.
     // rustyline blocks the thread, so run in spawn_blocking with mpsc bridge.
