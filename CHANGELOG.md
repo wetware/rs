@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `ww shell` now auto-discovers local nodes via Kubo's LAN DHT when `--addr` is omitted. The daemon advertises a well-known discovery CID; the shell queries Kubo's `findprovs` API to find it.
+
 ### Changed
 - Outbound HTTP access for cells now requires explicit `--http-dial` flag. No flag means no `http-client` capability. Supports exact hosts, subdomain globs (`*.example.com`), and `*` for unrestricted access.
 
