@@ -1,0 +1,20 @@
+#!/bin/sh
+# Pre-push hook: catch the two things we keep forgetting.
+set -e
+
+# 1. cargo fmt
+if ! cargo fmt --check >/dev/null 2>&1; then
+  echo "pre-push: cargo fmt --check failed. Run: cargo fmt" >&2
+  exit 1
+fi
+
+# 2. CHANGELOG.md must be touched if src/ or scripts/ changed
+BASE=$(git merge-base HEAD origin/master 2>/dev/null || echo HEAD~1)
+CHANGED=$(git diff --name-only "$BASE"...HEAD 2>/dev/null || git diff --name-only HEAD~1)
+
+if echo "$CHANGED" | grep -qE '^(src/|scripts/)'; then
+  if ! echo "$CHANGED" | grep -q '^CHANGELOG.md'; then
+    echo "pre-push: src/ or scripts/ changed but CHANGELOG.md was not updated." >&2
+    exit 1
+  fi
+fi
