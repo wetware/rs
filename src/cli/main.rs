@@ -2248,7 +2248,7 @@ wasip2::cli::command::export!({iface_name}Guest);
                         // Write the key into namespace config so perform_update
                         // can publish to IPNS on the first install.
                         let ns_path = ww_dir.join("etc/ns/ww");
-                        let mut config = ww::ns::NamespaceConfig {
+                        let config = ww::ns::NamespaceConfig {
                             name: "ww".to_string(),
                             ipns: id.clone(),
                             bootstrap: ww::namespace::WW_STD_CID.to_string(),
