@@ -40,20 +40,17 @@ Authentication, if needed, is handled by wrapping the Membrane in a
 ```
 Traditional process:        Wetware guest:
   env vars     -> yes         env vars     -> only if explicitly passed
-  filesystem   -> yes         filesystem   -> none; content via IPFS capability
+  filesystem   -> yes         filesystem   -> virtual WASI FS (read-only, from image layers)
   network      -> yes         network      -> no
   syscalls     -> yes         syscalls     -> WASI subset only
   ambient auth -> yes         ambient auth -> none
-                              graft caps   -> the only authority (Host + Runtime + Routing + Identity)
+                              graft caps   -> the only authority (named exports via List(Export))
 ```
 
-**There is no native filesystem on the guest side.** The WASI sandbox does
-not provide filesystem access. All content loading goes through capabilities
-— specifically the IPFS capability obtained via `ipfs.cat(path)`.
-
-The host publishes the merged FHS image to IPFS and sets `$WW_ROOT` to the
-resulting IPFS path (e.g. `/ipfs/QmHash...`). Guests resolve content relative
-to this root: `ipfs.cat("$WW_ROOT/bin/main.wasm")`.
+**The guest filesystem is virtual and read-only.** The host merges image
+layers into a virtual WASI filesystem that the guest can read via standard
+POSIX file operations. Content is reactive to stem updates: when the
+on-chain head advances, the filesystem reflects the new image.
 
 This is the foundation that makes untrusted code execution safe. An agent can
 only do what the capabilities it holds allow. If you don't hand it the
@@ -141,34 +138,37 @@ these capabilities, giving a child a restricted view of the host.
 
 The host creates a Membrane and bootstraps it to pid0 over in-memory
 Cap'n Proto RPC. pid0 calls `membrane.graft()` to obtain epoch-guarded
-capabilities as flat return fields:
+capabilities as a `List(Export)` of named capabilities:
 
-- **identity** (`Identity`) — host-side signing (maps domains → Signers)
-- **host** (`Host`) — network identity and peer management
-- **runtime** (`Runtime`) — load WASM binaries, obtain scoped Executors
-- **routing** (`Routing`) — Kademlia DHT (provide, findProviders)
-- **httpClient** (`HttpClient`) — outbound HTTP requests
+- **Host** — peer identity, listen addresses, network access
+- **Runtime** — load WASM binaries, obtain scoped Executors (with compilation caching)
+- **Routing** — Kademlia DHT (provide, findProviders)
+- **Identity** — host-side Ed25519 signing (private key never enters WASM)
+- **HttpClient** — outbound HTTP requests (domain-scoped via `--http-dial`)
+- **StreamListener / StreamDialer** — open and accept libp2p byte streams
+- **VatListener / VatClient** — serve and consume Cap'n Proto RPC over the network
 
 All capabilities are epoch-guarded: they become stale when the on-chain
 head advances. The guest must re-graft to obtain fresh capabilities.
 
 Having a Membrane reference IS authorization (ocap model). `graft()` is
-parameterless — no signer needed. To gate access for remote peers, wrap
+parameterless -- no signer needed. To gate access for remote peers, wrap
 the Membrane in `Terminal(Membrane)`, which requires challenge-response
 authentication before handing out the Membrane reference.
 
 ```
 Host                             pid0
-────                             ────
+----                             ----
 create Membrane
   with GraftBuilder
-    Host (network state)
-    Runtime (engine, cache)
-    Routing (DHT)
-serve via RpcSystem ──────────> membrane.graft() -> (identity, host, runtime, routing, httpClient)
-                                  host.id()
-                                  host.addrs()
-                                  runtime.load(wasm) -> executor
+    Host, Runtime, Routing,
+    Identity, HttpClient,
+    StreamListener, StreamDialer,
+    VatListener, VatClient
+serve via RpcSystem ----------> membrane.graft() -> List(Export { name, cap })
+                                  lookup("host").id()
+                                  lookup("host").addrs()
+                                  lookup("runtime").load(wasm) -> executor
                                   executor.spawn(args, env) -> process
 ```
 
@@ -369,6 +369,61 @@ Object, Swarm, PubSub, Routing.
 The host delegates to a local Kubo HTTP client (`http://localhost:5001`).
 Cap'n Proto pipelining allows `ipfs.unixfs().cat(path)` to
 resolve in a single round-trip.
+
+## State management
+
+Wetware provides two coordination primitives via **stems**:
+
+- **Atomic stems** (on-chain): a linearizable register backed by a smart
+  contract. The contract stores a single CID (the "head"). When updated,
+  all capabilities are revoked and the epoch advances. This is the
+  mechanism behind `--stem`.
+
+- **Eventual stems** (IPNS): a mutable pointer backed by IPNS. Updates
+  propagate through the DHT with eventual consistency. Used for
+  namespace resolution (`ww ns add`) and configuration distribution.
+
+**Planned: dosync transactions.** Atomic multi-field updates over
+content-addressed state using Clojure-inspired STM semantics. Each
+agent gets transactional state as a language primitive:
+
+```clojure
+(dosync game
+  (alter! [:board :e2] nil)
+  (alter! [:board :e4] :white-pawn))
+```
+
+The dosync model collapses three boundaries into one: consistency
+boundary = stem root, authority boundary = write capability, identity
+boundary = entity-over-time. See CEO plan `2026-04-11-dosync-transactions`
+for the full design.
+
+## Distribution
+
+Wetware images are content-addressed FHS trees stored in IPFS. The
+distribution model:
+
+1. `ww build` compiles to `boot/main.wasm`
+2. `ww push` adds the tree to IPFS and returns a CID
+3. `ww run /ipfs/<CID>` boots from content-addressed storage
+4. On-chain stems point to CIDs for automatic updates
+
+IPNS provides mutable pointers for release channels:
+`/ipns/releases.wetware.run` resolves to the latest release tree.
+`ww perform upgrade` uses this to self-update the binary.
+
+## AI integration
+
+Wetware is the drivetrain, not the engine. An LLM connects to a
+node and gets a capability-secured shell:
+
+- **MCP mode** (`ww run . --mcp`): the cell becomes an MCP server on
+  stdin/stdout. Tools map to capability methods. The membrane provides
+  the safety boundary -- AI agents can only do what their capabilities
+  allow.
+
+- **Glia shell** (`ww shell`): interactive REPL for capability
+  exploration. `ww perform install` wires MCP into Claude Code.
 
 ## See also
 
