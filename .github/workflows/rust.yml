@@ -232,6 +232,9 @@ jobs:
     - name: Build WASM std + examples
       run: make std && make examples
 
+    - name: Test WASM components
+      run: make test-wasm
+
     - uses: actions/upload-artifact@v5
       with:
         name: wasm-artifacts

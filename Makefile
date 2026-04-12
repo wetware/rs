@@ -6,7 +6,7 @@
 WASM_TARGET := wasm32-wasip2
 
 .PHONY: all host std kernel shell mcp examples chess echo counter discovery oracle auction mindshare clean run-kernel
-.PHONY: publish-std try-publish-std publish
+.PHONY: publish-std try-publish-std publish test-wasm
 .PHONY: container-build container-run container-dev container-clean
 .PHONY: agent-skills
 
@@ -150,6 +150,24 @@ publish: host
 		fi
 	@rm -rf "$(RELEASE_TREE)"
 	@echo "Done. CID written to target/release.cid"
+
+# --- Test WASM components ----------------------------------------------------
+# Scaffolding for WASM component tests. Today this is a no-op because the
+# WASM crates (kernel, shell, mcp) have no test suite yet. When tests are
+# added, this target will run them. CI calls this after building WASM.
+#
+# WASM crates can't run cargo test on the host (they depend on wasip2).
+# Tests should be either:
+#   - Host-side integration tests that spawn cells and test via RPC
+#   - wasmtime-based test harness for unit tests
+#
+# For now, just verify the binaries were produced.
+test-wasm: std
+	@echo "Verifying WASM artifacts..."
+	@test -f std/kernel/bin/main.wasm  || { echo "FAIL: kernel WASM missing"; exit 1; }
+	@test -f std/shell/bin/shell.wasm  || { echo "FAIL: shell WASM missing"; exit 1; }
+	@test -f std/mcp/bin/main.wasm     || { echo "FAIL: mcp WASM missing"; exit 1; }
+	@echo "WASM artifacts OK (no test suite yet — see Makefile for guidance)"
 
 # --- Run ---------------------------------------------------------------------
 
