@@ -60,7 +60,7 @@ spin_ok() {
       wait "$SPINNER_PID" 2>/dev/null || true
       SPINNER_PID=""
     fi
-    printf '\r  \342\234\223 %s\n' "$1" >&2
+    printf '\r\033[K  \342\234\223 %s\n' "$1" >&2
   else
     printf ' ok\n' >&2
   fi
@@ -74,7 +74,7 @@ spin_fail() {
       wait "$SPINNER_PID" 2>/dev/null || true
       SPINNER_PID=""
     fi
-    printf '\r  \342\234\227 %s\n' "$1" >&2
+    printf '\r\033[K  \342\234\227 %s\n' "$1" >&2
   else
     printf ' FAILED\n' >&2
   fi
