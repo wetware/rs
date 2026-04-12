@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.2] - 2026-04-12
+
+### Fixed
+- Checksum verification during install. CHECKSUMS.txt now includes both SHA-256 (universal) and BLAKE3 (when available) under labeled sections. The install script prefers BLAKE3 when `b3sum` is present, falling back to SHA-256. Previously only one format was written with no section markers, so verification silently failed on machines missing `b3sum`.
+
 ## [0.1.1] - 2026-04-10
 
 ### Added
