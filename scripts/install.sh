@@ -279,27 +279,31 @@ if ! "${WW_HOME}/bin/ww" perform install; then
   printf '  %s/bin/ww perform install\n' "$WW_HOME"
 fi
 
-# --- PATH warning (shell-specific) ---
+# --- Next steps ---
+printf '\n'
+
+# PATH warning first if needed, then the call to action.
+PATH_CMD=""
 case ":${PATH}:" in
   *":${WW_HOME}/bin:"*) ;;
   *)
-    printf '\n'
     SHELL_NAME="${SHELL:-}"
     case "$SHELL_NAME" in
-      */fish)
-        warn "${WW_HOME}/bin is not in your PATH.  Add it:"
-        printf '  fish_add_path %s/bin\n' "$WW_HOME"
-        ;;
-      */zsh)
-        warn "${WW_HOME}/bin is not in your PATH.  Add to ~/.zshrc:"
-        printf '  export PATH="%s/bin:$PATH"\n' "$WW_HOME"
-        ;;
-      *)
-        warn "${WW_HOME}/bin is not in your PATH.  Add to ~/.bashrc:"
-        printf '  export PATH="%s/bin:$PATH"\n' "$WW_HOME"
-        ;;
+      */fish)  PATH_CMD="fish_add_path ${WW_HOME}/bin" ;;
+      */zsh)   PATH_CMD="export PATH=\"${WW_HOME}/bin:\$PATH\"" ;;
+      *)       PATH_CMD="export PATH=\"${WW_HOME}/bin:\$PATH\"" ;;
     esac
     ;;
 esac
 
+if $IS_TTY; then
+  printf '\342\232\227\357\270\217  Next steps:\n'
+else
+  printf 'Next steps:\n'
+fi
+printf '\n'
+if [ -n "$PATH_CMD" ]; then
+  printf '  %s\n' "$PATH_CMD"
+fi
+printf '  ww shell\n'
 printf '\n'
