@@ -278,15 +278,17 @@ jobs:
         rsync -a --exclude .git --exclude target . "$STAGE/"
         cd "$STAGE"
 
-        mkdir -p bin/linux/x86_64 bin/linux/aarch64 bin/macos/aarch64
+        mkdir -p bin/linux/x86_64 bin/linux/aarch64 bin/macos/x86_64 bin/macos/aarch64
         tar xzf "$GITHUB_WORKSPACE/artifacts/ww-linux-x86_64.tar.gz" -C bin/linux/x86_64/
         tar xzf "$GITHUB_WORKSPACE/artifacts/ww-linux-aarch64.tar.gz" -C bin/linux/aarch64/
+        tar xzf "$GITHUB_WORKSPACE/artifacts/ww-macos-x86_64.tar.gz" -C bin/macos/x86_64/
         tar xzf "$GITHUB_WORKSPACE/artifacts/ww-macos-aarch64.tar.gz" -C bin/macos/aarch64/
 
         mkdir -p oci
         cp "$GITHUB_WORKSPACE/artifacts/ww-image.tar" oci/image.tar
 
-        find bin/ oci/ -type f | sort | xargs b3sum > CHECKSUMS.txt
+        echo "# blake3" > CHECKSUMS.txt
+        find bin/ oci/ -type f | sort | xargs b3sum >> CHECKSUMS.txt
         echo "" >> CHECKSUMS.txt
         echo "# sha256" >> CHECKSUMS.txt
         find bin/ oci/ -type f | sort | xargs sha256sum >> CHECKSUMS.txt
