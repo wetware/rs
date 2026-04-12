@@ -232,15 +232,15 @@ enum Commands {
     /// Evaluates Glia expressions on the remote node. State persists
     /// across evals (def sticks). Ctrl-D or (exit) to disconnect.
     ///
-    /// When --addr is omitted, discovers a local node via Kubo's LAN DHT.
+    /// When no address is given, discovers a local node via Kubo's LAN DHT.
     ///
     /// Example:
     ///   ww shell
-    ///   ww shell --addr /ip4/127.0.0.1/tcp/2025/p2p/12D3KooW...
+    ///   ww shell /ip4/127.0.0.1/tcp/2025/p2p/12D3KooW...
+    ///   ww shell /dnsaddr/master.wetware.run
     Shell {
-        /// Multiaddr of the target node (must include /p2p/<peer-id>).
+        /// Multiaddr of the target node (e.g. /ip4/.../p2p/... or /dnsaddr/...).
         /// If omitted, discovers a local node via Kubo's LAN DHT.
-        #[arg(long)]
         addr: Option<Multiaddr>,
 
         /// Path to Ed25519 identity file for auth.
@@ -2121,7 +2121,10 @@ wasip2::cli::command::export!({iface_name}Guest);
         } else {
             let sp = spin();
             sp.set_message("Registering daemon...");
-            let image_layers: Vec<String> = ["kernel", "shell", "mcp"]
+            // Only mount kernel and shell as root layers.  The MCP cell
+            // is spawned separately by `ww run --mcp` and must NOT be a
+            // root layer — its bin/main.wasm would clobber the kernel's.
+            let image_layers: Vec<String> = ["kernel", "shell"]
                 .iter()
                 .map(|name| ww_dir.join(name).display().to_string())
                 .collect();
