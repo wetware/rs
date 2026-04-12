@@ -98,7 +98,8 @@ struct Session {
     ///
     /// Domain-scoped proxy — the host checks URL host against an allowlist.
     /// Exposed to glia scripts via `(perform host :http-client)`.
-    http_client: http_capnp::http_client::Client,
+    /// `None` when the operator did not pass `--http-dial`.
+    http_client: Option<http_capnp::http_client::Client>,
     cwd: String,
 }
 
@@ -276,7 +277,7 @@ fn call_resume(resume: &Val, val: Val) -> Result<Val, Val> {
 fn make_host_handler(
     host: system_capnp::host::Client,
     runtime: system_capnp::runtime::Client,
-    http_client: http_capnp::http_client::Client,
+    http_client: Option<http_capnp::http_client::Client>,
 ) -> Val {
     Val::AsyncNativeFn {
         name: "host-handler".into(),
@@ -597,10 +598,15 @@ fn make_host_handler(
                     "http-client" => {
                         // (perform host :http-client) → Val::Cap wrapping HttpClient
                         // Future: parse :allow and :rate kwargs from rest
-                        Val::Cap {
-                            name: "http".into(),
-                            schema_cid: schema_ids::HTTP_CLIENT_CID.to_string(),
-                            inner: Rc::new(http_client.clone()),
+                        match &http_client {
+                            Some(c) => Val::Cap {
+                                name: "http".into(),
+                                schema_cid: schema_ids::HTTP_CLIENT_CID.to_string(),
+                                inner: Rc::new(c.clone()),
+                            },
+                            None => return Err(Val::from(
+                                "http-client not available (node started without --http-dial)",
+                            )),
                         }
                     }
                     _ => return Err(Val::from(format!("host: unknown method :{method}"))),
@@ -1331,7 +1337,8 @@ fn run_impl() {
         let runtime: system_capnp::runtime::Client = get_graft_cap(&caps, "runtime")?;
         let routing: routing_capnp::routing::Client = get_graft_cap(&caps, "routing")?;
         let identity: stem_capnp::identity::Client = get_graft_cap(&caps, "identity")?;
-        let http_client: http_capnp::http_client::Client = get_graft_cap(&caps, "http-client")?;
+        let http_client: Option<http_capnp::http_client::Client> =
+            get_graft_cap(&caps, "http-client").ok();
 
         let ctx = RefCell::new(Session {
             host: host.clone(),
@@ -1385,13 +1392,21 @@ fn run_impl() {
                             // Glia effect handler — skip env binding.
                             continue;
                         }
-                        "http-client" => (
-                            schema_ids::HTTP_CLIENT_CID,
-                            Rc::new(s.http_client.clone()),
-                            // No standalone handler — http-client is accessed
-                            // via (perform host :http-client).
-                            Val::Nil,
-                        ),
+                        "http-client" => {
+                            match s.http_client.clone() {
+                                Some(c) => (
+                                    schema_ids::HTTP_CLIENT_CID,
+                                    Rc::new(c),
+                                    // No standalone handler — http-client is accessed
+                                    // via (perform host :http-client).
+                                    Val::Nil,
+                                ),
+                                None => {
+                                    log::warn!("graft: host sent 'http-client' but Session has None, skipping");
+                                    continue;
+                                }
+                            }
+                        }
                         other => {
                             log::warn!("graft: unknown cap '{other}', skipping");
                             continue;
@@ -1955,7 +1970,7 @@ mod tests {
             runtime: capnp_rpc::new_client(TestRuntime),
             routing: capnp_rpc::new_client(TestRouting),
             identity: capnp_rpc::new_client(TestIdentity),
-            http_client: capnp_rpc::new_client(TestHttpClient),
+            http_client: Some(capnp_rpc::new_client(TestHttpClient)),
             cwd: "/".into(),
         }
     }
@@ -2529,15 +2544,17 @@ mod tests {
             env.set(format!("{name}-handler"), handler);
         }
 
-        // http-client with real capnp client.
-        env.set(
-            "http-client".to_string(),
-            Val::Cap {
-                name: "http-client".into(),
-                schema_cid: "test-http-cid".into(),
-                inner: Rc::new(session.http_client.clone()),
-            },
-        );
+        // http-client with real capnp client (tests always provide one).
+        if let Some(ref c) = session.http_client {
+            env.set(
+                "http-client".to_string(),
+                Val::Cap {
+                    name: "http-client".into(),
+                    schema_cid: "test-http-cid".into(),
+                    inner: Rc::new(c.clone()),
+                },
+            );
+        }
     }
 
     /// Verify that (perform :load "path") inside wrap_with_handlers
@@ -2718,7 +2735,7 @@ mod tests {
             "should extract routing client"
         );
         // HttpClient
-        let inner: Rc<dyn std::any::Any> = Rc::new(s.http_client.clone());
+        let inner: Rc<dyn std::any::Any> = Rc::new(s.http_client.clone().unwrap());
         assert!(
             extract_capnp_client(&inner).is_some(),
             "should extract http_client"
@@ -2745,7 +2762,7 @@ mod tests {
             let http_cap = Val::Cap {
                 name: "http".into(),
                 schema_cid: "test-http-cid".into(),
-                inner: Rc::new(s.http_client.clone()),
+                inner: Rc::new(s.http_client.clone().unwrap()),
             };
             let cell = Val::Cell {
                 wasm: b"fake-wasm".to_vec(),
