@@ -242,7 +242,7 @@ jobs:
           std/kernel/bin/main.wasm
           std/shell/bin/shell.wasm
           std/mcp/bin/main.wasm
-          examples/echo/bin/echo.wasm
+          examples/*/bin/
         retention-days: 1
 
   build-binaries:
@@ -466,6 +466,15 @@ jobs:
         cp artifacts/wasm-artifacts/std/kernel/bin/main.wasm  "$STAGE/std/kernel/bin/main.wasm"  2>/dev/null || true
         cp artifacts/wasm-artifacts/std/shell/bin/shell.wasm  "$STAGE/std/shell/bin/shell.wasm"  2>/dev/null || true
         cp artifacts/wasm-artifacts/std/mcp/bin/main.wasm     "$STAGE/std/mcp/bin/main.wasm"     2>/dev/null || true
+
+        # Place example WASM artifacts
+        for example_bin in artifacts/wasm-artifacts/examples/*/bin/*; do
+          if [ -f "$example_bin" ]; then
+            rel="${example_bin#artifacts/wasm-artifacts/}"
+            mkdir -p "$STAGE/$(dirname "$rel")"
+            cp "$example_bin" "$STAGE/$rel"
+          fi
+        done
 
         # Generate checksums
         cd "$STAGE"

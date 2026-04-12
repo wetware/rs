@@ -13,6 +13,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - Outbound HTTP access for cells now requires explicit `--http-dial` flag. No flag means no `http-client` capability. Supports exact hosts, subdomain globs (`*.example.com`), and `*` for unrestricted access.
 
+### Fixed
+- IPFS release tree now includes all example WASM binaries (oracle, counter, chess, etc.), not just echo. Previously `make examples` built them but the CI artifact upload and publish steps dropped them, so `ww run /ipns/<key>/examples/oracle` failed with missing `bin/oracle.wasm`.
+
 ## [0.1.2] - 2026-04-12
 
 ### Changed
