@@ -688,6 +688,8 @@ pub struct RuntimeImpl {
     self_client: Rc<RefCell<Option<system_capnp::runtime::Client>>>,
     /// IPFS HTTP client for Kubo API calls (e.g. IPNS resolution via routing).
     ipfs_client: crate::ipfs::HttpClient,
+    /// Allowed outbound HTTP hosts — inherited by child cells.
+    http_dial: Vec<String>,
 }
 
 impl RuntimeImpl {
@@ -716,6 +718,7 @@ impl RuntimeImpl {
             stream_control: self.stream_control.clone(),
             runtime_client,
             ipfs_client: self.ipfs_client.clone(),
+            http_dial: self.http_dial.clone(),
         })
     }
 }
@@ -736,6 +739,7 @@ pub fn create_runtime_client(
     stream_control: Option<libp2p_stream::Control>,
     cache_policy: CachePolicy,
     ipfs_client: crate::ipfs::HttpClient,
+    http_dial: Vec<String>,
 ) -> system_capnp::runtime::Client {
     let self_client = Rc::new(RefCell::new(None));
     let runtime = RuntimeImpl {
@@ -750,6 +754,7 @@ pub fn create_runtime_client(
         executor_cache: RefCell::new(HashMap::new()),
         self_client: self_client.clone(),
         ipfs_client,
+        http_dial,
     };
     let client: system_capnp::runtime::Client = capnp_rpc::new_client(runtime);
     *self_client.borrow_mut() = Some(client.clone());
@@ -860,6 +865,8 @@ pub struct ExecutorImpl {
     runtime_client: system_capnp::runtime::Client,
     /// IPFS HTTP client — passed to child cells through their membrane graft.
     ipfs_client: crate::ipfs::HttpClient,
+    /// Allowed outbound HTTP hosts — inherited by child cells.
+    http_dial: Vec<String>,
 }
 
 #[allow(refining_impl_trait)]
@@ -928,6 +935,7 @@ impl system_capnp::executor::Server for ExecutorImpl {
         let stream_control = self.stream_control.clone();
         let runtime_client = self.runtime_client.clone();
         let ipfs_client = self.ipfs_client.clone();
+        let http_dial = self.http_dial.clone();
 
         Promise::from_future(async move {
             let (host_stderr, guest_stderr) = io::duplex(64 * 1024);
@@ -974,6 +982,7 @@ impl system_capnp::executor::Server for ExecutorImpl {
                     runtime_client,
                     extra_caps,
                     ipfs_client,
+                    http_dial,
                 );
                 bootstrap_cap = Some(guest.client);
                 rpc

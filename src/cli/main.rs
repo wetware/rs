@@ -155,6 +155,12 @@ enum Commands {
         #[arg(long, value_name = "ADDR")]
         http_listen: Option<String>,
 
+        /// Allow cells to make outbound HTTP requests to the given host.
+        /// Repeatable. Without this flag, no http-client capability is granted.
+        /// Supports exact hosts, subdomain globs (*.example.com), or '*' for all.
+        #[arg(long, value_name = "HOST")]
+        http_dial: Vec<String>,
+
         /// Runtime cache policy for `Runtime.load()`.
         /// "shared" (default): same WASM bytes → same Executor server.
         /// "isolated": always create a fresh Executor server.
@@ -472,6 +478,7 @@ impl Commands {
                 executor_threads,
                 mcp,
                 http_listen,
+                http_dial,
                 runtime_cache_policy,
                 with_http_admin,
                 ipfs_url,
@@ -495,6 +502,7 @@ impl Commands {
                     executor_threads,
                     mcp,
                     http_listen,
+                    http_dial,
                     runtime_cache_policy,
                     with_http_admin,
                     ipfs_url,
@@ -1302,6 +1310,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         executor_threads: usize,
         mcp: bool,
         http_listen: Option<String>,
+        http_dial: Vec<String>,
         runtime_cache_policy: String,
         with_http_admin: Option<String>,
         ipfs_url: String,
@@ -1613,7 +1622,8 @@ wasip2::cli::command::export!({iface_name}Guest);
             .with_cache_policy(cache_policy)
             .with_wasmtime_engine(executor_pool.engine())
             .with_suppress_stdin(mcp)
-            .with_ipfs_client(ipfs_client.clone());
+            .with_ipfs_client(ipfs_client.clone())
+            .with_http_dial(http_dial);
 
         if let Some(registry) = route_registry {
             builder = builder.with_route_registry(registry);

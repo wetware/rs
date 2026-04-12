@@ -12,8 +12,9 @@ use crate::http_capnp;
 
 /// Epoch-guarded HTTP proxy that enforces domain scoping.
 ///
-/// If `allowed_hosts` is empty, all hosts are permitted (useful for testing).
-/// Otherwise, the URL's host must appear in the allowlist.
+/// Only created when the operator passes `--http-dial` flags.
+/// The allowlist supports exact hosts, subdomain globs (`*.example.com`),
+/// and `*` for unrestricted access.
 pub struct EpochGuardedHttpProxy {
     client: reqwest::Client,
     guard: EpochGuard,
@@ -45,13 +46,26 @@ impl EpochGuardedHttpProxy {
             .host_str()
             .ok_or_else(|| capnp::Error::failed("URL has no host".into()))?;
 
-        if !self.allowed_hosts.is_empty() && !self.allowed_hosts.iter().any(|h| h == host) {
+        if !self.host_matches(host) {
             return Err(capnp::Error::failed(format!(
                 "host {host:?} not in allowlist"
             )));
         }
 
         Ok(parsed)
+    }
+
+    /// Check whether `host` is permitted by the allowlist.
+    fn host_matches(&self, host: &str) -> bool {
+        self.allowed_hosts.iter().any(|pattern| {
+            if pattern == "*" {
+                true
+            } else if let Some(suffix) = pattern.strip_prefix("*.") {
+                host == suffix || host.ends_with(&format!(".{suffix}"))
+            } else {
+                host == pattern
+            }
+        })
     }
 
     /// Extract headers from a Cap'n Proto header list into a vec of (name, value) pairs.
@@ -248,30 +262,67 @@ mod tests {
     }
 
     #[test]
-    fn empty_allowlist_permits_all() {
+    fn empty_allowlist_rejects_all() {
         let proxy = test_proxy(vec![]);
+        let err = proxy
+            .validate_request("https://anything.example.org/x")
+            .unwrap_err();
+        assert!(err.to_string().contains("not in allowlist"));
+    }
+
+    #[test]
+    fn star_wildcard_permits_all() {
+        let proxy = test_proxy(vec!["*".into()]);
         assert!(proxy
             .validate_request("https://anything.example.org/x")
             .is_ok());
     }
 
     #[test]
+    fn subdomain_wildcard_matches_subdomains() {
+        let proxy = test_proxy(vec!["*.example.com".into()]);
+        assert!(proxy
+            .validate_request("https://api.example.com/path")
+            .is_ok());
+        assert!(proxy
+            .validate_request("https://deep.sub.example.com/path")
+            .is_ok());
+    }
+
+    #[test]
+    fn subdomain_wildcard_matches_bare_domain() {
+        let proxy = test_proxy(vec!["*.example.com".into()]);
+        assert!(proxy
+            .validate_request("https://example.com/path")
+            .is_ok());
+    }
+
+    #[test]
+    fn subdomain_wildcard_rejects_other_domains() {
+        let proxy = test_proxy(vec!["*.example.com".into()]);
+        let err = proxy
+            .validate_request("https://evil.com/path")
+            .unwrap_err();
+        assert!(err.to_string().contains("not in allowlist"));
+    }
+
+    #[test]
     fn rejects_invalid_url() {
-        let proxy = test_proxy(vec![]);
+        let proxy = test_proxy(vec!["*".into()]);
         let err = proxy.validate_request("not a url").unwrap_err();
         assert!(err.to_string().contains("invalid URL"));
     }
 
     #[test]
     fn rejects_url_without_host() {
-        let proxy = test_proxy(vec![]);
+        let proxy = test_proxy(vec!["*".into()]);
         let err = proxy.validate_request("data:text/plain,hello").unwrap_err();
         assert!(err.to_string().contains("no host"));
     }
 
     #[test]
     fn stale_epoch_rejects_request() {
-        let proxy = stale_proxy(vec![]);
+        let proxy = stale_proxy(vec!["*".into()]);
         let err = proxy.validate_request("https://example.com").unwrap_err();
         assert!(err.to_string().contains("staleEpoch"));
     }

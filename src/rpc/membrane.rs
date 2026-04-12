@@ -266,14 +266,7 @@ impl GraftBuilder for HostGraftBuilder {
                 self.ipfs_client.clone(),
             ));
 
-        let http_client: http_capnp::http_client::Client =
-            capnp_rpc::new_client(super::http_client::EpochGuardedHttpProxy::new(
-                self.allowed_hosts.clone(),
-                guard.clone(),
-            ));
-
         // Collect all capabilities into a flat list of Export entries.
-        // Core caps: identity, host, runtime, routing, http-client.
         let mut entries: Vec<(&str, capnp::capability::Client)> = Vec::new();
 
         if let Some(sk) = &self.signing_key {
@@ -287,7 +280,16 @@ impl GraftBuilder for HostGraftBuilder {
         entries.push(("host", host.client));
         entries.push(("runtime", self.runtime_client.clone().client));
         entries.push(("routing", routing.client));
-        entries.push(("http-client", http_client.client));
+
+        // Only grant http-client if the operator explicitly opted in via --http-dial.
+        if !self.allowed_hosts.is_empty() {
+            let http_client: http_capnp::http_client::Client =
+                capnp_rpc::new_client(super::http_client::EpochGuardedHttpProxy::new(
+                    self.allowed_hosts.clone(),
+                    guard.clone(),
+                ));
+            entries.push(("http-client", http_client.client));
+        }
 
         // Append init.d-scoped extras.
         let extras_owned: Vec<(String, capnp::capability::Client)> = self
@@ -360,6 +362,7 @@ pub fn build_membrane_rpc<R, W>(
     runtime_client: system_capnp::runtime::Client,
     extras: Vec<(String, capnp::capability::Client)>,
     ipfs_client: crate::ipfs::HttpClient,
+    http_dial: Vec<String>,
 ) -> (RpcSystem<Side>, GuestMembrane)
 where
     R: AsyncRead + Unpin + 'static,
@@ -371,7 +374,7 @@ where
         wasm_debug,
         signing_key,
         stream_control,
-        Vec::new(), // allowed_hosts: empty = allow all (default)
+        http_dial,
         runtime_client,
         ipfs_client,
     );
