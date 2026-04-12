@@ -1,14 +1,11 @@
-//! Prometheus metrics endpoint for fuel auction observability.
+//! Admin HTTP server for node introspection.
 //!
-//! Phase 1: exposes per-cell fuel metrics (`ww_cell_fuel_remaining`,
-//! `ww_cell_fuel_consumed_total`) from host-side [`FuelEstimator`] state.
+//! Serves Prometheus metrics at `GET /metrics` and host identity/address
+//! information at `GET /host/id` and `GET /host/addrs`.
 //!
-//! Auction-specific metrics (`ww_auction_*`) are stubbed — they require
-//! the host to hold a `ComputeProvider` client reference, which will be
-//! wired in a future PR.
-//!
-//! The endpoint is a minimal axum handler that responds to `GET /metrics`
-//! with Prometheus text exposition format (text/plain; version=0.0.4).
+//! Fuel metrics (`ww_cell_fuel_remaining`, `ww_cell_fuel_consumed_total`)
+//! are live from host-side [`FuelEstimator`] state.  Auction-specific
+//! metrics (`ww_auction_*`) are stubbed pending a `ComputeProvider` client.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -169,9 +166,11 @@ pub fn new_stream_metrics() -> StreamMetricsRegistry {
 // Metrics HTTP handler
 // ---------------------------------------------------------------------------
 
-/// Shared state for the metrics axum handler.
+/// Shared state for the admin axum handlers.
 #[derive(Clone)]
-struct MetricsState {
+struct AdminState {
+    peer_id: String,
+    network_state: crate::rpc::NetworkState,
     fuel_registry: FuelRegistry,
     rpc_metrics: RpcMetricsRegistry,
     cache_metrics: CacheMetricsRegistry,
@@ -179,7 +178,7 @@ struct MetricsState {
 }
 
 /// Render all metrics in Prometheus text exposition format.
-fn render_metrics(state: &MetricsState) -> String {
+fn render_metrics(state: &AdminState) -> String {
     let mut out = String::with_capacity(2048);
 
     // ---- Auction metrics (Phase 1: stubs) ----
@@ -315,7 +314,7 @@ fn render_metrics(state: &MetricsState) -> String {
 }
 
 /// `GET /metrics` handler.
-async fn metrics_handler(State(state): State<MetricsState>) -> impl IntoResponse {
+async fn metrics_handler(State(state): State<AdminState>) -> impl IntoResponse {
     let body = render_metrics(&state);
     (
         [(
@@ -327,27 +326,65 @@ async fn metrics_handler(State(state): State<MetricsState>) -> impl IntoResponse
 }
 
 // ---------------------------------------------------------------------------
-// MetricsService (runtime::Service implementation)
+// Host introspection handlers
 // ---------------------------------------------------------------------------
 
-/// A [`crate::runtime::Service`] that serves Prometheus metrics over HTTP.
-pub struct MetricsService {
+/// `GET /host/id` — returns the node's peer ID as plain text.
+async fn host_id_handler(State(state): State<AdminState>) -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        state.peer_id,
+    )
+}
+
+/// `GET /host/addrs` — returns the node's listen addresses, one per line.
+async fn host_addrs_handler(State(state): State<AdminState>) -> impl IntoResponse {
+    let snapshot = state.network_state.snapshot().await;
+    let lines: Vec<String> = snapshot
+        .listen_addrs
+        .iter()
+        .filter_map(|bytes| libp2p::Multiaddr::try_from(bytes.clone()).ok())
+        .map(|a| a.to_string())
+        .collect();
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        lines.join("\n"),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// AdminService (runtime::Service implementation)
+// ---------------------------------------------------------------------------
+
+/// A [`crate::runtime::Service`] that serves admin HTTP endpoints:
+/// Prometheus metrics, host identity, and listen addresses.
+pub struct AdminService {
     pub listen_addr: SocketAddr,
+    pub peer_id: String,
+    pub network_state: crate::rpc::NetworkState,
     pub fuel_registry: FuelRegistry,
     pub rpc_metrics: RpcMetricsRegistry,
     pub cache_metrics: CacheMetricsRegistry,
     pub stream_metrics: StreamMetricsRegistry,
 }
 
-impl crate::runtime::Service for MetricsService {
+impl crate::runtime::Service for AdminService {
     fn run(self, mut shutdown: watch::Receiver<()>) -> anyhow::Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let _span = tracing::info_span!("metrics").entered();
+        let _span = tracing::info_span!("admin").entered();
 
         rt.block_on(async move {
-            let state = MetricsState {
+            let state = AdminState {
+                peer_id: self.peer_id,
+                network_state: self.network_state,
                 fuel_registry: self.fuel_registry,
                 rpc_metrics: self.rpc_metrics,
                 cache_metrics: self.cache_metrics,
@@ -356,16 +393,18 @@ impl crate::runtime::Service for MetricsService {
 
             let app = Router::new()
                 .route("/metrics", get(metrics_handler))
+                .route("/host/id", get(host_id_handler))
+                .route("/host/addrs", get(host_addrs_handler))
                 .with_state(state);
 
             let listener = tokio::net::TcpListener::bind(self.listen_addr).await?;
             let local_addr = listener.local_addr()?;
-            tracing::info!(%local_addr, "Prometheus metrics server listening");
+            tracing::info!(%local_addr, "Admin server listening");
 
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
                     let _ = shutdown.changed().await;
-                    tracing::info!("Metrics server shutting down");
+                    tracing::info!("Admin server shutting down");
                 })
                 .await?;
 
@@ -382,8 +421,10 @@ impl crate::runtime::Service for MetricsService {
 mod tests {
     use super::*;
 
-    fn test_state() -> MetricsState {
-        MetricsState {
+    fn test_state() -> AdminState {
+        AdminState {
+            peer_id: "12D3KooWTestPeerId".to_string(),
+            network_state: crate::rpc::NetworkState::new(),
             fuel_registry: new_fuel_registry(),
             rpc_metrics: new_rpc_metrics(),
             cache_metrics: new_cache_metrics(),
@@ -495,5 +536,35 @@ mod tests {
         let output = render_metrics(&state);
         assert!(output.contains("ww_stream_bytes_pumped_total 1000000"));
         assert!(output.contains("ww_stream_pump_ops_total 500"));
+    }
+
+    #[test]
+    fn host_id_returns_peer_id() {
+        let state = test_state();
+        assert_eq!(state.peer_id, "12D3KooWTestPeerId");
+    }
+
+    #[tokio::test]
+    async fn host_addrs_returns_listen_addresses() {
+        let state = test_state();
+        let addr: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/2025".parse().unwrap();
+        state.network_state.add_listen_addr(addr.to_vec()).await;
+
+        let snapshot = state.network_state.snapshot().await;
+        let addrs: Vec<String> = snapshot
+            .listen_addrs
+            .iter()
+            .filter_map(|bytes| libp2p::Multiaddr::try_from(bytes.clone()).ok())
+            .map(|a| a.to_string())
+            .collect();
+        let body = addrs.join("\n");
+        assert!(body.contains("/ip4/127.0.0.1/tcp/2025"));
+    }
+
+    #[tokio::test]
+    async fn host_addrs_empty_when_no_listeners() {
+        let state = test_state();
+        let snapshot = state.network_state.snapshot().await;
+        assert!(snapshot.listen_addrs.is_empty());
     }
 }

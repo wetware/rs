@@ -409,8 +409,8 @@ use crate::rpc::NetworkState;
 // Re-export WagiService so cli/main.rs can use `ww::runtime::WagiService`.
 pub use crate::dispatcher::server::WagiService;
 
-// Re-export MetricsService so cli/main.rs can use `ww::runtime::MetricsService`.
-pub use crate::metrics::MetricsService;
+// Re-export AdminService so cli/main.rs can use `ww::runtime::AdminService`.
+pub use crate::metrics::AdminService;
 
 /// Parameters for constructing a [`Libp2pHost`] inside the swarm thread.
 ///

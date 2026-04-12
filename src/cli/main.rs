@@ -168,7 +168,7 @@ enum Commands {
         runtime_cache_policy: String,
 
         /// Enable the HTTP admin endpoint on the given address.
-        /// Serves Prometheus metrics at GET /metrics. Future: /healthz, /debug.
+        /// Serves GET /metrics, GET /host/id, GET /host/addrs.
         /// Example: --with-http-admin 127.0.0.1:2026
         #[arg(long, value_name = "ADDR")]
         with_http_admin: Option<String>,
@@ -1573,7 +1573,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         };
 
         // HTTP admin thread (only when --with-http-admin is provided).
-        // Serves Prometheus metrics at GET /metrics. Future: /healthz, /debug.
+        // Serves metrics at GET /metrics, host info at GET /host/id and /host/addrs.
         let fuel_registry = ww::metrics::new_fuel_registry();
         let rpc_metrics = ww::metrics::new_rpc_metrics();
         let cache_metrics = ww::metrics::new_cache_metrics();
@@ -1582,10 +1582,16 @@ wasip2::cli::command::export!({iface_name}Guest);
             let listen_addr: std::net::SocketAddr = addr
                 .parse()
                 .context("invalid --with-http-admin address (expected host:port)")?;
+            let snapshot = network_state.snapshot().await;
+            let peer_id = libp2p::PeerId::from_bytes(&snapshot.local_peer_id)
+                .context("invalid peer ID in network state")?
+                .to_string();
             supervisor.spawn(
                 "admin",
-                ww::metrics::MetricsService {
+                ww::metrics::AdminService {
                     listen_addr,
+                    peer_id,
+                    network_state: network_state.clone(),
                     fuel_registry: fuel_registry.clone(),
                     rpc_metrics: rpc_metrics.clone(),
                     cache_metrics: cache_metrics.clone(),
