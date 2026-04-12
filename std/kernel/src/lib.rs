@@ -474,11 +474,18 @@ fn make_host_handler(
                                 })?,
                             Some(Val::Cap { name, .. }) => {
                                 return Err(Val::from(format!(
-                                    "host :listen — expected runtime cap, got '{name}'"
+                                    "host :listen — expected a cell or runtime cap, got cap '{name}'"
                                 )))
                             }
-                            _ => {
-                                return Err(Val::from("host :listen — runtime capability required"))
+                            Some(other) => {
+                                return Err(Val::from(format!(
+                                    "host :listen — expected a cell (from (cell (load ...) ...)), got {other}"
+                                )))
+                            }
+                            None => {
+                                return Err(Val::from(
+                                    "host :listen — missing argument. Usage: (perform host :listen <cell>) or (perform host :listen <cell> \"/path\")"
+                                ))
                             }
                         };
                         match rest.len() {
@@ -2040,10 +2047,12 @@ mod tests {
                     match &peers[0] {
                         Val::Map(entries) => {
                             assert_eq!(entries.len(), 2);
-                            assert_eq!(entries[0].0, Val::Keyword("peer-id".into()));
                             let expected_id = bs58::encode(STUB_PEER_ID).into_string();
-                            assert_eq!(entries[0].1, Val::Str(expected_id));
-                            assert_eq!(entries[1].0, Val::Keyword("addrs".into()));
+                            assert_eq!(
+                                entries.get(&Val::Keyword("peer-id".into())),
+                                Some(&Val::Str(expected_id))
+                            );
+                            assert!(entries.get(&Val::Keyword("addrs".into())).is_some());
                         }
                         other => panic!("expected map, got {other:?}"),
                     }
@@ -2198,7 +2207,7 @@ mod tests {
             .await;
             assert!(err.is_err(), "string should not pass as runtime cap");
             let msg = format!("{}", err.unwrap_err());
-            assert!(msg.contains("runtime capability required"), "got: {msg}");
+            assert!(msg.contains("expected a cell"), "got: {msg}");
         })
         .await;
     }
