@@ -6,16 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.0.1.0] - 2026-04-12
+
 ### Added
+- `ww perform update` refreshes WASM images, daemon config, service file, and MCP wiring to match the current binary. Safe to run repeatedly. Does not touch identity or directory structure.
 - `ww shell` now auto-discovers local nodes via Kubo's LAN DHT when no address is given. The daemon advertises a well-known discovery CID; the shell queries Kubo's `findprovs` API to find it.
 - `ww shell` accepts `/dnsaddr/` multiaddrs (e.g. `ww shell /dnsaddr/master.wetware.run`). Address is now a positional argument instead of `--addr`.
 - Admin HTTP server (`--with-http-admin`) now exposes `GET /host/id` (peer ID) and `GET /host/addrs` (listen addresses). `MetricsService` renamed to `AdminService`.
 
 ### Changed
+- `ww perform install` now detects an existing `~/.ww` and delegates to `perform_update` instead of re-running the full bootstrap. First-time install still creates directories, generates identity, provisions IPNS keys.
+- `ww perform upgrade` now automatically runs `perform_update` after replacing the binary, so WASM images, daemon, and MCP wiring are refreshed without a manual step.
+- WASM images use CID comparison (BLAKE3) instead of file-existence checks, so stale images from a previous install are always replaced.
+- Daemon image layers no longer include the MCP cell. The MCP cell's `bin/main.wasm` was clobbering the kernel's entry point, causing the daemon to crash-loop.
 - Outbound HTTP access for cells now requires explicit `--http-dial` flag. No flag means no `http-client` capability. Supports exact hosts, subdomain globs (`*.example.com`), and `*` for unrestricted access.
 - Documentation overhaul: README rewritten with quick start, cell modes, AI integration, roadmap. CLI reference now covers all 12 commands. Architecture doc updated for `List(Export)` membrane, virtual WASI FS, state management, and distribution model.
 
 ### Fixed
+- Daemon no longer crash-loops on startup. The MCP mount layer was overwriting the kernel binary; removed from daemon image layers.
+- Kernel no longer crashes when `--http-dial` is not passed. The `http-client` capability is now optional in the membrane graft.
 - `host :listen` now gives a clear error when passed an undefined variable instead of a cell (e.g. when `load` fails). Previously showed misleading "runtime capability required".
 - IPFS release tree now includes all example WASM binaries (oracle, counter, chess, etc.), not just echo. Previously `make examples` built them but the CI artifact upload and publish steps dropped them, so `ww run /ipns/<key>/examples/oracle` failed with missing `bin/oracle.wasm`.
 

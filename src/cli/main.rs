@@ -331,11 +331,24 @@ enum PerformAction {
     ///   3. Optionally remove ~/.ww (prompts for confirmation)
     Uninstall,
 
+    /// Refresh WASM images, daemon, and MCP wiring to match this binary.
+    ///
+    /// Safe to run repeatedly. Does not touch identity or directory structure.
+    ///
+    /// Steps:
+    ///   1. Sync WASM images (CID compare, overwrite if changed)
+    ///   2. Republish standard library (if images changed and Kubo running)
+    ///   3. Regenerate daemon config and service file
+    ///   4. Restart daemon
+    ///   5. Re-wire MCP into Claude Code
+    Update,
+
     /// Self-update the ww binary via IPNS.
     ///
     /// Resolves /ipns/releases.wetware.run/Cargo.toml to check for a
     /// newer version, then fetches the platform binary and atomically
-    /// replaces the running executable.
+    /// replaces the running executable, then runs `update` to refresh
+    /// WASM images, daemon, and MCP wiring.
     Upgrade {
         /// IPFS HTTP API endpoint.
         #[arg(long, default_value = "http://localhost:5001", env = "IPFS_API")]
@@ -536,6 +549,7 @@ impl Commands {
             Commands::Perform { action } => match action {
                 PerformAction::Install => Self::perform_install().await,
                 PerformAction::Uninstall => Self::perform_uninstall().await,
+                PerformAction::Update => Self::perform_update().await,
                 PerformAction::Upgrade { ipfs_url } => Self::perform_upgrade(ipfs_url).await,
             },
             Commands::Doctor => Self::doctor().await,
@@ -1898,68 +1912,46 @@ wasip2::cli::command::export!({iface_name}Guest);
         Ok(())
     }
 
-    /// Bootstrap the ~/.ww user layer, daemon, and MCP wiring.
-    ///
-    /// Idempotent: re-running skips completed steps, retries failed ones.
-    async fn perform_install() -> Result<()> {
+    /// CIDv1 (raw codec, BLAKE3) for a byte slice.
+    fn wasm_cid(data: &[u8]) -> cid::Cid {
+        let digest = blake3::hash(data);
+        let mh = cid::multihash::Multihash::<64>::wrap(0x1e, digest.as_bytes()).unwrap();
+        cid::Cid::new_v1(0x55, mh)
+    }
+
+    /// Refresh WASM images, daemon config/service file, and MCP wiring
+    /// to match the current binary. Safe to run repeatedly.
+    async fn perform_update() -> Result<()> {
         use indicatif::{ProgressBar, ProgressStyle};
         use std::time::Duration;
 
-        // Spinner for slow operations. Subtle, one line, clears on finish.
         let spin = || {
             let pb = ProgressBar::new_spinner();
             pb.set_style(
                 ProgressStyle::default_spinner()
-                    .template("  ⚙ {msg}")
+                    .template("  \u{2699} {msg}")
                     .expect("valid template"),
             );
             pb.enable_steady_tick(Duration::from_millis(80));
             pb
         };
         let done = |msg: String| println!("  \u{2713} {msg}");
-        let skip = |msg: String| println!("  · {msg}");
+        let skip = |msg: String| println!("  \u{00b7} {msg}");
         let fail = |msg: String| println!("  \u{2717} {msg}");
 
         let home = dirs::home_dir().context("Cannot determine home directory")?;
         let ww_dir = home.join(".ww");
 
-        // ── Directories ──────────────────────────────────────────────
-        let subdirs = [
-            "boot",
-            "bin",
-            "lib",
-            "etc/init.d",
-            "etc/ns",
-            "logs",
-            "kernel/bin",
-            "shell/bin",
-            "mcp/bin",
-        ];
-        let mut any_created = false;
-        for sub in &subdirs {
-            let dir = ww_dir.join(sub);
-            if !dir.exists() {
-                std::fs::create_dir_all(&dir)
-                    .with_context(|| format!("Failed to create {}", dir.display()))?;
-                any_created = true;
-            }
-        }
-        if any_created {
-            done("Directories".into());
-        } else {
-            skip("Directories".into());
+        if !ww_dir.exists() {
+            bail!("~/.ww does not exist. Run `ww perform install` first.");
         }
 
-        // ── Identity ─────────────────────────────────────────────────
-        let identity_path = ww_dir.join("identity");
-        if identity_path.exists() {
-            skip("Identity".into());
-        } else {
-            let sk = ww::keys::generate()?;
-            ww::keys::save(&sk, &identity_path)?;
-            let kp = ww::keys::to_libp2p(&sk)?;
-            let peer_id = kp.public().to_peer_id();
-            done(format!("Identity ({peer_id})"));
+        // Ensure subdirectories exist (may be missing if created by older version).
+        for sub in &["kernel/bin", "shell/bin", "mcp/bin", "logs", "etc/ns"] {
+            let dir = ww_dir.join(sub);
+            if !dir.exists() {
+                std::fs::create_dir_all(&dir)?;
+            }
         }
 
         // ── WASM images ──────────────────────────────────────────────
@@ -1969,37 +1961,40 @@ wasip2::cli::command::export!({iface_name}Guest);
             ("mcp", "main.wasm", EMBEDDED_MCP),
         ];
         let mut images_ok = true;
+        let mut any_images_changed = false;
         for (name, wasm_name, bytes) in image_cells {
             let wasm_dest = ww_dir.join(format!("{name}/bin/{wasm_name}"));
             if !bytes.is_empty() {
-                if !wasm_dest.exists()
-                    || std::fs::metadata(&wasm_dest)
-                        .map(|m| m.len() == 0)
-                        .unwrap_or(true)
-                {
+                let embedded_cid = Self::wasm_cid(bytes);
+                let needs_write = !wasm_dest.exists()
+                    || std::fs::read(&wasm_dest)
+                        .map(|on_disk| Self::wasm_cid(&on_disk) != embedded_cid)
+                        .unwrap_or(true);
+                if needs_write {
                     std::fs::write(&wasm_dest, bytes)
                         .with_context(|| format!("write {}", wasm_dest.display()))?;
+                    any_images_changed = true;
                 }
             } else {
                 images_ok = false;
             }
         }
-        if images_ok {
-            done("WASM images".into());
-        } else {
+        if !images_ok {
             skip("WASM images (not embedded, build from source)".into());
+        } else if any_images_changed {
+            done("WASM images (updated)".into());
+        } else {
+            skip("WASM images (unchanged)".into());
         }
 
-        // ── Kubo probe ───────────────────────────────────────────────
+        // ── Stdlib republish (if images changed + Kubo running) ──────
         let ipfs_client = ipfs::HttpClient::new("http://localhost:5001".into());
         let kubo_ok = ipfs_client.kubo_info().await.is_ok();
 
-        // ── Namespace + IPNS key + publish ───────────────────────────
         {
             let ns_path = ww_dir.join("etc/ns/ww");
             let std_cid = ww::namespace::WW_STD_CID;
 
-            // Read existing config or start fresh.
             let mut config = if ns_path.exists() {
                 let content = std::fs::read_to_string(&ns_path)?;
                 ww::ns::NamespaceConfig::parse("ww", &content)
@@ -2011,94 +2006,62 @@ wasip2::cli::command::export!({iface_name}Guest);
                 }
             };
 
-            // Provision IPNS key if Kubo is available.
-            if kubo_ok {
-                let keys = ipfs_client.key_list().await.unwrap_or_default();
-                if keys.iter().any(|k| k == "ww") {
-                    skip("IPNS key".into());
-                } else {
-                    let sp = spin();
-                    sp.set_message("Generating IPNS key...");
-                    match ipfs_client.key_gen("ww").await {
-                        Ok(id) => {
-                            config.ipns = id.clone();
-                            sp.finish_and_clear();
-                            done(format!("IPNS key ({id})"));
-                        }
-                        Err(e) => {
-                            sp.finish_and_clear();
-                            fail(format!("IPNS key ({e})"));
+            if kubo_ok && images_ok && any_images_changed {
+                let sp = spin();
+                sp.set_message("Indexing standard library...");
+
+                let tmp = tempfile::TempDir::new()?;
+                let tree = tmp.path();
+                let lib_dir = tree.join("lib/ww");
+                std::fs::create_dir_all(&lib_dir)?;
+                std::fs::create_dir_all(tree.join("kernel/bin"))?;
+                std::fs::create_dir_all(tree.join("shell/bin"))?;
+                std::fs::create_dir_all(tree.join("mcp/bin"))?;
+
+                // Copy Glia stdlib if present on disk.
+                let glia_src = std::path::Path::new("std/lib/ww");
+                if glia_src.is_dir() {
+                    for entry in std::fs::read_dir(glia_src)? {
+                        let entry = entry?;
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) == Some("glia") {
+                            if let Some(name) = path.file_name() {
+                                std::fs::copy(&path, lib_dir.join(name))?;
+                            }
                         }
                     }
                 }
 
-                // Publish std to IPFS if images are available.
-                if images_ok {
-                    let sp = spin();
-                    sp.set_message("Indexing standard library...");
-
-                    // Assemble namespace tree in temp dir.
-                    let tmp = tempfile::TempDir::new()?;
-                    let tree = tmp.path();
-                    let lib_dir = tree.join("lib/ww");
-                    std::fs::create_dir_all(&lib_dir)?;
-                    std::fs::create_dir_all(tree.join("kernel/bin"))?;
-                    std::fs::create_dir_all(tree.join("shell/bin"))?;
-                    std::fs::create_dir_all(tree.join("mcp/bin"))?;
-
-                    // Copy Glia stdlib if present on disk.
-                    let glia_src = std::path::Path::new("std/lib/ww");
-                    if glia_src.is_dir() {
-                        for entry in std::fs::read_dir(glia_src)? {
-                            let entry = entry?;
-                            let path = entry.path();
-                            if path.extension().and_then(|e| e.to_str()) == Some("glia") {
-                                if let Some(name) = path.file_name() {
-                                    std::fs::copy(&path, lib_dir.join(name))?;
-                                }
-                            }
-                        }
-                    }
-
-                    // Copy embedded WASM into the tree.
-                    for (name, wasm_name, bytes) in image_cells {
-                        if !bytes.is_empty() {
-                            std::fs::write(tree.join(format!("{name}/bin/{wasm_name}")), bytes)?;
-                        }
-                    }
-
-                    // Publish to IPFS.
-                    match ipfs_client.add_dir(tree).await {
-                        Ok(cid) => {
-                            let ipfs_path = format!("/ipfs/{cid}");
-                            config.bootstrap = ipfs_path.clone();
-
-                            // Pin for offline access.
-                            let _ = ipfs_client.pin_add(&ipfs_path).await;
-
-                            // Publish to IPNS if we have a key.
-                            if !config.ipns.is_empty() {
-                                let _ = ipfs_client.name_publish(&ipfs_path, "ww").await;
-                            }
-
-                            sp.finish_and_clear();
-                            done(format!("Standard library ({ipfs_path})"));
-                        }
-                        Err(e) => {
-                            sp.finish_and_clear();
-                            fail(format!("Standard library ({e})"));
-                        }
+                for (name, wasm_name, bytes) in image_cells {
+                    if !bytes.is_empty() {
+                        std::fs::write(tree.join(format!("{name}/bin/{wasm_name}")), bytes)?;
                     }
                 }
-            } else {
-                skip("IPNS (Kubo not running)".into());
+
+                match ipfs_client.add_dir(tree).await {
+                    Ok(cid) => {
+                        let ipfs_path = format!("/ipfs/{cid}");
+                        config.bootstrap = ipfs_path.clone();
+                        let _ = ipfs_client.pin_add(&ipfs_path).await;
+                        if !config.ipns.is_empty() {
+                            let _ = ipfs_client.name_publish(&ipfs_path, "ww").await;
+                        }
+                        sp.finish_and_clear();
+                        done(format!("Standard library ({ipfs_path})"));
+                    }
+                    Err(e) => {
+                        sp.finish_and_clear();
+                        fail(format!("Standard library ({e})"));
+                    }
+                }
+            } else if !kubo_ok {
+                skip("Standard library (Kubo not running)".into());
+            } else if !any_images_changed {
+                skip("Standard library (images unchanged)".into());
             }
 
-            // Always write the config.
             config.write_to(&ns_path)?;
-            if config.ipns.is_empty() && config.bootstrap.is_empty() {
-                done("Namespace ww".into());
-            } else {
+            if !config.bootstrap.is_empty() {
                 let detail = if !config.ipns.is_empty() {
                     format!("ipns={}", config.ipns)
                 } else {
@@ -2108,77 +2071,59 @@ wasip2::cli::command::export!({iface_name}Guest);
             }
         }
 
-        // ── Daemon ───────────────────────────────────────────────────
+        // ── Daemon config + service file (unconditional) ─────────────
         let ww_bin = std::env::current_exe().context("cannot determine ww binary path")?;
-        let ww_bin_str = ww_bin.display().to_string();
+        let identity_path = ww_dir.join("identity");
+        // Only mount kernel and shell as root layers.  The MCP cell
+        // is spawned separately by `ww run --mcp` and must NOT be a
+        // root layer — its bin/main.wasm would clobber the kernel's.
+        let image_layers: Vec<String> = ["kernel", "shell"]
+            .iter()
+            .map(|name| ww_dir.join(name).display().to_string())
+            .collect();
+        Self::daemon_install(Some(identity_path), Some(2025), image_layers, true).await?;
+        done("Background daemon".into());
 
+        // ── Restart daemon (only if images changed) ─────────────────
         let plist_path = home.join("Library/LaunchAgents/io.wetware.ww.plist");
         let systemd_path = home.join(".config/systemd/user/ww.service");
-        let daemon_exists = plist_path.exists() || systemd_path.exists();
 
-        if daemon_exists {
-            skip("Background daemon".into());
-        } else {
-            let sp = spin();
-            sp.set_message("Registering daemon...");
-            // Only mount kernel and shell as root layers.  The MCP cell
-            // is spawned separately by `ww run --mcp` and must NOT be a
-            // root layer — its bin/main.wasm would clobber the kernel's.
-            let image_layers: Vec<String> = ["kernel", "shell"]
-                .iter()
-                .map(|name| ww_dir.join(name).display().to_string())
-                .collect();
-            Self::daemon_install(Some(identity_path.clone()), Some(2025), image_layers, true)
-                .await?;
-            sp.finish_and_clear();
-            done("Background daemon".into());
-        }
-
-        // ── Start daemon ─────────────────────────────────────────────
-        {
-            let already_running = if cfg!(target_os = "macos") {
-                std::process::Command::new("launchctl")
-                    .args(["list", "io.wetware.ww"])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            } else {
-                std::process::Command::new("systemctl")
-                    .args(["--user", "is-active", "--quiet", "ww"])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            };
-
-            if already_running {
-                skip("Daemon running".into());
-            } else if cfg!(target_os = "macos") && plist_path.exists() {
-                match std::process::Command::new("launchctl")
-                    .args(["load", &plist_path.display().to_string()])
-                    .status()
-                {
-                    Ok(s) if s.success() => done("Daemon started".into()),
-                    _ => fail(
-                        "Daemon start (try: launchctl load {})"
-                            .replace("{}", &plist_path.display().to_string()),
-                    ),
-                }
-            } else if cfg!(target_os = "linux") && systemd_path.exists() {
-                match std::process::Command::new("systemctl")
-                    .args(["--user", "enable", "--now", "ww"])
-                    .status()
-                {
-                    Ok(s) if s.success() => done("Daemon started".into()),
-                    _ => fail("Daemon start (try: systemctl --user enable --now ww)".into()),
-                }
-            } else {
-                skip("Daemon start (no service file)".into());
+        if !any_images_changed {
+            skip("Daemon restart (nothing changed)".into());
+        } else if cfg!(target_os = "macos") && plist_path.exists() {
+            // Stop if running, then start.
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", &plist_path.display().to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            match std::process::Command::new("launchctl")
+                .args(["load", &plist_path.display().to_string()])
+                .status()
+            {
+                Ok(s) if s.success() => done("Daemon restarted".into()),
+                _ => fail(
+                    "Daemon start (try: launchctl load {})"
+                        .replace("{}", &plist_path.display().to_string()),
+                ),
             }
+        } else if cfg!(target_os = "linux") && systemd_path.exists() {
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "daemon-reload"])
+                .status();
+            match std::process::Command::new("systemctl")
+                .args(["--user", "restart", "ww"])
+                .status()
+            {
+                Ok(s) if s.success() => done("Daemon restarted".into()),
+                _ => fail("Daemon restart (try: systemctl --user restart ww)".into()),
+            }
+        } else {
+            skip("Daemon start (no service file)".into());
         }
 
         // ── Claude Code MCP ──────────────────────────────────────────
+        let ww_bin_str = ww_bin.display().to_string();
         let claude_available = std::process::Command::new("claude")
             .args(["--version"])
             .stdout(std::process::Stdio::null())
@@ -2188,19 +2133,32 @@ wasip2::cli::command::export!({iface_name}Guest);
             .unwrap_or(false);
 
         if claude_available {
+            // Try add first. If it fails with "already exists", remove and retry.
             let output = std::process::Command::new("claude")
                 .args(["mcp", "add", "wetware", "--", &ww_bin_str, "run", "--mcp"])
                 .output();
             match output {
                 Ok(o) if o.status.success() => done("Claude Code MCP".into()),
                 Ok(o) => {
-                    let msg = format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&o.stdout),
-                        String::from_utf8_lossy(&o.stderr)
-                    );
+                    let msg = String::from_utf8_lossy(&o.stdout).to_string()
+                        + &String::from_utf8_lossy(&o.stderr);
                     if msg.contains("already exists") {
-                        skip("Claude Code MCP".into());
+                        // Remove stale entry and re-add with current binary path.
+                        let _ = std::process::Command::new("claude")
+                            .args(["mcp", "remove", "wetware"])
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                        let retry = std::process::Command::new("claude")
+                            .args(["mcp", "add", "wetware", "--", &ww_bin_str, "run", "--mcp"])
+                            .output();
+                        match retry {
+                            Ok(r) if r.status.success() => done("Claude Code MCP (updated)".into()),
+                            _ => {
+                                fail("Claude Code MCP".into());
+                                println!("    claude mcp add wetware -- {} run --mcp", ww_bin_str);
+                            }
+                        }
                     } else {
                         fail("Claude Code MCP".into());
                         println!("    claude mcp add wetware -- {} run --mcp", ww_bin_str);
@@ -2215,30 +2173,118 @@ wasip2::cli::command::export!({iface_name}Guest);
             skip("Claude Code MCP (claude CLI not found)".into());
         }
 
-        // ── PATH ──────────────────────────────────────────────────────
+        Ok(())
+    }
+
+    /// Bootstrap the ~/.ww user layer, daemon, and MCP wiring.
+    ///
+    /// If ~/.ww already exists, delegates directly to `perform_update`.
+    /// Otherwise performs first-time bootstrap then calls `perform_update`.
+    async fn perform_install() -> Result<()> {
+        let home = dirs::home_dir().context("Cannot determine home directory")?;
+        let ww_dir = home.join(".ww");
+
+        // Already bootstrapped — just refresh.
+        if ww_dir.exists() {
+            return Self::perform_update().await;
+        }
+
+        // ── Cold start: first-time bootstrap ─────────────────────────
+        let done = |msg: String| println!("  \u{2713} {msg}");
+
+        // ── Directories ──────────────────────────────────────────────
+        let subdirs = [
+            "boot",
+            "bin",
+            "lib",
+            "etc/init.d",
+            "etc/ns",
+            "logs",
+            "kernel/bin",
+            "shell/bin",
+            "mcp/bin",
+        ];
+        for sub in &subdirs {
+            let dir = ww_dir.join(sub);
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("Failed to create {}", dir.display()))?;
+        }
+        done("Directories".into());
+
+        // ── Identity ─────────────────────────────────────────────────
+        let identity_path = ww_dir.join("identity");
+        let sk = ww::keys::generate()?;
+        ww::keys::save(&sk, &identity_path)?;
+        let kp = ww::keys::to_libp2p(&sk)?;
+        let peer_id = kp.public().to_peer_id();
+        done(format!("Identity ({peer_id})"));
+
+        // ── IPNS key (first-time only, before update so publish works) ─
+        let ipfs_client = ipfs::HttpClient::new("http://localhost:5001".into());
+        let kubo_ok = ipfs_client.kubo_info().await.is_ok();
+
+        if kubo_ok {
+            use indicatif::{ProgressBar, ProgressStyle};
+            use std::time::Duration;
+
+            let spin = || {
+                let pb = ProgressBar::new_spinner();
+                pb.set_style(
+                    ProgressStyle::default_spinner()
+                        .template("  \u{2699} {msg}")
+                        .expect("valid template"),
+                );
+                pb.enable_steady_tick(Duration::from_millis(80));
+                pb
+            };
+            let fail = |msg: String| println!("  \u{2717} {msg}");
+
+            let keys = ipfs_client.key_list().await.unwrap_or_default();
+            if !keys.iter().any(|k| k == "ww") {
+                let sp = spin();
+                sp.set_message("Generating IPNS key...");
+                match ipfs_client.key_gen("ww").await {
+                    Ok(id) => {
+                        // Write the key into namespace config so perform_update
+                        // can publish to IPNS on the first install.
+                        let ns_path = ww_dir.join("etc/ns/ww");
+                        let mut config = ww::ns::NamespaceConfig {
+                            name: "ww".to_string(),
+                            ipns: id.clone(),
+                            bootstrap: ww::namespace::WW_STD_CID.to_string(),
+                        };
+                        let _ = config.write_to(&ns_path);
+                        sp.finish_and_clear();
+                        done(format!("IPNS key ({id})"));
+                    }
+                    Err(e) => {
+                        sp.finish_and_clear();
+                        fail(format!("IPNS key ({e})"));
+                    }
+                }
+            }
+        }
+
+        // ── Update: WASM images, stdlib, daemon, MCP ─────────────────
+        Self::perform_update().await?;
+
+        // ── PATH + summary ───────────────────────────────────────────
         let ww_bin_dir = ww_dir.join("bin");
         let in_path = std::env::var("PATH")
             .unwrap_or_default()
             .split(':')
             .any(|p| std::path::Path::new(p) == ww_bin_dir);
 
-        let path_cmd = if !in_path {
-            let shell = std::env::var("SHELL").unwrap_or_default();
-            if shell.ends_with("/fish") {
-                Some(format!("fish_add_path {}", ww_bin_dir.display()))
-            } else {
-                Some(format!("export PATH=\"{}:$PATH\"", ww_bin_dir.display()))
-            }
-        } else {
-            None
-        };
-
-        // ── Summary ──────────────────────────────────────────────────
         println!();
         println!("\u{2697}\u{fe0f}  Next steps:");
         println!();
-        if let Some(cmd) = &path_cmd {
-            println!("  {cmd}");
+        if !in_path {
+            let shell = std::env::var("SHELL").unwrap_or_default();
+            if shell.ends_with("/fish") {
+                println!("  fish_add_path {}", ww_bin_dir.display());
+            } else {
+                println!("  export PATH=\"{}:$PATH\"", ww_bin_dir.display());
+            }
         }
         println!("  ww shell");
         println!();
@@ -2548,8 +2594,9 @@ wasip2::cli::command::export!({iface_name}Guest);
         // still holds the inode, but the directory entry is removed).
         let _ = std::fs::remove_file(&old_exe);
 
-        println!("Upgraded ww to {remote_version}. Restart any running daemon.");
-        Ok(())
+        println!("Upgraded ww to {remote_version}. Running update...");
+        println!();
+        Self::perform_update().await
     }
 
     /// Parse `version = "x.y.z"` from the [package] section of Cargo.toml.
