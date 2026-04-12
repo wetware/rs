@@ -3,6 +3,9 @@
 //! Spins up a client-mode swarm (identify + stream only), dials the target
 //! peer, bootstraps Cap'n Proto RPC on the shell protocol, and enters a
 //! rustyline REPL loop.
+//!
+//! When `--addr` is omitted, discovers a local wetware node by querying
+//! Kubo's LAN DHT for providers of the well-known discovery CID.
 
 use anyhow::{Context, Result};
 use libp2p::Multiaddr;
@@ -15,9 +18,59 @@ use futures::io::AsyncReadExt;
 
 use ww::shell_capnp;
 
+/// Discover a local wetware node via Kubo's routing API.
+///
+/// Queries `findprovs` for the well-known discovery CID and returns the
+/// first provider's multiaddr (preferring loopback addresses).
+async fn discover_local_node() -> Result<Multiaddr> {
+    let kubo_url =
+        std::env::var("IPFS_API").unwrap_or_else(|_| "http://localhost:5001".to_string());
+    let client = ww::ipfs::HttpClient::new(kubo_url);
+    let cid_str = ww::discovery::DISCOVERY_CID.to_string();
+
+    eprintln!("Discovering local node via Kubo...");
+
+    let providers = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        client.find_providers(&cid_str, 1),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "discovery timeout (15s)\n  Is a wetware node running?  Start one with: ww run ."
+        )
+    })?
+    .context("discovery query failed")?;
+
+    if providers.is_empty() {
+        anyhow::bail!("no wetware node found on local network\n  Start one with: ww run .");
+    }
+
+    let (peer_id_str, addrs) = &providers[0];
+
+    // Prefer a loopback address, then any address.
+    let transport_addr = addrs
+        .iter()
+        .find(|a| a.contains("/ip4/127.") || a.contains("/ip6/::1/"))
+        .or_else(|| addrs.first())
+        .with_context(|| format!("found node {peer_id_str} but it has no addresses"))?;
+
+    let full_addr: Multiaddr = format!("{transport_addr}/p2p/{peer_id_str}")
+        .parse()
+        .with_context(|| format!("invalid multiaddr: {transport_addr}/p2p/{peer_id_str}"))?;
+
+    Ok(full_addr)
+}
+
 /// Run the interactive shell client.
-pub async fn run_shell(addr: Multiaddr, identity: Option<PathBuf>) -> Result<()> {
-    // 1. Load identity key.
+pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Result<()> {
+    // 1. Resolve target address.
+    let addr = match addr {
+        Some(a) => a,
+        None => discover_local_node().await?,
+    };
+
+    // 2. Load identity key.
     let keypair = if let Some(path) = identity {
         let path_str = path.to_str().context("identity path is non-UTF-8")?;
         let sk = ww::keys::load(path_str)?;
@@ -38,7 +91,7 @@ pub async fn run_shell(addr: Multiaddr, identity: Option<PathBuf>) -> Result<()>
         }
     };
 
-    // 2. Extract peer ID from the multiaddr (/p2p/<peer-id> component).
+    // 3. Extract peer ID from the multiaddr (/p2p/<peer-id> component).
     let peer_id = addr
         .iter()
         .find_map(|proto| match proto {
@@ -47,7 +100,7 @@ pub async fn run_shell(addr: Multiaddr, identity: Option<PathBuf>) -> Result<()>
         })
         .context("multiaddr must include /p2p/<peer-id> component")?;
 
-    // 3. Build client swarm.
+    // 4. Build client swarm.
     let mut client = ww::host::ClientSwarm::new(keypair)?;
     // Strip the /p2p/ component to get the transport address.
     let transport_addr: Multiaddr = addr
@@ -57,17 +110,17 @@ pub async fn run_shell(addr: Multiaddr, identity: Option<PathBuf>) -> Result<()>
     client.add_peer_addr(peer_id, transport_addr);
     let mut stream_control = client.stream_control();
 
-    // 4. Spawn swarm event loop.
+    // 5. Spawn swarm event loop.
     tokio::task::spawn_local(client.run());
 
-    // 5. Compute the shell protocol from schema bytes.
+    // 6. Compute the shell protocol from schema bytes.
     // The schema bytes are compiled into the shell cell's build output.
     // We need the same bytes to compute the matching protocol CID.
     let schema_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/shell_schema.bin"));
     let protocol_cid = ww::rpc::schema_cid(schema_bytes);
     let stream_protocol = ww::rpc::schema_protocol(&protocol_cid)?;
 
-    // 6. Dial the shell protocol.
+    // 7. Dial the shell protocol.
     eprintln!("Connecting to {peer_id}...");
     let stream = tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -77,7 +130,7 @@ pub async fn run_shell(addr: Multiaddr, identity: Option<PathBuf>) -> Result<()>
     .map_err(|_| anyhow::anyhow!("connection timeout after 30s"))?
     .map_err(|e| anyhow::anyhow!("failed to open stream: {e}"))?;
 
-    // 7. Bootstrap Cap'n Proto RPC.
+    // 8. Bootstrap Cap'n Proto RPC.
     let (reader, writer) = Box::pin(stream).split();
     let network = VatNetwork::new(reader, writer, Side::Client, Default::default());
     let mut rpc_system = RpcSystem::new(Box::new(network), None);
@@ -103,7 +156,7 @@ pub async fn run_shell(addr: Multiaddr, identity: Option<PathBuf>) -> Result<()>
     eprintln!("Connected to {peer_id}");
     eprintln!("AI agents:  ipfs cat /ipns/releases.wetware.run/.agents/prompt.md");
 
-    // 8. REPL loop.
+    // 9. REPL loop.
     // rustyline blocks the thread, so run in spawn_blocking with mpsc bridge.
     let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<String>(1);
 

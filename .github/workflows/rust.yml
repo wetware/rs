@@ -132,7 +132,7 @@ jobs:
       run: cargo build --tests
 
   test:
-    name: Test ww binary
+    name: Test
     needs: [build]
     runs-on: ubuntu-latest
     steps:

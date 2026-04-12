@@ -232,12 +232,16 @@ enum Commands {
     /// Evaluates Glia expressions on the remote node. State persists
     /// across evals (def sticks). Ctrl-D or (exit) to disconnect.
     ///
+    /// When --addr is omitted, discovers a local node via Kubo's LAN DHT.
+    ///
     /// Example:
+    ///   ww shell
     ///   ww shell --addr /ip4/127.0.0.1/tcp/2025/p2p/12D3KooW...
     Shell {
-        /// Multiaddr of the target node (must include /p2p/<peer-id>)
+        /// Multiaddr of the target node (must include /p2p/<peer-id>).
+        /// If omitted, discovers a local node via Kubo's LAN DHT.
         #[arg(long)]
-        addr: Multiaddr,
+        addr: Option<Multiaddr>,
 
         /// Path to Ed25519 identity file for auth.
         #[arg(long, env = "WW_IDENTITY", value_name = "PATH")]

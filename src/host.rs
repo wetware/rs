@@ -401,6 +401,18 @@ impl Libp2pHost {
         beh.kad_lan.get_closest_peers(self.local_peer_id);
         tracing::debug!("Kad self-announcement walks started (WAN + LAN)");
 
+        // Advertise on the LAN DHT so `ww shell` can discover us via Kubo.
+        let discovery_key = crate::discovery::discovery_record_key();
+        match self
+            .swarm
+            .behaviour_mut()
+            .kad_lan
+            .start_providing(discovery_key)
+        {
+            Ok(_) => tracing::debug!("LAN discovery provide started"),
+            Err(e) => tracing::warn!("LAN discovery provide failed: {e:?}"),
+        }
+
         loop {
             tokio::select! {
                 event = self.swarm.select_next_some() => {

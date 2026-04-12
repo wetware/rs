@@ -655,6 +655,69 @@ impl HttpClient {
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow::anyhow!("ipfs add: missing Hash in response"))
     }
+
+    /// Find providers of a CID via Kubo's routing API.
+    ///
+    /// Calls `POST /api/v0/routing/findprovs?arg=<cid>&num-providers=<n>`.
+    /// Returns `(peer_id, Vec<multiaddr>)` pairs for each provider found.
+    /// The response is NDJSON; we collect entries with `Type == 4` (provider).
+    pub async fn find_providers(
+        &self,
+        cid: &str,
+        num_providers: usize,
+    ) -> Result<Vec<(String, Vec<String>)>> {
+        let url = format!(
+            "{}/api/v0/routing/findprovs?arg={}&num-providers={}",
+            self.base_url, cid, num_providers
+        );
+        let response = self
+            .http_client
+            .post(&url)
+            .send()
+            .await
+            .with_context(|| format!("kubo routing/findprovs failed: {}", self.base_url))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("kubo routing/findprovs failed: {}", response.status());
+        }
+
+        let body = response
+            .text()
+            .await
+            .context("kubo routing/findprovs: failed to read response")?;
+
+        let mut providers = Vec::new();
+        for line in body.lines() {
+            let entry: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            // Type 4 = provider response in Kubo's routing API
+            if entry.get("Type").and_then(|t| t.as_u64()) != Some(4) {
+                continue;
+            }
+            if let Some(responses) = entry.get("Responses").and_then(|r| r.as_array()) {
+                for resp in responses {
+                    let peer_id = match resp.get("ID").and_then(|id| id.as_str()) {
+                        Some(id) => id.to_string(),
+                        None => continue,
+                    };
+                    let addrs: Vec<String> = resp
+                        .get("Addrs")
+                        .and_then(|a| a.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    providers.push((peer_id, addrs));
+                }
+            }
+        }
+
+        Ok(providers)
+    }
 }
 
 // ── Pinner impl for cache crate ────────────────────────────────────
