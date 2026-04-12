@@ -292,17 +292,13 @@ mod tests {
     #[test]
     fn subdomain_wildcard_matches_bare_domain() {
         let proxy = test_proxy(vec!["*.example.com".into()]);
-        assert!(proxy
-            .validate_request("https://example.com/path")
-            .is_ok());
+        assert!(proxy.validate_request("https://example.com/path").is_ok());
     }
 
     #[test]
     fn subdomain_wildcard_rejects_other_domains() {
         let proxy = test_proxy(vec!["*.example.com".into()]);
-        let err = proxy
-            .validate_request("https://evil.com/path")
-            .unwrap_err();
+        let err = proxy.validate_request("https://evil.com/path").unwrap_err();
         assert!(err.to_string().contains("not in allowlist"));
     }
 
