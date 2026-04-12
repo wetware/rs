@@ -14,7 +14,8 @@ ww run /ipfs/QmHash               # boot from IPFS CID
 ww run . --mcp                    # run as MCP server (stdin/stdout)
 ww run . --port 2025              # libp2p swarm port (default 2025)
 ww run . --http-listen 0.0.0.0:2080   # WAGI HTTP endpoint
-ww run . --with-http-admin :2026  # Prometheus metrics
+ww run . --http-dial api.example.com # allow outbound HTTP to host
+ww run . --with-http-admin :2026  # admin endpoint (metrics, /host/id, /host/addrs)
 ww run . --identity ~/.ww/identity    # Ed25519 key
 ww run . --stem 0xAddr --rpc-url http://... --ws-url ws://...
                                   # on-chain epoch pipeline
@@ -52,7 +53,7 @@ Cells are WASM binaries whose stdio is wired to a transport.
 ## Architecture (three layers)
 
 - **Host** (`ww` binary): libp2p swarm, loads kernel WASM, serves Membrane.
-- **Kernel** (pid0): calls `membrane.graft()`, gets Host/Runtime/Routing/Identity/HttpClient capabilities. All policy lives here.
+- **Kernel** (pid0): calls `membrane.graft()`, receives `List(Export)` of named capabilities. All policy lives here.
 - **Children**: spawned by pid0 with attenuated capabilities.
 
 ## Capabilities after graft
@@ -82,7 +83,7 @@ the cell an MCP server on stdin/stdout.
 | Port | Service |
 |------|---------|
 | 2025 | libp2p swarm |
-| 2026 | HTTP admin (metrics) |
+| 2026 | HTTP admin (metrics, peer ID, listen addrs) |
 | 2080 | HTTP/WAGI |
 
 ## Develop → deploy

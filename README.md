@@ -1,8 +1,8 @@
 # Wetware
 
-[![CI](https://github.com/wetware/rs/actions/workflows/rust.yml/badge.svg)](https://github.com/wetware/rs/actions/workflows/rust.yml)
+[![CI](https://github.com/wetware/ww/actions/workflows/rust.yml/badge.svg)](https://github.com/wetware/ww/actions/workflows/rust.yml)
 
-The peer-to-peer agentic OS.
+The peer-to-peer OS for autonomous agents.
 
 ## Why?
 
@@ -12,31 +12,55 @@ gives your agents an **operating system**. It provides primitives
 Processes are network-addressable, capability-secured, and
 peer-to-peer by default.
 
-Where agentic frameworks rely on ambient authority — any code can
-call any API, read any secret, spend any resource — Wetware replaces
+Where agentic frameworks rely on ambient authority -- any code can
+call any API, read any secret, spend any resource -- Wetware replaces
 this with capabilities. A process can only do what it's been handed
-a capability to do.
+a capability to do. No ambient authority, ever.
 
 ## Quick start
 
-> Read github.com/wetware/ww/.agents/prompt.md, check if we're in a
-> wetware environment, and help me get started.
+```bash
+# Install
+curl -sSL https://wetware.run/install | sh
+
+# Or build from source
+ww doctor                         # check your dev environment
+rustup target add wasm32-wasip2   # one-time
+make                              # build everything
+
+# Run
+ww run .                          # boot a node from current dir
+ww shell                          # connect to a local node (auto-discovers via Kubo)
+ww shell /dnsaddr/master.wetware.run  # connect to a remote node
+```
 
 ## How it works
 
 `ww run` boots an agent:
 
-1. Starts a **libp2p swarm** on the configured port
-2. Loads `bin/main.wasm` from the merged [image](doc/images.md)
-3. Spawns the agent with a **Membrane** — the capability hub that
-   grants access to host, network, IPFS, and identity services via
-   Cap'n Proto RPC
+1. Starts a **libp2p swarm** on port 2025
+2. Merges [image layers](doc/images.md) into a virtual FHS filesystem
+3. Loads `boot/main.wasm` from the merged image
+4. Spawns the agent with a **Membrane** -- the capability hub that
+   serves named [capabilities](doc/capabilities.md) (Host, Runtime,
+   Routing, Identity, HttpClient, and more) over Cap'n Proto RPC
 
-Agents call `membrane.graft()` to receive epoch-scoped
-[capabilities](doc/capabilities.md). When the on-chain epoch
-advances (new code deployed, configuration changed), all capabilities
-are revoked and the agent must re-graft, picking up the new state
-automatically.
+Agents call `membrane.graft()` to receive epoch-scoped capabilities
+as a `List(Export)`. When the on-chain epoch advances (new code
+deployed, configuration changed), all capabilities are revoked and
+the agent must re-graft, picking up the new state automatically.
+
+## Cell modes
+
+WASM processes ("cells") run with zero ambient authority. Their stdio
+is wired to a transport based on `WW_CELL_MODE`:
+
+| Mode | stdio carries | Use case |
+|------|--------------|----------|
+| `vat` | Cap'n Proto RPC | Service mesh, capability exchange |
+| `raw` | libp2p stream bytes | Low-level protocols |
+| `http` | CGI (WAGI) | HTTP request handlers |
+| *(absent)* | Host RPC channel | pid0 kernel -- full membrane graft |
 
 ## The shell
 
@@ -47,16 +71,49 @@ first-class values. The design blends three traditions:
 - **Clojure**: s-expression syntax, immutable data, functional composition
 - **Unix**: processes, PATH lookup, stdin/stdout, init.d scripts
 
+```
+/ > (perform host :id)
+"12D3KooWExample..."
+/ > (perform host :addrs)
+("/ip4/127.0.0.1/tcp/2025" "/ip4/192.168.1.5/tcp/2025")
+```
+
+See [doc/shell.md](doc/shell.md) for the full syntax and capability reference.
+
+## AI integration
+
+Wetware is the drivetrain, not the engine. An LLM connects *to* a
+node over MCP and gets a Glia shell.
+
+```bash
+ww run . --mcp                    # cell as MCP server on stdin/stdout
+ww run . --http-listen :2080      # HTTP/WAGI endpoint
+```
+
+The `ww perform install` command wires MCP into Claude Code
+automatically. See [.agents/prompt.md](.agents/prompt.md) for the
+full AI agent reference.
+
+## Standard ports
+
+| Port | Service |
+|------|---------|
+| 2025 | libp2p swarm |
+| 2026 | HTTP admin (metrics, peer ID, listen addrs) |
+| 2080 | HTTP/WAGI |
+
 ## Building & testing
 
 ```bash
+ww doctor                         # check dev environment
 rustup target add wasm32-wasip2   # one-time
 make                              # build everything (host + std + examples)
 cargo test                        # run tests
 ```
 
 Requires Rust with `wasm32-wasip2` target. Optional:
-[Kubo](https://docs.ipfs.tech/install/) for IPFS resolution.
+[Kubo](https://docs.ipfs.tech/install/) for IPFS resolution and
+peer discovery.
 
 ## Container
 
@@ -66,11 +123,39 @@ CONTAINER_ENGINE=docker make container-build  # or with docker
 podman run --rm wetware:latest                # boots kernel + shell
 ```
 
+## Develop, deploy
+
+```sh
+ww init myapp                 # scaffold a new cell project
+cd myapp && ww build          # compile to WASM
+ww run .                      # test locally
+ww push . --ipfs-url http://localhost:5001   # publish to IPFS
+ww run /ipfs/<CID>            # run from content-addressed image
+```
+
+## Roadmap
+
+The near-term roadmap (see CEO plans in project history):
+
+- **dosync** -- transactional state management for Glia. Atomic
+  multi-field updates over content-addressed stems. "Every agent
+  gets its own Datomic, as a language primitive."
+- **IPFS-first distribution** -- nodes become distribution points.
+  IPNS releases, content-addressed images, self-updating binaries.
+- **Engagement starter kit** -- compose-based demo showing the real
+  operational loop: WAGI HTTP, Glia shell, IPNS config updates,
+  epoch-driven restarts.
+
 ## Learn more
 
-- [Architecture](doc/architecture.md) — design principles and capability flow
-- [Capabilities](doc/capabilities.md) — the capability model and Cap'n Proto schemas
-- [Image layout](doc/images.md) — FHS convention, mounts, and on-chain coordination
-- [CLI reference](doc/cli.md) — full command-line usage
-- [Shell](doc/shell.md) — Glia shell details
-- [Platform vision](doc/designs/economic-agent-platform.md) — roadmap and design
+- [Architecture](doc/architecture.md) -- design principles and capability flow
+- [Capabilities](doc/capabilities.md) -- the capability model and Cap'n Proto schemas
+- [CLI reference](doc/cli.md) -- full command-line usage
+- [Shell](doc/shell.md) -- Glia shell syntax and capabilities
+- [Image layout](doc/images.md) -- FHS convention, mounts, and on-chain coordination
+- [Routing](doc/routing.md) -- Kademlia DHT and peer discovery
+- [Keys & identity](doc/keys.md) -- Ed25519 identity management
+- [RPC transport](doc/rpc-transport.md) -- transport plumbing and scheduling model
+- [Guest runtime](doc/guest-runtime.md) -- async runtime for WASM guests
+- [Replay protection](doc/replay-protection.md) -- epoch-bound authentication
+- [Examples](examples/) -- echo, counter, oracle, chess, and more

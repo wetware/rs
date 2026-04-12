@@ -1,64 +1,244 @@
 # CLI Reference
 
+## ww init
+
+Scaffold a new typed cell guest project.
+
+```
+ww init <NAME>
+```
+
+Creates a Rust project with Cap'n Proto schema, build script, and
+FHS boot layout.
+
+## ww build
+
+Compile a guest project to WASM.
+
+```
+ww build [PATH]
+```
+
+Targets `wasm32-wasip2` and places the artifact at `boot/main.wasm`
+inside the project. Defaults to the current directory.
+
 ## ww run
 
-Start the wetware daemon and boot an image.
+Boot a wetware node.
 
 ```
-ww run [OPTIONS] <IMAGE>...
+ww run [OPTIONS] [MOUNT...]
 ```
 
-### Arguments
-
-| Argument | Description |
-|----------|-------------|
-| `<IMAGE>...` | One or more image layers (local paths or `/ipfs/Qm...`). Later layers override earlier ones via per-file union. The merged result must contain `bin/main.wasm`. |
+Every positional argument is a mount: `source[:target]`.
+Without `:target`, the source is mounted at `/` (image layer).
+With `:target`, the source is overlaid at that guest path.
+Layers stack with per-file union; later layers win.
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--port <PORT>` | `2025` | libp2p swarm listen port |
+| `--identity <PATH>` | none | Ed25519 identity file. Sugar for `PATH:/etc/identity` mount. Also reads `WW_IDENTITY` env. |
+| `--mcp` | off | Run as MCP server (JSON-RPC on stdin/stdout) |
+| `--http-listen <ADDR>` | none | Enable WAGI HTTP server (e.g. `127.0.0.1:2080`) |
+| `--http-dial <HOST>` | none | Allow outbound HTTP to host. Repeatable. Supports exact hosts, `*.example.com`, or `*`. Without this flag, no http-client capability is granted. |
+| `--with-http-admin <ADDR>` | none | Enable HTTP admin endpoint (metrics, `/host/id`, `/host/addrs`) |
 | `--wasm-debug` | off | Enable WASM debug info for guest processes |
-| `--executor-threads <N>` | `0` | Number of executor worker threads for cell scheduling. 0 = auto-detect (one per CPU core). Each thread runs its own single-threaded tokio runtime with a LocalSet for !Send WASM futures. |
-| `--stem <ADDR>` | none | Atom contract address (hex, 0x-prefixed). Enables epoch lifecycle: reads on-chain HEAD, prepends as base image layer, watches for updates. |
-| `--rpc-url <URL>` | `http://127.0.0.1:8545` | HTTP JSON-RPC endpoint for `eth_call` / `eth_getLogs` |
-| `--ws-url <URL>` | `ws://127.0.0.1:8545` | WebSocket JSON-RPC endpoint for `eth_subscribe` |
-| `--confirmation-depth <N>` | `6` | Blocks to wait before finalizing a `HeadUpdated` event |
+| `--executor-threads <N>` | `0` | Executor worker threads (0 = auto-detect, one per CPU core) |
+| `--runtime-cache-policy` | `shared` | `shared`: same WASM bytes share Executor. `isolated`: always fresh. |
+| `--ipfs-url <URL>` | `http://localhost:5001` | IPFS HTTP API endpoint. Also reads `IPFS_API` env. |
+| `--stem <ADDR>` | none | Atom contract address (hex, 0x-prefixed). Enables epoch pipeline. |
+| `--rpc-url <URL>` | `http://127.0.0.1:8545` | HTTP JSON-RPC for eth_call/eth_getLogs |
+| `--ws-url <URL>` | `ws://127.0.0.1:8545` | WebSocket JSON-RPC for eth_subscribe |
+| `--confirmation-depth <N>` | `6` | Blocks before finalizing HeadUpdated events |
+| `--epoch-drain-secs <N>` | `1` | Seconds to drain in-flight ops before epoch advance |
 
 ### Examples
 
 ```sh
-# Run a local image
-ww run images/kernel
+# Dev mode (current directory)
+ww run .
 
-# Run with a custom port
-ww run --port 3030 images/kernel
+# Run as MCP server
+ww run . --mcp
 
-# Run with Stem contract (epoch lifecycle)
-ww run --stem 0x1234...abcd images/kernel
+# HTTP endpoint with outbound access
+ww run . --http-listen 0.0.0.0:2080 --http-dial api.example.com
 
-# Stack image layers: on-chain base + local overlay
-ww run --stem 0x1234...abcd ./my-app
+# Admin metrics + custom port
+ww run . --port 3030 --with-http-admin :2026
 
-# Custom RPC endpoints
-ww run --stem 0x1234...abcd \
-  --rpc-url http://rpc.example.com:8545 \
-  --ws-url ws://rpc.example.com:8546 \
-  --confirmation-depth 12 \
-  images/kernel
+# Identity + image layers
+ww run images/app ~/.ww/identity:/etc/identity ~/data:/var/data
+
+# Run from IPFS
+ww run /ipfs/QmHash...
+
+# On-chain epoch lifecycle
+ww run . --stem 0x1234...abcd --rpc-url http://rpc.example.com:8545
 ```
-
-### TTY detection
-
-When stdin is a terminal, the host sets `WW_TTY=1` in the guest
-environment. The default kernel uses this to choose between interactive
-shell mode (TTY) and daemon mode (non-TTY). See [shell.md](shell.md).
 
 ### Environment variables
 
 | Variable | Set by | Description |
 |----------|--------|-------------|
-| `WW_TTY` | host (if stdin is a TTY) | Signals interactive mode to the guest |
-| `PATH` | host (default: `/bin`) | Search path for `.wasm` executables |
-| `RUST_LOG` | user | Controls host-side tracing verbosity |
+| `WW_IDENTITY` | user | Default identity file path |
+| `WW_TTY` | host | Set to `1` when stdin is a terminal (triggers interactive shell mode) |
+| `WW_CELL_MODE` | host | Cell transport mode: `vat`, `raw`, `http`, or absent (kernel) |
+| `IPFS_API` | user | Default IPFS HTTP API endpoint |
+| `RUST_LOG` | user | Host-side tracing verbosity |
+
+## ww shell
+
+Connect to a running node and open a Glia REPL.
+
+```
+ww shell [MULTIADDR] [--identity PATH]
+```
+
+The address is an optional positional argument:
+
+- `/ip4/.../tcp/.../p2p/...` -- dial directly
+- `/dnsaddr/master.wetware.run` -- resolve via DNS TXT records
+- *(omitted)* -- auto-discover a local node via Kubo's LAN DHT
+
+### Examples
+
+```sh
+ww shell                                    # auto-discover local node
+ww shell /dnsaddr/master.wetware.run        # connect to remote node
+ww shell /ip4/127.0.0.1/tcp/2025/p2p/12D3KooW...  # direct dial
+ww shell --identity ~/.ww/identity /dnsaddr/master.wetware.run
+```
+
+See [shell.md](shell.md) for Glia syntax and capability reference.
+
+## ww push
+
+Snapshot a project's FHS tree and publish to IPFS.
+
+```
+ww push [PATH] [OPTIONS]
+```
+
+Adds the tree as a UnixFS directory and returns the CID. Optionally
+updates the on-chain Atom contract HEAD.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--ipfs-url <URL>` | `http://localhost:5001` | IPFS HTTP API endpoint |
+| `--stem <ADDR>` | none | Atom contract address to update |
+| `--rpc-url <URL>` | `http://127.0.0.1:8545` | JSON-RPC for eth_sendTransaction |
+| `--private-key <KEY>` | none | Hex private key (required with `--stem`) |
+
+## ww keygen
+
+Generate a new Ed25519 identity.
+
+```
+ww keygen [--output PATH]
+```
+
+Prints the base58btc secret key to stdout, peer ID to stderr.
+
+```sh
+ww keygen > ~/.ww/identity
+ww keygen --output ~/.ww/identity   # equivalent
+```
+
+## ww doctor
+
+Check the development environment for required and optional tools.
+
+```
+ww doctor
+```
+
+Verifies: Rust toolchain, `wasm32-wasip2` target, Cargo. Optionally
+checks for Kubo (IPFS) and Ollama (LLM). Exit 0 if all required
+checks pass.
+
+## ww perform
+
+Effectful operations that mutate state beyond the current directory.
+
+### ww perform install
+
+Bootstrap `~/.ww`, daemon, and MCP wiring.
+
+Idempotent: re-running skips completed steps, retries failed ones.
+
+1. Creates `~/.ww` directory structure
+2. Generates Ed25519 identity (if missing)
+3. Registers background daemon (launchd/systemd)
+4. Wires MCP into Claude Code (if installed)
+
+### ww perform upgrade
+
+Self-update the `ww` binary via IPNS.
+
+```
+ww perform upgrade [--ipfs-url URL]
+```
+
+Resolves `/ipns/releases.wetware.run/Cargo.toml` for the latest
+version, fetches the platform binary, and atomically replaces the
+running executable.
+
+### ww perform uninstall
+
+Remove daemon, MCP wiring, and optionally `~/.ww`.
+
+## ww daemon
+
+Manage the background daemon.
+
+### ww daemon install
+
+Register wetware as a user-level background service (launchd on
+macOS, systemd on Linux).
+
+```
+ww daemon install [--identity PATH] [--port PORT] [--images PATH...]
+```
+
+### ww daemon uninstall
+
+Remove the platform service file.
+
+## ww ns
+
+Manage namespaces (IPFS mount layers).
+
+### ww ns list
+
+List configured namespaces.
+
+### ww ns add
+
+Add or update a namespace.
+
+```
+ww ns add <NAME> [--ipns KEY]
+```
+
+Writes a config file to `~/.ww/etc/ns/<name>`.
+
+## ww oci import
+
+Pull the container image from IPFS into Docker/podman.
+
+```
+ww oci import [--cid CID] [--stdout] [--ipfs-url URL]
+```
+
+Resolves the OCI tar from `/ipns/releases.wetware.run/oci/image.tar`
+and pipes it to `docker load` or `podman load`.
+
+```sh
+ww oci import                     # auto-detect and load
+ww oci import --cid QmHash...    # specific CID
+ww oci import --stdout | podman load
+```
