@@ -112,7 +112,11 @@ trap cleanup EXIT
 # --- Parse arguments ---
 while [ $# -gt 0 ]; do
   case "$1" in
-    --version) VERSION_CID="$2"; shift 2 ;;
+    --version)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
+        echo "Error: --version requires a CID argument"; exit 1
+      fi
+      VERSION_CID="$2"; shift 2 ;;
     --help)
       echo "Usage: install.sh [--version CID]"
       echo "  --version  Install a specific release by immutable CID"
@@ -165,13 +169,14 @@ else
   spin "Resolving latest release..."
 
   RESOLVED_CID=""
-  ipfs name resolve "$IPNS_NAME" > /tmp/ww-ipns-resolve.$$ 2>/dev/null &
+  WW_RESOLVE_TMP=$(mktemp /tmp/ww-ipns-resolve.XXXXXXXX)
+  ipfs name resolve "$IPNS_NAME" > "$WW_RESOLVE_TMP" 2>/dev/null &
   RESOLVE_PID=$!
 
   i=0
   while [ $i -lt $IPNS_TIMEOUT ]; do
     if ! kill -0 "$RESOLVE_PID" 2>/dev/null; then
-      RESOLVED_CID=$(cat /tmp/ww-ipns-resolve.$$ 2>/dev/null || true)
+      RESOLVED_CID=$(cat "$WW_RESOLVE_TMP" 2>/dev/null || true)
       break
     fi
     i=$((i + 1))
@@ -179,7 +184,8 @@ else
   done
 
   kill "$RESOLVE_PID" 2>/dev/null || true
-  rm -f /tmp/ww-ipns-resolve.$$
+  wait "$RESOLVE_PID" 2>/dev/null || true
+  rm -f "$WW_RESOLVE_TMP"
 
   if [ -z "$RESOLVED_CID" ]; then
     die "IPNS resolution failed" \
@@ -188,6 +194,14 @@ else
       "  curl -sSf .../install.sh | sh -s -- --version <CID>" \
       "Release CIDs: https://github.com/wetware/ww/releases"
   fi
+
+  # Validate resolved CID looks like an IPFS path
+  case "$RESOLVED_CID" in
+    /ipfs/bafy*|/ipfs/Qm*) ;;
+    *) die "IPNS resolved to unexpected value" \
+         "Got: ${RESOLVED_CID}" \
+         "Expected /ipfs/bafy... or /ipfs/Qm..." ;;
+  esac
 
   IPFS_BASE="$RESOLVED_CID"
   spin_ok "Resolved latest release"
