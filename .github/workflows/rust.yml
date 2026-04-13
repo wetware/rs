@@ -220,59 +220,13 @@ jobs:
           examples/*/bin/
         retention-days: 1
 
-  build-deploy-binary:
-    name: Build deploy binary (musl)
+  build-binaries:
+    name: Build ${{ matrix.artifact }}
     if: >-
       github.event_name == 'push' && github.ref == 'refs/heads/master'
       && (needs.changes.outputs.std == 'true' || needs.changes.outputs.host == 'true'
           || github.event_name == 'workflow_dispatch')
     needs: [changes, fmt, clippy, solidity, build, build-wasm]
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/checkout@v5
-      with:
-        submodules: recursive
-
-    - uses: actions/download-artifact@v5
-      with:
-        name: wasm-artifacts
-
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: x86_64-unknown-linux-musl
-
-    - uses: ./.github/actions/setup-capnp
-
-    - name: Install musl toolchain
-      run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-    - uses: Swatinem/rust-cache@v2
-      with:
-        key: deploy-musl
-
-    - name: Build static binary
-      run: cargo build --release --target x86_64-unknown-linux-musl
-
-    - name: Verify static linking
-      run: |
-        file target/x86_64-unknown-linux-musl/release/ww
-        file target/x86_64-unknown-linux-musl/release/ww | grep -q "statically linked"
-
-    - uses: actions/upload-artifact@v5
-      with:
-        name: ww-deploy-musl
-        path: target/x86_64-unknown-linux-musl/release/ww
-        retention-days: 1
-
-  build-binaries:
-    name: Build ${{ matrix.artifact }}
-    if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/master'
-      && (needs.changes.outputs.host == 'true'
-          || github.event_name == 'workflow_dispatch')
-    needs: [changes, build-wasm]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -302,6 +256,13 @@ jobs:
             bin_path: bin/macos/x86_64
             use_cross: false
 
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: ww-linux-musl-x86_64
+            bin_path: bin/linux/musl-x86_64
+            use_cross: false
+            install_musl: true
+
     steps:
     - uses: actions/checkout@v5
       with:
@@ -320,6 +281,10 @@ jobs:
       if: ${{ !matrix.use_cross }}
       with:
         cache-key-suffix: ${{ matrix.target }}
+
+    - name: Install musl toolchain
+      if: ${{ matrix.install_musl }}
+      run: sudo apt-get update && sudo apt-get install -y musl-tools
 
     - name: Install cross
       if: ${{ matrix.use_cross }}
@@ -342,6 +307,10 @@ jobs:
         mkdir -p ${{ matrix.bin_path }}
         cp target/${{ matrix.target }}/release/ww ${{ matrix.bin_path }}/ww
 
+    - name: Verify static linking
+      if: ${{ matrix.install_musl }}
+      run: file ${{ matrix.bin_path }}/ww | grep -q "statically linked"
+
     - uses: actions/upload-artifact@v5
       with:
         name: ${{ matrix.artifact }}
@@ -354,7 +323,7 @@ jobs:
       github.event_name == 'push' && github.ref == 'refs/heads/master'
       && (needs.changes.outputs.std == 'true' || needs.changes.outputs.host == 'true'
           || github.event_name == 'workflow_dispatch')
-    needs: [changes, fmt, clippy, solidity, build, build-deploy-binary]
+    needs: [changes, fmt, clippy, solidity, build, build-binaries]
     runs-on: ubuntu-latest
     environment: master
     permissions:
@@ -366,7 +335,7 @@ jobs:
 
     - uses: actions/download-artifact@v5
       with:
-        name: ww-deploy-musl
+        name: ww-linux-musl-x86_64
         path: deploy-context
 
     - uses: actions/download-artifact@v5
@@ -377,6 +346,9 @@ jobs:
     - name: Assemble deploy context
       run: |
         cd deploy-context
+        # Musl binary is uploaded under bin_path; move to context root
+        mv bin/linux/musl-x86_64/ww ww
+        rm -rf bin
         chmod +x ww
         mkdir -p usr/share/wetware/kernel/bin
         mkdir -p usr/share/wetware/shell/bin
