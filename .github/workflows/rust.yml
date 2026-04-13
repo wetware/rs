@@ -434,70 +434,14 @@ jobs:
         echo "Deploy failed after 2 attempts"
         exit 1
 
-  publish-std:
-    name: Publish std to IPNS
-    if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/master'
-      && (needs.changes.outputs.std == 'true'
-          || github.event_name == 'workflow_dispatch')
-    needs: [changes, build-wasm, deploy]
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/download-artifact@v5
-      with:
-        name: wasm-artifacts
-        path: artifacts/wasm-artifacts
-
-    - name: Publish std namespace to IPNS via VPS
-      env:
-        SSH_CMD: ssh -i ~/.ssh/deploy_key -o ServerAliveInterval=30 -o ServerAliveCountMax=10
-      run: |
-        # Set up SSH
-        mkdir -p ~/.ssh
-        echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
-        chmod 600 ~/.ssh/deploy_key
-        echo "${{ secrets.DEPLOY_SSH_HOST_KEY }}" > ~/.ssh/known_hosts
-
-        # Assemble std namespace tree
-        STAGE=/tmp/std-tree
-        mkdir -p "$STAGE/kernel/bin" "$STAGE/shell/bin" "$STAGE/mcp/bin"
-        cp artifacts/wasm-artifacts/std/kernel/bin/main.wasm "$STAGE/kernel/bin/main.wasm"
-        cp artifacts/wasm-artifacts/std/shell/bin/shell.wasm "$STAGE/shell/bin/shell.wasm"
-        cp artifacts/wasm-artifacts/std/mcp/bin/main.wasm    "$STAGE/mcp/bin/main.wasm"
-
-        # Get IPFS pod name
-        POD=$($SSH_CMD ${{ secrets.VPS_SSH }} "kubectl get pod -l app=ipfs-daemon -o jsonpath='{.items[0].metadata.name}'")
-        echo "IPFS pod: $POD"
-
-        # Rsync std tree to VPS, publish to IPFS + IPNS
-        rsync -a -e "$SSH_CMD" "$STAGE/" ${{ secrets.VPS_SSH }}:/tmp/ww-std-tree/
-
-        $SSH_CMD ${{ secrets.VPS_SSH }} "
-          kubectl cp /tmp/ww-std-tree $POD:/tmp/std-tree
-          CID=\$(kubectl exec $POD -- ipfs add -rQ --cid-version=1 /tmp/std-tree/)
-          echo \"STD_CID=\$CID\"
-          kubectl exec $POD -- ipfs pin add \$CID
-          kubectl exec $POD -- ipfs name publish --key=ww-std /ipfs/\$CID
-          kubectl exec $POD -- rm -rf /tmp/std-tree
-          rm -rf /tmp/ww-std-tree
-        " | tee /tmp/std-publish-output.txt
-
-        CID=$(grep '^STD_CID=' /tmp/std-publish-output.txt | cut -d= -f2)
-        echo "Std namespace CID: $CID"
-
-    - name: Record std CID
-      run: |
-        echo "## Std Namespace Publish" >> "$GITHUB_STEP_SUMMARY"
-        echo "- CID: \`$(grep '^STD_CID=' /tmp/std-publish-output.txt | cut -d= -f2)\`" >> "$GITHUB_STEP_SUMMARY"
-
-  publish-ipfs:
-    name: Publish release to IPFS
-    if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/master'
-      && (needs.changes.outputs.host == 'true'
-          || github.event_name == 'workflow_dispatch')
+  publish:
+    name: Publish to IPFS
     needs: [changes, test, build-binaries, build-wasm, deploy]
+    # Run even if build-binaries was skipped (std-only change)
+    if: >-
+      !failure() && !cancelled()
+      && (needs.changes.outputs.std == 'true' || needs.changes.outputs.host == 'true'
+          || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
 
     steps:
@@ -510,22 +454,27 @@ jobs:
         name: wasm-artifacts
         path: artifacts/wasm-artifacts
 
+    # Download binary artifacts (only available when host lane ran)
     - uses: actions/download-artifact@v5
+      if: needs.changes.outputs.host == 'true' || github.event_name == 'workflow_dispatch'
       with:
         name: ww-linux-x86_64
         path: artifacts/ww-linux-x86_64
 
     - uses: actions/download-artifact@v5
+      if: needs.changes.outputs.host == 'true' || github.event_name == 'workflow_dispatch'
       with:
         name: ww-linux-aarch64
         path: artifacts/ww-linux-aarch64
 
     - uses: actions/download-artifact@v5
+      if: needs.changes.outputs.host == 'true' || github.event_name == 'workflow_dispatch'
       with:
         name: ww-macos-aarch64
         path: artifacts/ww-macos-aarch64
 
     - uses: actions/download-artifact@v5
+      if: needs.changes.outputs.host == 'true' || github.event_name == 'workflow_dispatch'
       with:
         name: ww-macos-x86_64
         path: artifacts/ww-macos-x86_64
@@ -533,6 +482,7 @@ jobs:
     - name: Publish to IPFS via VPS
       env:
         SSH_CMD: ssh -i ~/.ssh/deploy_key -o ServerAliveInterval=30 -o ServerAliveCountMax=10
+        HOST_CHANGED: ${{ needs.changes.outputs.host }}
       run: |
         # Set up SSH
         mkdir -p ~/.ssh
@@ -540,18 +490,15 @@ jobs:
         chmod 600 ~/.ssh/deploy_key
         echo "${{ secrets.DEPLOY_SSH_HOST_KEY }}" > ~/.ssh/known_hosts
 
-        # Assemble release tree (repo working tree minus .git/target + all platform binaries + WASM)
+        # Get IPFS pod name
+        POD=$($SSH_CMD ${{ secrets.VPS_SSH }} "kubectl get pod -l app=ipfs-daemon -o jsonpath='{.items[0].metadata.name}'")
+        echo "IPFS pod: $POD"
+
+        # Assemble release tree (repo working tree minus .git/target)
         STAGE=/tmp/release-tree
         rsync -a --exclude .git --exclude target . "$STAGE/"
 
-        # Place binaries from build matrix
-        mkdir -p "$STAGE/bin/linux/x86_64" "$STAGE/bin/linux/aarch64" "$STAGE/bin/macos/aarch64" "$STAGE/bin/macos/x86_64"
-        cp artifacts/ww-linux-x86_64/ww   "$STAGE/bin/linux/x86_64/ww"
-        cp artifacts/ww-linux-aarch64/ww   "$STAGE/bin/linux/aarch64/ww"
-        cp artifacts/ww-macos-aarch64/ww   "$STAGE/bin/macos/aarch64/ww"
-        cp artifacts/ww-macos-x86_64/ww    "$STAGE/bin/macos/x86_64/ww"
-
-        # Place WASM artifacts
+        # Place WASM artifacts (always available from build-wasm)
         cp artifacts/wasm-artifacts/std/kernel/bin/main.wasm  "$STAGE/std/kernel/bin/main.wasm"  2>/dev/null || true
         cp artifacts/wasm-artifacts/std/shell/bin/shell.wasm  "$STAGE/std/shell/bin/shell.wasm"  2>/dev/null || true
         cp artifacts/wasm-artifacts/std/mcp/bin/main.wasm     "$STAGE/std/mcp/bin/main.wasm"     2>/dev/null || true
@@ -565,14 +512,33 @@ jobs:
           fi
         done
 
+        # Place binaries: from CI artifacts if host lane ran, else from previous IPNS
+        mkdir -p "$STAGE/bin/linux/x86_64" "$STAGE/bin/linux/aarch64" "$STAGE/bin/macos/aarch64" "$STAGE/bin/macos/x86_64"
+
+        if [ "$HOST_CHANGED" = "true" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "Using fresh binaries from build matrix"
+          cp artifacts/ww-linux-x86_64/ww   "$STAGE/bin/linux/x86_64/ww"
+          cp artifacts/ww-linux-aarch64/ww   "$STAGE/bin/linux/aarch64/ww"
+          cp artifacts/ww-macos-aarch64/ww   "$STAGE/bin/macos/aarch64/ww"
+          cp artifacts/ww-macos-x86_64/ww    "$STAGE/bin/macos/x86_64/ww"
+        else
+          echo "Host unchanged — fetching previous binaries from IPNS"
+          PREV=$($SSH_CMD ${{ secrets.VPS_SSH }} "kubectl exec $POD -- ipfs name resolve /ipns/\$(kubectl exec $POD -- ipfs key list -l | grep ww-release | awk '{print \$1}')" 2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            for platform in linux/x86_64 linux/aarch64 macos/aarch64 macos/x86_64; do
+              $SSH_CMD ${{ secrets.VPS_SSH }} "kubectl exec $POD -- ipfs cat $PREV/bin/$platform/ww" > "$STAGE/bin/$platform/ww" 2>/dev/null || true
+              chmod +x "$STAGE/bin/$platform/ww" 2>/dev/null || true
+            done
+            echo "Fetched previous binaries from $PREV"
+          else
+            echo "WARNING: Could not resolve previous IPNS — binaries may be missing"
+          fi
+        fi
+
         # Generate checksums
         cd "$STAGE"
         find bin/ -type f | sort | xargs sha256sum > CHECKSUMS.txt
         cd -
-
-        # Get IPFS pod name
-        POD=$($SSH_CMD ${{ secrets.VPS_SSH }} "kubectl get pod -l app=ipfs-daemon -o jsonpath='{.items[0].metadata.name}'")
-        echo "IPFS pod: $POD"
 
         # Rsync release tree to VPS
         rsync -a -e "$SSH_CMD" "$STAGE/" ${{ secrets.VPS_SSH }}:/tmp/ww-release-tree/
