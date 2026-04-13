@@ -350,13 +350,22 @@ jobs:
         mv bin/linux/musl-x86_64/ww ww
         rm -rf bin
         chmod +x ww
-        mkdir -p usr/share/wetware/kernel/bin
-        mkdir -p usr/share/wetware/shell/bin
-        mkdir -p usr/share/wetware/shell/etc/init.d
-        cp wasm/std/kernel/bin/main.wasm usr/share/wetware/kernel/bin/
-        cp wasm/std/shell/bin/shell.wasm usr/share/wetware/shell/bin/
-        cp wasm/std/shell/bin/shell.capnpc usr/share/wetware/shell/bin/
-        cp wasm/std/shell/etc/init.d/50-shell.glia usr/share/wetware/shell/etc/init.d/
+
+        # FHS layout: bin/ (WASM cells), lib/ (Glia), share/ (schemas), etc/ (config)
+        mkdir -p wetware/bin wetware/lib/ww wetware/share/schema
+        mkdir -p wetware/etc/init.d
+
+        # WASM cells
+        cp wasm/std/kernel/bin/main.wasm  wetware/bin/kernel.wasm
+        cp wasm/std/shell/bin/shell.wasm  wetware/bin/shell.wasm
+        cp wasm/std/mcp/bin/main.wasm     wetware/bin/mcp.wasm
+
+        # Compiled schemas
+        cp wasm/std/shell/bin/shell.capnpc wetware/share/schema/shell.capnpc 2>/dev/null || true
+
+        # Init scripts
+        cp wasm/std/shell/etc/init.d/50-shell.glia wetware/etc/init.d/ 2>/dev/null || true
+
         cp ../Containerfile.deploy Containerfile
 
     - name: Set up Docker Buildx
@@ -466,40 +475,64 @@ jobs:
         POD=$($SSH_CMD ${{ secrets.VPS_SSH }} "kubectl get pod -l app=ipfs-daemon -o jsonpath='{.items[0].metadata.name}'")
         echo "IPFS pod: $POD"
 
-        # Assemble release tree (repo working tree minus .git/target)
+        # Assemble clean release tree (artifacts only, no source code)
         STAGE=/tmp/release-tree
-        rsync -a --exclude .git --exclude target . "$STAGE/"
+        mkdir -p "$STAGE/bin/ww/linux/x86_64" "$STAGE/bin/ww/linux/aarch64"
+        mkdir -p "$STAGE/bin/ww/macos/aarch64" "$STAGE/bin/ww/macos/x86_64"
+        mkdir -p "$STAGE/include/schema" "$STAGE/lib/ww" "$STAGE/lib/init.d"
+        mkdir -p "$STAGE/share/schema"
 
-        # Place WASM artifacts (always available from build-wasm)
-        cp artifacts/wasm-artifacts/std/kernel/bin/main.wasm  "$STAGE/std/kernel/bin/main.wasm"  2>/dev/null || true
-        cp artifacts/wasm-artifacts/std/shell/bin/shell.wasm  "$STAGE/std/shell/bin/shell.wasm"  2>/dev/null || true
-        cp artifacts/wasm-artifacts/std/mcp/bin/main.wasm     "$STAGE/std/mcp/bin/main.wasm"     2>/dev/null || true
+        # VERSION
+        grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/' > "$STAGE/VERSION"
 
-        # Place example WASM artifacts
-        for example_bin in artifacts/wasm-artifacts/examples/*/bin/*; do
-          if [ -f "$example_bin" ]; then
-            rel="${example_bin#artifacts/wasm-artifacts/}"
-            mkdir -p "$STAGE/$(dirname "$rel")"
-            cp "$example_bin" "$STAGE/$rel"
+        # Changelog
+        cp CHANGELOG.md "$STAGE/"
+
+        # WASM cells (flat under bin/)
+        cp artifacts/wasm-artifacts/std/kernel/bin/main.wasm  "$STAGE/bin/kernel.wasm"
+        cp artifacts/wasm-artifacts/std/shell/bin/shell.wasm  "$STAGE/bin/shell.wasm"
+        cp artifacts/wasm-artifacts/std/mcp/bin/main.wasm     "$STAGE/bin/mcp.wasm"
+
+        # Example WASM cells
+        for example_dir in artifacts/wasm-artifacts/examples/*/bin; do
+          if [ -d "$example_dir" ]; then
+            name=$(basename "$(dirname "$example_dir")")
+            cp "$example_dir"/*.wasm "$STAGE/bin/${name}.wasm" 2>/dev/null || true
           fi
         done
 
-        # Place binaries: from CI artifacts if host lane ran, else from previous IPNS
-        mkdir -p "$STAGE/bin/linux/x86_64" "$STAGE/bin/linux/aarch64" "$STAGE/bin/macos/aarch64" "$STAGE/bin/macos/x86_64"
+        # Compiled schemas (.capnpc)
+        cp artifacts/wasm-artifacts/std/shell/bin/shell.capnpc "$STAGE/share/schema/shell.capnpc" 2>/dev/null || true
 
+        # Human-readable .capnp schemas
+        cp capnp/shell.capnp "$STAGE/include/schema/" 2>/dev/null || true
+        for ex_capnp in examples/*/*.capnp; do
+          [ -f "$ex_capnp" ] && cp "$ex_capnp" "$STAGE/include/schema/"
+        done
+
+        # Glia stdlib
+        cp std/lib/ww/*.glia "$STAGE/lib/ww/" 2>/dev/null || true
+
+        # Reference init.d scripts
+        cp std/shell/etc/init.d/*.glia "$STAGE/lib/init.d/" 2>/dev/null || true
+        for ex_init in examples/*/etc/init.d/*.glia; do
+          [ -f "$ex_init" ] && cp "$ex_init" "$STAGE/lib/init.d/"
+        done
+
+        # Host binaries: from CI artifacts if host lane ran, else from previous IPNS
         if [ "$HOST_CHANGED" = "true" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
           echo "Using fresh binaries from build matrix"
-          cp artifacts/ww-linux-x86_64/ww   "$STAGE/bin/linux/x86_64/ww"
-          cp artifacts/ww-linux-aarch64/ww   "$STAGE/bin/linux/aarch64/ww"
-          cp artifacts/ww-macos-aarch64/ww   "$STAGE/bin/macos/aarch64/ww"
-          cp artifacts/ww-macos-x86_64/ww    "$STAGE/bin/macos/x86_64/ww"
+          cp artifacts/ww-linux-x86_64/ww   "$STAGE/bin/ww/linux/x86_64/ww"
+          cp artifacts/ww-linux-aarch64/ww   "$STAGE/bin/ww/linux/aarch64/ww"
+          cp artifacts/ww-macos-aarch64/ww   "$STAGE/bin/ww/macos/aarch64/ww"
+          cp artifacts/ww-macos-x86_64/ww    "$STAGE/bin/ww/macos/x86_64/ww"
         else
           echo "Host unchanged — fetching previous binaries from IPNS"
           PREV=$($SSH_CMD ${{ secrets.VPS_SSH }} "kubectl exec $POD -- ipfs name resolve /ipns/\$(kubectl exec $POD -- ipfs key list -l | grep ww-release | awk '{print \$1}')" 2>/dev/null || true)
           if [ -n "$PREV" ]; then
             for platform in linux/x86_64 linux/aarch64 macos/aarch64 macos/x86_64; do
-              $SSH_CMD ${{ secrets.VPS_SSH }} "kubectl exec $POD -- ipfs cat $PREV/bin/$platform/ww" > "$STAGE/bin/$platform/ww" 2>/dev/null || true
-              chmod +x "$STAGE/bin/$platform/ww" 2>/dev/null || true
+              $SSH_CMD ${{ secrets.VPS_SSH }} "kubectl exec $POD -- ipfs cat $PREV/bin/ww/$platform/ww" > "$STAGE/bin/ww/$platform/ww" 2>/dev/null || true
+              chmod +x "$STAGE/bin/ww/$platform/ww" 2>/dev/null || true
             done
             echo "Fetched previous binaries from $PREV"
           else
@@ -507,9 +540,9 @@ jobs:
           fi
         fi
 
-        # Generate checksums
+        # Checksums (host binaries only)
         cd "$STAGE"
-        find bin/ -type f | sort | xargs sha256sum > CHECKSUMS.txt
+        find bin/ww/ -type f | sort | xargs sha256sum > CHECKSUMS.txt
         cd -
 
         # Rsync release tree to VPS

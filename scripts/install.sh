@@ -196,7 +196,7 @@ fi
 TMPDIR=$(mktemp -d)
 
 # --- Fetch binary ---
-BIN_PATH="/bin/${OS_NAME}/${ARCH_NAME}/ww"
+BIN_PATH="/bin/ww/${OS_NAME}/${ARCH_NAME}/ww"
 spin "Fetching binary (${OS_NAME}/${ARCH_NAME})..."
 
 if ! ipfs cat "${IPFS_BASE}${BIN_PATH}" > "${TMPDIR}/ww" 2>/dev/null; then
@@ -258,19 +258,8 @@ mkdir -p "${WW_HOME}/bin"
 mv "${TMPDIR}/ww" "${WW_HOME}/bin/ww"
 chmod +x "${WW_HOME}/bin/ww"
 
-# --- Fetch standard library ---
-spin "Fetching standard library..."
-
-if ipfs get "${IPFS_BASE}/std/" -o "${WW_HOME}/lib/std/" >/dev/null 2>&1; then
-  spin_ok "Fetched standard library"
-else
-  spin_fail "Standard library not available"
-  warn "Fetch it later: ipfs get <release-cid>/std/ -o ~/.ww/lib/std/"
-fi
-
-# --- Fetch config template (silent) ---
-mkdir -p "${WW_HOME}/etc"
-ipfs cat "${IPFS_BASE}/etc/config.toml.default" > "${WW_HOME}/etc/config.toml.default" 2>/dev/null || true
+# --- Note: standard library is embedded in the binary and resolved ---
+# --- via IPNS namespace at runtime. No separate fetch needed.       ---
 
 # --- Full node setup (identity, namespace, daemon, MCP, PATH) ---
 printf '\n'

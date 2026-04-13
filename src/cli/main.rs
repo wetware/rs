@@ -46,10 +46,10 @@ const EMBEDDED_ECHO: &[u8] = b"";
 /// Build the standard embedded loader with all bundled WASM images.
 fn embedded_loader() -> EmbeddedLoader {
     EmbeddedLoader::new()
-        .insert("kernel/bin/main.wasm", EMBEDDED_KERNEL)
-        .insert("shell/bin/shell.wasm", EMBEDDED_SHELL)
-        .insert("mcp/bin/main.wasm", EMBEDDED_MCP)
-        .insert("echo/bin/echo.wasm", EMBEDDED_ECHO)
+        .insert("bin/kernel.wasm", EMBEDDED_KERNEL)
+        .insert("bin/shell.wasm", EMBEDDED_SHELL)
+        .insert("bin/mcp.wasm", EMBEDDED_MCP)
+        .insert("bin/echo.wasm", EMBEDDED_ECHO)
 }
 
 #[derive(Parser)]
@@ -1913,13 +1913,6 @@ wasip2::cli::command::export!({iface_name}Guest);
         Ok(())
     }
 
-    /// CIDv1 (raw codec, BLAKE3) for a byte slice.
-    fn wasm_cid(data: &[u8]) -> cid::Cid {
-        let digest = blake3::hash(data);
-        let mh = cid::multihash::Multihash::<64>::wrap(0x1e, digest.as_bytes()).unwrap();
-        cid::Cid::new_v1(0x55, mh)
-    }
-
     /// Refresh WASM images, daemon config/service file, and MCP wiring
     /// to match the current binary. Safe to run repeatedly.
     async fn perform_update() -> Result<()> {
@@ -1948,38 +1941,41 @@ wasip2::cli::command::export!({iface_name}Guest);
         }
 
         // Ensure subdirectories exist (may be missing if created by older version).
-        for sub in &["kernel/bin", "shell/bin", "mcp/bin", "logs", "etc/ns"] {
+        for sub in &["bin", "etc/init.d", "etc/ns", "logs"] {
             let dir = ww_dir.join(sub);
             if !dir.exists() {
                 std::fs::create_dir_all(&dir)?;
             }
         }
 
-        // ── WASM images ──────────────────────────────────────────────
-        let image_cells: &[(&str, &str, &[u8])] = &[
-            ("kernel", "main.wasm", EMBEDDED_KERNEL),
-            ("shell", "shell.wasm", EMBEDDED_SHELL),
-            ("mcp", "main.wasm", EMBEDDED_MCP),
+        // ── WASM images (embedded check) ─────────────────────────────
+        // Embedded WASM blobs are served by EmbeddedLoader at runtime.
+        // We no longer write them to disk; just check if they're present
+        // in the binary to decide whether to republish the std namespace.
+        let embedded_cells: &[(&str, &[u8])] = &[
+            ("kernel.wasm", EMBEDDED_KERNEL),
+            ("shell.wasm", EMBEDDED_SHELL),
+            ("mcp.wasm", EMBEDDED_MCP),
         ];
-        let mut images_ok = true;
-        let mut any_images_changed = false;
-        for (name, wasm_name, bytes) in image_cells {
-            let wasm_dest = ww_dir.join(format!("{name}/bin/{wasm_name}"));
-            if !bytes.is_empty() {
-                let embedded_cid = Self::wasm_cid(bytes);
-                let needs_write = !wasm_dest.exists()
-                    || std::fs::read(&wasm_dest)
-                        .map(|on_disk| Self::wasm_cid(&on_disk) != embedded_cid)
-                        .unwrap_or(true);
-                if needs_write {
-                    std::fs::write(&wasm_dest, bytes)
-                        .with_context(|| format!("write {}", wasm_dest.display()))?;
-                    any_images_changed = true;
+        let images_ok = embedded_cells.iter().all(|(_, bytes)| !bytes.is_empty());
+        // Detect changes by hashing embedded blobs against last-published CID.
+        let any_images_changed = {
+            let cid_marker = ww_dir.join(".last-std-cid");
+            let current_hash = {
+                let mut hasher = blake3::Hasher::new();
+                for (_, bytes) in embedded_cells {
+                    hasher.update(bytes);
                 }
-            } else {
-                images_ok = false;
+                hasher.finalize().to_hex().to_string()
+            };
+            let changed = std::fs::read_to_string(&cid_marker)
+                .map(|prev| prev.trim() != current_hash)
+                .unwrap_or(true);
+            if changed {
+                let _ = std::fs::write(&cid_marker, &current_hash);
             }
-        }
+            changed
+        };
         if !images_ok {
             skip("WASM images (not embedded, build from source)".into());
         } else if any_images_changed {
@@ -2013,11 +2009,10 @@ wasip2::cli::command::export!({iface_name}Guest);
 
                 let tmp = tempfile::TempDir::new()?;
                 let tree = tmp.path();
+                let bin_dir = tree.join("bin");
                 let lib_dir = tree.join("lib/ww");
+                std::fs::create_dir_all(&bin_dir)?;
                 std::fs::create_dir_all(&lib_dir)?;
-                std::fs::create_dir_all(tree.join("kernel/bin"))?;
-                std::fs::create_dir_all(tree.join("shell/bin"))?;
-                std::fs::create_dir_all(tree.join("mcp/bin"))?;
 
                 // Copy Glia stdlib if present on disk.
                 let glia_src = std::path::Path::new("std/lib/ww");
@@ -2033,9 +2028,10 @@ wasip2::cli::command::export!({iface_name}Guest);
                     }
                 }
 
-                for (name, wasm_name, bytes) in image_cells {
+                // Write WASM cells to bin/ (flat layout).
+                for (wasm_name, bytes) in embedded_cells {
                     if !bytes.is_empty() {
-                        std::fs::write(tree.join(format!("{name}/bin/{wasm_name}")), bytes)?;
+                        std::fs::write(bin_dir.join(wasm_name), bytes)?;
                     }
                 }
 
@@ -2075,13 +2071,10 @@ wasip2::cli::command::export!({iface_name}Guest);
         // ── Daemon config + service file (unconditional) ─────────────
         let ww_bin = std::env::current_exe().context("cannot determine ww binary path")?;
         let identity_path = ww_dir.join("identity");
-        // Only mount kernel and shell as root layers.  The MCP cell
-        // is spawned separately by `ww run --mcp` and must NOT be a
-        // root layer — its bin/main.wasm would clobber the kernel's.
-        let image_layers: Vec<String> = ["kernel", "shell"]
-            .iter()
-            .map(|name| ww_dir.join(name).display().to_string())
-            .collect();
+        // Mount ~/.ww as the single root layer. WASM cells are resolved
+        // from the embedded loader or IPNS namespace. Init scripts in
+        // etc/init.d/ control which cells are activated at boot.
+        let image_layers: Vec<String> = vec![ww_dir.display().to_string()];
         Self::daemon_install(Some(identity_path), Some(2025), image_layers, true).await?;
         done("Background daemon".into());
 
@@ -2194,23 +2187,42 @@ wasip2::cli::command::export!({iface_name}Guest);
         let done = |msg: String| println!("  \u{2713} {msg}");
 
         // ── Directories ──────────────────────────────────────────────
-        let subdirs = [
-            "boot",
-            "bin",
-            "lib",
-            "etc/init.d",
-            "etc/ns",
-            "logs",
-            "kernel/bin",
-            "shell/bin",
-            "mcp/bin",
-        ];
+        let subdirs = ["bin", "etc/init.d", "etc/ns", "logs"];
         for sub in &subdirs {
             let dir = ww_dir.join(sub);
             std::fs::create_dir_all(&dir)
                 .with_context(|| format!("Failed to create {}", dir.display()))?;
         }
         done("Directories".into());
+
+        // ── Symlink binary to ~/.ww/bin/ww ──────────────────────────
+        let current_exe =
+            std::env::current_exe().context("Cannot determine path of running binary")?;
+        let current_exe = current_exe
+            .canonicalize()
+            .unwrap_or_else(|_| current_exe.clone());
+        let symlink_path = ww_dir.join("bin/ww");
+        let _ = std::fs::remove_file(&symlink_path);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&current_exe, &symlink_path).with_context(|| {
+            format!(
+                "symlink {} -> {}",
+                symlink_path.display(),
+                current_exe.display()
+            )
+        })?;
+        done(format!("Binary symlink ({})", symlink_path.display()));
+
+        // ── Default init.d ──────────────────────────────────────────
+        let shell_init = ww_dir.join("etc/init.d/50-shell.glia");
+        if !shell_init.exists() {
+            std::fs::write(
+                &shell_init,
+                include_str!("../../std/shell/etc/init.d/50-shell.glia"),
+            )
+            .context("Failed to write default shell init script")?;
+            done("Default init.d (50-shell.glia)".into());
+        }
 
         // ── Identity ─────────────────────────────────────────────────
         let identity_path = ww_dir.join("identity");
@@ -2501,18 +2513,17 @@ wasip2::cli::command::export!({iface_name}Guest);
             )?;
         let base = resolved.trim_end_matches('/');
 
-        // 2. Fetch Cargo.toml and parse version.
-        let cargo_toml_path = format!("{base}/Cargo.toml");
+        // 2. Fetch VERSION file (one line: "x.y.z").
+        let version_path = format!("{base}/VERSION");
         eprintln!("Checking latest version ...");
-        let cargo_toml_bytes = ipfs_client
-            .cat(&cargo_toml_path)
+        let version_bytes = ipfs_client
+            .cat(&version_path)
             .await
-            .context("Failed to fetch Cargo.toml from IPFS release")?;
-        let cargo_toml =
-            String::from_utf8(cargo_toml_bytes).context("Cargo.toml is not valid UTF-8")?;
-
-        let remote_version = Self::parse_version_from_cargo_toml(&cargo_toml)
-            .context("Failed to parse version from remote Cargo.toml")?;
+            .context("Failed to fetch VERSION from IPFS release")?;
+        let remote_version = String::from_utf8(version_bytes)
+            .context("VERSION is not valid UTF-8")?
+            .trim()
+            .to_string();
 
         // 3. Compare with running version.
         let current_version = env!("CARGO_PKG_VERSION");
@@ -2536,7 +2547,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         };
 
         // 5. Fetch binary.
-        let binary_path = format!("{base}/bin/{os}/{arch}/ww");
+        let binary_path = format!("{base}/bin/ww/{os}/{arch}/ww");
         eprintln!("Fetching {binary_path} ...");
         let binary = ipfs_client
             .cat(&binary_path)
@@ -2552,7 +2563,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         let checksums =
             String::from_utf8(checksums_bytes).context("CHECKSUMS.txt is not valid UTF-8")?;
 
-        Self::verify_checksum(&binary, &format!("bin/{os}/{arch}/ww"), &checksums)
+        Self::verify_checksum(&binary, &format!("bin/ww/{os}/{arch}/ww"), &checksums)
             .context("Checksum verification failed — aborting upgrade")?;
 
         // 7. Atomic replace of current binary.
@@ -2595,38 +2606,19 @@ wasip2::cli::command::export!({iface_name}Guest);
         // still holds the inode, but the directory entry is removed).
         let _ = std::fs::remove_file(&old_exe);
 
+        // Re-symlink ~/.ww/bin/ww to the new binary location.
+        if let Some(home) = dirs::home_dir() {
+            let symlink_path = home.join(".ww/bin/ww");
+            if symlink_path.exists() || symlink_path.symlink_metadata().is_ok() {
+                let _ = std::fs::remove_file(&symlink_path);
+                #[cfg(unix)]
+                let _ = std::os::unix::fs::symlink(&current_exe, &symlink_path);
+            }
+        }
+
         println!("Upgraded ww to {remote_version}. Running update...");
         println!();
         Self::perform_update().await
-    }
-
-    /// Parse `version = "x.y.z"` from the [package] section of Cargo.toml.
-    fn parse_version_from_cargo_toml(content: &str) -> Result<String> {
-        // Simple line-based parser: find `version = "..."` in the
-        // [package] section (before any other `[` section header).
-        let mut in_package = false;
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed == "[package]" {
-                in_package = true;
-                continue;
-            }
-            if trimmed.starts_with('[') {
-                if in_package {
-                    break; // Left [package] section.
-                }
-                continue;
-            }
-            if in_package && trimmed.starts_with("version") {
-                // Match: version = "x.y.z"
-                if let Some(start) = trimmed.find('"') {
-                    if let Some(end) = trimmed[start + 1..].find('"') {
-                        return Ok(trimmed[start + 1..start + 1 + end].to_string());
-                    }
-                }
-            }
-        }
-        bail!("No version field found in [package] section")
     }
 
     /// Verify a binary against CHECKSUMS.txt (blake3 or sha256).

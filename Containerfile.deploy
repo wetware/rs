@@ -1,14 +1,19 @@
 # Artifact-based deploy container. No Rust compilation.
 # Binary and WASM are pre-built by CI and COPYed in.
 # For local development builds, use the full Containerfile instead.
+#
+# Directory layout follows Unix FHS conventions:
+#   bin/   — compiled executables (WASM cells)
+#   lib/   — interpreted source (Glia stdlib)
+#   share/ — runtime data (compiled schemas)
 
 FROM gcr.io/distroless/static-debian12
 
 COPY ww /usr/local/bin/ww
-COPY usr/share/wetware/ /usr/share/wetware/
+COPY wetware/ /usr/share/wetware/
 
 USER 1000:1000
 EXPOSE 2025 2026 2080
 
 ENTRYPOINT ["/usr/local/bin/ww"]
-CMD ["run", "/usr/share/wetware/kernel", "/usr/share/wetware/shell"]
+CMD ["run", "/usr/share/wetware"]
