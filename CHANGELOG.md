@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Daemon mounts `~/.ww/` as a single root layer instead of separate `kernel/` and `shell/` layers.
 
 ### Fixed
+- **Install script `TMPDIR` collision:** `scripts/install.sh` shadowed the macOS system `TMPDIR` env var. If the script exited early (e.g. IPNS timeout), the cleanup trap ran `rm -rf` against the user's system temp directory (`/var/folders/.../T/`). Renamed to `WW_TMPDIR`.
 - `ww perform install` now symlinks the binary to `~/.ww/bin/ww`. Previously the directory was created empty, leaving `ww` off the user's PATH.
 - `ww perform install` now writes a default `50-shell.glia` init script to `~/.ww/etc/init.d/`. Previously no init scripts were installed, so the daemon had nothing to boot.
 

@@ -105,14 +105,18 @@ cleanup() {
     kill "$SPINNER_PID" 2>/dev/null || true
     wait "$SPINNER_PID" 2>/dev/null || true
   fi
-  rm -rf "${TMPDIR:-}"
+  rm -rf "${WW_TMPDIR:-}"
 }
 trap cleanup EXIT
 
 # --- Parse arguments ---
 while [ $# -gt 0 ]; do
   case "$1" in
-    --version) VERSION_CID="$2"; shift 2 ;;
+    --version)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
+        echo "Error: --version requires a CID argument"; exit 1
+      fi
+      VERSION_CID="$2"; shift 2 ;;
     --help)
       echo "Usage: install.sh [--version CID]"
       echo "  --version  Install a specific release by immutable CID"
@@ -165,13 +169,14 @@ else
   spin "Resolving latest release..."
 
   RESOLVED_CID=""
-  ipfs name resolve "$IPNS_NAME" > /tmp/ww-ipns-resolve.$$ 2>/dev/null &
+  WW_RESOLVE_TMP=$(mktemp /tmp/ww-ipns-resolve.XXXXXXXX)
+  ipfs name resolve "$IPNS_NAME" > "$WW_RESOLVE_TMP" 2>/dev/null &
   RESOLVE_PID=$!
 
   i=0
   while [ $i -lt $IPNS_TIMEOUT ]; do
     if ! kill -0 "$RESOLVE_PID" 2>/dev/null; then
-      RESOLVED_CID=$(cat /tmp/ww-ipns-resolve.$$ 2>/dev/null || true)
+      RESOLVED_CID=$(cat "$WW_RESOLVE_TMP" 2>/dev/null || true)
       break
     fi
     i=$((i + 1))
@@ -179,7 +184,8 @@ else
   done
 
   kill "$RESOLVE_PID" 2>/dev/null || true
-  rm -f /tmp/ww-ipns-resolve.$$
+  wait "$RESOLVE_PID" 2>/dev/null || true
+  rm -f "$WW_RESOLVE_TMP"
 
   if [ -z "$RESOLVED_CID" ]; then
     die "IPNS resolution failed" \
@@ -189,17 +195,25 @@ else
       "Release CIDs: https://github.com/wetware/ww/releases"
   fi
 
+  # Validate resolved CID looks like an IPFS path
+  case "$RESOLVED_CID" in
+    /ipfs/bafy*|/ipfs/Qm*) ;;
+    *) die "IPNS resolved to unexpected value" \
+         "Got: ${RESOLVED_CID}" \
+         "Expected /ipfs/bafy... or /ipfs/Qm..." ;;
+  esac
+
   IPFS_BASE="$RESOLVED_CID"
   spin_ok "Resolved latest release"
 fi
 
-TMPDIR=$(mktemp -d)
+WW_TMPDIR=$(mktemp -d)
 
 # --- Fetch binary ---
 BIN_PATH="/bin/ww/${OS_NAME}/${ARCH_NAME}/ww"
 spin "Fetching binary (${OS_NAME}/${ARCH_NAME})..."
 
-if ! ipfs cat "${IPFS_BASE}${BIN_PATH}" > "${TMPDIR}/ww" 2>/dev/null; then
+if ! ipfs cat "${IPFS_BASE}${BIN_PATH}" > "${WW_TMPDIR}/ww" 2>/dev/null; then
   die "Could not fetch binary" \
     "No binary for ${OS_NAME}/${ARCH_NAME} in this release." \
     "Download manually: https://github.com/wetware/ww/releases"
@@ -209,26 +223,26 @@ spin_ok "Fetched binary (${OS_NAME}/${ARCH_NAME})"
 
 # --- Verify checksum ---
 CHECKSUM_ALGO=""
-ipfs cat "${IPFS_BASE}/CHECKSUMS.txt" > "${TMPDIR}/CHECKSUMS.txt" 2>/dev/null || true
+ipfs cat "${IPFS_BASE}/CHECKSUMS.txt" > "${WW_TMPDIR}/CHECKSUMS.txt" 2>/dev/null || true
 
-if [ -f "${TMPDIR}/CHECKSUMS.txt" ] && [ -s "${TMPDIR}/CHECKSUMS.txt" ]; then
+if [ -f "${WW_TMPDIR}/CHECKSUMS.txt" ] && [ -s "${WW_TMPDIR}/CHECKSUMS.txt" ]; then
   EXPECTED=""
   ACTUAL=""
 
   # Prefer BLAKE3 if b3sum is available and CHECKSUMS.txt has a blake3 section
-  if command -v b3sum >/dev/null 2>&1 && grep -q "^# blake3" "${TMPDIR}/CHECKSUMS.txt"; then
-    EXPECTED=$(sed -n '/^# blake3/,/^$/p' "${TMPDIR}/CHECKSUMS.txt" | grep "${BIN_PATH}" | head -1 | awk '{print $1}')
+  if command -v b3sum >/dev/null 2>&1 && grep -q "^# blake3" "${WW_TMPDIR}/CHECKSUMS.txt"; then
+    EXPECTED=$(sed -n '/^# blake3/,/^$/p' "${WW_TMPDIR}/CHECKSUMS.txt" | grep "${BIN_PATH}" | head -1 | awk '{print $1}')
     if [ -n "$EXPECTED" ]; then
-      ACTUAL=$(b3sum --no-names "${TMPDIR}/ww")
+      ACTUAL=$(b3sum --no-names "${WW_TMPDIR}/ww")
       CHECKSUM_ALGO="blake3"
     fi
   fi
 
   # Fall back to SHA-256 (always available on macOS and Linux)
-  if [ -z "$CHECKSUM_ALGO" ] && grep -q "^# sha256" "${TMPDIR}/CHECKSUMS.txt"; then
-    EXPECTED=$(sed -n '/^# sha256/,/^$/p' "${TMPDIR}/CHECKSUMS.txt" | grep "${BIN_PATH}" | head -1 | awk '{print $1}')
+  if [ -z "$CHECKSUM_ALGO" ] && grep -q "^# sha256" "${WW_TMPDIR}/CHECKSUMS.txt"; then
+    EXPECTED=$(sed -n '/^# sha256/,/^$/p' "${WW_TMPDIR}/CHECKSUMS.txt" | grep "${BIN_PATH}" | head -1 | awk '{print $1}')
     if [ -n "$EXPECTED" ]; then
-      ACTUAL=$(sha256sum "${TMPDIR}/ww" 2>/dev/null || shasum -a 256 "${TMPDIR}/ww")
+      ACTUAL=$(sha256sum "${WW_TMPDIR}/ww" 2>/dev/null || shasum -a 256 "${WW_TMPDIR}/ww")
       ACTUAL=$(echo "$ACTUAL" | awk '{print $1}')
       CHECKSUM_ALGO="sha256"
     fi
@@ -255,7 +269,7 @@ fi
 
 # --- Install binary ---
 mkdir -p "${WW_HOME}/bin"
-mv "${TMPDIR}/ww" "${WW_HOME}/bin/ww"
+mv "${WW_TMPDIR}/ww" "${WW_HOME}/bin/ww"
 chmod +x "${WW_HOME}/bin/ww"
 
 # --- Note: standard library is embedded in the binary and resolved ---
