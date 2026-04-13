@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Distribution architecture:** IPFS release tree restructured to follow Unix FHS conventions. No more full repo dump. Release tree contains only artifacts: `bin/` (WASM cells + host binary), `lib/ww/` (Glia stdlib), `lib/init.d/` (reference init scripts), `include/schema/` (.capnp source), `share/schema/` (.capnpc compiled type descriptors).
+- **CI pipeline split:** Two independent lanes (std and host) trigger based on what changed. Deploy uses pre-built musl binary + WASM artifacts (~30s) instead of full Docker multi-stage build (~10 min). Cap'n Proto build extracted to composite action.
+- **Compiled schema extension:** `.schema` files renamed to `.capnpc` (capnp-compiled), following the `.py`/`.pyc` pattern. Avoids naming collision with human-readable `.capnp` schema source files.
+- `perform_upgrade` reads a `VERSION` file from the release tree instead of parsing `Cargo.toml`. Host binaries at `bin/ww/{os}/{arch}/ww` (was `bin/{os}/{arch}/ww`).
+- `perform_update` publishes flat `bin/*.wasm` layout to IPNS (was `kernel/bin/main.wasm`, `shell/bin/shell.wasm`). No longer writes WASM to disk; embedded blobs served by EmbeddedLoader at runtime.
+- Daemon mounts `~/.ww/` as a single root layer instead of separate `kernel/` and `shell/` layers.
+
+### Fixed
+- `ww perform install` now symlinks the binary to `~/.ww/bin/ww`. Previously the directory was created empty, leaving `ww` off the user's PATH.
+- `ww perform install` now writes a default `50-shell.glia` init script to `~/.ww/etc/init.d/`. Previously no init scripts were installed, so the daemon had nothing to boot.
+
+### Breaking
+- Release tree layout changed. Users on old binaries must reinstall: `ww perform uninstall -y` then re-run the install script.
+
 ## [0.0.1.0] - 2026-04-12
 
 ### Added
