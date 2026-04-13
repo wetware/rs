@@ -5,12 +5,48 @@ on:
     branches: [ "master", "staging" ]
   pull_request:
     branches: [ "master", "staging" ]
+  workflow_dispatch: {}
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # === Path-based change detection (master push only) ===
+
+  changes:
+    name: Detect changes
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/master')
+      || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      std: ${{ steps.filter.outputs.std }}
+      host: ${{ steps.filter.outputs.host }}
+    steps:
+    - uses: actions/checkout@v5
+    - uses: dorny/paths-filter@v3
+      id: filter
+      with:
+        filters: |
+          std:
+            - 'std/**'
+            - 'crates/guest/**'
+            - 'examples/**'
+          host:
+            - 'src/**'
+            - 'crates/**'
+            - 'capnp/**'
+            - 'Cargo.toml'
+            - 'Cargo.lock'
+            - 'build.rs'
+            - 'Containerfile*'
+            - 'Makefile'
+
+  # === Always-run checks (PRs and pushes) ===
+
   fmt:
     name: Check formatting
     runs-on: ubuntu-latest
@@ -40,25 +76,7 @@ jobs:
       with:
         components: clippy
 
-    - name: Cache Cap'n Proto
-      id: capnp-cache
-      uses: actions/cache@v5
-      with:
-        path: /tmp/capnp-install
-        key: capnp-1.1.0-linux-x86_64
-
-    - name: Build Cap'n Proto
-      if: steps.capnp-cache.outputs.cache-hit != 'true'
-      run: |
-        curl -fsSL "https://capnproto.org/capnproto-c++-1.1.0.tar.gz" | tar xz
-        cd capnproto-c++-1.1.0
-        ./configure --prefix=/tmp/capnp-install
-        make -j$(nproc)
-        make install
-        cd .. && rm -rf capnproto-c++-1.1.0
-
-    - name: Install Cap'n Proto
-      run: sudo cp -a /tmp/capnp-install/. /usr/local/
+    - uses: ./.github/actions/setup-capnp
 
     - uses: Swatinem/rust-cache@v2
 
@@ -101,32 +119,11 @@ jobs:
       with:
         targets: x86_64-unknown-linux-gnu, wasm32-wasip2
 
-    - name: Cache Cap'n Proto
-      id: capnp-cache
-      uses: actions/cache@v5
-      with:
-        path: /tmp/capnp-install
-        key: capnp-1.1.0-linux-x86_64
-
-    - name: Build Cap'n Proto
-      if: steps.capnp-cache.outputs.cache-hit != 'true'
-      run: |
-        curl -fsSL "https://capnproto.org/capnproto-c++-1.1.0.tar.gz" | tar xz
-        cd capnproto-c++-1.1.0
-        ./configure --prefix=/tmp/capnp-install
-        make -j$(nproc)
-        make install
-        cd .. && rm -rf capnproto-c++-1.1.0
-
-    - name: Install Cap'n Proto
-      run: sudo cp -a /tmp/capnp-install/. /usr/local/
+    - uses: ./.github/actions/setup-capnp
 
     - uses: Swatinem/rust-cache@v2
       with:
         key: build-test
-
-    - name: Build WASI example binaries
-      run: make -C examples/echo
 
     - name: Build (compile all crates + test binaries)
       run: cargo build --tests
@@ -145,15 +142,7 @@ jobs:
       with:
         targets: x86_64-unknown-linux-gnu, wasm32-wasip2
 
-    - name: Cache Cap'n Proto
-      id: capnp-cache
-      uses: actions/cache@v5
-      with:
-        path: /tmp/capnp-install
-        key: capnp-1.1.0-linux-x86_64
-
-    - name: Install Cap'n Proto
-      run: sudo cp -a /tmp/capnp-install/. /usr/local/
+    - uses: ./.github/actions/setup-capnp
 
     - name: Install Foundry
       uses: foundry-rs/foundry-toolchain@v1
@@ -187,7 +176,7 @@ jobs:
     - name: Run tests (hot cache from build job)
       run: cargo test
 
-  # === Master-only: fan out after test passes ===
+  # === Master-only: fan out after checks pass ===
 
   build-wasm:
     name: Build WASM components
@@ -205,25 +194,9 @@ jobs:
       with:
         targets: wasm32-wasip2
 
-    - name: Cache Cap'n Proto
-      id: capnp-cache
-      uses: actions/cache@v5
+    - uses: ./.github/actions/setup-capnp
       with:
-        path: /tmp/capnp-install
-        key: capnp-1.1.0-linux-wasm
-
-    - name: Build Cap'n Proto
-      if: steps.capnp-cache.outputs.cache-hit != 'true'
-      run: |
-        curl -fsSL "https://capnproto.org/capnproto-c++-1.1.0.tar.gz" | tar xz
-        cd capnproto-c++-1.1.0
-        ./configure --prefix=/tmp/capnp-install
-        make -j$(nproc)
-        make install
-        cd .. && rm -rf capnproto-c++-1.1.0
-
-    - name: Install Cap'n Proto
-      run: sudo cp -a /tmp/capnp-install/. /usr/local/
+        cache-key-suffix: wasm
 
     - uses: Swatinem/rust-cache@v2
       with:
@@ -241,14 +214,65 @@ jobs:
         path: |
           std/kernel/bin/main.wasm
           std/shell/bin/shell.wasm
+          std/shell/bin/shell.schema
+          std/shell/etc/init.d/50-shell.glia
           std/mcp/bin/main.wasm
           examples/*/bin/
         retention-days: 1
 
+  build-deploy-binary:
+    name: Build deploy binary (musl)
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/master'
+      && (needs.changes.outputs.std == 'true' || needs.changes.outputs.host == 'true'
+          || github.event_name == 'workflow_dispatch')
+    needs: [changes, fmt, clippy, solidity, build, build-wasm]
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        submodules: recursive
+
+    - uses: actions/download-artifact@v5
+      with:
+        name: wasm-artifacts
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-unknown-linux-musl
+
+    - uses: ./.github/actions/setup-capnp
+
+    - name: Install musl toolchain
+      run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: deploy-musl
+
+    - name: Build static binary
+      run: cargo build --release --target x86_64-unknown-linux-musl
+
+    - name: Verify static linking
+      run: |
+        file target/x86_64-unknown-linux-musl/release/ww
+        file target/x86_64-unknown-linux-musl/release/ww | grep -q "statically linked"
+
+    - uses: actions/upload-artifact@v5
+      with:
+        name: ww-deploy-musl
+        path: target/x86_64-unknown-linux-musl/release/ww
+        retention-days: 1
+
   build-binaries:
     name: Build ${{ matrix.artifact }}
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [build-wasm]
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/master'
+      && (needs.changes.outputs.host == 'true'
+          || github.event_name == 'workflow_dispatch')
+    needs: [changes, build-wasm]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -292,27 +316,10 @@ jobs:
       with:
         targets: ${{ matrix.target }}
 
-    - name: Cache Cap'n Proto
+    - uses: ./.github/actions/setup-capnp
       if: ${{ !matrix.use_cross }}
-      id: capnp-cache
-      uses: actions/cache@v5
       with:
-        path: /tmp/capnp-install
-        key: capnp-1.1.0-${{ runner.os }}-${{ matrix.target }}
-
-    - name: Build Cap'n Proto
-      if: ${{ !matrix.use_cross && steps.capnp-cache.outputs.cache-hit != 'true' }}
-      run: |
-        curl -fsSL "https://capnproto.org/capnproto-c++-1.1.0.tar.gz" | tar xz
-        cd capnproto-c++-1.1.0
-        ./configure --prefix=/tmp/capnp-install
-        make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
-        make install
-        cd .. && rm -rf capnproto-c++-1.1.0
-
-    - name: Install Cap'n Proto
-      if: ${{ !matrix.use_cross }}
-      run: sudo cp -R /tmp/capnp-install/. /usr/local/
+        cache-key-suffix: ${{ matrix.target }}
 
     - name: Install cross
       if: ${{ matrix.use_cross }}
@@ -343,8 +350,11 @@ jobs:
 
   deploy:
     name: Deploy to master.wetware.run
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [fmt, clippy, solidity, build]
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/master'
+      && (needs.changes.outputs.std == 'true' || needs.changes.outputs.host == 'true'
+          || github.event_name == 'workflow_dispatch')
+    needs: [changes, fmt, clippy, solidity, build, build-deploy-binary]
     runs-on: ubuntu-latest
     environment: master
     permissions:
@@ -353,8 +363,29 @@ jobs:
 
     steps:
     - uses: actions/checkout@v5
+
+    - uses: actions/download-artifact@v5
       with:
-        submodules: recursive
+        name: ww-deploy-musl
+        path: deploy-context
+
+    - uses: actions/download-artifact@v5
+      with:
+        name: wasm-artifacts
+        path: deploy-context/wasm
+
+    - name: Assemble deploy context
+      run: |
+        cd deploy-context
+        chmod +x ww
+        mkdir -p usr/share/wetware/kernel/bin
+        mkdir -p usr/share/wetware/shell/bin
+        mkdir -p usr/share/wetware/shell/etc/init.d
+        cp wasm/std/kernel/bin/main.wasm usr/share/wetware/kernel/bin/
+        cp wasm/std/shell/bin/shell.wasm usr/share/wetware/shell/bin/
+        cp wasm/std/shell/bin/shell.schema usr/share/wetware/shell/bin/
+        cp wasm/std/shell/etc/init.d/50-shell.glia usr/share/wetware/shell/etc/init.d/
+        cp ../Containerfile.deploy Containerfile
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -369,15 +400,11 @@ jobs:
     - name: Build and push
       uses: docker/build-push-action@v6
       with:
-        context: .
-        file: Containerfile
+        context: deploy-context
         push: true
-        build-args: GIT_COMMIT=${{ github.sha }}
         tags: |
           ghcr.io/wetware/ww:master
           ghcr.io/wetware/ww:master-${{ github.sha }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
 
     - name: Deploy to VPS
       env:
@@ -407,10 +434,70 @@ jobs:
         echo "Deploy failed after 2 attempts"
         exit 1
 
+  publish-std:
+    name: Publish std to IPNS
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/master'
+      && (needs.changes.outputs.std == 'true'
+          || github.event_name == 'workflow_dispatch')
+    needs: [changes, build-wasm, deploy]
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/download-artifact@v5
+      with:
+        name: wasm-artifacts
+        path: artifacts/wasm-artifacts
+
+    - name: Publish std namespace to IPNS via VPS
+      env:
+        SSH_CMD: ssh -i ~/.ssh/deploy_key -o ServerAliveInterval=30 -o ServerAliveCountMax=10
+      run: |
+        # Set up SSH
+        mkdir -p ~/.ssh
+        echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+        chmod 600 ~/.ssh/deploy_key
+        echo "${{ secrets.DEPLOY_SSH_HOST_KEY }}" > ~/.ssh/known_hosts
+
+        # Assemble std namespace tree
+        STAGE=/tmp/std-tree
+        mkdir -p "$STAGE/kernel/bin" "$STAGE/shell/bin" "$STAGE/mcp/bin"
+        cp artifacts/wasm-artifacts/std/kernel/bin/main.wasm "$STAGE/kernel/bin/main.wasm"
+        cp artifacts/wasm-artifacts/std/shell/bin/shell.wasm "$STAGE/shell/bin/shell.wasm"
+        cp artifacts/wasm-artifacts/std/mcp/bin/main.wasm    "$STAGE/mcp/bin/main.wasm"
+
+        # Get IPFS pod name
+        POD=$($SSH_CMD ${{ secrets.VPS_SSH }} "kubectl get pod -l app=ipfs-daemon -o jsonpath='{.items[0].metadata.name}'")
+        echo "IPFS pod: $POD"
+
+        # Rsync std tree to VPS, publish to IPFS + IPNS
+        rsync -a -e "$SSH_CMD" "$STAGE/" ${{ secrets.VPS_SSH }}:/tmp/ww-std-tree/
+
+        $SSH_CMD ${{ secrets.VPS_SSH }} "
+          kubectl cp /tmp/ww-std-tree $POD:/tmp/std-tree
+          CID=\$(kubectl exec $POD -- ipfs add -rQ --cid-version=1 /tmp/std-tree/)
+          echo \"STD_CID=\$CID\"
+          kubectl exec $POD -- ipfs pin add \$CID
+          kubectl exec $POD -- ipfs name publish --key=ww-std /ipfs/\$CID
+          kubectl exec $POD -- rm -rf /tmp/std-tree
+          rm -rf /tmp/ww-std-tree
+        " | tee /tmp/std-publish-output.txt
+
+        CID=$(grep '^STD_CID=' /tmp/std-publish-output.txt | cut -d= -f2)
+        echo "Std namespace CID: $CID"
+
+    - name: Record std CID
+      run: |
+        echo "## Std Namespace Publish" >> "$GITHUB_STEP_SUMMARY"
+        echo "- CID: \`$(grep '^STD_CID=' /tmp/std-publish-output.txt | cut -d= -f2)\`" >> "$GITHUB_STEP_SUMMARY"
+
   publish-ipfs:
-    name: Publish to IPFS
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [test, build-binaries, build-wasm, deploy]
+    name: Publish release to IPFS
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/master'
+      && (needs.changes.outputs.host == 'true'
+          || github.event_name == 'workflow_dispatch')
+    needs: [changes, test, build-binaries, build-wasm, deploy]
     runs-on: ubuntu-latest
 
     steps:
