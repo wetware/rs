@@ -376,6 +376,8 @@ jobs:
         tags: |
           ghcr.io/wetware/ww:master
           ghcr.io/wetware/ww:master-${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
 
     - name: Deploy to VPS
       env:
