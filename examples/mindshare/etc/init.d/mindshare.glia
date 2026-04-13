@@ -16,6 +16,6 @@
 
 (def mindshare
   (cell (load "bin/mindshare.wasm")
-        (load "bin/mindshare.schema")))
+        (load "bin/mindshare.capnpc")))
 
 (perform host :listen mindshare)

@@ -33,7 +33,7 @@ make discovery
 ```
 
 This compiles the WASM guest and copies the compiled schema bytes
-(`discovery.schema`) next to the binary. The schema is passed
+(`discovery.capnpc`) next to the binary. The schema is passed
 explicitly via RPC at runtime -- no custom sections.
 
 ## Running
@@ -75,7 +75,7 @@ Expected output on Agent B:
 
 ```
 BUILD TIME:
-  greeter.capnp --> capnpc --> greeter_schema.bin --> discovery.wasm + discovery.schema
+  greeter.capnp --> capnpc --> greeter_schema.bin --> discovery.wasm + discovery.capnpc
 
 AGENT A (service mode):                    AGENT B (service mode):
   membrane.graft()                           membrane.graft()
@@ -123,13 +123,13 @@ The same binary serves both roles:
 ; VatListener spawns a cell per connection; the cell exports
 ; a Greeter capability via system::serve().
 (def discovery-wasm (load "bin/discovery.wasm"))
-(def discovery-schema (load "bin/discovery.schema"))
+(def discovery-schema (load "bin/discovery.capnpc"))
 
 (perform host :listen runtime discovery-wasm discovery-schema)
 ```
 
 The script registers the discovery binary with the host's
-`VatListener`. The schema is read from `bin/discovery.schema`
+`VatListener`. The schema is read from `bin/discovery.capnpc`
 (adjacent to the WASM binary). Each incoming RPC connection spawns
 a fresh cell that exports a `Greeter` capability.
 
@@ -161,7 +161,7 @@ examples/discovery/
 ├── greeter.capnp          # Greeter schema source
 ├── bin/                   # build output (gitignored)
 │   ├── discovery.wasm
-│   └── discovery.schema   # compiled schema bytes
+│   └── discovery.capnpc   # compiled schema bytes
 ├── etc/
 │   └── init.d/
 │       └── discovery.glia # cell registration

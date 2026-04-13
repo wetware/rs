@@ -150,7 +150,7 @@ From the consumer's Glia shell, compare quotes across providers:
 ;; One binary, two transports.
 (def auction
   (cell (load "bin/auction.wasm")
-        (load "bin/auction.schema")))
+        (load "bin/auction.capnpc")))
 
 (perform host :listen auction)              ;; vat RPC (schema-keyed, libp2p)
 (perform host :listen auction "/auction")   ;; HTTP/WAGI at /auction
@@ -187,7 +187,7 @@ examples/auction/
 ├── auction.capnp         # ComputeProvider schema source
 ├── bin/                  # build output (gitignored)
 │   ├── auction.wasm
-│   └── auction.schema    # compiled schema bytes
+│   └── auction.capnpc    # compiled schema bytes
 ├── etc/
 │   └── init.d/
 │       └── auction.glia  # cell registration

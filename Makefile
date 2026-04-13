@@ -32,7 +32,7 @@ shell:
 	cp std/shell/target/$(WASM_TARGET)/release/shell.wasm std/shell/bin/shell.wasm
 	@SCHEMA_OUT=$$(find std/shell/target/$(WASM_TARGET)/release/build -path '*/shell-*/out/shell_schema.bin' | head -1) && \
 		if [ -n "$$SCHEMA_OUT" ]; then \
-			cp "$$SCHEMA_OUT" std/shell/bin/shell.schema; \
+			cp "$$SCHEMA_OUT" std/shell/bin/shell.capnpc; \
 		fi
 
 mcp:
@@ -182,7 +182,7 @@ run-kernel: kernel
 clean:
 	cargo clean
 	rm -f std/kernel/bin/main.wasm
-	rm -f std/shell/bin/shell.wasm std/shell/bin/shell.schema
+	rm -f std/shell/bin/shell.wasm std/shell/bin/shell.capnpc
 	rm -f std/mcp/bin/mcp.wasm std/mcp/bin/main.wasm
 	$(MAKE) -C examples/chess clean
 	$(MAKE) -C examples/echo clean

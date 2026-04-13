@@ -91,8 +91,8 @@ COPY --from=builder /usr/src/app/std/kernel/bin/main.wasm \
 # Shell layer (WASM + schema + init.d)
 COPY --from=builder /usr/src/app/std/shell/bin/shell.wasm \
      /usr/share/wetware/shell/bin/shell.wasm
-COPY --from=builder /usr/src/app/std/shell/bin/shell.schema \
-     /usr/share/wetware/shell/bin/shell.schema
+COPY --from=builder /usr/src/app/std/shell/bin/shell.capnpc \
+     /usr/share/wetware/shell/bin/shell.capnpc
 COPY --from=builder /usr/src/app/std/shell/etc/init.d/50-shell.glia \
      /usr/share/wetware/shell/etc/init.d/50-shell.glia
 

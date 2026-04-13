@@ -33,7 +33,7 @@ make oracle
 ```
 
 This compiles the WASM guest and copies the compiled schema bytes
-(`oracle.schema`) next to the binary. The schema is passed
+(`oracle.capnpc`) next to the binary. The schema is passed
 explicitly via RPC at runtime -- no custom sections.
 
 ## Running
@@ -193,7 +193,7 @@ RPC. Confidence decays toward 0.0 if data goes stale.
 (def oracle
   (with [(http (perform host :http-client))]
     (cell (load "bin/oracle.wasm")
-          (load "bin/oracle.schema"))))
+          (load "bin/oracle.capnpc"))))
 
 ;; Mount on both transports.
 (perform host :listen oracle)              ;; vat RPC
@@ -232,7 +232,7 @@ examples/oracle/
 ├── oracle.capnp          # PriceOracle schema source
 ├── bin/                  # build output (gitignored)
 │   ├── oracle.wasm
-│   └── oracle.schema     # compiled schema bytes
+│   └── oracle.capnpc     # compiled schema bytes
 ├── etc/
 │   └── init.d/
 │       └── oracle.glia   # cell registration (dual transport)

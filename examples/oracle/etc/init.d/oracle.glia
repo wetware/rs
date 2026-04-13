@@ -14,7 +14,7 @@
 
 (def oracle
   (cell (load "bin/oracle.wasm")
-        (load "bin/oracle.schema")))
+        (load "bin/oracle.capnpc")))
 
 (perform host :listen oracle)              ;; vat RPC (schema-keyed, libp2p)
 (perform host :listen oracle "/oracle")    ;; HTTP/WAGI at /oracle

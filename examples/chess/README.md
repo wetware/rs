@@ -29,7 +29,7 @@ make chess
 ```
 
 This compiles the WASM guest and copies the compiled schema bytes
-(`chess-demo.schema`) next to the binary. The schema is passed
+(`chess-demo.capnpc`) next to the binary. The schema is passed
 explicitly via RPC at runtime -- no custom sections.
 
 ## Running
@@ -118,7 +118,7 @@ The protocol address is derived at build time from the ChessEngine
 Cap'n Proto schema: `CIDv1(raw, BLAKE3(canonical(schema.Node)))`.
 This CID serves as both the DHT key and the subprotocol address
 (`/ww/0.1.0/vat/{cid}`). Schema bytes are compiled at build time
-and passed explicitly via RPC -- the host reads `bin/chess-demo.schema`
+and passed explicitly via RPC -- the host reads `bin/chess-demo.capnpc`
 from the image to derive the CID.
 
 ### Schema
@@ -148,13 +148,13 @@ interface ChessEngine {
 ; VatListener spawns a cell process per connection; the cell exports
 ; a ChessEngine capability via system::serve().
 (def chess-wasm (load "bin/chess-demo.wasm"))
-(def chess-schema (load "bin/chess-demo.schema"))
+(def chess-schema (load "bin/chess-demo.capnpc"))
 
 (perform host :listen runtime chess-wasm chess-schema)
 ```
 
 The script registers the chess binary with the host's `VatListener`.
-The schema is read from `bin/chess-demo.schema` (adjacent to the
+The schema is read from `bin/chess-demo.capnpc` (adjacent to the
 WASM binary). Each incoming RPC connection spawns a fresh cell that
 exports a `ChessEngine` capability.
 
@@ -182,7 +182,7 @@ examples/chess/
 ├── chess.capnp           # ChessEngine schema source
 ├── bin/                  # build output (gitignored)
 │   ├── chess-demo.wasm
-│   └── chess-demo.schema # compiled schema bytes
+│   └── chess-demo.capnpc # compiled schema bytes
 ├── doc/
 │   └── replay.md         # replay log format
 ├── etc/

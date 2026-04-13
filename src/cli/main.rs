@@ -232,7 +232,7 @@ enum Commands {
     /// Evaluates Glia expressions on the remote node. State persists
     /// across evals (def sticks). Ctrl-D or (exit) to disconnect.
     ///
-    /// When no address is given, discovers a local node via Kubo's LAN DHT.
+    /// When no address is given, discovers a local node via mDNS.
     ///
     /// Example:
     ///   ww shell
@@ -240,7 +240,7 @@ enum Commands {
     ///   ww shell /dnsaddr/master.wetware.run
     Shell {
         /// Multiaddr of the target node (e.g. /ip4/.../p2p/... or /dnsaddr/...).
-        /// If omitted, discovers a local node via Kubo's LAN DHT.
+        /// If omitted, discovers a local node via mDNS.
         addr: Option<Multiaddr>,
 
         /// Path to Ed25519 identity file for auth.
@@ -543,6 +543,7 @@ impl Commands {
             } => Self::push(path, ipfs_url, stem, rpc_url, private_key).await,
             Commands::Keygen { output } => Self::keygen(output).await,
             Commands::Shell { addr, identity } => {
+                ww::config::init_tracing();
                 let local = tokio::task::LocalSet::new();
                 local.run_until(shell::run_shell(addr, identity)).await
             }
@@ -862,7 +863,7 @@ wasip2::cli::command::export!({iface_name}Guest);
 ;   (executor run (load "bin/{name}.wasm") "serve")
 
 (def {snake_name}-wasm (load "bin/{name}.wasm"))
-(def {snake_name}-schema (load "bin/{name}.schema"))
+(def {snake_name}-schema (load "bin/{name}.capnpc"))
 
 (perform host :listen executor {snake_name}-wasm {snake_name}-schema)
 "#,
@@ -971,13 +972,13 @@ wasip2::cli::command::export!({iface_name}Guest);
         // Copy schema bytes next to the WASM if the build produced them.
         let build_dir = path.join("target/wasm32-wasip2/release/build");
         if let Ok(schema_bin) = Self::find_schema_bin(&build_dir, &path) {
-            let dst_schema = bin_dir.join(format!("{crate_name}.schema"));
+            let dst_schema = bin_dir.join(format!("{crate_name}.capnpc"));
             std::fs::copy(&schema_bin, &dst_schema).context(format!(
                 "Failed to copy {} to {}",
                 schema_bin.display(),
                 dst_schema.display(),
             ))?;
-            println!("  bin/{crate_name}.schema");
+            println!("  bin/{crate_name}.capnpc");
         }
 
         println!("Build complete: {}", path.display());

@@ -8,6 +8,6 @@
 ;   (perform runtime :run (load "bin/discovery.wasm") "serve")
 
 (def discovery-wasm (load "bin/discovery.wasm"))
-(def discovery-schema (load "bin/discovery.schema"))
+(def discovery-schema (load "bin/discovery.capnpc"))
 
 (perform host :listen runtime discovery-wasm discovery-schema)

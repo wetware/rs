@@ -14,7 +14,7 @@
 
 (def auction
   (cell (load "bin/auction.wasm")
-        (load "bin/auction.schema")))
+        (load "bin/auction.capnpc")))
 
 (perform host :listen auction)              ;; vat RPC (schema-keyed, libp2p)
 (perform host :listen auction "/auction")   ;; HTTP/WAGI at /auction

@@ -214,7 +214,7 @@ jobs:
         path: |
           std/kernel/bin/main.wasm
           std/shell/bin/shell.wasm
-          std/shell/bin/shell.schema
+          std/shell/bin/shell.capnpc
           std/shell/etc/init.d/50-shell.glia
           std/mcp/bin/main.wasm
           examples/*/bin/
@@ -355,7 +355,7 @@ jobs:
         mkdir -p usr/share/wetware/shell/etc/init.d
         cp wasm/std/kernel/bin/main.wasm usr/share/wetware/kernel/bin/
         cp wasm/std/shell/bin/shell.wasm usr/share/wetware/shell/bin/
-        cp wasm/std/shell/bin/shell.schema usr/share/wetware/shell/bin/
+        cp wasm/std/shell/bin/shell.capnpc usr/share/wetware/shell/bin/
         cp wasm/std/shell/etc/init.d/50-shell.glia usr/share/wetware/shell/etc/init.d/
         cp ../Containerfile.deploy Containerfile
 

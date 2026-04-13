@@ -137,7 +137,7 @@ capabilities automatically.
 (def mindshare
   (with [(http (perform host :http-client))]
     (cell (load "bin/mindshare.wasm")
-          (load "bin/mindshare.schema"))))
+          (load "bin/mindshare.capnpc"))))
 
 (perform host :listen mindshare)
 ```
@@ -184,7 +184,7 @@ examples/mindshare/
 ├── mindshare.capnp        # Mindshare schema source
 ├── bin/                   # build output (gitignored)
 │   ├── mindshare.wasm
-│   └── mindshare.schema   # compiled schema bytes
+│   └── mindshare.capnpc   # compiled schema bytes
 ├── etc/
 │   └── init.d/
 │       └── mindshare.glia # cell registration
