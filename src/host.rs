@@ -395,6 +395,10 @@ impl Libp2pHost {
         // Peers already seen as relay candidates (dedup).
         let mut seen_relay_peers: HashSet<PeerId> = HashSet::new();
 
+        // Local discovery: lockfile tracks our listen addresses.
+        let peer_id_str = self.local_peer_id.to_string();
+        let mut lockfile_addrs: Vec<String> = Vec::new();
+
         // Self-announcement on both DHTs.
         let beh = self.swarm.behaviour_mut();
         beh.kad.get_closest_peers(self.local_peer_id);
@@ -425,6 +429,15 @@ impl Libp2pHost {
                                 tracing::debug!(%address, "Skipping unspecified listen address");
                             }
                             network_state.add_listen_addr(address.to_vec()).await;
+
+                            // Update lockfile with new listen address.
+                            lockfile_addrs.push(address.to_string());
+                            if let Err(e) = crate::discovery::write_lockfile(
+                                &peer_id_str,
+                                &lockfile_addrs,
+                            ) {
+                                tracing::warn!("Failed to write discovery lockfile: {e}");
+                            }
                         }
                         SwarmEvent::ExpiredListenAddr { address, .. } => {
                             self.swarm.remove_external_address(&address);
