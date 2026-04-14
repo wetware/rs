@@ -350,9 +350,6 @@ jobs:
     - name: Assemble deploy context
       run: |
         cd deploy-context
-        # Musl binary is uploaded under bin_path; move to context root
-        mv bin/linux/musl-x86_64/ww ww
-        rm -rf bin
         chmod +x ww
 
         # FHS layout: bin/ (WASM cells), lib/ (Glia), share/ (schemas), etc/ (config)
