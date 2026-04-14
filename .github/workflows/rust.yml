@@ -383,6 +383,7 @@ jobs:
       uses: docker/build-push-action@v6
       with:
         context: deploy-context
+        file: deploy-context/Containerfile
         push: true
         tags: |
           ghcr.io/wetware/ww:master
