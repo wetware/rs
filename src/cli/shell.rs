@@ -89,22 +89,18 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
     };
 
     // 2. Load identity key.
+    //
+    // The shell is a client, not a node. It uses an ephemeral key by
+    // default so it never collides with the local daemon's identity
+    // (libp2p refuses to dial yourself). Only load a real identity when
+    // the user passes --identity explicitly.
     let keypair = if let Some(path) = identity {
         let path_str = path.to_str().context("identity path is non-UTF-8")?;
         let sk = ww::keys::load(path_str)?;
         ww::keys::to_libp2p(&sk)?
     } else {
-        let default_path = dirs::home_dir()
-            .map(|h| h.join(".ww/identity"))
-            .filter(|p| p.exists());
-        if let Some(path) = default_path {
-            let path_str = path.to_str().context("identity path is non-UTF-8")?;
-            let sk = ww::keys::load(path_str)?;
-            ww::keys::to_libp2p(&sk)?
-        } else {
-            let sk = ww::keys::generate()?;
-            ww::keys::to_libp2p(&sk)?
-        }
+        let sk = ww::keys::generate()?;
+        ww::keys::to_libp2p(&sk)?
     };
 
     // 3. Build client swarm and extract peer ID from the address.
