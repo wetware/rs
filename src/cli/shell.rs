@@ -1,13 +1,12 @@
 //! `ww shell` — thin REPL client that dials a shell cell over libp2p.
 //!
-//! Spins up a client-mode swarm (identify + stream only), dials the target
-//! peer, bootstraps Cap'n Proto RPC on the shell protocol, and enters a
-//! rustyline REPL loop.
+//! Discovers local nodes via lockfiles in `~/.ww/run/`, or dials a
+//! remote node via an explicit multiaddr.
 //!
-//! Accepts an optional multiaddr as a positional argument:
-//!   - `/ip4/.../tcp/.../p2p/...` — dial directly
+//! Accepts an optional positional argument:
+//!   - `/ip4/.../tcp/.../p2p/...` — dial directly (multiaddr)
 //!   - `/dnsaddr/...` — resolve via DNS TXT records, then dial
-//!   - *(omitted)* — discover a local node via Kubo's LAN DHT
+//!   - *(omitted)* — discover via lockfiles in `~/.ww/run/`
 
 use anyhow::{Context, Result};
 use libp2p::Multiaddr;
@@ -20,48 +19,65 @@ use futures::io::AsyncReadExt;
 
 use ww::shell_capnp;
 
-/// Discover a local wetware node via Kubo's routing API.
+/// Discover a local node from lockfiles in `~/.ww/run/`.
 ///
-/// Queries `findprovs` for the well-known discovery CID and returns the
-/// first provider's multiaddr (preferring loopback addresses).
-async fn discover_local_node() -> Result<Multiaddr> {
-    let kubo_url =
-        std::env::var("IPFS_API").unwrap_or_else(|_| "http://localhost:5001".to_string());
-    let client = ww::ipfs::HttpClient::new(kubo_url);
-    let cid_str = ww::discovery::DISCOVERY_CID.to_string();
+/// If exactly one node is running, returns its multiaddr.
+/// If multiple are running, prompts the user to choose.
+fn discover_from_lockfiles() -> Result<Multiaddr> {
+    let nodes = ww::discovery::list_local_nodes();
 
-    eprintln!("Discovering local node via Kubo...");
+    match nodes.len() {
+        0 => anyhow::bail!("no local wetware nodes found\n  Start one with: ww run ."),
+        1 => {
+            let node = &nodes[0];
+            let addr = pick_best_addr(&node.addrs)
+                .with_context(|| format!("node {} has no addresses", node.peer_id))?;
+            let full = format!("{addr}/p2p/{}", node.peer_id);
+            eprintln!("Connecting to {}...", node.peer_id);
+            full.parse::<Multiaddr>()
+                .with_context(|| format!("invalid multiaddr: {full}"))
+        }
+        _ => {
+            eprintln!("Multiple wetware nodes found:\n");
+            for (i, node) in nodes.iter().enumerate() {
+                let addr_summary = node
+                    .addrs
+                    .first()
+                    .map(|a| a.as_str())
+                    .unwrap_or("(no addrs)");
+                eprintln!("  [{}] {} ({})", i + 1, node.peer_id, addr_summary);
+            }
+            eprintln!();
 
-    let providers = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        client.find_providers(&cid_str, 1),
-    )
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "discovery timeout (15s)\n  Is a wetware node running?  Start one with: ww run ."
-        )
-    })?
-    .context("discovery query failed")?;
+            eprint!("Select node [1-{}]: ", nodes.len());
+            let mut input = String::new();
+            std::io::stdin()
+                .read_line(&mut input)
+                .context("failed to read selection")?;
 
-    if providers.is_empty() {
-        anyhow::bail!("no wetware node found on local network\n  Start one with: ww run .");
+            let choice: usize = input.trim().parse::<usize>().context("invalid selection")?;
+            if choice == 0 || choice > nodes.len() {
+                anyhow::bail!("selection out of range");
+            }
+
+            let node = &nodes[choice - 1];
+            let addr = pick_best_addr(&node.addrs)
+                .with_context(|| format!("node {} has no addresses", node.peer_id))?;
+            let full = format!("{addr}/p2p/{}", node.peer_id);
+            eprintln!("Connecting to {}...", node.peer_id);
+            full.parse::<Multiaddr>()
+                .with_context(|| format!("invalid multiaddr: {full}"))
+        }
     }
+}
 
-    let (peer_id_str, addrs) = &providers[0];
-
-    // Prefer a loopback address, then any address.
-    let transport_addr = addrs
+/// Pick the best address from a list — prefer loopback, then any.
+fn pick_best_addr(addrs: &[String]) -> Option<String> {
+    addrs
         .iter()
         .find(|a| a.contains("/ip4/127.") || a.contains("/ip6/::1/"))
         .or_else(|| addrs.first())
-        .with_context(|| format!("found node {peer_id_str} but it has no addresses"))?;
-
-    let full_addr: Multiaddr = format!("{transport_addr}/p2p/{peer_id_str}")
-        .parse()
-        .with_context(|| format!("invalid multiaddr: {transport_addr}/p2p/{peer_id_str}"))?;
-
-    Ok(full_addr)
+        .cloned()
 }
 
 /// Run the interactive shell client.
@@ -69,7 +85,7 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
     // 1. Resolve target address.
     let addr = match addr {
         Some(a) => a,
-        None => discover_local_node().await?,
+        None => discover_from_lockfiles()?,
     };
 
     // 2. Load identity key.
@@ -78,7 +94,6 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
         let sk = ww::keys::load(path_str)?;
         ww::keys::to_libp2p(&sk)?
     } else {
-        // Check default location
         let default_path = dirs::home_dir()
             .map(|h| h.join(".ww/identity"))
             .filter(|p| p.exists());
@@ -87,15 +102,12 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
             let sk = ww::keys::load(path_str)?;
             ww::keys::to_libp2p(&sk)?
         } else {
-            // Ephemeral key for dev/testing
             let sk = ww::keys::generate()?;
             ww::keys::to_libp2p(&sk)?
         }
     };
 
     // 3. Build client swarm and extract peer ID from the address.
-    //    For /dnsaddr/ multiaddrs, the peer ID is discovered after the DNS
-    //    transport resolves the address and the connection is established.
     let mut client = ww::host::ClientSwarm::new(keypair)?;
     let mut stream_control = client.stream_control();
 
@@ -118,10 +130,10 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
             .map_err(|e| anyhow::anyhow!("failed to dial {addr}: {e}"))?;
     }
 
-    // 4. Spawn swarm event loop (reports first connected peer via channel).
+    // 4. Spawn swarm event loop.
     tokio::task::spawn_local(client.run(Some(connected_tx)));
 
-    // 5. Resolve peer ID: either known from the multiaddr or discovered via connection.
+    // 5. Resolve peer ID.
     let peer_id = if let Some(id) = peer_id_from_addr {
         id
     } else {
@@ -133,8 +145,6 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
     };
 
     // 6. Compute the shell protocol from schema bytes.
-    // The schema bytes are compiled into the shell cell's build output.
-    // We need the same bytes to compute the matching protocol CID.
     let schema_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/shell_schema.bin"));
     let protocol_cid = ww::rpc::schema_cid(schema_bytes);
     let stream_protocol = ww::rpc::schema_protocol(&protocol_cid)?;
@@ -155,7 +165,6 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
     let mut rpc_system = RpcSystem::new(Box::new(network), None);
     let shell: shell_capnp::shell::Client = rpc_system.bootstrap(Side::Server);
 
-    // Verify the bootstrap resolves.
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         shell.client.when_resolved(),
@@ -164,7 +173,6 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
     .map_err(|_| anyhow::anyhow!("RPC handshake timeout (10s)"))?
     .map_err(|e| anyhow::anyhow!("RPC handshake failed: {e}"))?;
 
-    // Drive RPC in background.
     tokio::task::spawn_local(async move {
         if let Err(e) = rpc_system.await {
             tracing::debug!("Shell RPC session ended: {e}");
@@ -176,7 +184,6 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
     eprintln!("AI agents:  ipfs cat /ipns/releases.wetware.run/.agents/prompt.md");
 
     // 9. REPL loop.
-    // rustyline blocks the thread, so run in spawn_blocking with mpsc bridge.
     let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<String>(1);
 
     std::thread::spawn(move || {
@@ -188,11 +195,11 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
                         let _ = rl.add_history_entry(&line);
                     }
                     if line_tx.blocking_send(line).is_err() {
-                        break; // Channel closed — eval loop exited.
+                        break;
                     }
                 }
-                Err(rustyline::error::ReadlineError::Interrupted) => continue, // Ctrl-C
-                Err(rustyline::error::ReadlineError::Eof) => break,            // Ctrl-D
+                Err(rustyline::error::ReadlineError::Interrupted) => continue,
+                Err(rustyline::error::ReadlineError::Eof) => break,
                 Err(e) => {
                     eprintln!("readline error: {e}");
                     break;
@@ -206,7 +213,6 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
             continue;
         }
 
-        // Send eval request with 30s timeout.
         let mut req = shell.eval_request();
         req.get().set_text(&line);
 
@@ -217,7 +223,7 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
                 let is_error = result.get_is_error();
 
                 if text == "exit" && !is_error {
-                    break; // Exit sentinel from shell cell
+                    break;
                 }
 
                 if !text.is_empty() {
@@ -230,7 +236,7 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
             }
             Ok(Err(e)) => {
                 eprintln!("RPC error: {e}");
-                break; // Remote probably disconnected.
+                break;
             }
             Err(_) => {
                 eprintln!("eval timeout (30s)");

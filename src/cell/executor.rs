@@ -340,6 +340,11 @@ impl Cell {
     /// `Terminal(Membrane)` auth gate — remote peers must `login(signer)` to
     /// obtain the kernel's capability surface.  Without a signing key
     /// (ephemeral node), the raw membrane is served directly.
+    /// If `membrane_tx` is provided, the kernel's `GuestMembrane` is sent
+    /// through it as soon as the membrane RPC is bootstrapped (before the
+    /// guest starts running). This lets the host re-export the membrane on
+    /// other transports (e.g. a Unix domain socket) without waiting for the
+    /// guest to exit.
     pub async fn spawn_serving(self, control: libp2p_stream::Control) -> Result<SpawnResult> {
         self.spawn_rpc_inner(Some(control)).await
     }
