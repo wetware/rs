@@ -44,6 +44,8 @@ jobs:
             - 'build.rs'
             - 'Containerfile*'
             - 'Makefile'
+            - '.github/workflows/**'
+            - '.github/actions/**'
 
   # === Always-run checks (PRs and pushes) ===
 
@@ -180,7 +182,9 @@ jobs:
 
   build-wasm:
     name: Build WASM components
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/master')
     needs: [fmt, clippy, solidity, build]
     runs-on: ubuntu-latest
 
@@ -223,9 +227,9 @@ jobs:
   build-binaries:
     name: Build ${{ matrix.artifact }}
     if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/master'
-      && (needs.changes.outputs.std == 'true' || needs.changes.outputs.host == 'true'
-          || github.event_name == 'workflow_dispatch')
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/master'
+          && (needs.changes.outputs.std == 'true' || needs.changes.outputs.host == 'true'))
     needs: [changes, fmt, clippy, solidity, build, build-wasm]
     runs-on: ${{ matrix.os }}
     strategy:
@@ -320,9 +324,9 @@ jobs:
   deploy:
     name: Deploy to master.wetware.run
     if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/master'
-      && (needs.changes.outputs.std == 'true' || needs.changes.outputs.host == 'true'
-          || github.event_name == 'workflow_dispatch')
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/master'
+          && (needs.changes.outputs.std == 'true' || needs.changes.outputs.host == 'true'))
     needs: [changes, fmt, clippy, solidity, build, build-binaries]
     runs-on: ubuntu-latest
     environment: master
