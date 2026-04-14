@@ -232,7 +232,8 @@ enum Commands {
     /// Evaluates Glia expressions on the remote node. State persists
     /// across evals (def sticks). Ctrl-D or (exit) to disconnect.
     ///
-    /// When no address is given, discovers a local node via mDNS.
+    /// When no address is given, discovers a local node via lockfiles
+    /// in `~/.ww/run/`.
     ///
     /// Example:
     ///   ww shell
@@ -240,7 +241,7 @@ enum Commands {
     ///   ww shell /dnsaddr/master.wetware.run
     Shell {
         /// Multiaddr of the target node (e.g. /ip4/.../p2p/... or /dnsaddr/...).
-        /// If omitted, discovers a local node via mDNS.
+        /// If omitted, discovers a local node via lockfiles in ~/.ww/run/.
         addr: Option<Multiaddr>,
 
         /// Path to Ed25519 identity file for auth.
@@ -1240,6 +1241,11 @@ wasip2::cli::command::export!({iface_name}Guest);
     <true/>
     <key>RunAtLoad</key>
     <false/>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
 </dict>
 </plist>
 "#,
@@ -2378,6 +2384,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         }
 
         // Step 3: Optionally remove ~/.ww.
+        let mut ww_dir_removed = false;
         if ww_dir.exists() {
             print!("  Remove ~/.ww? This deletes your identity and all data. [y/N] ");
             std::io::stdout().flush().ok();
@@ -2387,6 +2394,7 @@ wasip2::cli::command::export!({iface_name}Guest);
                 std::fs::remove_dir_all(&ww_dir)
                     .with_context(|| format!("remove {}", ww_dir.display()))?;
                 println!("  ~/.ww ....................... REMOVED");
+                ww_dir_removed = true;
             } else {
                 println!("  ~/.ww ....................... KEPT");
             }
@@ -2394,12 +2402,18 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         println!();
         println!("Wetware uninstalled.");
-        println!(
-            "  Binary at {} not removed (delete manually if desired).",
-            std::env::current_exe()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "unknown".to_string())
-        );
+
+        // Only mention the binary if it lives outside ~/.ww (or ~/.ww was kept).
+        if let Ok(exe) = std::env::current_exe() {
+            let exe = exe.canonicalize().unwrap_or(exe);
+            let inside_ww_dir = exe.starts_with(&ww_dir);
+            if !inside_ww_dir || !ww_dir_removed {
+                println!(
+                    "  Binary at {} not removed (delete manually if desired).",
+                    exe.display()
+                );
+            }
+        }
 
         Ok(())
     }
