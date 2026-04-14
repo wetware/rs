@@ -492,7 +492,10 @@ jobs:
         cp CHANGELOG.md "$STAGE/"
 
         # WASM cells (flat under bin/)
-        cp artifacts/wasm-artifacts/std/kernel/bin/main.wasm  "$STAGE/bin/kernel.wasm"
+        # The host validator requires bin/main.wasm at the merged image
+        # root, so the kernel is named main.wasm. Other cells keep their
+        # canonical names (loaded by name via embedded loader / VFS).
+        cp artifacts/wasm-artifacts/std/kernel/bin/main.wasm  "$STAGE/bin/main.wasm"
         cp artifacts/wasm-artifacts/std/shell/bin/shell.wasm  "$STAGE/bin/shell.wasm"
         cp artifacts/wasm-artifacts/std/mcp/bin/main.wasm     "$STAGE/bin/mcp.wasm"
 
@@ -504,8 +507,10 @@ jobs:
           fi
         done
 
-        # Compiled schemas (.capnpc)
-        cp artifacts/wasm-artifacts/std/shell/bin/shell.capnpc "$STAGE/share/schema/shell.capnpc" 2>/dev/null || true
+        # Compiled schemas (.capnpc) — co-located with their WASM in bin/
+        # so init scripts can `(load "bin/shell.capnpc")` relative to the
+        # merged image root.
+        cp artifacts/wasm-artifacts/std/shell/bin/shell.capnpc "$STAGE/bin/shell.capnpc"
 
         # Human-readable .capnp schemas
         cp capnp/shell.capnp "$STAGE/include/schema/" 2>/dev/null || true

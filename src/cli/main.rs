@@ -46,7 +46,7 @@ const EMBEDDED_ECHO: &[u8] = b"";
 /// Build the standard embedded loader with all bundled WASM images.
 fn embedded_loader() -> EmbeddedLoader {
     EmbeddedLoader::new()
-        .insert("bin/kernel.wasm", EMBEDDED_KERNEL)
+        .insert("bin/main.wasm", EMBEDDED_KERNEL)
         .insert("bin/shell.wasm", EMBEDDED_SHELL)
         .insert("bin/mcp.wasm", EMBEDDED_MCP)
         .insert("bin/echo.wasm", EMBEDDED_ECHO)
@@ -1958,8 +1958,11 @@ wasip2::cli::command::export!({iface_name}Guest);
         // Embedded WASM blobs are served by EmbeddedLoader at runtime.
         // We no longer write them to disk; just check if they're present
         // in the binary to decide whether to republish the std namespace.
+        // The kernel is named main.wasm (not kernel.wasm) because the
+        // host validator requires bin/main.wasm at the merged image root.
+        // Other cells keep their canonical names.
         let embedded_cells: &[(&str, &[u8])] = &[
-            ("kernel.wasm", EMBEDDED_KERNEL),
+            ("main.wasm", EMBEDDED_KERNEL),
             ("shell.wasm", EMBEDDED_SHELL),
             ("mcp.wasm", EMBEDDED_MCP),
         ];
