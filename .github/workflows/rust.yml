@@ -352,24 +352,21 @@ jobs:
         cd deploy-context
         chmod +x ww
 
-        # FHS layout: bin/ (WASM cells), lib/ (Glia), share/ (schemas), etc/ (config)
-        mkdir -p wetware/bin wetware/lib/ww wetware/share/schema
-        mkdir -p wetware/etc/init.d
+        # Two-layer layout matching the production k8s manifest:
+        #   /usr/share/wetware/kernel/  → kernel image (mounted as base)
+        #   /usr/share/wetware/shell/   → shell image (overlaid on kernel)
+        # The daemon mounts both as separate root layers; the shell layer
+        # provides bin/shell.wasm + bin/shell.capnpc + etc/init.d/.
+        mkdir -p wetware/kernel/bin
+        mkdir -p wetware/shell/bin wetware/shell/etc/init.d
 
-        # WASM cells
-        # The host requires bin/main.wasm at the image root, so the kernel
-        # is named main.wasm. Other cells get their canonical names.
-        cp wasm/std/kernel/bin/main.wasm  wetware/bin/main.wasm
-        cp wasm/std/shell/bin/shell.wasm  wetware/bin/shell.wasm
-        cp wasm/std/mcp/bin/main.wasm     wetware/bin/mcp.wasm
+        # Kernel layer: bin/main.wasm is required at the merged root.
+        cp wasm/std/kernel/bin/main.wasm wetware/kernel/bin/main.wasm
 
-        # Compiled schemas — co-located with their WASM in bin/ so that
-        # init scripts can `(load "bin/shell.capnpc")` relative to the
-        # cell's view of the merged image root.
-        cp wasm/std/shell/bin/shell.capnpc wetware/bin/shell.capnpc
-
-        # Init scripts
-        cp wasm/std/shell/etc/init.d/50-shell.glia wetware/etc/init.d/
+        # Shell layer: WASM, schema, and init script.
+        cp wasm/std/shell/bin/shell.wasm    wetware/shell/bin/shell.wasm
+        cp wasm/std/shell/bin/shell.capnpc  wetware/shell/bin/shell.capnpc
+        cp wasm/std/shell/etc/init.d/50-shell.glia wetware/shell/etc/init.d/
 
         cp ../Containerfile.deploy Containerfile
 

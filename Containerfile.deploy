@@ -2,10 +2,12 @@
 # Binary and WASM are pre-built by CI and COPYed in.
 # For local development builds, use the full Containerfile instead.
 #
-# Directory layout follows Unix FHS conventions:
-#   bin/   — compiled executables (WASM cells)
-#   lib/   — interpreted source (Glia stdlib)
-#   share/ — runtime data (compiled schemas)
+# Image layout: two cell layers under /usr/share/wetware/, mounted
+# separately by the daemon CMD.
+#   kernel/bin/main.wasm   — pid0 entrypoint
+#   shell/bin/shell.wasm   — REPL cell
+#   shell/bin/shell.capnpc — compiled schema (loaded by init script)
+#   shell/etc/init.d/      — init scripts run on kernel boot
 
 FROM gcr.io/distroless/static-debian12
 
@@ -16,4 +18,7 @@ USER 1000:1000
 EXPOSE 2025 2026 2080
 
 ENTRYPOINT ["/usr/local/bin/ww"]
-CMD ["run", "/usr/share/wetware"]
+# Two-layer mount: kernel base + shell overlay.
+# Production k8s manifest overrides this with additional layers
+# (e.g. example cells from IPNS) and flags (--identity, --port, etc).
+CMD ["run", "/usr/share/wetware/kernel", "/usr/share/wetware/shell"]
