@@ -363,11 +363,13 @@ jobs:
         cp wasm/std/shell/bin/shell.wasm  wetware/bin/shell.wasm
         cp wasm/std/mcp/bin/main.wasm     wetware/bin/mcp.wasm
 
-        # Compiled schemas
-        cp wasm/std/shell/bin/shell.capnpc wetware/share/schema/shell.capnpc 2>/dev/null || true
+        # Compiled schemas — co-located with their WASM in bin/ so that
+        # init scripts can `(load "bin/shell.capnpc")` relative to the
+        # cell's view of the merged image root.
+        cp wasm/std/shell/bin/shell.capnpc wetware/bin/shell.capnpc
 
         # Init scripts
-        cp wasm/std/shell/etc/init.d/50-shell.glia wetware/etc/init.d/ 2>/dev/null || true
+        cp wasm/std/shell/etc/init.d/50-shell.glia wetware/etc/init.d/
 
         cp ../Containerfile.deploy Containerfile
 
