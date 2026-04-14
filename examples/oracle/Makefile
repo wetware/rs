@@ -17,7 +17,7 @@ all:
 	@# Copy compiled schema bytes next to the WASM binary.
 	@ORACLE_OUT=$$(find target/$(WASM_TARGET)/release/build -path '*/oracle-*/out/oracle_schema.bin' | head -1) && \
 		if [ -n "$$ORACLE_OUT" ]; then \
-			cp "$$ORACLE_OUT" bin/oracle.schema; \
+			cp "$$ORACLE_OUT" bin/oracle.capnpc; \
 		else \
 			echo "WARNING: oracle_schema.bin not found"; \
 		fi
@@ -37,5 +37,5 @@ demo: all
 	@echo ""
 
 clean:
-	rm -f bin/oracle.wasm bin/oracle.schema
+	rm -f bin/oracle.wasm bin/oracle.capnpc
 	$(CARGO) clean --manifest-path Cargo.toml
