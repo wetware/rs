@@ -28,10 +28,11 @@ pub fn discovery_record_key() -> libp2p::kad::RecordKey {
 }
 
 /// Directory where running nodes store their lockfiles.
+///
+/// Uses `/var/run/ww/` so nodes are discoverable across users on the
+/// same machine.
 pub fn run_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("home directory required")
-        .join(".ww/run")
+    PathBuf::from("/var/run/ww")
 }
 
 /// A running wetware node discovered via lockfile.
@@ -43,11 +44,20 @@ pub struct LocalNode {
 
 /// Write a lockfile for the current node.
 ///
-/// Creates `~/.ww/run/<peer_id>` with one multiaddr per line.
+/// Creates `/var/run/ww/<peer_id>` with one multiaddr per line.
 /// The addrs should be transport-only (no `/p2p/<peer_id>` suffix).
+/// The lockfile is owned by the calling user; the directory is created
+/// with sticky bit (mode 1777) so any user can write but only the
+/// owner can remove their own files.
 pub fn write_lockfile(peer_id: &str, addrs: &[String]) -> std::io::Result<PathBuf> {
     let dir = run_dir();
     std::fs::create_dir_all(&dir)?;
+    // Set sticky bit so users can only delete their own lockfiles.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o1777));
+    }
     let path = dir.join(peer_id);
     let contents = addrs.join("\n");
     std::fs::write(&path, contents)?;
