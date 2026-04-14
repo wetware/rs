@@ -309,7 +309,7 @@ jobs:
 
     - name: Verify static linking
       if: ${{ matrix.install_musl }}
-      run: file ${{ matrix.bin_path }}/ww | grep -q "statically linked"
+      run: file ${{ matrix.bin_path }}/ww | grep -qE "static(ally|-pie) linked"
 
     - uses: actions/upload-artifact@v5
       with:
@@ -417,7 +417,7 @@ jobs:
 
   publish:
     name: Publish to IPFS
-    needs: [changes, test, build-binaries, build-wasm, deploy]
+    needs: [changes, test, build-binaries, build-wasm]
     # Run even if build-binaries was skipped (std-only change)
     if: >-
       !failure() && !cancelled()
@@ -569,5 +569,3 @@ jobs:
         echo "## IPFS Publish" >> "$GITHUB_STEP_SUMMARY"
         echo "- CID: \`${{ env.CID }}\`" >> "$GITHUB_STEP_SUMMARY"
         echo "- IPNS: \`/ipns/${{ secrets.IPNS_KEY_ID }}\`" >> "$GITHUB_STEP_SUMMARY"
-
-  # Release builds moved to .github/workflows/release.yml
