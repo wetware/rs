@@ -357,7 +357,9 @@ jobs:
         mkdir -p wetware/etc/init.d
 
         # WASM cells
-        cp wasm/std/kernel/bin/main.wasm  wetware/bin/kernel.wasm
+        # The host requires bin/main.wasm at the image root, so the kernel
+        # is named main.wasm. Other cells get their canonical names.
+        cp wasm/std/kernel/bin/main.wasm  wetware/bin/main.wasm
         cp wasm/std/shell/bin/shell.wasm  wetware/bin/shell.wasm
         cp wasm/std/mcp/bin/main.wasm     wetware/bin/mcp.wasm
 
