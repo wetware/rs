@@ -17,11 +17,11 @@ all:
 	@# Copy compiled schema bytes next to the WASM binary.
 	@AUCTION_OUT=$$(find target/$(WASM_TARGET)/release/build -path '*/auction-*/out/auction_schema.bin' | head -1) && \
 		if [ -n "$$AUCTION_OUT" ]; then \
-			cp "$$AUCTION_OUT" bin/auction.schema; \
+			cp "$$AUCTION_OUT" bin/auction.capnpc; \
 		else \
 			echo "WARNING: auction_schema.bin not found"; \
 		fi
 
 clean:
-	rm -f bin/auction.wasm bin/auction.schema
+	rm -f bin/auction.wasm bin/auction.capnpc
 	$(CARGO) clean --manifest-path Cargo.toml

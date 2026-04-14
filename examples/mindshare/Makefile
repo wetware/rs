@@ -17,11 +17,11 @@ all:
 	@# Copy compiled schema bytes next to the WASM binary.
 	@MINDSHARE_OUT=$$(find target/$(WASM_TARGET)/release/build -path '*/mindshare-*/out/mindshare_schema.bin' | head -1) && \
 		if [ -n "$$MINDSHARE_OUT" ]; then \
-			cp "$$MINDSHARE_OUT" bin/mindshare.schema; \
+			cp "$$MINDSHARE_OUT" bin/mindshare.capnpc; \
 		else \
 			echo "WARNING: mindshare_schema.bin not found"; \
 		fi
 
 clean:
-	rm -f bin/mindshare.wasm bin/mindshare.schema
+	rm -f bin/mindshare.wasm bin/mindshare.capnpc
 	$(CARGO) clean --manifest-path Cargo.toml

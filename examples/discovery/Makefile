@@ -17,10 +17,10 @@ all:
 	@# Copy compiled schema bytes next to the WASM binary.
 	@GREETER_OUT=$$(find $(ROOT)/target/$(WASM_TARGET)/release/build -path '*/discovery-*/out/greeter_schema.bin' | head -1) && \
 		if [ -n "$$GREETER_OUT" ]; then \
-			cp "$$GREETER_OUT" bin/discovery.schema; \
+			cp "$$GREETER_OUT" bin/discovery.capnpc; \
 		else \
 			echo "WARNING: greeter_schema.bin not found"; \
 		fi
 
 clean:
-	rm -f bin/discovery.wasm bin/discovery.schema
+	rm -f bin/discovery.wasm bin/discovery.capnpc

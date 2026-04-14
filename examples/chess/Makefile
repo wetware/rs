@@ -17,10 +17,10 @@ all:
 	@# Copy compiled schema bytes next to the WASM binary.
 	@CHESS_OUT=$$(find $(ROOT)/target/$(WASM_TARGET)/release/build -path '*/chess-*/out/chess_engine_schema.bin' | head -1) && \
 		if [ -n "$$CHESS_OUT" ]; then \
-			cp "$$CHESS_OUT" bin/chess-demo.schema; \
+			cp "$$CHESS_OUT" bin/chess-demo.capnpc; \
 		else \
 			echo "WARNING: chess_engine_schema.bin not found"; \
 		fi
 
 clean:
-	rm -f bin/chess-demo.wasm bin/chess-demo.schema
+	rm -f bin/chess-demo.wasm bin/chess-demo.capnpc
