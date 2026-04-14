@@ -436,7 +436,7 @@ impl Libp2pHost {
                                 &peer_id_str,
                                 &lockfile_addrs,
                             ) {
-                                tracing::warn!("Failed to write discovery lockfile: {e}");
+                                tracing::debug!("Failed to write discovery lockfile: {e}");
                             }
                         }
                         SwarmEvent::ExpiredListenAddr { address, .. } => {
