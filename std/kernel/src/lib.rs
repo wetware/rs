@@ -51,7 +51,7 @@ struct StderrLogger;
 
 impl log::Log for StderrLogger {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        metadata.level() <= log::Level::Trace
+        metadata.level() <= log::Level::Warn
     }
 
     fn log(&self, record: &log::Record<'_>) {
@@ -71,7 +71,9 @@ static LOGGER: StderrLogger = StderrLogger;
 
 fn init_logging() {
     if log::set_logger(&LOGGER).is_ok() {
-        log::set_max_level(log::LevelFilter::Trace);
+        // pid0 runs on the operator's console — keep it quiet by default.
+        // Warnings and errors only; info/debug/trace are suppressed.
+        log::set_max_level(log::LevelFilter::Warn);
     }
 }
 

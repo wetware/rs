@@ -161,12 +161,14 @@ pub async fn run_shell(addr: Option<Multiaddr>, identity: Option<PathBuf>) -> Re
     let mut rpc_system = RpcSystem::new(Box::new(network), None);
     let shell: shell_capnp::shell::Client = rpc_system.bootstrap(Side::Server);
 
+    // Handshake timeout is generous: the server spawns a fresh cell per
+    // connection, which includes WASM compilation on a cache miss.
     tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(30),
         shell.client.when_resolved(),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("RPC handshake timeout (10s)"))?
+    .map_err(|_| anyhow::anyhow!("RPC handshake timeout (30s)"))?
     .map_err(|e| anyhow::anyhow!("RPC handshake failed: {e}"))?;
 
     tokio::task::spawn_local(async move {

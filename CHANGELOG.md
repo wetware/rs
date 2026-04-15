@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - **Shell discovery:** `ww shell` now discovers local nodes via lockfiles in `~/.ww/run/` instead of querying Kubo's LAN DHT. Running nodes write their listen multiaddrs to `~/.ww/run/<peer_id>`. No Kubo dependency for local shell access. Interactive picker when multiple nodes are running.
 - **Daemon fd limit:** launchd plist now sets `SoftResourceLimits/NumberOfFiles` to 4096 (was default 256), preventing fd exhaustion from DHT peer connections.
+- **Kernel (pid0) log level:** default filter lowered to `Warn` so the operator console only sees warnings/errors. Info/debug/trace from init.d, vat registration, and runtime events no longer spam stdout by default.
+- **Shell RPC handshake timeout:** raised from 10s to 30s to accommodate fresh cell spawns on cache-cold workers (WASM compile + membrane graft can take a few seconds).
 - **Distribution architecture:** IPFS release tree restructured to follow Unix FHS conventions. No more full repo dump. Release tree contains only artifacts: `bin/` (WASM cells + host binary), `lib/ww/` (Glia stdlib), `lib/init.d/` (reference init scripts), `include/schema/` (.capnp source), `share/schema/` (.capnpc compiled type descriptors).
 - **CI pipeline split:** Two independent lanes (std and host) trigger based on what changed. Deploy uses pre-built musl binary + WASM artifacts (~30s) instead of full Docker multi-stage build (~10 min). Cap'n Proto build extracted to composite action.
 - **Compiled schema extension:** `.schema` files renamed to `.capnpc` (capnp-compiled), following the `.py`/`.pyc` pattern. Avoids naming collision with human-readable `.capnp` schema source files.

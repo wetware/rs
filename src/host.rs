@@ -338,7 +338,7 @@ impl Libp2pHost {
         ] {
             let addr: Multiaddr = listen.parse()?;
             if let Err(e) = swarm.listen_on(addr.clone()) {
-                tracing::warn!(%addr, error = %e, "Optional listen address failed (continuing)");
+                tracing::warn!(%addr, error = ?e, "Optional listen address failed (continuing)");
             }
         }
 
