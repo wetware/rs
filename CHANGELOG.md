@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Core capability schemas in `Export.schema` (#386, partial — Item 1a).** The membrane graft now populates `Export.schema` with canonical `Schema.Node` bytes for the five core capabilities (`identity`, `host`, `runtime`, `routing`, `http-client`). Bytes are extracted at build time by `crates/membrane/build.rs` via the existing `schema-id` pipeline and exposed through a new `membrane::schema_registry` module. Guest-side introspection (and the future MCP tool description generator) can now parse a real `Schema.Node` per cap instead of receiving an empty stub. Guest-contributed extras still get an empty schema — that's Item 1b (FHS-loaded `.capnpc` files).
+
 ### Removed
 - **IPFS `UnixFS` capability.** The `ipfs.capnp` schema, `ipfs_capnp` module, `UnixFS`/`UnixFSRef` structs, `ContentStore` trait, `MemoryStore` test double, and `CellBuilder::with_content_store()` are all gone. Guests no longer see an IPFS capability; content-addressed reads flow through the WASI virtual filesystem (`CidTree`). `HttpClient::cat()` and `HttpClient::get_dir()` remain as internal host helpers. The `content_store` field on `Cell` was unread — it has been deleted along with its builder setter. `IpfsUnixfsLoader` renamed to `IpfsLoader`.
 - `tests/kernel_initd_integration.rs`: test exercised `with_content_store()` but the Cell never read that field, so the test was not actually verifying init.d behavior. Deleted; proper init.d coverage belongs on the CidTree path.

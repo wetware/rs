@@ -6,6 +6,7 @@ description = "Epoch-scoped capability primitives over Cap'n Proto RPC"
 
 [build-dependencies]
 capnpc = "0.25.3"
+schema-id = { path = "../schema-id" }
 
 [dependencies]
 capnp = "0.25.3"

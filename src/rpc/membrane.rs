@@ -304,7 +304,7 @@ impl GraftBuilder for HostGraftBuilder {
         for (i, (name, client)) in entries.iter().enumerate() {
             let mut entry = caps_builder.reborrow().get(i as u32);
             entry.set_name(name);
-            entry.reborrow().init_schema(); // TODO: populate with real Schema.Node bytes for MCP tool description generation
+            write_schema_for_core_cap(entry.reborrow(), name)?;
             entry.init_cap().set_as_capability(client.hook.clone());
         }
 
@@ -312,12 +312,48 @@ impl GraftBuilder for HostGraftBuilder {
         for (i, (name, client)) in extras_owned.iter().enumerate() {
             let mut entry = caps_builder.reborrow().get((offset + i) as u32);
             entry.set_name(name);
-            entry.reborrow().init_schema(); // TODO: populate from FHS .schema files for guest caps
+            // TODO(Item 1b): populate from FHS .capnpc files for guest-contributed caps.
+            entry.reborrow().init_schema();
             entry.init_cap().set_as_capability(client.hook.clone());
         }
 
         Ok(())
     }
+}
+
+/// Populate `Export.schema` with the canonical Schema.Node bytes for a core
+/// capability name. Core caps (`identity`, `host`, `runtime`, `routing`,
+/// `http-client`) have schemas baked into the binary at build time by
+/// `crates/membrane/build.rs`. Unknown names get an empty Schema.Node —
+/// callers then fall back to string-name lookup.
+fn write_schema_for_core_cap(
+    mut entry: stem_capnp::export::Builder<'_>,
+    name: &str,
+) -> Result<(), capnp::Error> {
+    let Some(bytes) = membrane::schema_registry::schema_by_name(name) else {
+        entry.init_schema();
+        return Ok(());
+    };
+    // Canonical encoding is the raw single-segment payload (no framing
+    // header). Capnp segments must be 8-byte aligned, but the static byte
+    // slice is only byte-aligned, so copy into a Word-aligned buffer.
+    let aligned = bytes_to_aligned_words(bytes);
+    let segments: &[&[u8]] = &[capnp::Word::words_to_bytes(&aligned)];
+    let segment_array = capnp::message::SegmentArray::new(segments);
+    let reader = capnp::message::Reader::new(segment_array, capnp::message::ReaderOptions::new());
+    let schema_node: capnp::schema_capnp::node::Reader = reader.get_root()?;
+    entry.set_schema(schema_node)?;
+    Ok(())
+}
+
+/// Copy a byte slice into an 8-byte-aligned `Vec<Word>` buffer. Trailing
+/// bytes (if `bytes.len()` is not word-multiple) are zero-padded; canonical
+/// capnp encodings are always word-aligned, so this should be lossless.
+fn bytes_to_aligned_words(bytes: &[u8]) -> Vec<capnp::Word> {
+    let word_count = bytes.len().div_ceil(8);
+    let mut words = vec![capnp::word(0, 0, 0, 0, 0, 0, 0, 0); word_count];
+    capnp::Word::words_to_bytes_mut(&mut words)[..bytes.len()].copy_from_slice(bytes);
+    words
 }
 
 // IPFS content access goes through the WASI virtual filesystem (CidTree).

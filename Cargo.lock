@@ -4282,6 +4282,7 @@ dependencies = [
  "libp2p-core",
  "libp2p-identity",
  "rand 0.8.5",
+ "schema-id",
  "tokio",
  "tracing",
 ]
