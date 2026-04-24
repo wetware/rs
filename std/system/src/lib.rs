@@ -534,13 +534,12 @@ pub fn serve_stdio(bootstrap: capnp::capability::Client) {
 
     // Drive RPC only (no user future) — poll_loop returns Err when RPC closes.
     let empty_extras = PollSet::new();
-    match poll_loop(&mut rpc_system, &pollables, &empty_extras, |_| {
-        Poll::<()>::Pending
-    }) {
-        Err(ref exit @ PollLoopExit::RpcError { .. }) => {
-            log::error!("serve_stdio: {exit}");
-        }
-        _ => {}
+    if let Err(ref exit @ PollLoopExit::RpcError { .. }) =
+        poll_loop(&mut rpc_system, &pollables, &empty_extras, |_| {
+            Poll::<()>::Pending
+        })
+    {
+        log::error!("serve_stdio: {exit}");
     }
 
     // WASI-P2 teardown: leak Cap'n Proto objects to avoid close-after-teardown
