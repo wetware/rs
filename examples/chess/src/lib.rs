@@ -33,7 +33,7 @@ mod system_capnp {
     include!(concat!(env!("OUT_DIR"), "/system_capnp.rs"));
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, clippy::extra_unused_type_parameters)]
 mod stem_capnp {
     include!(concat!(env!("OUT_DIR"), "/stem_capnp.rs"));
 }
@@ -370,7 +370,7 @@ async fn play_rpc_game(
         // --- White's turn (us) ---
         let moves_resp = engine.get_legal_moves_request().send().promise.await?;
         let moves = moves_resp.get()?.get_moves()?;
-        if moves.len() == 0 {
+        if moves.is_empty() {
             // No legal moves for white — black wins.
             let node = format!(r#"{{"result":"0-1",{}}}"#, prev_field(&prev_cid));
             prev_cid = log_replay_node(&node).or(prev_cid);
@@ -416,7 +416,7 @@ async fn play_rpc_game(
         // --- Black's turn (them) ---
         let moves_resp = engine.get_legal_moves_request().send().promise.await?;
         let moves = moves_resp.get()?.get_moves()?;
-        if moves.len() == 0 {
+        if moves.is_empty() {
             // No legal moves for black after white moved — shouldn't happen
             // if status was Ongoing, but handle gracefully.
             let node = format!(
@@ -831,7 +831,7 @@ mod tests {
                         .await
                         .unwrap();
                     let moves = moves_resp.get().unwrap().get_moves().unwrap();
-                    if moves.len() == 0 {
+                    if moves.is_empty() {
                         break;
                     }
 
@@ -859,7 +859,7 @@ mod tests {
                         .await
                         .unwrap();
                     let moves = moves_resp.get().unwrap().get_moves().unwrap();
-                    if moves.len() == 0 {
+                    if moves.is_empty() {
                         break;
                     }
 

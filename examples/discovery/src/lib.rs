@@ -30,7 +30,7 @@ mod system_capnp {
     include!(concat!(env!("OUT_DIR"), "/system_capnp.rs"));
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, clippy::extra_unused_type_parameters)]
 mod stem_capnp {
     include!(concat!(env!("OUT_DIR"), "/stem_capnp.rs"));
 }
@@ -223,7 +223,7 @@ async fn greet_peer(
     let greeter: greeter_capnp::greeter::Client = resp.get()?.get_cap().get_as_capability()?;
 
     let mut greet_req = greeter.greet_request();
-    greet_req.get().set_name(&format!("peer {us}"));
+    greet_req.get().set_name(format!("peer {us}"));
     let greet_resp = greet_req.send().promise.await?;
     let greeting = greet_resp
         .get()?
