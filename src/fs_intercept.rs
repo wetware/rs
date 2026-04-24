@@ -486,17 +486,37 @@ impl types::HostDescriptor for IpfsFilesystemView<'_> {
         oflags: types::OpenFlags,
         flags: types::DescriptorFlags,
     ) -> FsResult<Resource<types::Descriptor>> {
-        // Intercept explicit /ipfs/ paths (works in all modes)
+        // CidTree-rooted paths resolve through the virtual filesystem.
+        // Guests build `$WW_ROOT/…` paths which wasi-libc turns into
+        // relative `ipfs/<root_cid>/…`; route those through CidTree so
+        // directory CIDs work (open_ipfs is file-only and fails loudly
+        // for directories).
+        if let Some(ref cid_tree) = self.cid_tree {
+            let rooted_subpath = parse_ipfs_path(&path)
+                .filter(|p| p.cid.to_string() == *cid_tree.root_cid())
+                .map(|p| p.subpath);
+            let target = rooted_subpath.unwrap_or_else(|| {
+                // Non-ipfs path: resolve directly against the CidTree root.
+                path.clone()
+            });
+            // Only skip CidTree for paths that explicitly reference a
+            // different CID — those are content-addressed leaf fetches
+            // and belong in open_ipfs.
+            let is_other_ipfs = parse_ipfs_path(&path)
+                .map(|p| p.cid.to_string() != *cid_tree.root_cid())
+                .unwrap_or(false);
+            if !is_other_ipfs {
+                let cid_tree = Arc::clone(cid_tree);
+                tracing::debug!(path = %target, "CidTree open_at");
+                return self.open_via_cid_tree(&cid_tree, &target, flags).await;
+            }
+        }
+
+        // Intercept explicit /ipfs/<leaf_cid>/… paths (no CidTree active,
+        // or CidTree active but the cid doesn't match root).
         if let Some(ipfs_path) = parse_ipfs_path(&path) {
             tracing::debug!(cid = %ipfs_path.cid, subpath = %ipfs_path.subpath, "Intercepting IPFS open_at");
             return self.open_ipfs(ipfs_path, oflags, flags).await;
-        }
-
-        // CidTree mode: resolve ALL paths through the virtual filesystem
-        if let Some(ref cid_tree) = self.cid_tree {
-            let cid_tree = Arc::clone(cid_tree);
-            tracing::debug!(path = %path, "CidTree open_at");
-            return self.open_via_cid_tree(&cid_tree, &path, flags).await;
         }
 
         // Delegate to standard filesystem

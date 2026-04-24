@@ -536,17 +536,28 @@ impl Proc {
             .envs(&envs)
             .args(&args);
 
-        // Mount the merged FHS image root read-only at `/` in the guest.
-        // Skip when CidTree is present — the virtual FS handles all paths.
-        if cid_tree.is_none() {
-            if let Some(ref root) = image_root {
-                wasi_builder
-                    .preopened_dir(root, "/", DirPerms::READ, FilePerms::READ)
-                    .context("failed to preopen image root at /")?;
-                tracing::debug!(root = %root.display(), "Mounted image root at /");
-            }
-        } else {
-            tracing::debug!("CidTree active — skipping preopened_dir, virtual FS handles paths");
+        // Mount something at `/` in the guest's WASI filesystem. wasi-libc
+        // needs at least one preopen to resolve absolute paths — without it,
+        // `open("/etc/...")` has no starting descriptor to walk from.
+        //
+        // - CidTree mode: preopen the staging dir as a stub. `fs_intercept`
+        //   overrides `open_at` to route all paths through the CID tree, so
+        //   the preopen's contents don't matter.
+        // - Plain mode: preopen the materialized FHS tempdir so guests read
+        //   files directly from the host.
+        if let Some(ref tree) = cid_tree {
+            wasi_builder
+                .preopened_dir(tree.staging_dir(), "/", DirPerms::READ, FilePerms::READ)
+                .context("failed to preopen CidTree staging dir at /")?;
+            tracing::debug!(
+                staging = %tree.staging_dir().display(),
+                "Mounted CidTree staging at / (fs_intercept routes via virtual FS)"
+            );
+        } else if let Some(ref root) = image_root {
+            wasi_builder
+                .preopened_dir(root, "/", DirPerms::READ, FilePerms::READ)
+                .context("failed to preopen image root at /")?;
+            tracing::debug!(root = %root.display(), "Mounted image root at /");
         }
 
         let wasi = wasi_builder.build();

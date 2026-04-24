@@ -74,6 +74,10 @@ pub struct CellBuilder {
     signing_key: Option<Arc<SigningKey>>,
     route_registry: Option<crate::dispatcher::server::RouteRegistry>,
     cache_policy: crate::rpc::CachePolicy,
+    /// Shared IPFS pin/content cache for CidTree file materialization.
+    /// Every spawn turns this into a `CacheMode::Shared(pinset)` on the
+    /// ProcBuilder — the inner cache is the host-wide pinset.
+    pinset_cache: Option<Arc<cache::PinsetCache>>,
     suppress_stdin: bool,
     ipfs_client: Option<crate::ipfs::HttpClient>,
     http_dial: Vec<String>,
@@ -102,6 +106,7 @@ impl CellBuilder {
             signing_key: None,
             route_registry: None,
             cache_policy: crate::rpc::CachePolicy::default(),
+            pinset_cache: None,
             suppress_stdin: false,
             ipfs_client: None,
             http_dial: Vec::new(),
@@ -229,6 +234,19 @@ impl CellBuilder {
         self
     }
 
+    /// Set the shared IPFS pin/content cache used by CidTree file materialization.
+    ///
+    /// Required when `with_cid_tree` is set; without it, reads of CID-backed
+    /// files fail with an I/O error (fs_intercept needs a cache to fetch
+    /// bytes from IPFS and stage them as real file descriptors).
+    ///
+    /// Every spawn wraps the cache in `CacheMode::Shared` on the ProcBuilder,
+    /// so all cells sharing this builder's cache see the same pinset.
+    pub fn with_pinset_cache(mut self, cache: Arc<cache::PinsetCache>) -> Self {
+        self.pinset_cache = Some(cache);
+        self
+    }
+
     /// Suppress host stdin bridging.
     ///
     /// When set, the cell receives an empty stdin (closed immediately)
@@ -271,6 +289,7 @@ impl CellBuilder {
             signing_key: self.signing_key,
             route_registry: self.route_registry,
             cache_policy: self.cache_policy,
+            pinset_cache: self.pinset_cache,
             suppress_stdin: self.suppress_stdin,
             ipfs_client: self
                 .ipfs_client
@@ -305,6 +324,11 @@ pub struct Cell {
     pub signing_key: Option<Arc<SigningKey>>,
     pub route_registry: Option<crate::dispatcher::server::RouteRegistry>,
     pub cache_policy: crate::rpc::CachePolicy,
+    /// Shared IPFS pin/content cache for CidTree content materialization.
+    /// Required when `cid_tree` is set; spawn wraps this in a
+    /// `CacheMode::Shared` on the ProcBuilder so fs_intercept can fetch
+    /// file content on-demand from IPFS.
+    pub pinset_cache: Option<Arc<cache::PinsetCache>>,
     /// When true, the cell receives an empty stdin instead of bridging host stdin.
     pub suppress_stdin: bool,
     /// IPFS HTTP client for Kubo API calls (e.g. IPNS resolution via routing).
@@ -367,6 +391,7 @@ impl Cell {
             signing_key: _,
             route_registry: _,
             cache_policy: _,
+            pinset_cache,
             suppress_stdin,
             ipfs_client: _,
             http_dial: _,
@@ -472,6 +497,9 @@ impl Cell {
             .with_image_root(image_root);
         if let Some(tree) = cid_tree {
             builder = builder.with_cid_tree(tree);
+        }
+        if let Some(pinset) = pinset_cache {
+            builder = builder.with_cache(cache::CacheMode::Shared(pinset));
         }
         let (builder, handles) = builder.with_data_streams();
 
