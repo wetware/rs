@@ -62,20 +62,17 @@ $ ipfs cat bafkrei0...
 
 ## Design rationale
 
-Each node is published to IPFS via `unixfs.add()` immediately after the
-move pair is played. This means:
+Each node is added to IPFS immediately after the move pair is played.
+This means:
 
 - **Turn-by-turn publishing**: each move is content-addressed before the
   next is played; if the process crashes mid-game, all completed moves
   are already persisted.
 - **Immutable history**: once a CID is published, that node can never
   change. The linked list is append-only by construction.
-- **Minimal capability surface**: only requires `unixfs.add(data) → cid`,
-  which is already available to every Wetware guest. No DAG or Block API
-  needed.
 - **User-friendly**: `ipfs cat <cid>` returns readable JSON. No special
   tooling required to inspect a game.
 
-When the DAG API is implemented, this structure can migrate to DAG-CBOR
+When DAG-CBOR becomes available to guests, this structure can migrate
 for smaller nodes and native IPLD traversal. The linked list topology
 remains the same.

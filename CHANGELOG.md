@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **IPFS `UnixFS` capability.** The `ipfs.capnp` schema, `ipfs_capnp` module, `UnixFS`/`UnixFSRef` structs, `ContentStore` trait, `MemoryStore` test double, and `CellBuilder::with_content_store()` are all gone. Guests no longer see an IPFS capability; content-addressed reads flow through the WASI virtual filesystem (`CidTree`). `HttpClient::cat()` and `HttpClient::get_dir()` remain as internal host helpers. The `content_store` field on `Cell` was unread — it has been deleted along with its builder setter. `IpfsUnixfsLoader` renamed to `IpfsLoader`.
+- `tests/kernel_initd_integration.rs`: test exercised `with_content_store()` but the Cell never read that field, so the test was not actually verifying init.d behavior. Deleted; proper init.d coverage belongs on the CidTree path.
+
 ### Changed
 - **Shell discovery:** `ww shell` now discovers local nodes via lockfiles in `~/.ww/run/` instead of querying Kubo's LAN DHT. Running nodes write their listen multiaddrs to `~/.ww/run/<peer_id>`. No Kubo dependency for local shell access. Interactive picker when multiple nodes are running.
 - **Daemon fd limit:** launchd plist now sets `SoftResourceLimits/NumberOfFiles` to 4096 (was default 256), preventing fd exhaustion from DHT peer connections.
