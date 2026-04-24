@@ -4,7 +4,7 @@
 //! Written by `make publish-std` to `target/std-namespace.cid`; read by build.rs.
 //!
 //! Empty for local builds (no IPFS needed — HostPathLoader resolves from disk).
-//! In release/CI builds, this points at the published UnixFS tree containing
+//! In release/CI builds, this points at the published IPFS tree containing
 //! the Glia stdlib, kernel, shell, and MCP images.
 
 /// IPFS path for the `ww` standard namespace tree (e.g. `/ipfs/bafyrei...`).

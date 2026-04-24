@@ -11,11 +11,6 @@ pub mod system_capnp {
 }
 
 #[allow(unused_parens, clippy::match_single_binding)]
-pub mod ipfs_capnp {
-    include!(concat!(env!("OUT_DIR"), "/capnp/ipfs_capnp.rs"));
-}
-
-#[allow(unused_parens, clippy::match_single_binding)]
 pub mod routing_capnp {
     include!(concat!(env!("OUT_DIR"), "/capnp/routing_capnp.rs"));
 }

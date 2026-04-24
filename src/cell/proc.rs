@@ -137,11 +137,9 @@ impl FuelEstimator {
     /// Returns the new budget to install via `store.set_fuel(...)`.
     pub fn on_host_return(&mut self, remaining: u64) -> u64 {
         let consumed = self.budget.saturating_sub(remaining);
-        let ratio = if self.budget > 0 {
-            consumed * RATIO_SCALE / self.budget
-        } else {
-            RATIO_SCALE / 2
-        };
+        let ratio = (consumed * RATIO_SCALE)
+            .checked_div(self.budget)
+            .unwrap_or(RATIO_SCALE / 2);
 
         if !self.initialized {
             // Seed from first real observation — avoids cold-start bias.

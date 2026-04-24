@@ -8,7 +8,7 @@
 //! - **`stem::eventual`** (off-chain) — IPNS records with DHT + gossipsub propagation.
 //!
 //! ```text
-//!                 UnixPath (CID -> UnixFS)       Value (capnp, future)
+//!                 UnixPath (CID -> directory)    Value (capnp, future)
 //!   +-----------+-----------------------------+-------------------------+
 //!   | atomic    | stem::atomic::UnixPath       | future                  |
 //!   | (chain)   | <- current Atom contract      |                         |

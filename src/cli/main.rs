@@ -15,8 +15,7 @@ use ww::cell::CellBuilder;
 use ww::host;
 use ww::image;
 use ww::ipfs;
-use ww::ipfs::ContentStore as _;
-use ww::loaders::{ChainLoader, EmbeddedLoader, HostPathLoader, IpfsUnixfsLoader};
+use ww::loaders::{ChainLoader, EmbeddedLoader, HostPathLoader, IpfsLoader};
 
 // Embedded WASM blobs — compiled into the binary so `ww run --mcp` works
 // without requiring `make std` on the user's machine.
@@ -205,8 +204,8 @@ enum Commands {
 
     /// Snapshot a project and push it to IPFS.
     ///
-    /// Adds the entire FHS tree to IPFS as a UnixFS directory and returns
-    /// the resulting CID. Optionally updates the on-chain Atom contract.
+    /// Adds the entire FHS tree to IPFS as a directory and returns the
+    /// resulting CID. Optionally updates the on-chain Atom contract.
     ///
     /// Expects boot/main.wasm to exist (run 'ww build' first).
     Push {
@@ -272,8 +271,9 @@ enum Commands {
 
     /// Manage wetware namespaces.
     ///
-    /// Namespaces map names (like `ww`) to IPFS UnixFS trees that are mounted
-    /// as FHS layers at boot. The standard library ships as the `ww` namespace.
+    /// Namespaces map names (like `ww`) to IPFS directory trees that are
+    /// mounted as FHS layers at boot. The standard library ships as the
+    /// `ww` namespace.
     Ns {
         #[command(subcommand)]
         action: NsAction,
@@ -667,7 +667,6 @@ fn main() {{
     capnpc::CompilerCommand::new()
         .src_prefix(&capnp_dir)
         .file(capnp_dir.join("system.capnp"))
-        .file(capnp_dir.join("ipfs.capnp"))
         .file(capnp_dir.join("routing.capnp"))
         .file(capnp_dir.join("stem.capnp"))
         .file(capnp_dir.join("http.capnp"))
@@ -698,7 +697,7 @@ fn main() {{
     schema_id::write_schema_bytes(&out_dir.join("{name}_schema.bin"), &schemas[0])
         .expect("write schema bytes");
 
-    for schema in &["system", "ipfs", "routing", "stem", "http"] {{
+    for schema in &["system", "routing", "stem", "http"] {{
         println!(
             "cargo:rerun-if-changed={{}}",
             capnp_dir.join(format!("{{schema}}.capnp")).display()
@@ -747,11 +746,6 @@ mod system_capnp {{
 #[allow(dead_code)]
 mod stem_capnp {{
     include!(concat!(env!("OUT_DIR"), "/stem_capnp.rs"));
-}}
-
-#[allow(dead_code)]
-mod ipfs_capnp {{
-    include!(concat!(env!("OUT_DIR"), "/ipfs_capnp.rs"));
 }}
 
 #[allow(dead_code)]
@@ -1369,12 +1363,10 @@ wasip2::cli::command::export!({iface_name}Guest);
         // Embedded second as fallback for pre-built binary distribution.
         // IPFS last for content-addressed network resolution.
         let ipfs_client = ipfs::HttpClient::new(ipfs_url);
-        let content_store: std::sync::Arc<dyn ipfs::ContentStore> =
-            std::sync::Arc::new(ipfs_client.clone());
         let loader = ChainLoader::new(vec![
             Box::new(HostPathLoader),
             Box::new(embedded_loader()),
-            Box::new(IpfsUnixfsLoader::new(ipfs_client.clone())),
+            Box::new(IpfsLoader::new(ipfs_client.clone())),
         ]);
 
         // If --stem is provided, read the on-chain head and prepend it
@@ -1461,7 +1453,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         tracing::debug!("mounts applied");
 
         // Publish the merged image to IPFS so guests can resolve content via
-        // the UnixFS capability.  $WW_ROOT is set to /ipfs/<cid>.
+        // the WASI virtual filesystem.  $WW_ROOT is set to /ipfs/<cid>.
         tracing::debug!("publishing image to IPFS...");
         let root_cid = ipfs_client.add_dir(merged.path()).await?;
         let image_path = format!("/ipfs/{}", root_cid);
@@ -1654,7 +1646,6 @@ wasip2::cli::command::export!({iface_name}Guest);
             .with_swarm_cmd_tx(swarm_cmd_tx.clone())
             .with_wasm_debug(wasm_debug)
             .with_image_root(merged.path().into())
-            .with_content_store(content_store.clone())
             .with_signing_key(signing_key.clone())
             .with_cache_policy(cache_policy)
             .with_wasmtime_engine(executor_pool.engine())
@@ -1711,7 +1702,7 @@ wasip2::cli::command::export!({iface_name}Guest);
             let mcp_loader = ChainLoader::new(vec![
                 Box::new(HostPathLoader),
                 Box::new(embedded_loader()),
-                Box::new(IpfsUnixfsLoader::new(ipfs_client.clone())),
+                Box::new(IpfsLoader::new(ipfs_client.clone())),
             ]);
             let mcp_cell = CellBuilder::new(mcp_image)
                 .with_loader(Box::new(mcp_loader))
@@ -1719,7 +1710,6 @@ wasip2::cli::command::export!({iface_name}Guest);
                 .with_swarm_cmd_tx(swarm_cmd_tx)
                 .with_wasm_debug(wasm_debug)
                 .with_image_root(merged.path().into())
-                .with_content_store(content_store)
                 .with_signing_key(signing_key)
                 .with_cache_policy(cache_policy)
                 .with_wasmtime_engine(executor_pool.engine())
