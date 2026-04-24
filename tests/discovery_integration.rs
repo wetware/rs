@@ -85,7 +85,7 @@ async fn spawn_greeter_on_pool(
                 let process = spawn_resp.get().unwrap().get_process().unwrap();
 
                 let bootstrap_resp = tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
+                    std::time::Duration::from_secs(60),
                     process.bootstrap_request().send().promise,
                 )
                 .await;
@@ -158,9 +158,12 @@ async fn test_discovery_cell_greet() {
             let greeter = spawn_greeter_on_pool(&pool, wasm).await;
 
             // Call greet() and verify the response.
+            // Generous timeout: debug-mode wasmtime compilation of the
+            // discovery component can take 5–10s and may run alongside
+            // other integration tests (cargo test runs in parallel).
             let mut req = greeter.greet_request();
             req.get().set_name("integration-test");
-            let resp = tokio::time::timeout(std::time::Duration::from_secs(10), req.send().promise)
+            let resp = tokio::time::timeout(std::time::Duration::from_secs(60), req.send().promise)
                 .await
                 .expect("greet timed out")
                 .expect("greet RPC failed");
@@ -208,11 +211,14 @@ async fn test_discovery_cell_greet_multiple() {
             let greeter = spawn_greeter_on_pool(&pool, wasm).await;
 
             // Multiple calls on the same cell should all succeed.
+            // First call covers wasmtime compilation (can take 5–10s in debug
+            // builds, longer under cargo's parallel test load); subsequent
+            // calls should be fast but share the same budget.
             for name in &["Alice", "Bob", "Charlie"] {
                 let mut req = greeter.greet_request();
                 req.get().set_name(name);
                 let resp =
-                    tokio::time::timeout(std::time::Duration::from_secs(10), req.send().promise)
+                    tokio::time::timeout(std::time::Duration::from_secs(60), req.send().promise)
                         .await
                         .expect("greet timed out")
                         .expect("greet RPC failed");
