@@ -1447,17 +1447,34 @@ wasip2::cli::command::export!({iface_name}Guest);
         // User mounts are highest priority — they override everything.
         all_mounts.extend(mounts);
 
-        // Apply all mounts into a single FHS root.
-        tracing::debug!("applying mounts...");
-        let merged = image::apply_mounts(&all_mounts, &ipfs_client).await?;
-        tracing::debug!("mounts applied");
-
-        // Publish the merged image to IPFS so guests can resolve content via
-        // the WASI virtual filesystem.  $WW_ROOT is set to /ipfs/<cid>.
-        tracing::debug!("publishing image to IPFS...");
-        let root_cid = ipfs_client.add_dir(merged.path()).await?;
+        // Resolve mounts into a merged root CID + local overrides. No
+        // tempdir materialization — guest filesystem reads are lazy via
+        // CidTree, backed by the IPFS DAG.
+        tracing::debug!("resolving mounts (virtual)...");
+        let (root_cid, local_overrides) =
+            image::resolve_mounts_virtual(&all_mounts, &ipfs_client).await?;
         let image_path = format!("/ipfs/{}", root_cid);
-        tracing::debug!(root = %image_path, "image published");
+        tracing::debug!(root = %image_path, "virtual root resolved");
+
+        // Staging dir for CidTree (holds materialized file content and
+        // dir-listing stubs). Unique per node boot so concurrent nodes
+        // don't collide.
+        let staging_dir = std::env::temp_dir().join(format!("ww-staging-{}", std::process::id()));
+        std::fs::create_dir_all(&staging_dir)
+            .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
+        let cid_tree = std::sync::Arc::new(ww::vfs::CidTree::new(
+            root_cid.clone(),
+            ipfs_client.clone(),
+            local_overrides,
+            staging_dir,
+        ));
+
+        // Host-wide IPFS pin/content cache. CidTree uses this to materialize
+        // CID-backed file content on demand. 128 MiB budget for pinned entries.
+        let pinset_cache = std::sync::Arc::new(
+            cache::PinsetCache::new(std::sync::Arc::new(ipfs_client.clone()), 128 * 1024 * 1024)
+                .context("failed to create PinsetCache")?,
+        );
 
         // Resolve identity from the explicit path (never from the merged FHS tree).
         // The identity file is kept out of the merged tree so guests can't read it.
@@ -1645,7 +1662,8 @@ wasip2::cli::command::export!({iface_name}Guest);
             .with_network_state(network_state.clone())
             .with_swarm_cmd_tx(swarm_cmd_tx.clone())
             .with_wasm_debug(wasm_debug)
-            .with_image_root(merged.path().into())
+            .with_cid_tree(cid_tree.clone())
+            .with_pinset_cache(pinset_cache.clone())
             .with_signing_key(signing_key.clone())
             .with_cache_policy(cache_policy)
             .with_wasmtime_engine(executor_pool.engine())
@@ -1709,7 +1727,8 @@ wasip2::cli::command::export!({iface_name}Guest);
                 .with_network_state(network_state)
                 .with_swarm_cmd_tx(swarm_cmd_tx)
                 .with_wasm_debug(wasm_debug)
-                .with_image_root(merged.path().into())
+                .with_cid_tree(cid_tree.clone())
+                .with_pinset_cache(pinset_cache.clone())
                 .with_signing_key(signing_key)
                 .with_cache_policy(cache_policy)
                 .with_wasmtime_engine(executor_pool.engine())
@@ -1792,11 +1811,12 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         supervisor.shutdown();
 
-        // Hold `merged` alive until after guest exits.
-        // ExecutorPool must also be dropped after the kernel exits but
-        // before process exit, to join worker threads cleanly.
+        // Hold the CidTree alive until after guest exits (its staging dir
+        // backs open file descriptors). ExecutorPool must also be dropped
+        // after the kernel exits but before process exit, to join worker
+        // threads cleanly.
         drop(executor_pool);
-        drop(merged);
+        drop(cid_tree);
         std::process::exit(exit_code);
     }
 
