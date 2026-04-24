@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Install script `TMPDIR` collision:** `scripts/install.sh` shadowed the macOS system `TMPDIR` env var. If the script exited early (e.g. IPNS timeout), the cleanup trap ran `rm -rf` against the user's system temp directory (`/var/folders/.../T/`). Renamed to `WW_TMPDIR`.
 - `ww perform install` now symlinks the binary to `~/.ww/bin/ww`. Previously the directory was created empty, leaving `ww` off the user's PATH.
 - `ww perform install` now writes a default `50-shell.glia` init script to `~/.ww/etc/init.d/`. Previously no init scripts were installed, so the daemon had nothing to boot.
+- `tests/discovery_integration.rs`: raised capnp-rpc timeouts from 10s to 60s so the two integration tests survive `cargo test`'s default parallel execution. Each test builds its own wasmtime Engine and triggers a fresh cranelift compile of the discovery component; under concurrent load the compile exceeded the old budget and `greet()` timed out before the cell served.
 
 ### Breaking
 - Release tree layout changed. Users on old binaries must reinstall: `ww perform uninstall -y` then re-run the install script.
