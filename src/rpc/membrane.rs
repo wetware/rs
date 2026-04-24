@@ -805,7 +805,7 @@ mod tests {
             _ => panic!("expected interface node, got a non-interface variant"),
         };
         let methods = interface.get_methods().expect("methods list");
-        assert!(methods.len() > 0, "host interface should have methods");
+        assert!(!methods.is_empty(), "host interface should have methods");
         // Sanity: each method has a non-empty name reachable from the
         // round-tripped schema. This is the property MCP tool generation
         // depends on.
