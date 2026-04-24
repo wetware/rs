@@ -357,11 +357,9 @@ mod tests {
         }
 
         // 6. Ghost list caps
-        let p_frac = if cache.budget > 0 {
-            cache.p * cache.ghost_capacity / cache.budget
-        } else {
-            0
-        };
+        let p_frac = (cache.p * cache.ghost_capacity)
+            .checked_div(cache.budget)
+            .unwrap_or(0);
         let b1_cap = cache.ghost_capacity.saturating_sub(p_frac).max(1);
         let b2_cap = p_frac.max(1);
         assert!(
