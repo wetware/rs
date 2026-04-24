@@ -1,40 +1,15 @@
-//! IPFS client API for interacting with IPFS nodes
+//! IPFS client API for interacting with IPFS nodes.
 //!
-//! This module provides a clean interface for IPFS operations, similar to Go's
-//! CoreAPI from github.com/ipfs/kubo/core/coreapi.
-//!
-//! Currently implements only the methods needed for file retrieval operations.
+//! Provides a thin HTTP wrapper around Kubo's `/api/v0/*` endpoints. This is
+//! an internal helper — guests do not receive an IPFS capability. Content
+//! is served to guests through the WASI virtual filesystem (`CidTree`).
 
-use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-/// Core content-addressed storage operations used by the epoch-guarded IPFS capability.
-///
-/// This trait abstracts the three UnixFS operations that the Cap'n Proto RPC layer
-/// delegates to: reading files (`cat`), listing directories (`ls`), and adding data (`add`).
-/// `HttpClient` implements this against a live Kubo node; `MemoryStore` provides an
-/// in-memory test double.
-#[async_trait]
-pub trait ContentStore: Send + Sync {
-    /// Retrieve file content by IPFS path (equivalent to `ipfs cat`).
-    async fn cat(&self, path: &str) -> Result<Vec<u8>>;
-
-    /// List directory entries at an IPFS path (equivalent to `ipfs ls`).
-    async fn ls(&self, path: &str) -> Result<Vec<LsEntry>>;
-
-    /// Add raw bytes and return the CID (equivalent to `ipfs add`).
-    async fn add(&self, data: &[u8]) -> Result<String>;
-}
-
-/// IPFS client for interacting with an IPFS node via HTTP API
-///
-///
-/// Similar to Go's CoreAPI, this provides access to various IPFS APIs
-/// through sub-APIs like Unixfs, Block, etc.
+/// HTTP client for talking to a Kubo node's `/api/v0/*` endpoints.
 #[derive(Clone)]
 pub struct HttpClient {
     pub(crate) http_client: reqwest::Client,
@@ -42,11 +17,7 @@ pub struct HttpClient {
 }
 
 impl HttpClient {
-    /// Create a new IPFS client with the given HTTP API endpoint URL
-    ///
-    /// # Arguments
-    ///
-    /// * `ipfs_url` - The base URL of the IPFS HTTP API (e.g., "http://localhost:5001")
+    /// Create a new IPFS client with the given HTTP API endpoint URL.
     pub fn new(ipfs_url: String) -> Self {
         Self {
             http_client: reqwest::Client::new(),
@@ -54,17 +25,88 @@ impl HttpClient {
         }
     }
 
-    /// Get the Unixfs API for file operations
+    /// Fetch file content from an IPFS path (calls `/api/v0/cat`).
     ///
-    /// Unixfs is the filesystem abstraction layer for IPFS, providing
-    /// operations for reading and writing files and directories.
-    pub fn unixfs(self) -> UnixFS {
-        UnixFS { client: self }
+    /// Accepts IPFS-family paths: `/ipfs/<cid>`, `/ipns/...`, `/ipld/...`.
+    pub async fn cat(&self, path: &str) -> Result<Vec<u8>> {
+        let url = format!("{}/api/v0/cat?arg={}", self.base_url, path);
+        let response = self
+            .http_client
+            .post(&url)
+            .send()
+            .await
+            .with_context(|| format!("Failed to connect to IPFS node at {}", self.base_url))?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to retrieve file from IPFS: {} (path: {})",
+                response.status(),
+                path
+            ));
+        }
+
+        response
+            .bytes()
+            .await
+            .with_context(|| format!("Failed to read IPFS content from {path}"))
+            .map(|b| b.to_vec())
     }
 
-    /// Get a borrowing reference to the Unixfs API.
-    pub fn unixfs_ref(&self) -> UnixFSRef<'_> {
-        UnixFSRef { client: self }
+    /// Fetch an IPFS directory and extract it to a local path.
+    ///
+    /// Uses kubo's `/api/v0/get?arg=<path>&archive=true` which returns the
+    /// directory contents as a TAR archive. The top-level CID directory in
+    /// the TAR is stripped so files land directly under `dst`.
+    pub async fn get_dir(&self, ipfs_path: &str, dst: &Path) -> Result<()> {
+        let url = format!(
+            "{}/api/v0/get?arg={}&archive=true",
+            self.base_url, ipfs_path
+        );
+        let response =
+            self.http_client.post(&url).send().await.with_context(|| {
+                format!("Failed to fetch IPFS directory from {}", self.base_url)
+            })?;
+
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "Failed to fetch IPFS directory: {} (path: {})",
+                response.status(),
+                ipfs_path
+            );
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .with_context(|| format!("Failed to read IPFS archive from {ipfs_path}"))?;
+
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive = tar::Archive::new(cursor);
+
+        // Kubo wraps the directory in a top-level entry named after the CID.
+        // Strip that prefix so files land directly under dst.
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?.into_owned();
+
+            let stripped: std::path::PathBuf = path.components().skip(1).collect();
+            if stripped.as_os_str().is_empty() {
+                continue;
+            }
+
+            let target = dst.join(&stripped);
+            if entry.header().entry_type().is_dir() {
+                std::fs::create_dir_all(&target)?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut file = std::fs::File::create(&target)?;
+                std::io::copy(&mut entry, &mut file)?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Resolve an IPNS name to a CID path.
@@ -183,169 +225,6 @@ impl HttpClient {
             .as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow::anyhow!("key gen response missing Id field"))
-    }
-}
-
-/// Unixfs API for file and directory operations
-///
-/// Provides methods for interacting with IPFS files and directories,
-/// similar to Go's UnixfsAPI.
-pub struct UnixFS {
-    pub(crate) client: HttpClient,
-}
-
-impl UnixFS {
-    /// Get file content from an IPFS path
-    ///
-    /// This is equivalent to the `/api/v0/cat` endpoint and Go's UnixfsAPI.Get.
-    /// It reads the content of a file from IPFS, IPNS, or IPLD paths.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - An IPFS path (e.g., "/ipfs/QmHash...", "/ipns/...", "/ipld/...")
-    ///
-    /// # Returns
-    ///
-    /// Returns the file content as bytes, or an error if the file cannot be retrieved.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use ww::ipfs::HttpClient;
-    ///
-    /// # async fn example() -> anyhow::Result<()> {
-    /// let client = HttpClient::new("http://localhost:5001".to_string());
-    /// let content = client.unixfs().get("/ipfs/QmHash...").await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn get(&self, path: &str) -> Result<Vec<u8>> {
-        let url = format!("{}/api/v0/cat?arg={}", self.client.base_url, path);
-        let response = self
-            .client
-            .http_client
-            .post(&url)
-            .send()
-            .await
-            .with_context(|| {
-                format!("Failed to connect to IPFS node at {}", self.client.base_url)
-            })?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "Failed to retrieve file from IPFS: {} (path: {})",
-                response.status(),
-                path
-            ));
-        }
-
-        response
-            .bytes()
-            .await
-            .with_context(|| format!("Failed to read IPFS content from {path}"))
-            .map(|b| b.to_vec())
-    }
-}
-
-/// Borrowing reference to the Unixfs API.
-pub struct UnixFSRef<'a> {
-    client: &'a HttpClient,
-}
-
-impl UnixFSRef<'_> {
-    /// Get file content from an IPFS path (borrowing version of `UnixFS::get`).
-    pub async fn get_bytes(&self, cid: &cid::Cid) -> Result<Vec<u8>> {
-        let path = format!("/ipfs/{cid}");
-        let url = format!("{}/api/v0/cat?arg={}", self.client.base_url, path);
-        let response = self
-            .client
-            .http_client
-            .post(&url)
-            .send()
-            .await
-            .with_context(|| {
-                format!("Failed to connect to IPFS node at {}", self.client.base_url)
-            })?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "Failed to retrieve file from IPFS: {} (cid: {})",
-                response.status(),
-                cid
-            ));
-        }
-
-        response
-            .bytes()
-            .await
-            .with_context(|| format!("Failed to read IPFS content for {cid}"))
-            .map(|b| b.to_vec())
-    }
-
-    /// Fetch an IPFS directory and extract it to a local path.
-    ///
-    /// Uses kubo's `/api/v0/get?arg=<path>&archive=true` which returns
-    /// the directory contents as a TAR archive. The top-level CID
-    /// directory in the TAR is stripped so files land directly under `dst`.
-    pub async fn get_dir(&self, ipfs_path: &str, dst: &Path) -> Result<()> {
-        let url = format!(
-            "{}/api/v0/get?arg={}&archive=true",
-            self.client.base_url, ipfs_path
-        );
-        let response = self
-            .client
-            .http_client
-            .post(&url)
-            .send()
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to fetch IPFS directory from {}",
-                    self.client.base_url
-                )
-            })?;
-
-        if !response.status().is_success() {
-            anyhow::bail!(
-                "Failed to fetch IPFS directory: {} (path: {})",
-                response.status(),
-                ipfs_path
-            );
-        }
-
-        let bytes = response
-            .bytes()
-            .await
-            .with_context(|| format!("Failed to read IPFS archive from {ipfs_path}"))?;
-
-        let cursor = std::io::Cursor::new(bytes);
-        let mut archive = tar::Archive::new(cursor);
-
-        // Kubo wraps the directory in a top-level entry named after the CID.
-        // Strip that prefix so files land directly under dst.
-        for entry in archive.entries()? {
-            let mut entry = entry?;
-            let path = entry.path()?.into_owned();
-
-            // Strip the first component (the CID directory).
-            let stripped: std::path::PathBuf = path.components().skip(1).collect();
-            if stripped.as_os_str().is_empty() {
-                continue; // skip the root CID entry itself
-            }
-
-            let target = dst.join(&stripped);
-            if entry.header().entry_type().is_dir() {
-                std::fs::create_dir_all(&target)?;
-            } else {
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let mut file = std::fs::File::create(&target)?;
-                std::io::copy(&mut entry, &mut file)?;
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -629,8 +508,7 @@ impl HttpClient {
 
     /// Add raw bytes to IPFS, returning the CID.
     ///
-    /// Calls Kubo's `POST /api/v0/add`.  This is a UnixFS operation, not
-    /// a routing operation — it belongs alongside `cat` and `ls`.
+    /// Calls Kubo's `POST /api/v0/add`.
     pub async fn add_bytes(&self, data: &[u8]) -> Result<String> {
         let url = format!("{}/api/v0/add", self.base_url);
         let part = reqwest::multipart::Part::bytes(data.to_vec()).file_name("data");
@@ -733,47 +611,12 @@ impl cache::Pinner for HttpClient {
     }
 
     async fn fetch(&self, cid: &cid::Cid) -> Result<Vec<u8>> {
-        self.unixfs_ref().get_bytes(cid).await
+        self.cat(&format!("/ipfs/{cid}")).await
     }
 
     async fn size(&self, cid: &cid::Cid) -> Result<u64> {
         let entries = self.ls(&format!("/ipfs/{cid}")).await?;
         Ok(entries.iter().map(|e| e.size).sum())
-    }
-}
-
-#[async_trait]
-impl ContentStore for HttpClient {
-    async fn cat(&self, path: &str) -> Result<Vec<u8>> {
-        let url = format!("{}/api/v0/cat?arg={}", self.base_url, path);
-        let response = self
-            .http_client
-            .post(&url)
-            .send()
-            .await
-            .with_context(|| format!("Failed to connect to IPFS node at {}", self.base_url))?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "Failed to retrieve file from IPFS: {} (path: {})",
-                response.status(),
-                path
-            ));
-        }
-
-        response
-            .bytes()
-            .await
-            .with_context(|| format!("Failed to read IPFS content from {path}"))
-            .map(|b| b.to_vec())
-    }
-
-    async fn ls(&self, path: &str) -> Result<Vec<LsEntry>> {
-        HttpClient::ls(self, path).await
-    }
-
-    async fn add(&self, data: &[u8]) -> Result<String> {
-        self.add_bytes(data).await
     }
 }
 
@@ -948,76 +791,5 @@ impl MFS<'_> {
             anyhow::bail!("MFS rm failed for {path}: {body}");
         }
         Ok(())
-    }
-}
-
-// ── MemoryStore — in-memory ContentStore for testing ───────────────
-
-/// In-memory [`ContentStore`] for testing the Cap'n Proto IPFS chain without Kubo.
-///
-/// `add` stores data keyed by a deterministic blake3 hash prefixed with `"/ipfs/"`.
-/// `cat` and `ls` look up entries in the same map. Directory listing treats
-/// stored paths with a matching prefix as children.
-#[derive(Clone, Default)]
-pub struct MemoryStore {
-    files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
-}
-
-impl MemoryStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Pre-seed the store with content at a given path.
-    pub fn insert(&self, path: impl Into<String>, data: Vec<u8>) {
-        self.files.lock().unwrap().insert(path.into(), data);
-    }
-}
-
-#[async_trait]
-impl ContentStore for MemoryStore {
-    async fn cat(&self, path: &str) -> Result<Vec<u8>> {
-        self.files
-            .lock()
-            .unwrap()
-            .get(path)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("MemoryStore: not found: {path}"))
-    }
-
-    async fn ls(&self, path: &str) -> Result<Vec<LsEntry>> {
-        let prefix = if path.ends_with('/') {
-            path.to_string()
-        } else {
-            format!("{path}/")
-        };
-        let files = self.files.lock().unwrap();
-        let entries = files
-            .keys()
-            .filter_map(|k| {
-                let rest = k.strip_prefix(&prefix)?;
-                // Only direct children (no further '/')
-                if rest.contains('/') {
-                    return None;
-                }
-                Some(LsEntry {
-                    name: rest.to_string(),
-                    hash: String::new(),
-                    size: files.get(k).map_or(0, |v| v.len() as u64),
-                    entry_type: 2, // file
-                })
-            })
-            .collect();
-        Ok(entries)
-    }
-
-    async fn add(&self, data: &[u8]) -> Result<String> {
-        let hash = blake3::hash(data);
-        let cid = format!("/ipfs/{}", hash.to_hex());
-        self.files
-            .lock()
-            .unwrap()
-            .insert(cid.clone(), data.to_vec());
-        Ok(cid)
     }
 }

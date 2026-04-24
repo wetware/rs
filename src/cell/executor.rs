@@ -69,7 +69,6 @@ pub struct CellBuilder {
     image_root: Option<PathBuf>,
     cid_tree: Option<Arc<crate::vfs::CidTree>>,
     initial_epoch: Option<Epoch>,
-    content_store: Option<Arc<dyn crate::ipfs::ContentStore>>,
     epoch_rx: Option<watch::Receiver<Epoch>>,
     signing_key: Option<Arc<SigningKey>>,
     route_registry: Option<crate::dispatcher::server::RouteRegistry>,
@@ -97,7 +96,6 @@ impl CellBuilder {
             image_root: None,
             cid_tree: None,
             initial_epoch: None,
-            content_store: None,
             epoch_rx: None,
             signing_key: None,
             route_registry: None,
@@ -201,12 +199,6 @@ impl CellBuilder {
         self
     }
 
-    /// Set the content store for the IPFS CoreAPI capability.
-    pub fn with_content_store(mut self, store: Arc<dyn crate::ipfs::ContentStore>) -> Self {
-        self.content_store = Some(store);
-        self
-    }
-
     /// Set the Ed25519 signing key for the node identity.
     ///
     /// When set:
@@ -264,9 +256,6 @@ impl CellBuilder {
             image_root: self.image_root,
             cid_tree: self.cid_tree,
             initial_epoch: self.initial_epoch,
-            content_store: self.content_store.unwrap_or_else(|| {
-                Arc::new(crate::ipfs::HttpClient::new("http://localhost:5001".into()))
-            }),
             epoch_rx: self.epoch_rx,
             signing_key: self.signing_key,
             route_registry: self.route_registry,
@@ -300,7 +289,6 @@ pub struct Cell {
     pub image_root: Option<PathBuf>,
     pub cid_tree: Option<Arc<crate::vfs::CidTree>>,
     pub initial_epoch: Option<Epoch>,
-    pub content_store: Arc<dyn crate::ipfs::ContentStore>,
     pub epoch_rx: Option<watch::Receiver<Epoch>>,
     pub signing_key: Option<Arc<SigningKey>>,
     pub route_registry: Option<crate::dispatcher::server::RouteRegistry>,
@@ -362,7 +350,6 @@ impl Cell {
             image_root,
             cid_tree,
             initial_epoch: _,
-            content_store: _,
             epoch_rx: _,
             signing_key: _,
             route_registry: _,

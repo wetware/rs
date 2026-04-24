@@ -1,13 +1,13 @@
 //! Membrane-based RPC bootstrap: epoch-scoped Host + Executor + node identity capabilities.
 //!
 //! Instead of bootstrapping a bare `Host`, the membrane's `graft()` returns
-//! epoch-scoped `Host`, `Executor`, `IPFS Client`, and a node `identity` signer
-//! directly as result fields. All capabilities fail with `staleEpoch` when the
-//! epoch advances.
+//! epoch-scoped `Host`, `Executor`, and a node `identity` signer directly as
+//! result fields. All capabilities fail with `staleEpoch` when the epoch
+//! advances.
 //!
 //! The `membrane` crate owns the Membrane server and epoch machinery.
 //! This module provides the `GraftBuilder` impl that injects wetware-specific
-//! capabilities into the graft response, plus the epoch-guarded IPFS and identity wrappers.
+//! capabilities into the graft response, plus the epoch-guarded identity wrapper.
 
 use std::sync::Arc;
 
@@ -320,8 +320,7 @@ impl GraftBuilder for HostGraftBuilder {
     }
 }
 
-// IPFS capability (EpochGuardedIpfsClient, EpochGuardedUnixFS) removed.
-// All IPFS content access now goes through the WASI virtual filesystem (CidTree).
+// IPFS content access goes through the WASI virtual filesystem (CidTree).
 // See src/vfs.rs and src/fs_intercept.rs.
 
 // ---------------------------------------------------------------------------
@@ -338,7 +337,7 @@ pub type GuestMembrane = membrane::stem_capnp::membrane::Client;
 /// Build an RPC system that bootstraps a `Membrane` instead of a bare `Host`.
 ///
 /// The membrane provides epoch-scoped sessions containing `Host`, `Executor`,
-/// `IPFS Client`, and (when `signing_key` is `Some`) a host-side node identity signer.
+/// and (when `signing_key` is `Some`) a host-side node identity signer.
 ///
 /// When `signing_key` is `Some`, an [`EpochGuardedIdentity`] hub is injected into
 /// every session so the kernel can request domain-scoped signers without holding
@@ -400,8 +399,7 @@ where
     (rpc_system, guest_membrane)
 }
 
-// Tests for the removed IPFS capability (EpochGuardedUnixFS) have been deleted.
-// IPFS content access now goes through WASI virtual FS — tested in fs_intercept::tests and vfs::tests.
+// IPFS content access is tested in fs_intercept::tests and vfs::tests.
 
 #[cfg(test)]
 mod tests {

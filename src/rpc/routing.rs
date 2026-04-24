@@ -5,7 +5,7 @@
 //! All methods check the epoch guard before proceeding.
 //!
 //! Only content routing (provide/findProviders) lives here.
-//! Data transfer (add/cat) is on the IPFS UnixFS capability.
+//! Data transfer flows through the WASI virtual filesystem, not a capability.
 
 use blake3;
 use capnp::capability::Promise;

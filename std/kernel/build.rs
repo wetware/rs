@@ -19,7 +19,6 @@ fn main() {
         // emits `crate::schema_capnp::node` instead of `::capnp::schema_capnp::node`.
         .crate_provides("capnp", [0xa93fc509624c72d9])
         .file(capnp_dir.join("system.capnp"))
-        .file(capnp_dir.join("ipfs.capnp"))
         .file(capnp_dir.join("routing.capnp"))
         .file(capnp_dir.join("stem.capnp"))
         .file(capnp_dir.join("http.capnp"))
@@ -34,7 +33,6 @@ fn main() {
             ("HOST", 0x9ea7_0c8c_9aef_b70c),
             ("RUNTIME", 0x8738_4748_df10_173c),
             ("EXECUTOR", 0xbfa3_7c1e_99b4_a492),
-            ("IPFS", 0xd74f_0585_ce16_3b98),
             ("ROUTING", 0xc033_44a7_b0a3_17be),
             ("STREAM_LISTENER", 0xb216_08b1_a223_181b),
             ("STREAM_DIALER", 0xa7c3_62e6_7f22_5afa),
@@ -52,10 +50,6 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         capnp_dir.join("system.capnp").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        capnp_dir.join("ipfs.capnp").display()
     );
     println!(
         "cargo:rerun-if-changed={}",

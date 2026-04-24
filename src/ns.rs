@@ -1,8 +1,8 @@
 //! Namespace resolution for the `etc/ns/` convention.
 //!
 //! Each file in `etc/ns/` defines a named namespace that maps to an IPFS
-//! UnixFS tree. On boot, these namespaces are resolved and mounted as FHS
-//! layers.
+//! directory tree. On boot, these namespaces are resolved and mounted as
+//! FHS layers.
 //!
 //! ## File format (`etc/ns/<name>`)
 //!

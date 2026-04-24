@@ -52,7 +52,7 @@ async fn ipfs_add_bytes(data: &[u8]) -> anyhow::Result<String> {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Round-trip: add bytes via the API, then retrieve them through `HttpClient::unixfs().get()`.
+/// Round-trip: add bytes via the API, then retrieve them through `HttpClient::cat()`.
 #[tokio::test]
 async fn test_add_and_cat_roundtrip() {
     if !ipfs_available().await {
@@ -64,16 +64,12 @@ async fn test_add_and_cat_roundtrip() {
     let cid = ipfs_add_bytes(payload).await.expect("ipfs add");
 
     let client = ww::ipfs::HttpClient::new(ipfs_api_url());
-    let fetched = client
-        .unixfs()
-        .get(&format!("/ipfs/{cid}"))
-        .await
-        .expect("ipfs cat");
+    let fetched = client.cat(&format!("/ipfs/{cid}")).await.expect("ipfs cat");
 
     assert_eq!(fetched, payload);
 }
 
-/// Round-trip: add bytes via `HttpClient::add_bytes()`, retrieve via `unixfs().get()`.
+/// Round-trip: add bytes via `HttpClient::add_bytes()`, retrieve via `cat()`.
 #[tokio::test]
 async fn test_add_bytes_and_cat_roundtrip() {
     if !ipfs_available().await {
@@ -87,11 +83,7 @@ async fn test_add_bytes_and_cat_roundtrip() {
     let cid = client.add_bytes(payload).await.expect("add_bytes");
     assert!(!cid.is_empty(), "CID should not be empty");
 
-    let fetched = client
-        .unixfs()
-        .get(&format!("/ipfs/{cid}"))
-        .await
-        .expect("ipfs cat");
+    let fetched = client.cat(&format!("/ipfs/{cid}")).await.expect("ipfs cat");
 
     assert_eq!(fetched, payload);
 }
@@ -116,7 +108,6 @@ async fn test_add_dir_and_get_dir_roundtrip() {
     // Retrieve into a fresh temp dir.
     let dst = TempDir::new().unwrap();
     client
-        .unixfs_ref()
         .get_dir(&format!("/ipfs/{root_cid}"), dst.path())
         .await
         .expect("get_dir");
