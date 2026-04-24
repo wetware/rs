@@ -29,5 +29,4 @@ Schema definitions live in `capnp/`:
 
 - **`system.capnp`** — Host, Runtime, Executor, Process, ByteStream, StreamListener, StreamDialer, VatListener, VatClient, HttpListener
 - **`stem.capnp`** — Terminal, Membrane, Epoch, Signer, Identity
-- **`ipfs.capnp`** — IPFS CoreAPI (UnixFS, Block, Pin, ...)
 - **`routing.capnp`** — Kademlia DHT (provide, findProviders, hash)

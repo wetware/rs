@@ -10,7 +10,6 @@ fn main() {
         // emits `crate::schema_capnp::node` instead of `::capnp::schema_capnp::node`.
         .crate_provides("capnp", [0xa93fc509624c72d9])
         .file(capnp_dir.join("system.capnp"))
-        .file(capnp_dir.join("ipfs.capnp"))
         .file(capnp_dir.join("routing.capnp"))
         .file(capnp_dir.join("stem.capnp"))
         .file(capnp_dir.join("cell.capnp"))
@@ -18,7 +17,7 @@ fn main() {
         .run()
         .expect("capnp compile schemas");
 
-    for schema in &["system", "ipfs", "routing", "stem", "cell", "http"] {
+    for schema in &["system", "routing", "stem", "cell", "http"] {
         println!(
             "cargo:rerun-if-changed={}",
             capnp_dir.join(format!("{schema}.capnp")).display()

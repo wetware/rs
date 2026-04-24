@@ -32,25 +32,24 @@ If they want to browse, show the menu:
 >    (`capnp/system.capnp`)
 > 3. **Membrane & auth** — Terminal, Membrane, Epoch, Identity
 >    (`capnp/stem.capnp`)
-> 4. **IPFS** — UnixFS, Block, Dag, Pin (`capnp/ipfs.capnp`)
-> 5. **Routing / DHT** — provide, findProviders
+> 4. **Routing / DHT** — provide, findProviders
 >    (`capnp/routing.capnp`, `doc/routing.md`)
-> 6. **CLI** — flags, subcommands, env vars (`doc/cli.md`)
-> 7. **Shell** — Glia REPL syntax, built-ins (`doc/shell.md`)
-> 8. **RPC transport** — duplex streams, scheduling (`doc/rpc-transport.md`)
-> 9. **schema-inject** — post-build cell type injection
+> 5. **CLI** — flags, subcommands, env vars (`doc/cli.md`)
+> 6. **Shell** — Glia REPL syntax, built-ins (`doc/shell.md`)
+> 7. **RPC transport** — duplex streams, scheduling (`doc/rpc-transport.md`)
+> 8. **schema-inject** — post-build cell type injection
 >    (`crates/schema-id/src/bin/schema-inject.rs`)
-> 10. **Effects** — `perform`, `with-effect-handler`,
->     `resume` (`crates/glia/src/effect.rs`)
-> 11. **Signing & keys** — Signer interface, key derivation
+> 9. **Effects** — `perform`, `with-effect-handler`,
+>    `resume` (`crates/glia/src/effect.rs`)
+> 10. **Signing & keys** — Signer interface, key derivation
 >     (`doc/keys.md`)
-> 12. **Cross-crate schemas** — sharing Cap'n Proto definitions
+> 11. **Cross-crate schemas** — sharing Cap'n Proto definitions
 >     across crates (`doc/capnp-cross-crate.md`)
-> 13. **Guest API** — WASI bindings for guest WASM modules
+> 12. **Guest API** — WASI bindings for guest WASM modules
 >     (`doc/api/wasm-guest.md`)
-> 14. **Guest runtime** — poll loop, effect dispatch, oneshot
+> 13. **Guest runtime** — poll loop, effect dispatch, oneshot
 >     channel, WASI integration (`doc/guest-runtime.md`)
-> 15. **Design docs** — deep dives on effects, macros, HTTP surface,
+> 14. **Design docs** — deep dives on effects, macros, HTTP surface,
 >     economic platform (`doc/designs/`)
 
 ## How to present reference material

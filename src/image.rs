@@ -7,7 +7,7 @@
 //! Mounts are applied left-to-right. Later mounts win on file
 //! conflicts. Directories merge. No deletes.
 //!
-//! When IPFS is available, root layers are merged at the UnixFS DAG
+//! When IPFS is available, root layers are merged at the IPFS DAG
 //! level via MFS — file blocks are never touched, only directory nodes
 //! get new CIDs. Falls back to copy-merge on MFS failure.
 
@@ -214,7 +214,7 @@ fn apply_local_layer(src: &Path, dst: &Path) -> Result<()> {
 /// Fetches the directory as a TAR archive via kubo `/api/v0/get`
 /// and extracts it, stripping the top-level CID directory.
 async fn apply_ipfs_layer(ipfs_path: &str, dst: &Path, client: &ipfs::HttpClient) -> Result<()> {
-    client.unixfs_ref().get_dir(ipfs_path, dst).await
+    client.get_dir(ipfs_path, dst).await
 }
 
 // ── DAG merge via IPFS MFS ─────────────────────────────────────────
@@ -276,7 +276,6 @@ async fn try_dag_merge(
 
     // Materialize: single TAR fetch of the merged tree.
     client
-        .unixfs_ref()
         .get_dir(&format!("/ipfs/{merged_cid}"), dst)
         .await
         .context("Failed to materialize merged CID")?;

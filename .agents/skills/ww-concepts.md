@@ -88,9 +88,9 @@ Present one row at a time, explain each, check in.
 | fork/exec | `runtime.load(wasm)` → `executor.spawn()` | Parent explicitly passes capabilities to child.  No inheritance of open fds, env vars, or fs access — you grant exactly what the child needs. |
 | file descriptor | Cap'n Proto client | Both are opaque handles.  But Unix fds live in a global namespace (paths) — any process can `open("/etc/passwd")`.  A capnp client is unforgeable and can only be obtained by explicit handoff. |
 | syscall table | Membrane → `graft()` | Both are the interface to kernel services.  But the syscall table is fixed and ambient — every process gets all of them.  `graft()` returns *only* the capabilities you were granted, and they can differ per Cell. |
-| `ioctl(fd, ...)` | method call on cap | Both operate on a handle.  But capnp calls are typed, async, and pipelined — not a bag-of-bytes command code.  `ipfs.unixfs().cat(path)` resolves in one round-trip via pipelining. |
-| filesystem | IPFS + `$WW_ROOT` | No local fs in the sandbox.  Content is loaded via IPFS capability: `ipfs.unixfs().cat("$WW_ROOT/bin/foo.wasm")`.  Content-addressed, not path-addressed. |
-| `open()` returns fd | `graft()` returns Session | `open()` grants access to anything the path resolves to.  `graft()` returns a Session with specific named capabilities: Host, Executor, IPFS, Routing, Identity — each of which can be null (withheld). |
+| `ioctl(fd, ...)` | method call on cap | Both operate on a handle.  But capnp calls are typed, async, and pipelined — not a bag-of-bytes command code.  `runtime.load(...).executor()` resolves in one round-trip via pipelining. |
+| filesystem | WASI VFS over IPFS + `$WW_ROOT` | No writable local fs in the sandbox.  Content is read through the WASI virtual filesystem — `open("$WW_ROOT/bin/foo.wasm")` transparently resolves `/ipfs/<cid>/...` paths.  Content-addressed, not capability-gated. |
+| `open()` returns fd | `graft()` returns Session | `open()` grants access to anything the path resolves to.  `graft()` returns a Session with specific named capabilities: Host, Executor, Routing, Identity — each of which can be null (withheld). |
 | signals | epoch lifecycle | Unix signals are fire-and-forget.  Epoch advances revoke *all* capabilities and force re-graft — the Cell picks up new state automatically.  It's like SIGHUP but for security policy. |
 | pipe | `ByteStream` (`capnp/system.capnp`) | Both connect two processes via read/write.  But ByteStream is a capability — it can be passed to third parties, attenuated, or revoked. |
 | `bind()`/`listen()` | `StreamListener.listen()` / `VatListener.listen()` | Unix: any process can bind any port.  Wetware: listening requires the StreamListener or VatListener capability, scoped to a specific protocol.  No ambient network access. |
@@ -132,7 +132,7 @@ Then show what capnp adds on top:
    child.  Same interface, fewer methods.
 3. **Async pipelining.**  Every fd `read()`/`write()` is a
    blocking round-trip.  Capnp lets you chain calls on promises:
-   `ipfs.unixfs().cat(path)` — one round-trip, not three.
+   `runtime.load(cid).executor().spawn()` — one round-trip, not three.
 4. **Network-transparent.**  A capnp client can point at a local
    object or a remote peer.  Same API, same types.  Passing an
    fd across machines requires bespoke plumbing.
@@ -274,9 +274,9 @@ is the object boundary.
 
 **Pipelining** is the key trick: instead of waiting for a result
 before making the next call, you can chain calls on *promises*.
-`ipfs.unixfs().cat(path)` resolves in a single round-trip, not
-three.  This lets you express ordering constraints declaratively
-rather than with locks.
+`runtime.load(cid).executor().spawn()` resolves in a single
+round-trip, not three.  This lets you express ordering constraints
+declaratively rather than with locks.
 
 If the user has blockchain background: "This is like how each
 smart contract serializes its own state transitions, but without

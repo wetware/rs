@@ -152,9 +152,11 @@ session-scoped capabilities:
 |------------|-----------|-------------|
 | Host | `system_capnp::host` | Node identity, network interfaces. |
 | Runtime | `system_capnp::runtime` | Load WASM binaries and obtain Executors. |
-| IPFS | `ipfs_capnp::client` | Content-addressed storage (add/cat/pin). |
 | Routing | `routing_capnp::routing` | DHT operations (provide/find_providers). |
 | Identity | `stem_capnp::identity` | Host-side signing (private key never leaves host). |
+
+IPFS content is not a capability; guests read `/ipfs/<cid>/...` through
+the WASI virtual filesystem.
 
 All capabilities are **epoch-guarded**: they become invalid when the
 host advances its epoch. Calls on stale capabilities return a

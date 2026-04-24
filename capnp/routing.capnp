@@ -1,7 +1,7 @@
 # Content routing capability backed by the in-process Kademlia client.
 #
 # Mirrors Go's coreiface.RoutingAPI (provide/findProviders only).
-# Data transfer (add/cat) lives on the IPFS UnixFS capability, not here.
+# Data transfer flows through the WASI virtual filesystem, not a capability.
 # DHT key-value store (putValue/getValue) is deferred.
 #
 # Epoch-scoped: the host wraps the implementation with an EpochGuard so all

@@ -7,7 +7,7 @@ Symmetric peer-to-peer context sharing for LLMs.
 - **Bidirectional capability exchange** -- both peers export a Mindshare to each other, not client-server
 - **Sub-capability attenuation** -- Mindshare returns separate ContextWriter and Prompt capabilities, each independently grantable and revocable
 - **Rate limiting as capability wrapper** -- token bucket intrinsic to the Prompt object, not an external policy check
-- **Content-addressed push** -- context pushed as UnixFS CIDs, resolved from the receiver's local content store
+- **Content-addressed push** -- context pushed as IPFS CIDs, resolved from the receiver's local content store
 - **Local LLM integration** -- HttpClient POST to Ollama/llama-server, no cloud APIs
 - **Schema-keyed DHT discovery** -- peers running Mindshare find each other automatically via schema CID
 
@@ -158,7 +158,7 @@ not from the init.d script.
 ;; Get their Mindshare capability
 (def bd (perform mindshare :open "12D3Koo..."))
 
-;; Push context — UnixFS paths are first-class
+;; Push context — IPFS paths are first-class
 (perform bd :push "/ipfs/QmNotes.../idea.md")
 (perform bd :push "/ipfs/QmData.../results.csv" {:tags ["experiment" "v2"]})
 
@@ -170,8 +170,8 @@ not from the init.d script.
 (perform bd :remaining)
 ;; => {:calls 8 :reset-in 3600}
 
-;; Read what they've pushed to you
-(perform ipfs :cat "/ipfs/QmCasey.../reply.md")
+;; Read what they've pushed to you via the virtual filesystem
+(slurp "/ipfs/QmCasey.../reply.md")
 ```
 
 ## Files

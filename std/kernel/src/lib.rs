@@ -23,11 +23,6 @@ mod stem_capnp {
     include!(concat!(env!("OUT_DIR"), "/stem_capnp.rs"));
 }
 
-#[allow(dead_code, clippy::match_single_binding)]
-mod ipfs_capnp {
-    include!(concat!(env!("OUT_DIR"), "/ipfs_capnp.rs"));
-}
-
 #[allow(dead_code)]
 mod routing_capnp {
     include!(concat!(env!("OUT_DIR"), "/routing_capnp.rs"));
@@ -1101,8 +1096,9 @@ fn wrap_with_handlers(form: &Val) -> Val {
     wrapped
 }
 
-/// Scan `$WW_ROOT/etc/init.d/*.glia` via IPFS UnixFS, parse and evaluate
-/// each file as a glia script. Returns true if any expression blocked
+/// Scan `$WW_ROOT/etc/init.d/*.glia` via the WASI virtual filesystem,
+/// parse and evaluate each file as a glia script. Returns true if any
+/// expression blocked
 /// (i.e. a foreground process ran to completion via `(runtime run ...)`).
 async fn run_initd(
     env: &mut Env,
@@ -1838,97 +1834,7 @@ mod tests {
     struct TestVatClient;
     impl system_capnp::vat_client::Server for TestVatClient {}
 
-    // --- Stub IPFS + Identity (unimplemented — not under test) ---
-
-    struct TestIpfs;
-
-    #[allow(refining_impl_trait)]
-    impl ipfs_capnp::client::Server for TestIpfs {
-        fn unixfs(
-            self: capnp::capability::Rc<Self>,
-            _p: ipfs_capnp::client::UnixfsParams,
-            _r: ipfs_capnp::client::UnixfsResults,
-        ) -> Promise<(), capnp::Error> {
-            Promise::err(capnp::Error::unimplemented("stub".into()))
-        }
-        fn block(
-            self: capnp::capability::Rc<Self>,
-            _p: ipfs_capnp::client::BlockParams,
-            _r: ipfs_capnp::client::BlockResults,
-        ) -> Promise<(), capnp::Error> {
-            Promise::err(capnp::Error::unimplemented("stub".into()))
-        }
-        fn dag(
-            self: capnp::capability::Rc<Self>,
-            _p: ipfs_capnp::client::DagParams,
-            _r: ipfs_capnp::client::DagResults,
-        ) -> Promise<(), capnp::Error> {
-            Promise::err(capnp::Error::unimplemented("stub".into()))
-        }
-        fn name(
-            self: capnp::capability::Rc<Self>,
-            _p: ipfs_capnp::client::NameParams,
-            _r: ipfs_capnp::client::NameResults,
-        ) -> Promise<(), capnp::Error> {
-            Promise::err(capnp::Error::unimplemented("stub".into()))
-        }
-        fn key(
-            self: capnp::capability::Rc<Self>,
-            _p: ipfs_capnp::client::KeyParams,
-            _r: ipfs_capnp::client::KeyResults,
-        ) -> Promise<(), capnp::Error> {
-            Promise::err(capnp::Error::unimplemented("stub".into()))
-        }
-        fn pin(
-            self: capnp::capability::Rc<Self>,
-            _p: ipfs_capnp::client::PinParams,
-            _r: ipfs_capnp::client::PinResults,
-        ) -> Promise<(), capnp::Error> {
-            Promise::err(capnp::Error::unimplemented("stub".into()))
-        }
-        fn object(
-            self: capnp::capability::Rc<Self>,
-            _p: ipfs_capnp::client::ObjectParams,
-            _r: ipfs_capnp::client::ObjectResults,
-        ) -> Promise<(), capnp::Error> {
-            Promise::err(capnp::Error::unimplemented("stub".into()))
-        }
-        fn swarm(
-            self: capnp::capability::Rc<Self>,
-            _p: ipfs_capnp::client::SwarmParams,
-            _r: ipfs_capnp::client::SwarmResults,
-        ) -> Promise<(), capnp::Error> {
-            Promise::err(capnp::Error::unimplemented("stub".into()))
-        }
-        fn pub_sub(
-            self: capnp::capability::Rc<Self>,
-            _p: ipfs_capnp::client::PubSubParams,
-            _r: ipfs_capnp::client::PubSubResults,
-        ) -> Promise<(), capnp::Error> {
-            Promise::err(capnp::Error::unimplemented("stub".into()))
-        }
-        fn routing(
-            self: capnp::capability::Rc<Self>,
-            _p: ipfs_capnp::client::RoutingParams,
-            _r: ipfs_capnp::client::RoutingResults,
-        ) -> Promise<(), capnp::Error> {
-            Promise::err(capnp::Error::unimplemented("stub".into()))
-        }
-        fn resolve_path(
-            self: capnp::capability::Rc<Self>,
-            _p: ipfs_capnp::client::ResolvePathParams,
-            _r: ipfs_capnp::client::ResolvePathResults,
-        ) -> Promise<(), capnp::Error> {
-            Promise::err(capnp::Error::unimplemented("stub".into()))
-        }
-        fn resolve_node(
-            self: capnp::capability::Rc<Self>,
-            _p: ipfs_capnp::client::ResolveNodeParams,
-            _r: ipfs_capnp::client::ResolveNodeResults,
-        ) -> Promise<(), capnp::Error> {
-            Promise::err(capnp::Error::unimplemented("stub".into()))
-        }
-    }
+    // --- Stub Identity (unimplemented — not under test) ---
 
     struct TestIdentity;
 

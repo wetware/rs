@@ -123,8 +123,8 @@ Snapshot a project's FHS tree and publish to IPFS.
 ww push [PATH] [OPTIONS]
 ```
 
-Adds the tree as a UnixFS directory and returns the CID. Optionally
-updates the on-chain Atom contract HEAD.
+Adds the tree to IPFS as a directory and returns the root CID.
+Optionally updates the on-chain Atom contract HEAD.
 
 | Flag | Default | Description |
 |------|---------|-------------|

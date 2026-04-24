@@ -1,6 +1,6 @@
 //! Loader implementations for resolving bytecode from various sources.
 //!
-//! This module provides loaders for IPFS (UnixFS), host filesystem paths,
+//! This module provides loaders for IPFS paths, host filesystem paths,
 //! embedded (compile-time) WASM blobs, and a chain loader that tries
 //! multiple loaders in sequence.
 
@@ -9,35 +9,29 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 
 use crate::cell::Loader;
-use crate::ipfs::{is_ipfs_path, UnixFS};
+use crate::ipfs::{is_ipfs_path, HttpClient};
 use std::path::Path;
 
-/// IPFS filesystem loader for IPFS-based bytecode resolution
+/// IPFS loader that resolves bytecode via Kubo's `/api/v0/cat`.
 ///
-/// Handles IPFS paths: `/ipfs/...`, `/ipns/...`, `/ipld/...`
-pub struct IpfsUnixfsLoader {
-    unixfs: UnixFS,
+/// Handles IPFS-family paths: `/ipfs/...`, `/ipns/...`, `/ipld/...`.
+pub struct IpfsLoader {
+    client: HttpClient,
 }
 
-impl IpfsUnixfsLoader {
-    /// Create a new IPFS filesystem loader with the given IPFS client
-    pub fn new(ipfs: crate::ipfs::HttpClient) -> Self {
-        Self {
-            unixfs: ipfs.unixfs(),
-        }
+impl IpfsLoader {
+    pub fn new(client: HttpClient) -> Self {
+        Self { client }
     }
 }
 
 #[async_trait]
-impl Loader for IpfsUnixfsLoader {
+impl Loader for IpfsLoader {
     async fn load(&self, path: &str) -> Result<Vec<u8>> {
-        // Only handle IPFS-family paths
         if !is_ipfs_path(path) {
             return Err(anyhow::anyhow!("Not an IPFS path: {path}"));
         }
-
-        // Download from IPFS using the Unixfs API
-        self.unixfs.get(path).await
+        self.client.cat(path).await
     }
 }
 

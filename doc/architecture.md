@@ -351,24 +351,13 @@ EpochGuard invalidation → stale capabilities fail → guest re-grafts
 The epoch channel is created before the guest spawns, so the pipeline
 runs concurrently with the guest via `CellBuilder::with_epoch_rx()`.
 
-## IPFS capability
+## IPFS access
 
-`Ipfs.Client` (`capnp/ipfs.capnp`) mirrors Go's CoreAPI. Currently
-implemented sub-APIs:
-
-- **UnixFS**: `cat(path) -> Data`, `ls(path) -> List(Entry)`,
-  `add(data) -> cid`
-
-The chess example uses `add()` to publish game replays as an IPLD-like
-linked list — one JSON node per move pair, each linking to the previous
-via CID (see `examples/chess/doc/replay.md`).
-
-Stub interfaces declared for future work: Block, Dag, Name, Key, Pin,
-Object, Swarm, PubSub, Routing.
-
-The host delegates to a local Kubo HTTP client (`http://localhost:5001`).
-Cap'n Proto pipelining allows `ipfs.unixfs().cat(path)` to
-resolve in a single round-trip.
+Guests do not receive an IPFS capability. Content-addressed reads flow
+through the WASI virtual filesystem (`CidTree` in `src/vfs.rs`): a guest
+opens `/ipfs/<cid>/...` just like any other path, and the host resolves
+blocks lazily through the local Kubo node (`http://localhost:5001`).
+See `src/fs_intercept.rs` for the WASI filesystem integration.
 
 ## State management
 
@@ -432,5 +421,4 @@ node and gets a capability-secured shell:
 - [cli.md](cli.md) — CLI flags and usage
 - [rpc-transport.md](rpc-transport.md) — transport plumbing, scheduling model, deadlock analysis
 - [../capnp/system.capnp](../capnp/system.capnp) — Host, Runtime, Executor, Process, ByteStream interfaces
-- [../capnp/ipfs.capnp](../capnp/ipfs.capnp) — IPFS Client capability schema
 - [../README.md](../README.md) — image layout, build instructions, usage
