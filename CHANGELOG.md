@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Daemon mounts `~/.ww/` as a single root layer instead of separate `kernel/` and `shell/` layers.
 
 ### Fixed
+- **`/oracle` (and any init.d-registered HTTP route) returned "no handler":** `ww run` materialized the image to a tempdir and preopened it at `/` in the guest, but wasi-libc's absolute-path lookup through a `/` preopen was unreliable, so the kernel's `std::fs::read_dir("/etc/init.d")` failed and init.d scripts never ran. `(perform host :listen oracle "/oracle")` was silently skipped. Fixed by wiring the `CidTree` virtual filesystem (`resolve_mounts_virtual` + shared `PinsetCache`) through `run_with_mounts` so content-addressed reads route through `fs_intercept` instead of tempdir preopens. Also prefer CidTree over `open_ipfs` for paths referencing the current root CID so directory CIDs aren't mistaken for leaf blobs.
 - **Install script `TMPDIR` collision:** `scripts/install.sh` shadowed the macOS system `TMPDIR` env var. If the script exited early (e.g. IPNS timeout), the cleanup trap ran `rm -rf` against the user's system temp directory (`/var/folders/.../T/`). Renamed to `WW_TMPDIR`.
 - `ww perform install` now symlinks the binary to `~/.ww/bin/ww`. Previously the directory was created empty, leaving `ww` off the user's PATH.
 - `ww perform install` now writes a default `50-shell.glia` init script to `~/.ww/etc/init.d/`. Previously no init scripts were installed, so the daemon had nothing to boot.
