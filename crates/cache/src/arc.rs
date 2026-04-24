@@ -257,11 +257,9 @@ impl<V> ArcInner<V> {
     /// ensuring that the list the algorithm is currently favoring retains
     /// more history for future adaptation decisions.
     fn prune_ghosts(&mut self) {
-        let p_frac = if self.budget > 0 {
-            self.p * self.ghost_capacity / self.budget
-        } else {
-            0
-        };
+        let p_frac = (self.p * self.ghost_capacity)
+            .checked_div(self.budget)
+            .unwrap_or(0);
 
         let b1_cap = self.ghost_capacity.saturating_sub(p_frac).max(1);
         let b2_cap = p_frac.max(1);
