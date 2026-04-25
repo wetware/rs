@@ -18,3 +18,7 @@ crate-type = ["rlib"]
 [build-dependencies]
 capnpc = "0.25.3"
 capnp = "0.25.3"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
