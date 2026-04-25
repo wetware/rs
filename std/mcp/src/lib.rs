@@ -26,7 +26,7 @@ use wasip2::exports::cli::run::Guest;
 
 // Shared effect handler factories from the caps crate.
 use caps::{
-    eval_load, get_graft_cap, make_host_handler, make_import_handler, make_ipfs_handler,
+    eval_load, get_graft_cap, make_fs_handler, make_host_handler, make_import_handler,
     make_routing_handler, routing_capnp, stem_capnp, system_capnp, wrap_with_handlers,
 };
 
@@ -732,7 +732,7 @@ fn run_impl() {
                 let mut e = env.borrow_mut();
                 let cap_handlers: [(&str, Val); 4] = [
                     ("host", make_host_handler(host)),
-                    ("ipfs", make_ipfs_handler()),
+                    ("fs", make_fs_handler()),
                     ("routing", make_routing_handler(routing)),
                     ("import", make_import_handler()),
                 ];
