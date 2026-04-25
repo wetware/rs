@@ -105,9 +105,17 @@ enum Commands {
         #[arg(default_value = ".", value_name = "MOUNT")]
         mounts: Vec<String>,
 
-        /// libp2p swarm port
-        #[arg(long, default_value = "2025")]
-        port: u16,
+        /// libp2p listen multiaddr. Repeatable; comma-separated via WW_LISTEN.
+        /// Defaults to TCP and QUIC on both IPv4 and IPv6 at port 2025.
+        /// Every requested address must bind successfully — bind failures are
+        /// hard errors. Pass an explicit subset to opt out of e.g. IPv6 or QUIC.
+        #[arg(
+            long = "listen",
+            value_name = "MULTIADDR",
+            env = "WW_LISTEN",
+            value_delimiter = ','
+        )]
+        listen: Vec<Multiaddr>,
 
         /// Enable WASM debug info for guest processes
         #[arg(long)]
@@ -299,9 +307,15 @@ enum DaemonAction {
         #[arg(long, value_name = "PATH")]
         identity: Option<PathBuf>,
 
-        /// libp2p swarm port.
-        #[arg(long)]
-        port: Option<u16>,
+        /// libp2p listen multiaddr. Repeatable; comma-separated via WW_LISTEN.
+        /// Overrides the default TCP+QUIC v4/v6 set on port 2025.
+        #[arg(
+            long = "listen",
+            value_name = "MULTIADDR",
+            env = "WW_LISTEN",
+            value_delimiter = ','
+        )]
+        listen: Vec<Multiaddr>,
 
         /// Image layers to run (local paths or IPFS CIDs).
         #[arg(long, value_name = "PATH")]
@@ -491,7 +505,7 @@ impl Commands {
             Commands::Build { path } => Self::build(path).await,
             Commands::Run {
                 mounts: mount_args,
-                port,
+                listen,
                 wasm_debug,
                 identity,
                 stem,
@@ -513,10 +527,19 @@ impl Commands {
                 // It must never enter the merged FHS tree (which is preopened
                 // to guests and published to IPFS).
                 let identity_path = identity.map(PathBuf::from);
+                let listen = if listen.is_empty() {
+                    ww::daemon_config::default_listen()
+                        .iter()
+                        .map(|s| s.parse())
+                        .collect::<Result<Vec<_>, _>>()
+                        .context("parse default listen multiaddrs")?
+                } else {
+                    listen
+                };
                 Self::run_with_mounts(
                     mounts,
                     identity_path,
-                    port,
+                    listen,
                     wasm_debug,
                     stem,
                     rpc_url,
@@ -536,9 +559,9 @@ impl Commands {
             Commands::Daemon { action } => match action {
                 DaemonAction::Install {
                     identity,
-                    port,
+                    listen,
                     images,
-                } => Self::daemon_install(identity, port, images, false).await,
+                } => Self::daemon_install(identity, listen, images, false).await,
                 DaemonAction::Uninstall => Self::daemon_uninstall().await,
             },
             Commands::Push {
@@ -1080,7 +1103,7 @@ wasip2::cli::command::export!({iface_name}Guest);
     /// which prints its own summary).
     async fn daemon_install(
         identity: Option<PathBuf>,
-        port: Option<u16>,
+        listen: Vec<Multiaddr>,
         images: Vec<String>,
         quiet: bool,
     ) -> Result<()> {
@@ -1108,8 +1131,8 @@ wasip2::cli::command::export!({iface_name}Guest);
         let config_path = ww::daemon_config::default_config_path();
         let mut config = ww::daemon_config::load(&config_path)?;
 
-        if let Some(p) = port {
-            config.port = p;
+        if !listen.is_empty() {
+            config.listen = listen.iter().map(|a| a.to_string()).collect();
         }
         config.identity = Some(key_path.clone());
         if !images.is_empty() {
@@ -1210,9 +1233,11 @@ wasip2::cli::command::export!({iface_name}Guest);
         let mut args = vec![
             format!("        <string>{}</string>", ww_bin.display()),
             "        <string>run</string>".to_string(),
-            format!("        <string>--port</string>"),
-            format!("        <string>{}</string>", config.port),
         ];
+        for addr in &config.listen {
+            args.push("        <string>--listen</string>".to_string());
+            args.push(format!("        <string>{addr}</string>"));
+        }
         // Identity as a --identity flag (host-side only, not a guest mount).
         args.push("        <string>--identity</string>".to_string());
         args.push(format!("        <string>{identity_path}</string>"));
@@ -1284,10 +1309,16 @@ wasip2::cli::command::export!({iface_name}Guest);
             positional.push(img.display().to_string());
         }
 
+        let listen_args: String = config
+            .listen
+            .iter()
+            .map(|a| format!("--listen {a}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         let exec_start = format!(
-            "{} run --port {} --identity {} {}",
+            "{} run {} --identity {} {}",
             ww_bin.display(),
-            config.port,
+            listen_args,
             identity_path,
             positional.join(" "),
         );
@@ -1325,7 +1356,7 @@ wasip2::cli::command::export!({iface_name}Guest);
     async fn run_with_mounts(
         mounts: Vec<ww::mount::Mount>,
         identity: Option<PathBuf>,
-        port: u16,
+        listen: Vec<Multiaddr>,
         wasm_debug: bool,
         stem: Option<String>,
         rpc_url: String,
@@ -1546,7 +1577,7 @@ wasip2::cli::command::export!({iface_name}Guest);
             "swarm",
             ww::runtime::SwarmService {
                 params: ww::runtime::SwarmServiceParams {
-                    port,
+                    listen: listen.clone(),
                     keypair,
                     kubo_bootstrap,
                     kubo_peers,
@@ -1636,10 +1667,15 @@ wasip2::cli::command::export!({iface_name}Guest);
             );
         }
 
+        let listen_summary = listen
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         tracing::info!(
             mounts = all_mounts.len(),
             root = %image_path,
-            port,
+            listen = %listen_summary,
             http = http_listen.as_deref().unwrap_or("disabled"),
             admin = with_http_admin.as_deref().unwrap_or("disabled"),
             "Booting environment"
@@ -2118,7 +2154,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         // from the embedded loader or IPNS namespace. Init scripts in
         // etc/init.d/ control which cells are activated at boot.
         let image_layers: Vec<String> = vec![ww_dir.display().to_string()];
-        Self::daemon_install(Some(identity_path), Some(2025), image_layers, true).await?;
+        Self::daemon_install(Some(identity_path), Vec::new(), image_layers, true).await?;
         done("Background daemon".into());
 
         // ── Restart daemon (only if images changed) ─────────────────
