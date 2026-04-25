@@ -56,6 +56,23 @@ pub fn schema_protocol(cid: &str) -> Result<StreamProtocol, capnp::Error> {
         .map_err(|e| capnp::Error::failed(format!("invalid protocol from schema CID: {e}")))
 }
 
+/// Re-canonicalize a `Schema.Node` reader into raw single-segment bytes.
+///
+/// Mirrors `crates/schema-id::canonicalize_node` and the build-time
+/// emission path so the bytes match what `crates/membrane`'s
+/// `schema_registry` exposes for core caps. Returns `None` if the message
+/// produces an unexpected (non-single) segment count, which would indicate
+/// a malformed input.
+pub fn canonicalize_schema_node(node: capnp::schema_capnp::node::Reader<'_>) -> Option<Vec<u8>> {
+    let mut msg = capnp::message::Builder::new_default();
+    msg.set_root_canonical(node).ok()?;
+    let segments = msg.get_segments_for_output();
+    if segments.len() != 1 {
+        return None;
+    }
+    Some(segments[0].to_vec())
+}
+
 /// Extract a custom section from a WASM binary (component or module).
 ///
 /// Returns the section data if found, or `None` if the section doesn't exist.
@@ -911,7 +928,10 @@ impl system_capnp::executor::Server for ExecutorImpl {
         };
 
         // Read optional caps from spawn request (forwarded from init.d `with` block).
-        let extra_caps: Vec<(String, capnp::capability::Client)> = {
+        // Each entry carries its canonical Schema.Node bytes through to the
+        // child cell's graft response so guests can introspect the cap's
+        // interface without hardcoded fallbacks.
+        let extra_caps: Vec<(String, capnp::capability::Client, Vec<u8>)> = {
             let mut caps_vec = Vec::new();
             if let Ok(caps_reader) = params.get_caps() {
                 for entry in caps_reader.iter() {
@@ -919,7 +939,11 @@ impl system_capnp::executor::Server for ExecutorImpl {
                         entry.get_name().map(|n| n.to_string().unwrap_or_default()),
                         entry.get_cap().get_as_capability(),
                     ) {
-                        caps_vec.push((name, cap));
+                        let schema_bytes = match entry.get_schema() {
+                            Ok(node) => canonicalize_schema_node(node).unwrap_or_default(),
+                            Err(_) => Vec::new(),
+                        };
+                        caps_vec.push((name, cap, schema_bytes));
                     }
                 }
             }

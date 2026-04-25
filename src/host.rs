@@ -6,7 +6,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::StreamExt;
 use libp2p::core::connection::ConnectedPoint;
 use libp2p::kad;
@@ -223,7 +223,11 @@ pub struct Libp2pHost {
 }
 
 impl Libp2pHost {
-    /// Create a new libp2p host and start listening on the given TCP port.
+    /// Create a new libp2p host and start listening on the given multiaddrs.
+    ///
+    /// `listen` is the set of multiaddrs to bind. Every entry must succeed —
+    /// any bind failure (port in use, IPv6 disabled, etc.) is a hard error.
+    /// Callers wanting a subset (e.g. IPv4 only) should pass only those addrs.
     ///
     /// `keypair` is the node's identity — load it with [`crate::keys::to_libp2p`]
     /// or supply an ephemeral key for dev/test use.
@@ -231,7 +235,7 @@ impl Libp2pHost {
     /// `kubo_bootstrap` is optional Kubo node info for bootstrapping the Kad
     /// client.  When `None`, the Kad client starts without any seed peers.
     pub fn new(
-        port: u16,
+        listen: Vec<Multiaddr>,
         keypair: libp2p::identity::Keypair,
         kubo_bootstrap: Option<KuboBootstrapInfo>,
         kubo_peers: Vec<(PeerId, Multiaddr)>,
@@ -325,21 +329,14 @@ impl Libp2pHost {
             })
             .build();
 
-        // Listen on TCP (required) and QUIC/IPv6 (best-effort).
-        // IPv4 TCP is required; everything else logs a warning on failure
-        // (IPv6 may be disabled, UDP port may be unavailable).
-        let tcp4: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
-        swarm.listen_on(tcp4)?;
-
-        for listen in &[
-            format!("/ip6/::/tcp/{port}"),
-            format!("/ip4/0.0.0.0/udp/{port}/quic-v1"),
-            format!("/ip6/::/udp/{port}/quic-v1"),
-        ] {
-            let addr: Multiaddr = listen.parse()?;
-            if let Err(e) = swarm.listen_on(addr.clone()) {
-                tracing::warn!(%addr, error = ?e, "Optional listen address failed (continuing)");
-            }
+        // Every requested listen addr must bind. Surfacing failure here is
+        // intentional: if the user asked for IPv6 or QUIC and the OS can't
+        // provide it, they should fix the config (host OS or --listen) rather
+        // than discover the silent degradation later.
+        for addr in &listen {
+            swarm
+                .listen_on(addr.clone())
+                .with_context(|| format!("listen on {addr}"))?;
         }
 
         Ok(Self {
@@ -1167,12 +1164,12 @@ pub struct WetwareHost {
 
 impl WetwareHost {
     pub fn new(
-        port: u16,
+        listen: Vec<Multiaddr>,
         keypair: libp2p::identity::Keypair,
         kubo_bootstrap: Option<KuboBootstrapInfo>,
         kubo_peers: Vec<(PeerId, Multiaddr)>,
     ) -> Result<Self> {
-        let libp2p = Libp2pHost::new(port, keypair, kubo_bootstrap, kubo_peers)?;
+        let libp2p = Libp2pHost::new(listen, keypair, kubo_bootstrap, kubo_peers)?;
         let wasmtime = WasmtimeHost::new()?;
         let network_state = NetworkState::from_peer_id(libp2p.local_peer_id().to_bytes());
         let (swarm_cmd_tx, swarm_cmd_rx) = mpsc::channel(64);
