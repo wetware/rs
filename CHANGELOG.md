@@ -32,6 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Daemon mounts `~/.ww/` as a single root layer instead of separate `kernel/` and `shell/` layers.
 
 ### Fixed
+- **Swarm startup errors now reach the operator.** When `Libp2pHost::new` failed (e.g. `listen on /ip4/0.0.0.0/tcp/2025: address already in use`), the swarm thread dropped its readiness oneshot and the main thread reported only `Swarm service failed to start: channel closed`, hiding the real cause. The readiness channel now carries `Result<SwarmReady>`, so bind failures and other construction errors are forwarded verbatim with full context.
 - **CI release pipeline ordering hazards (`.github/workflows/rust.yml`).**
   - **Concurrent runs raced on IPNS.** Added a workflow-level `concurrency` group (`ww-release-${{ github.ref }}`, `cancel-in-progress: false`) so master pushes serialize through deploy + IPNS publish in commit order. Previously two pushes in quick succession could land on the `ww-release` IPNS key out of order, silently rolling installer users back to an older release.
   - **`publish` raced `deploy`.** `publish` now `needs: [deploy]`, so installer-facing IPNS only flips after the VPS is serving the new code. Eliminates the window where `install.sh` could fetch a binary version different from what production is running.
