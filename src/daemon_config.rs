@@ -5,7 +5,10 @@
 //!
 //! Example config:
 //! ```glia
-//! {:port     2025
+//! {:listen   ["/ip4/0.0.0.0/tcp/2025"
+//!             "/ip6/::/tcp/2025"
+//!             "/ip4/0.0.0.0/udp/2025/quic-v1"
+//!             "/ip6/::/udp/2025/quic-v1"]
 //!  :identity "~/.ww/identity"
 //!  :images   ["images/my-app" "images/shell"]}
 //! ```
@@ -19,15 +22,25 @@ use glia::Val;
 /// Daemon configuration extracted from a `.glia` file.
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
-    pub port: u16,
+    pub listen: Vec<String>,
     pub identity: Option<PathBuf>,
     pub images: Vec<PathBuf>,
+}
+
+/// Default libp2p listen multiaddrs: TCP and QUIC on both IPv4 and IPv6, port 2025.
+pub fn default_listen() -> Vec<String> {
+    vec![
+        "/ip4/0.0.0.0/tcp/2025".to_string(),
+        "/ip6/::/tcp/2025".to_string(),
+        "/ip4/0.0.0.0/udp/2025/quic-v1".to_string(),
+        "/ip6/::/udp/2025/quic-v1".to_string(),
+    ]
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            port: 2025,
+            listen: default_listen(),
             identity: None,
             images: Vec::new(),
         }
@@ -37,7 +50,8 @@ impl Default for DaemonConfig {
 impl DaemonConfig {
     /// Serialize this config as a Glia data literal.
     pub fn to_glia(&self) -> String {
-        let mut parts = vec![format!(":port {}", self.port)];
+        let listens: Vec<String> = self.listen.iter().map(|a| format!("\"{a}\"")).collect();
+        let mut parts = vec![format!(":listen [{}]", listens.join(" "))];
 
         if let Some(ref identity) = self.identity {
             parts.push(format!(":identity \"{}\"", identity.display()));
@@ -107,11 +121,23 @@ fn from_val(val: &Val) -> Result<DaemonConfig> {
         };
 
         match kw {
-            "port" => {
-                config.port = match value {
-                    Val::Int(n) => u16::try_from(*n).context(":port must be 0..65535")?,
-                    other => bail!(":port must be an integer, got: {other}"),
+            "listen" => {
+                config.listen = match value {
+                    Val::Vector(items) => items
+                        .iter()
+                        .map(|v| match v {
+                            Val::Str(s) => Ok(s.clone()),
+                            other => bail!(":listen elements must be strings, got: {other}"),
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                    other => bail!(":listen must be a vector of multiaddr strings, got: {other}"),
                 };
+            }
+            "port" => {
+                bail!(
+                    ":port is no longer supported; use :listen with multiaddr strings instead. \
+                     Re-run `ww daemon install` to regenerate this config."
+                );
             }
             "identity" => {
                 config.identity = match value {
@@ -155,10 +181,15 @@ mod tests {
 
     #[test]
     fn parse_full_config() {
-        let input = r#"{:port 2025 :identity "~/.ww/identity" :images ["img/a" "img/b"]}"#;
+        let input = r#"{:listen ["/ip4/0.0.0.0/tcp/2025" "/ip6/::/tcp/2025"]
+                        :identity "~/.ww/identity"
+                        :images ["img/a" "img/b"]}"#;
         let val = glia::read(input).unwrap();
         let config = from_val(&val).unwrap();
-        assert_eq!(config.port, 2025);
+        assert_eq!(
+            config.listen,
+            vec!["/ip4/0.0.0.0/tcp/2025", "/ip6/::/tcp/2025"]
+        );
         assert!(config.identity.is_some());
         assert_eq!(config.images.len(), 2);
     }
@@ -168,17 +199,17 @@ mod tests {
         let input = "{}";
         let val = glia::read(input).unwrap();
         let config = from_val(&val).unwrap();
-        assert_eq!(config.port, 2025);
+        assert_eq!(config.listen, default_listen());
         assert!(config.identity.is_none());
         assert!(config.images.is_empty());
     }
 
     #[test]
     fn parse_partial_config() {
-        let input = "{:port 3000}";
+        let input = r#"{:listen ["/ip4/0.0.0.0/tcp/3000"]}"#;
         let val = glia::read(input).unwrap();
         let config = from_val(&val).unwrap();
-        assert_eq!(config.port, 3000);
+        assert_eq!(config.listen, vec!["/ip4/0.0.0.0/tcp/3000"]);
         assert!(config.identity.is_none());
     }
 
@@ -190,25 +221,36 @@ mod tests {
     }
 
     #[test]
-    fn reject_bad_port() {
-        let input = r#"{:port "not-a-number"}"#;
+    fn reject_legacy_port_key() {
+        let input = "{:port 2025}";
+        let val = glia::read(input).unwrap();
+        let err = from_val(&val).unwrap_err().to_string();
+        assert!(
+            err.contains(":listen"),
+            "error should mention :listen: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_bad_listen() {
+        let input = "{:listen [123]}";
         let val = glia::read(input).unwrap();
         assert!(from_val(&val).is_err());
     }
 
     #[test]
-    fn reject_port_out_of_range() {
-        let input = "{:port 99999}";
+    fn reject_listen_not_vector() {
+        let input = r#"{:listen "/ip4/0.0.0.0/tcp/2025"}"#;
         let val = glia::read(input).unwrap();
         assert!(from_val(&val).is_err());
     }
 
     #[test]
     fn unknown_keys_ignored() {
-        let input = "{:port 2025 :unknown-key true}";
+        let input = r#"{:listen ["/ip4/0.0.0.0/tcp/2025"] :unknown-key true}"#;
         let val = glia::read(input).unwrap();
         let config = from_val(&val).unwrap();
-        assert_eq!(config.port, 2025);
+        assert_eq!(config.listen, vec!["/ip4/0.0.0.0/tcp/2025"]);
     }
 
     #[test]
@@ -228,20 +270,23 @@ mod tests {
     fn to_glia_minimal() {
         let config = DaemonConfig::default();
         let s = config.to_glia();
-        assert_eq!(s, "{:port 2025}");
+        assert_eq!(
+            s,
+            r#"{:listen ["/ip4/0.0.0.0/tcp/2025" "/ip6/::/tcp/2025" "/ip4/0.0.0.0/udp/2025/quic-v1" "/ip6/::/udp/2025/quic-v1"]}"#
+        );
     }
 
     #[test]
     fn to_glia_full() {
         let config = DaemonConfig {
-            port: 9000,
+            listen: vec!["/ip4/0.0.0.0/tcp/9000".to_string()],
             identity: Some(PathBuf::from("/keys/my.key")),
             images: vec![PathBuf::from("img/a"), PathBuf::from("img/b")],
         };
         let s = config.to_glia();
         assert_eq!(
             s,
-            r#"{:port 9000 :identity "/keys/my.key" :images ["img/a" "img/b"]}"#
+            r#"{:listen ["/ip4/0.0.0.0/tcp/9000"] :identity "/keys/my.key" :images ["img/a" "img/b"]}"#
         );
     }
 
@@ -250,13 +295,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.glia");
         let original = DaemonConfig {
-            port: 3000,
+            listen: vec!["/ip4/0.0.0.0/tcp/3000".to_string()],
             identity: Some(PathBuf::from("/tmp/key")),
             images: vec![PathBuf::from("images/app")],
         };
         original.write(&path).unwrap();
         let loaded = load(&path).unwrap();
-        assert_eq!(loaded.port, 3000);
+        assert_eq!(loaded.listen, vec!["/ip4/0.0.0.0/tcp/3000"]);
         assert_eq!(loaded.identity, Some(PathBuf::from("/tmp/key")));
         assert_eq!(loaded.images, vec![PathBuf::from("images/app")]);
     }
