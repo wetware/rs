@@ -2452,19 +2452,16 @@ mod tests {
     #[test]
     fn eval_self_evaluating() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
 
+        assert_eq!(eval_blocking(&Val::Int(42), &mut env, &d), Ok(Val::Int(42)));
         assert_eq!(
-            eval_blocking(&Val::Int(42), &mut env, &mut d),
-            Ok(Val::Int(42))
-        );
-        assert_eq!(
-            eval_blocking(&Val::Str("hi".into()), &mut env, &mut d),
+            eval_blocking(&Val::Str("hi".into()), &mut env, &d),
             Ok(Val::Str("hi".into()))
         );
-        assert_eq!(eval_blocking(&Val::Nil, &mut env, &mut d), Ok(Val::Nil));
+        assert_eq!(eval_blocking(&Val::Nil, &mut env, &d), Ok(Val::Nil));
         assert_eq!(
-            eval_blocking(&Val::Bool(true), &mut env, &mut d),
+            eval_blocking(&Val::Bool(true), &mut env, &d),
             Ok(Val::Bool(true))
         );
         assert!(d.calls.borrow().is_empty());
@@ -2473,16 +2470,16 @@ mod tests {
     #[test]
     fn eval_symbol_lookup() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         env.set("x".into(), Val::Int(99));
 
         assert_eq!(
-            eval_blocking(&Val::Sym("x".into()), &mut env, &mut d),
+            eval_blocking(&Val::Sym("x".into()), &mut env, &d),
             Ok(Val::Int(99))
         );
         // Unbound symbols pass through
         assert_eq!(
-            eval_blocking(&Val::Sym("unknown".into()), &mut env, &mut d),
+            eval_blocking(&Val::Sym("unknown".into()), &mut env, &d),
             Ok(Val::Sym("unknown".into()))
         );
     }
@@ -2490,9 +2487,9 @@ mod tests {
     #[test]
     fn eval_empty_list() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_blocking(&Val::List(vec![]), &mut env, &mut d),
+            eval_blocking(&Val::List(vec![]), &mut env, &d),
             Ok(Val::Nil)
         );
     }
@@ -2500,10 +2497,10 @@ mod tests {
     #[test]
     fn eval_dispatches_call() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
 
         let expr = Val::List(vec![Val::Sym("host".into()), Val::Sym("id".into())]);
-        let result = eval_blocking(&expr, &mut env, &mut d);
+        let result = eval_blocking(&expr, &mut env, &d);
         assert_eq!(result, Ok(Val::Nil));
         assert_eq!(d.calls.borrow().len(), 1);
         assert_eq!(d.calls.borrow()[0].0, "host");
@@ -2531,7 +2528,7 @@ mod tests {
             }
         }
 
-        let mut d = TestDispatch;
+        let d = TestDispatch;
         // (host listen "chess" (ipfs cat "bin/x.wasm"))
         let expr = Val::List(vec![
             Val::Sym("host".into()),
@@ -2543,16 +2540,16 @@ mod tests {
                 Val::Str("bin/x.wasm".into()),
             ]),
         ]);
-        let result = pollster_eval(eval(&expr, &mut env, &mut d));
+        let result = pollster_eval(eval(&expr, &mut env, &d));
         assert_eq!(result, Ok(Val::Nil));
     }
 
     #[test]
     fn eval_non_symbol_head_errors() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         let expr = Val::List(vec![Val::Int(42)]);
-        let result = eval_blocking(&expr, &mut env, &mut d);
+        let result = eval_blocking(&expr, &mut env, &d);
         assert!(result.is_err());
     }
 
@@ -2588,14 +2585,14 @@ mod tests {
     #[test]
     fn def_binds_in_root() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (def x 42)
         let expr = Val::List(vec![
             Val::Sym("def".into()),
             Val::Sym("x".into()),
             Val::Int(42),
         ]);
-        let result = eval_blocking(&expr, &mut env, &mut d);
+        let result = eval_blocking(&expr, &mut env, &d);
         assert_eq!(result, Ok(Val::Int(42)));
         assert_eq!(env.get("x"), Some(&Val::Int(42)));
     }
@@ -2603,7 +2600,7 @@ mod tests {
     #[test]
     fn def_evals_value() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (def x (do 1 2 3))
         let expr = Val::List(vec![
             Val::Sym("def".into()),
@@ -2615,7 +2612,7 @@ mod tests {
                 Val::Int(3),
             ]),
         ]);
-        let result = eval_blocking(&expr, &mut env, &mut d);
+        let result = eval_blocking(&expr, &mut env, &d);
         assert_eq!(result, Ok(Val::Int(3)));
         assert_eq!(env.get("x"), Some(&Val::Int(3)));
     }
@@ -2623,14 +2620,14 @@ mod tests {
     #[test]
     fn def_non_symbol_errors() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (def 42 "oops")
         let expr = Val::List(vec![
             Val::Sym("def".into()),
             Val::Int(42),
             Val::Str("oops".into()),
         ]);
-        let result = eval_blocking(&expr, &mut env, &mut d);
+        let result = eval_blocking(&expr, &mut env, &d);
         assert!(result.is_err());
         assert!(err_contains(&result.unwrap_err(), "def"));
     }
@@ -2638,7 +2635,7 @@ mod tests {
     #[test]
     fn def_inside_let_writes_root() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (let [a 1] (def b 2))
         let expr = Val::List(vec![
             Val::Sym("let".into()),
@@ -2649,7 +2646,7 @@ mod tests {
                 Val::Int(2),
             ]),
         ]);
-        eval_blocking(&expr, &mut env, &mut d).unwrap();
+        eval_blocking(&expr, &mut env, &d).unwrap();
         // b should be visible at root level (not just inside let)
         assert_eq!(env.get("b"), Some(&Val::Int(2)));
     }
@@ -2659,7 +2656,7 @@ mod tests {
     #[test]
     fn if_true_branch() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (if true "yes" "no")
         let expr = Val::List(vec![
             Val::Sym("if".into()),
@@ -2668,7 +2665,7 @@ mod tests {
             Val::Str("no".into()),
         ]);
         assert_eq!(
-            eval_blocking(&expr, &mut env, &mut d),
+            eval_blocking(&expr, &mut env, &d),
             Ok(Val::Str("yes".into()))
         );
     }
@@ -2676,7 +2673,7 @@ mod tests {
     #[test]
     fn if_false_branch() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (if false "yes" "no")
         let expr = Val::List(vec![
             Val::Sym("if".into()),
@@ -2685,7 +2682,7 @@ mod tests {
             Val::Str("no".into()),
         ]);
         assert_eq!(
-            eval_blocking(&expr, &mut env, &mut d),
+            eval_blocking(&expr, &mut env, &d),
             Ok(Val::Str("no".into()))
         );
     }
@@ -2693,7 +2690,7 @@ mod tests {
     #[test]
     fn if_nil_is_falsy() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (if nil "yes" "no")
         let expr = Val::List(vec![
             Val::Sym("if".into()),
@@ -2702,7 +2699,7 @@ mod tests {
             Val::Str("no".into()),
         ]);
         assert_eq!(
-            eval_blocking(&expr, &mut env, &mut d),
+            eval_blocking(&expr, &mut env, &d),
             Ok(Val::Str("no".into()))
         );
     }
@@ -2710,7 +2707,7 @@ mod tests {
     #[test]
     fn if_zero_is_truthy() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (if 0 "yes" "no")
         let expr = Val::List(vec![
             Val::Sym("if".into()),
@@ -2719,7 +2716,7 @@ mod tests {
             Val::Str("no".into()),
         ]);
         assert_eq!(
-            eval_blocking(&expr, &mut env, &mut d),
+            eval_blocking(&expr, &mut env, &d),
             Ok(Val::Str("yes".into()))
         );
     }
@@ -2727,7 +2724,7 @@ mod tests {
     #[test]
     fn if_empty_string_truthy() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (if "" "yes" "no")
         let expr = Val::List(vec![
             Val::Sym("if".into()),
@@ -2736,7 +2733,7 @@ mod tests {
             Val::Str("no".into()),
         ]);
         assert_eq!(
-            eval_blocking(&expr, &mut env, &mut d),
+            eval_blocking(&expr, &mut env, &d),
             Ok(Val::Str("yes".into()))
         );
     }
@@ -2744,23 +2741,23 @@ mod tests {
     #[test]
     fn if_no_else_returns_nil() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (if false "yes")
         let expr = Val::List(vec![
             Val::Sym("if".into()),
             Val::Bool(false),
             Val::Str("yes".into()),
         ]);
-        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(Val::Nil));
+        assert_eq!(eval_blocking(&expr, &mut env, &d), Ok(Val::Nil));
     }
 
     #[test]
     fn if_wrong_arg_count() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (if)
         let expr = Val::List(vec![Val::Sym("if".into())]);
-        assert!(eval_blocking(&expr, &mut env, &mut d).is_err());
+        assert!(eval_blocking(&expr, &mut env, &d).is_err());
         // (if a b c d)
         let expr = Val::List(vec![
             Val::Sym("if".into()),
@@ -2769,13 +2766,13 @@ mod tests {
             Val::Int(2),
             Val::Int(3),
         ]);
-        assert!(eval_blocking(&expr, &mut env, &mut d).is_err());
+        assert!(eval_blocking(&expr, &mut env, &d).is_err());
     }
 
     #[test]
     fn if_only_evals_taken_branch() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (if true (host "taken") (host "not-taken"))
         // Only "taken" branch should dispatch; "not-taken" should NOT.
         let expr = Val::List(vec![
@@ -2784,7 +2781,7 @@ mod tests {
             Val::List(vec![Val::Sym("host".into()), Val::Str("taken".into())]),
             Val::List(vec![Val::Sym("host".into()), Val::Str("not-taken".into())]),
         ]);
-        eval_blocking(&expr, &mut env, &mut d).unwrap();
+        eval_blocking(&expr, &mut env, &d).unwrap();
         assert_eq!(d.calls.borrow().len(), 1);
         assert_eq!(d.calls.borrow()[0].1, vec![Val::Str("taken".into())]);
     }
@@ -2794,7 +2791,7 @@ mod tests {
     #[test]
     fn do_returns_last() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (do 1 2 3)
         let expr = Val::List(vec![
             Val::Sym("do".into()),
@@ -2802,25 +2799,25 @@ mod tests {
             Val::Int(2),
             Val::Int(3),
         ]);
-        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(Val::Int(3)));
+        assert_eq!(eval_blocking(&expr, &mut env, &d), Ok(Val::Int(3)));
     }
 
     #[test]
     fn do_empty() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (do)
         let expr = Val::List(vec![Val::Sym("do".into())]);
-        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(Val::Nil));
+        assert_eq!(eval_blocking(&expr, &mut env, &d), Ok(Val::Nil));
     }
 
     #[test]
     fn do_single() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (do 42)
         let expr = Val::List(vec![Val::Sym("do".into()), Val::Int(42)]);
-        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(Val::Int(42)));
+        assert_eq!(eval_blocking(&expr, &mut env, &d), Ok(Val::Int(42)));
     }
 
     // --- let ---
@@ -2828,20 +2825,20 @@ mod tests {
     #[test]
     fn let_basic() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (let [x 1] x)
         let expr = Val::List(vec![
             Val::Sym("let".into()),
             Val::Vector(vec![Val::Sym("x".into()), Val::Int(1)]),
             Val::Sym("x".into()),
         ]);
-        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(Val::Int(1)));
+        assert_eq!(eval_blocking(&expr, &mut env, &d), Ok(Val::Int(1)));
     }
 
     #[test]
     fn let_shadow() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         env.set("x".into(), Val::Int(1));
         // (let [x 2] x)
         let expr = Val::List(vec![
@@ -2849,7 +2846,7 @@ mod tests {
             Val::Vector(vec![Val::Sym("x".into()), Val::Int(2)]),
             Val::Sym("x".into()),
         ]);
-        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(Val::Int(2)));
+        assert_eq!(eval_blocking(&expr, &mut env, &d), Ok(Val::Int(2)));
         // After let, x should be back to 1
         assert_eq!(env.get("x"), Some(&Val::Int(1)));
     }
@@ -2857,7 +2854,7 @@ mod tests {
     #[test]
     fn let_sequential_binding() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (let [x 1 y x] y) — y sees x from earlier binding
         let expr = Val::List(vec![
             Val::Sym("let".into()),
@@ -2869,13 +2866,13 @@ mod tests {
             ]),
             Val::Sym("y".into()),
         ]);
-        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(Val::Int(1)));
+        assert_eq!(eval_blocking(&expr, &mut env, &d), Ok(Val::Int(1)));
     }
 
     #[test]
     fn let_implicit_do() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (let [x 1] 10 20 x) — multiple body forms, returns last
         let expr = Val::List(vec![
             Val::Sym("let".into()),
@@ -2884,20 +2881,20 @@ mod tests {
             Val::Int(20),
             Val::Sym("x".into()),
         ]);
-        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(Val::Int(1)));
+        assert_eq!(eval_blocking(&expr, &mut env, &d), Ok(Val::Int(1)));
     }
 
     #[test]
     fn let_odd_bindings_error() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (let [x] x) — odd number of binding forms
         let expr = Val::List(vec![
             Val::Sym("let".into()),
             Val::Vector(vec![Val::Sym("x".into())]),
             Val::Sym("x".into()),
         ]);
-        let result = eval_blocking(&expr, &mut env, &mut d);
+        let result = eval_blocking(&expr, &mut env, &d);
         assert!(result.is_err());
         assert!(err_contains(&result.unwrap_err(), "pairs"));
     }
@@ -2905,14 +2902,14 @@ mod tests {
     #[test]
     fn let_non_vector_error() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (let (x 1) x) — list instead of vector
         let expr = Val::List(vec![
             Val::Sym("let".into()),
             Val::List(vec![Val::Sym("x".into()), Val::Int(1)]),
             Val::Sym("x".into()),
         ]);
-        let result = eval_blocking(&expr, &mut env, &mut d);
+        let result = eval_blocking(&expr, &mut env, &d);
         assert!(result.is_err());
         assert!(err_contains(&result.unwrap_err(), "vector"));
     }
@@ -2922,24 +2919,21 @@ mod tests {
     #[test]
     fn quote_symbol() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         env.set("x".into(), Val::Int(99));
         // (quote x) — should NOT look up x
         let expr = Val::List(vec![Val::Sym("quote".into()), Val::Sym("x".into())]);
-        assert_eq!(
-            eval_blocking(&expr, &mut env, &mut d),
-            Ok(Val::Sym("x".into()))
-        );
+        assert_eq!(eval_blocking(&expr, &mut env, &d), Ok(Val::Sym("x".into())));
     }
 
     #[test]
     fn quote_list() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (quote (+ 1 2)) — should NOT evaluate the list
         let inner = Val::List(vec![Val::Sym("+".into()), Val::Int(1), Val::Int(2)]);
         let expr = Val::List(vec![Val::Sym("quote".into()), inner.clone()]);
-        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(inner));
+        assert_eq!(eval_blocking(&expr, &mut env, &d), Ok(inner));
         assert!(d.calls.borrow().is_empty()); // no dispatch happened
     }
 
@@ -2948,7 +2942,7 @@ mod tests {
     #[test]
     fn fn_single_arity_call() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (def f (fn [x] x))
         let def_expr = Val::List(vec![
             Val::Sym("def".into()),
@@ -2959,17 +2953,17 @@ mod tests {
                 Val::Sym("x".into()),
             ]),
         ]);
-        eval_blocking(&def_expr, &mut env, &mut d).unwrap();
+        eval_blocking(&def_expr, &mut env, &d).unwrap();
         // (f 42)
         let call_expr = Val::List(vec![Val::Sym("f".into()), Val::Int(42)]);
-        let result = eval_blocking(&call_expr, &mut env, &mut d);
+        let result = eval_blocking(&call_expr, &mut env, &d);
         assert_eq!(result, Ok(Val::Int(42)));
     }
 
     #[test]
     fn fn_multi_arity() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (def f (fn ([x] x) ([x y] y)))
         let def_expr = Val::List(vec![
             Val::Sym("def".into()),
@@ -2986,19 +2980,19 @@ mod tests {
                 ]),
             ]),
         ]);
-        eval_blocking(&def_expr, &mut env, &mut d).unwrap();
+        eval_blocking(&def_expr, &mut env, &d).unwrap();
         // (f 1) → 1
         let call1 = Val::List(vec![Val::Sym("f".into()), Val::Int(1)]);
-        assert_eq!(eval_blocking(&call1, &mut env, &mut d), Ok(Val::Int(1)));
+        assert_eq!(eval_blocking(&call1, &mut env, &d), Ok(Val::Int(1)));
         // (f 1 2) → 2
         let call2 = Val::List(vec![Val::Sym("f".into()), Val::Int(1), Val::Int(2)]);
-        assert_eq!(eval_blocking(&call2, &mut env, &mut d), Ok(Val::Int(2)));
+        assert_eq!(eval_blocking(&call2, &mut env, &d), Ok(Val::Int(2)));
     }
 
     #[test]
     fn fn_variadic() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (def f (fn [x & rest] rest))
         let def_expr = Val::List(vec![
             Val::Sym("def".into()),
@@ -3013,7 +3007,7 @@ mod tests {
                 Val::Sym("rest".into()),
             ]),
         ]);
-        eval_blocking(&def_expr, &mut env, &mut d).unwrap();
+        eval_blocking(&def_expr, &mut env, &d).unwrap();
         // (f 1 2 3) → (2 3)
         let call = Val::List(vec![
             Val::Sym("f".into()),
@@ -3022,7 +3016,7 @@ mod tests {
             Val::Int(3),
         ]);
         assert_eq!(
-            eval_blocking(&call, &mut env, &mut d),
+            eval_blocking(&call, &mut env, &d),
             Ok(Val::List(vec![Val::Int(2), Val::Int(3)]))
         );
     }
@@ -3030,14 +3024,14 @@ mod tests {
     #[test]
     fn fn_closure_captures_env() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (def x 10)
         let def_x = Val::List(vec![
             Val::Sym("def".into()),
             Val::Sym("x".into()),
             Val::Int(10),
         ]);
-        eval_blocking(&def_x, &mut env, &mut d).unwrap();
+        eval_blocking(&def_x, &mut env, &d).unwrap();
         // (def f (fn [] x))
         let def_f = Val::List(vec![
             Val::Sym("def".into()),
@@ -3048,23 +3042,23 @@ mod tests {
                 Val::Sym("x".into()),
             ]),
         ]);
-        eval_blocking(&def_f, &mut env, &mut d).unwrap();
+        eval_blocking(&def_f, &mut env, &d).unwrap();
         // (def x 20) — rebind x
         let def_x2 = Val::List(vec![
             Val::Sym("def".into()),
             Val::Sym("x".into()),
             Val::Int(20),
         ]);
-        eval_blocking(&def_x2, &mut env, &mut d).unwrap();
+        eval_blocking(&def_x2, &mut env, &d).unwrap();
         // (f) → 10, not 20 (captured at definition time)
         let call = Val::List(vec![Val::Sym("f".into())]);
-        assert_eq!(eval_blocking(&call, &mut env, &mut d), Ok(Val::Int(10)));
+        assert_eq!(eval_blocking(&call, &mut env, &d), Ok(Val::Int(10)));
     }
 
     #[test]
     fn fn_arity_mismatch() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (def f (fn [x y] x))
         let def_expr = Val::List(vec![
             Val::Sym("def".into()),
@@ -3075,17 +3069,17 @@ mod tests {
                 Val::Sym("x".into()),
             ]),
         ]);
-        eval_blocking(&def_expr, &mut env, &mut d).unwrap();
+        eval_blocking(&def_expr, &mut env, &d).unwrap();
         // (f 1) — wrong arity
         let call = Val::List(vec![Val::Sym("f".into()), Val::Int(1)]);
-        let err = eval_blocking(&call, &mut env, &mut d).unwrap_err();
+        let err = eval_blocking(&call, &mut env, &d).unwrap_err();
         assert!(err_contains(&err, "wrong number of args"), "got: {err}");
     }
 
     #[test]
     fn fn_duplicate_arity_errors() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (fn ([x] x) ([y] y)) — two 1-arg arities
         let expr = Val::List(vec![
             Val::Sym("fn".into()),
@@ -3098,14 +3092,14 @@ mod tests {
                 Val::Sym("y".into()),
             ]),
         ]);
-        let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
+        let err = eval_blocking(&expr, &mut env, &d).unwrap_err();
         assert!(err_contains(&err, "duplicate arity"), "got: {err}");
     }
 
     #[test]
     fn fn_implicit_do_body() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (def f (fn [x] 1 2 x)) — body has multiple forms, returns last
         let def_expr = Val::List(vec![
             Val::Sym("def".into()),
@@ -3118,18 +3112,18 @@ mod tests {
                 Val::Sym("x".into()),
             ]),
         ]);
-        eval_blocking(&def_expr, &mut env, &mut d).unwrap();
+        eval_blocking(&def_expr, &mut env, &d).unwrap();
         let call = Val::List(vec![Val::Sym("f".into()), Val::Int(99)]);
-        assert_eq!(eval_blocking(&call, &mut env, &mut d), Ok(Val::Int(99)));
+        assert_eq!(eval_blocking(&call, &mut env, &d), Ok(Val::Int(99)));
     }
 
     #[test]
     fn fn_no_params_errors() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (fn) — no params at all
         let expr = Val::List(vec![Val::Sym("fn".into())]);
-        assert!(eval_blocking(&expr, &mut env, &mut d).is_err());
+        assert!(eval_blocking(&expr, &mut env, &d).is_err());
     }
 
     // --- loop / recur ---
@@ -3137,20 +3131,20 @@ mod tests {
     #[test]
     fn loop_returns_non_recur() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (loop [x 42] x)
         let expr = Val::List(vec![
             Val::Sym("loop".into()),
             Val::Vector(vec![Val::Sym("x".into()), Val::Int(42)]),
             Val::Sym("x".into()),
         ]);
-        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(Val::Int(42)));
+        assert_eq!(eval_blocking(&expr, &mut env, &d), Ok(Val::Int(42)));
     }
 
     #[test]
     fn loop_recur_once() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (loop [x true] (if x (recur false) "done"))
         let expr = Val::List(vec![
             Val::Sym("loop".into()),
@@ -3163,7 +3157,7 @@ mod tests {
             ]),
         ]);
         assert_eq!(
-            eval_blocking(&expr, &mut env, &mut d),
+            eval_blocking(&expr, &mut env, &d),
             Ok(Val::Str("done".into()))
         );
     }
@@ -3171,7 +3165,7 @@ mod tests {
     #[test]
     fn loop_recur_multiple_bindings() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (loop [a 1 b 2] (if a (recur false 3) b))
         let expr = Val::List(vec![
             Val::Sym("loop".into()),
@@ -3192,13 +3186,13 @@ mod tests {
                 Val::Sym("b".into()),
             ]),
         ]);
-        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(Val::Int(3)));
+        assert_eq!(eval_blocking(&expr, &mut env, &d), Ok(Val::Int(3)));
     }
 
     #[test]
     fn loop_sequential_bindings() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (loop [a 1 b a] b) — b sees a=1
         let expr = Val::List(vec![
             Val::Sym("loop".into()),
@@ -3210,13 +3204,13 @@ mod tests {
             ]),
             Val::Sym("b".into()),
         ]);
-        assert_eq!(eval_blocking(&expr, &mut env, &mut d), Ok(Val::Int(1)));
+        assert_eq!(eval_blocking(&expr, &mut env, &d), Ok(Val::Int(1)));
     }
 
     #[test]
     fn recur_wrong_arity() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (loop [x 1 y 2] (recur 3))
         let expr = Val::List(vec![
             Val::Sym("loop".into()),
@@ -3228,17 +3222,17 @@ mod tests {
             ]),
             Val::List(vec![Val::Sym("recur".into()), Val::Int(3)]),
         ]);
-        let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
+        let err = eval_blocking(&expr, &mut env, &d).unwrap_err();
         assert!(err_contains(&err, "expected 2 args"), "got: {err}");
     }
 
     #[test]
     fn recur_outside_loop() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (recur 1) at top level
         let expr = Val::List(vec![Val::Sym("recur".into()), Val::Int(1)]);
-        let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
+        let err = eval_blocking(&expr, &mut env, &d).unwrap_err();
         assert!(
             err_contains(&err, "recur not in tail position"),
             "got: {err}"
@@ -3248,28 +3242,28 @@ mod tests {
     #[test]
     fn loop_non_vector_bindings() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (loop (x 1) x) — list instead of vector
         let expr = Val::List(vec![
             Val::Sym("loop".into()),
             Val::List(vec![Val::Sym("x".into()), Val::Int(1)]),
             Val::Sym("x".into()),
         ]);
-        let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
+        let err = eval_blocking(&expr, &mut env, &d).unwrap_err();
         assert!(err_contains(&err, "vector"), "got: {err}");
     }
 
     #[test]
     fn loop_odd_bindings() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (loop [x] x) — odd number of binding forms
         let expr = Val::List(vec![
             Val::Sym("loop".into()),
             Val::Vector(vec![Val::Sym("x".into())]),
             Val::Sym("x".into()),
         ]);
-        let err = eval_blocking(&expr, &mut env, &mut d).unwrap_err();
+        let err = eval_blocking(&expr, &mut env, &d).unwrap_err();
         assert!(err_contains(&err, "pairs"), "got: {err}");
     }
 
@@ -3304,16 +3298,16 @@ mod tests {
     #[test]
     fn builtin_list_empty() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(list)", &mut env, &mut d), Ok(Val::List(vec![])));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(list)", &mut env, &d), Ok(Val::List(vec![])));
     }
 
     #[test]
     fn builtin_list_with_args() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(list 1 2 3)", &mut env, &mut d),
+            eval_str("(list 1 2 3)", &mut env, &d),
             Ok(Val::List(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
         );
     }
@@ -3323,9 +3317,9 @@ mod tests {
     #[test]
     fn builtin_cons_onto_list() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(cons 1 (list 2 3))", &mut env, &mut d),
+            eval_str("(cons 1 (list 2 3))", &mut env, &d),
             Ok(Val::List(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
         );
     }
@@ -3333,15 +3327,15 @@ mod tests {
     #[test]
     fn builtin_cons_wrong_args() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(cons 1)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(cons 1)", &mut env, &d).is_err());
     }
 
     #[test]
     fn builtin_cons_non_collection() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(cons 1 2)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(cons 1 2)", &mut env, &d).is_err());
     }
 
     // --- first ---
@@ -3349,9 +3343,9 @@ mod tests {
     #[test]
     fn builtin_first_of_list() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(first (list 1 2 3))", &mut env, &mut d),
+            eval_str("(first (list 1 2 3))", &mut env, &d),
             Ok(Val::Int(1))
         );
     }
@@ -3359,22 +3353,22 @@ mod tests {
     #[test]
     fn builtin_first_of_empty() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(first (list))", &mut env, &mut d), Ok(Val::Nil));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(first (list))", &mut env, &d), Ok(Val::Nil));
     }
 
     #[test]
     fn builtin_first_of_nil() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(first nil)", &mut env, &mut d), Ok(Val::Nil));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(first nil)", &mut env, &d), Ok(Val::Nil));
     }
 
     #[test]
     fn builtin_first_wrong_type() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(first 42)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(first 42)", &mut env, &d).is_err());
     }
 
     // --- rest ---
@@ -3382,9 +3376,9 @@ mod tests {
     #[test]
     fn builtin_rest_of_list() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(rest (list 1 2 3))", &mut env, &mut d),
+            eval_str("(rest (list 1 2 3))", &mut env, &d),
             Ok(Val::List(vec![Val::Int(2), Val::Int(3)]))
         );
     }
@@ -3392,9 +3386,9 @@ mod tests {
     #[test]
     fn builtin_rest_of_empty() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(rest (list))", &mut env, &mut d),
+            eval_str("(rest (list))", &mut env, &d),
             Ok(Val::List(vec![]))
         );
     }
@@ -3402,18 +3396,15 @@ mod tests {
     #[test]
     fn builtin_rest_of_nil() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(
-            eval_str("(rest nil)", &mut env, &mut d),
-            Ok(Val::List(vec![]))
-        );
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(rest nil)", &mut env, &d), Ok(Val::List(vec![])));
     }
 
     #[test]
     fn builtin_rest_wrong_type() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(rest 42)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(rest 42)", &mut env, &d).is_err());
     }
 
     // --- count ---
@@ -3421,9 +3412,9 @@ mod tests {
     #[test]
     fn builtin_count_list() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(count (list 1 2 3))", &mut env, &mut d),
+            eval_str("(count (list 1 2 3))", &mut env, &d),
             Ok(Val::Int(3))
         );
     }
@@ -3431,17 +3422,17 @@ mod tests {
     #[test]
     fn builtin_count_nil() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(count nil)", &mut env, &mut d), Ok(Val::Int(0)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(count nil)", &mut env, &d), Ok(Val::Int(0)));
     }
 
     #[test]
     fn builtin_count_string_chars() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Unicode: each emoji is one char
         assert_eq!(
-            eval_str(r#"(count "hello")"#, &mut env, &mut d),
+            eval_str(r#"(count "hello")"#, &mut env, &d),
             Ok(Val::Int(5))
         );
     }
@@ -3449,8 +3440,8 @@ mod tests {
     #[test]
     fn builtin_count_wrong_type() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(count 42)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(count 42)", &mut env, &d).is_err());
     }
 
     // --- vec ---
@@ -3458,9 +3449,9 @@ mod tests {
     #[test]
     fn builtin_vec_from_list() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(vec (list 1 2))", &mut env, &mut d),
+            eval_str("(vec (list 1 2))", &mut env, &d),
             Ok(Val::Vector(vec![Val::Int(1), Val::Int(2)]))
         );
     }
@@ -3468,18 +3459,15 @@ mod tests {
     #[test]
     fn builtin_vec_from_nil() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(
-            eval_str("(vec nil)", &mut env, &mut d),
-            Ok(Val::Vector(vec![]))
-        );
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(vec nil)", &mut env, &d), Ok(Val::Vector(vec![])));
     }
 
     #[test]
     fn builtin_vec_wrong_type() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(vec 42)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(vec 42)", &mut env, &d).is_err());
     }
 
     // --- get ---
@@ -3487,9 +3475,9 @@ mod tests {
     #[test]
     fn builtin_get_map() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(get {:a 1 :b 2} :b)", &mut env, &mut d),
+            eval_str("(get {:a 1 :b 2} :b)", &mut env, &d),
             Ok(Val::Int(2))
         );
     }
@@ -3497,16 +3485,16 @@ mod tests {
     #[test]
     fn builtin_get_map_missing() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(get {:a 1} :z)", &mut env, &mut d), Ok(Val::Nil));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(get {:a 1} :z)", &mut env, &d), Ok(Val::Nil));
     }
 
     #[test]
     fn builtin_get_vector() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(get [10 20 30] 1)", &mut env, &mut d),
+            eval_str("(get [10 20 30] 1)", &mut env, &d),
             Ok(Val::Int(20))
         );
     }
@@ -3514,15 +3502,15 @@ mod tests {
     #[test]
     fn builtin_get_nil() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(get nil :a)", &mut env, &mut d), Ok(Val::Nil));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(get nil :a)", &mut env, &d), Ok(Val::Nil));
     }
 
     #[test]
     fn builtin_get_wrong_type() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(get 42 0)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(get 42 0)", &mut env, &d).is_err());
     }
 
     // --- assoc ---
@@ -3530,9 +3518,9 @@ mod tests {
     #[test]
     fn builtin_assoc_add_key() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(assoc {:a 1} :b 2)", &mut env, &mut d),
+            eval_str("(assoc {:a 1} :b 2)", &mut env, &d),
             Ok(Val::Map(ValMap::from_pairs(vec![
                 (Val::Keyword("a".into()), Val::Int(1)),
                 (Val::Keyword("b".into()), Val::Int(2)),
@@ -3543,9 +3531,9 @@ mod tests {
     #[test]
     fn builtin_assoc_update_key() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(assoc {:a 1} :a 99)", &mut env, &mut d),
+            eval_str("(assoc {:a 1} :a 99)", &mut env, &d),
             Ok(Val::Map(ValMap::from_pairs(vec![(
                 Val::Keyword("a".into()),
                 Val::Int(99)
@@ -3556,9 +3544,9 @@ mod tests {
     #[test]
     fn builtin_assoc_wrong_args() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Even number of args (map + 1 key, no value)
-        assert!(eval_str("(assoc {:a 1} :b)", &mut env, &mut d).is_err());
+        assert!(eval_str("(assoc {:a 1} :b)", &mut env, &d).is_err());
     }
 
     // --- conj ---
@@ -3566,9 +3554,9 @@ mod tests {
     #[test]
     fn builtin_conj_vector_appends() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(conj [1 2] 3)", &mut env, &mut d),
+            eval_str("(conj [1 2] 3)", &mut env, &d),
             Ok(Val::Vector(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
         );
     }
@@ -3576,9 +3564,9 @@ mod tests {
     #[test]
     fn builtin_conj_list_prepends() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(conj (list 2 3) 1)", &mut env, &mut d),
+            eval_str("(conj (list 2 3) 1)", &mut env, &d),
             Ok(Val::List(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
         );
     }
@@ -3586,9 +3574,9 @@ mod tests {
     #[test]
     fn builtin_conj_map() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(conj {:a 1} [:b 2])", &mut env, &mut d),
+            eval_str("(conj {:a 1} [:b 2])", &mut env, &d),
             Ok(Val::Map(ValMap::from_pairs(vec![
                 (Val::Keyword("a".into()), Val::Int(1)),
                 (Val::Keyword("b".into()), Val::Int(2)),
@@ -3599,8 +3587,8 @@ mod tests {
     #[test]
     fn builtin_conj_too_few_args() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(conj [1])", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(conj [1])", &mut env, &d).is_err());
     }
 
     // --- Arithmetic ---
@@ -3608,99 +3596,99 @@ mod tests {
     #[test]
     fn builtin_add_ints() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(+ 1 2 3)", &mut env, &mut d), Ok(Val::Int(6)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(+ 1 2 3)", &mut env, &d), Ok(Val::Int(6)));
     }
 
     #[test]
     fn builtin_add_empty() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(+)", &mut env, &mut d), Ok(Val::Int(0)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(+)", &mut env, &d), Ok(Val::Int(0)));
     }
 
     #[test]
     fn builtin_add_float_promotion() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(+ 1 2.0)", &mut env, &mut d), Ok(Val::Float(3.0)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(+ 1 2.0)", &mut env, &d), Ok(Val::Float(3.0)));
     }
 
     #[test]
     fn builtin_add_non_number() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str(r#"(+ 1 "a")"#, &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str(r#"(+ 1 "a")"#, &mut env, &d).is_err());
     }
 
     #[test]
     fn builtin_sub_two() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(- 10 3)", &mut env, &mut d), Ok(Val::Int(7)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(- 10 3)", &mut env, &d), Ok(Val::Int(7)));
     }
 
     #[test]
     fn builtin_sub_negate() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(- 5)", &mut env, &mut d), Ok(Val::Int(-5)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(- 5)", &mut env, &d), Ok(Val::Int(-5)));
     }
 
     #[test]
     fn builtin_sub_empty_error() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(-)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(-)", &mut env, &d).is_err());
     }
 
     #[test]
     fn builtin_mul_ints() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(* 2 3 4)", &mut env, &mut d), Ok(Val::Int(24)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(* 2 3 4)", &mut env, &d), Ok(Val::Int(24)));
     }
 
     #[test]
     fn builtin_mul_empty() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(*)", &mut env, &mut d), Ok(Val::Int(1)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(*)", &mut env, &d), Ok(Val::Int(1)));
     }
 
     #[test]
     fn builtin_div_ints() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(/ 10 3)", &mut env, &mut d), Ok(Val::Int(3)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(/ 10 3)", &mut env, &d), Ok(Val::Int(3)));
     }
 
     #[test]
     fn builtin_div_by_zero() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(/ 10 0)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(/ 10 0)", &mut env, &d).is_err());
     }
 
     #[test]
     fn builtin_div_wrong_args() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(/ 1)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(/ 1)", &mut env, &d).is_err());
     }
 
     #[test]
     fn builtin_mod_ints() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(mod 10 3)", &mut env, &mut d), Ok(Val::Int(1)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(mod 10 3)", &mut env, &d), Ok(Val::Int(1)));
     }
 
     #[test]
     fn builtin_mod_by_zero() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(mod 10 0)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(mod 10 0)", &mut env, &d).is_err());
     }
 
     // --- Comparison ---
@@ -3708,71 +3696,71 @@ mod tests {
     #[test]
     fn builtin_eq_true() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(= 1 1)", &mut env, &mut d), Ok(Val::Bool(true)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(= 1 1)", &mut env, &d), Ok(Val::Bool(true)));
     }
 
     #[test]
     fn builtin_eq_false() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(= 1 2)", &mut env, &mut d), Ok(Val::Bool(false)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(= 1 2)", &mut env, &d), Ok(Val::Bool(false)));
     }
 
     #[test]
     fn builtin_eq_wrong_args() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(= 1)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(= 1)", &mut env, &d).is_err());
     }
 
     #[test]
     fn builtin_lt_true() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(< 1 2)", &mut env, &mut d), Ok(Val::Bool(true)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(< 1 2)", &mut env, &d), Ok(Val::Bool(true)));
     }
 
     #[test]
     fn builtin_lt_false() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(< 2 1)", &mut env, &mut d), Ok(Val::Bool(false)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(< 2 1)", &mut env, &d), Ok(Val::Bool(false)));
     }
 
     #[test]
     fn builtin_gt_true() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(> 2 1)", &mut env, &mut d), Ok(Val::Bool(true)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(> 2 1)", &mut env, &d), Ok(Val::Bool(true)));
     }
 
     #[test]
     fn builtin_le_equal() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(<= 2 2)", &mut env, &mut d), Ok(Val::Bool(true)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(<= 2 2)", &mut env, &d), Ok(Val::Bool(true)));
     }
 
     #[test]
     fn builtin_ge_equal() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(>= 2 2)", &mut env, &mut d), Ok(Val::Bool(true)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(>= 2 2)", &mut env, &d), Ok(Val::Bool(true)));
     }
 
     #[test]
     fn builtin_comparison_mixed_numeric() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(< 1 2.5)", &mut env, &mut d), Ok(Val::Bool(true)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(< 1 2.5)", &mut env, &d), Ok(Val::Bool(true)));
     }
 
     #[test]
     fn builtin_comparison_non_number() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str(r#"(< 1 "a")"#, &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str(r#"(< 1 "a")"#, &mut env, &d).is_err());
     }
 
     // --- gensym ---
@@ -3780,9 +3768,9 @@ mod tests {
     #[test]
     fn builtin_gensym() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        let r1 = eval_str("(gensym)", &mut env, &mut d).unwrap();
-        let r2 = eval_str("(gensym)", &mut env, &mut d).unwrap();
+        let d = RecordingDispatch::new();
+        let r1 = eval_str("(gensym)", &mut env, &d).unwrap();
+        let r2 = eval_str("(gensym)", &mut env, &d).unwrap();
         // Each gensym returns a unique symbol
         match (&r1, &r2) {
             (Val::Sym(s1), Val::Sym(s2)) => {
@@ -3797,8 +3785,8 @@ mod tests {
     #[test]
     fn builtin_gensym_no_args() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(gensym 1)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(gensym 1)", &mut env, &d).is_err());
     }
 
     // --- apply ---
@@ -3806,9 +3794,9 @@ mod tests {
     #[test]
     fn builtin_apply_builtin_fn() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(apply + (list 1 2 3))", &mut env, &mut d),
+            eval_str("(apply + (list 1 2 3))", &mut env, &d),
             Ok(Val::Int(6))
         );
     }
@@ -3816,10 +3804,10 @@ mod tests {
     #[test]
     fn builtin_apply_user_fn() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        eval_str("(def f (fn [x y] (+ x y)))", &mut env, &mut d).unwrap();
+        let d = RecordingDispatch::new();
+        eval_str("(def f (fn [x y] (+ x y)))", &mut env, &d).unwrap();
         assert_eq!(
-            eval_str("(apply f (list 3 4))", &mut env, &mut d),
+            eval_str("(apply f (list 3 4))", &mut env, &d),
             Ok(Val::Int(7))
         );
     }
@@ -3827,10 +3815,10 @@ mod tests {
     #[test]
     fn builtin_apply_with_middle_args() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (apply + 1 2 (list 3)) → (+ 1 2 3) → 6
         assert_eq!(
-            eval_str("(apply + 1 2 (list 3))", &mut env, &mut d),
+            eval_str("(apply + 1 2 (list 3))", &mut env, &d),
             Ok(Val::Int(6))
         );
     }
@@ -3838,27 +3826,24 @@ mod tests {
     #[test]
     fn builtin_apply_too_few_args() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(apply +)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(apply +)", &mut env, &d).is_err());
     }
 
     #[test]
     fn builtin_apply_non_collection_last() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(apply + 1 2)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(apply + 1 2)", &mut env, &d).is_err());
     }
 
     #[test]
     fn builtin_apply_fn_value() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // apply with a fn value (not symbol)
-        eval_str("(def f (fn [x] (+ x 1)))", &mut env, &mut d).unwrap();
-        assert_eq!(
-            eval_str("(apply f [10])", &mut env, &mut d),
-            Ok(Val::Int(11))
-        );
+        eval_str("(def f (fn [x] (+ x 1)))", &mut env, &d).unwrap();
+        assert_eq!(eval_str("(apply f [10])", &mut env, &d), Ok(Val::Int(11)));
     }
 
     // --- Integration: builtins with special forms ---
@@ -3866,9 +3851,9 @@ mod tests {
     #[test]
     fn builtin_in_let() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(let [x (+ 1 2)] (* x 10))", &mut env, &mut d),
+            eval_str("(let [x (+ 1 2)] (* x 10))", &mut env, &d),
             Ok(Val::Int(30))
         );
     }
@@ -3876,17 +3861,17 @@ mod tests {
     #[test]
     fn builtin_in_fn() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &mut d).unwrap();
-        assert_eq!(eval_str("(add 3 4)", &mut env, &mut d), Ok(Val::Int(7)));
+        let d = RecordingDispatch::new();
+        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &d).unwrap();
+        assert_eq!(eval_str("(add 3 4)", &mut env, &d), Ok(Val::Int(7)));
     }
 
     #[test]
     fn builtin_nested() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(+ (* 2 3) (- 10 4))", &mut env, &mut d),
+            eval_str("(+ (* 2 3) (- 10 4))", &mut env, &d),
             Ok(Val::Int(12))
         );
     }
@@ -3898,22 +3883,22 @@ mod tests {
     #[test]
     fn defmacro_basic() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Define a macro that returns a constant form
-        eval_str("(defmacro m [] 42)", &mut env, &mut d).unwrap();
-        assert_eq!(eval_str("(m)", &mut env, &mut d), Ok(Val::Int(42)));
+        eval_str("(defmacro m [] 42)", &mut env, &d).unwrap();
+        assert_eq!(eval_str("(m)", &mut env, &d), Ok(Val::Int(42)));
     }
 
     #[test]
     fn defmacro_receives_unevaluated_args() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Macro that receives a form and quotes it (returns it without eval)
         // (defmacro identity-form [x] x) — returns the raw form
-        eval_str("(defmacro identity-form [x] x)", &mut env, &mut d).unwrap();
+        eval_str("(defmacro identity-form [x] x)", &mut env, &d).unwrap();
         // (identity-form 42) → eval(42) → 42
         assert_eq!(
-            eval_str("(identity-form 42)", &mut env, &mut d),
+            eval_str("(identity-form 42)", &mut env, &d),
             Ok(Val::Int(42))
         );
     }
@@ -3921,62 +3906,57 @@ mod tests {
     #[test]
     fn defmacro_expansion_is_re_evaluated() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Macro that constructs a (+ 1 2) form using list and quote
-        eval_str(
-            r#"(defmacro add12 [] (list (quote +) 1 2))"#,
-            &mut env,
-            &mut d,
-        )
-        .unwrap();
+        eval_str(r#"(defmacro add12 [] (list (quote +) 1 2))"#, &mut env, &d).unwrap();
         // (add12) → expands to (+ 1 2) → evaluates to 3
-        assert_eq!(eval_str("(add12)", &mut env, &mut d), Ok(Val::Int(3)));
+        assert_eq!(eval_str("(add12)", &mut env, &d), Ok(Val::Int(3)));
     }
 
     #[test]
     fn defmacro_stored_in_root() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Define macro inside a let — should still be in root
-        eval_str("(let [x 1] (defmacro m [] 99))", &mut env, &mut d).unwrap();
-        assert_eq!(eval_str("(m)", &mut env, &mut d), Ok(Val::Int(99)));
+        eval_str("(let [x 1] (defmacro m [] 99))", &mut env, &d).unwrap();
+        assert_eq!(eval_str("(m)", &mut env, &d), Ok(Val::Int(99)));
     }
 
     #[test]
     fn defmacro_no_name_errors() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(defmacro)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(defmacro)", &mut env, &d).is_err());
     }
 
     #[test]
     fn defmacro_no_params_errors() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(defmacro m)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(defmacro m)", &mut env, &d).is_err());
     }
 
     #[test]
     fn defmacro_non_symbol_name_errors() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(defmacro 42 [] nil)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(defmacro 42 [] nil)", &mut env, &d).is_err());
     }
 
     #[test]
     fn defmacro_variadic() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Macro with variadic args — wraps everything in a list call
         eval_str(
             "(defmacro wrap [& forms] (cons (quote list) forms))",
             &mut env,
-            &mut d,
+            &d,
         )
         .unwrap();
         // (wrap 1 2 3) → expands to (list 1 2 3) → (1 2 3)
         assert_eq!(
-            eval_str("(wrap 1 2 3)", &mut env, &mut d),
+            eval_str("(wrap 1 2 3)", &mut env, &d),
             Ok(Val::List(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
         );
     }
@@ -3986,60 +3966,49 @@ mod tests {
     #[test]
     fn defmacro_uses_builtins_to_construct_forms() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // A "when" macro: (when test body...) → (if test (do body...) nil)
         eval_str(
             r#"(defmacro when [test & body]
                 (list (quote if) test (cons (quote do) body) nil))"#,
             &mut env,
-            &mut d,
+            &d,
         )
         .unwrap();
         assert_eq!(
-            eval_str("(when true (+ 1 2))", &mut env, &mut d),
+            eval_str("(when true (+ 1 2))", &mut env, &d),
             Ok(Val::Int(3))
         );
-        assert_eq!(
-            eval_str("(when false (+ 1 2))", &mut env, &mut d),
-            Ok(Val::Nil)
-        );
+        assert_eq!(eval_str("(when false (+ 1 2))", &mut env, &d), Ok(Val::Nil));
     }
 
     #[test]
     fn defmacro_unless_integration() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // (unless test body...) → (if test nil (do body...))
         eval_str(
             r#"(defmacro unless [test & body]
                 (list (quote if) test nil (cons (quote do) body)))"#,
             &mut env,
-            &mut d,
+            &d,
         )
         .unwrap();
         assert_eq!(
-            eval_str("(unless false 42)", &mut env, &mut d),
+            eval_str("(unless false 42)", &mut env, &d),
             Ok(Val::Int(42))
         );
-        assert_eq!(eval_str("(unless true 42)", &mut env, &mut d), Ok(Val::Nil));
+        assert_eq!(eval_str("(unless true 42)", &mut env, &d), Ok(Val::Nil));
     }
 
     #[test]
     fn defmacro_with_gensym() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Macro that uses gensym to avoid name collisions
         // This just tests that gensym can be called from a macro body
-        eval_str(
-            "(defmacro test-gensym [] (do (gensym) 42))",
-            &mut env,
-            &mut d,
-        )
-        .unwrap();
-        assert_eq!(
-            eval_str("(test-gensym)", &mut env, &mut d),
-            Ok(Val::Int(42))
-        );
+        eval_str("(defmacro test-gensym [] (do (gensym) 42))", &mut env, &d).unwrap();
+        assert_eq!(eval_str("(test-gensym)", &mut env, &d), Ok(Val::Int(42)));
     }
 
     // --- concat builtin tests ---
@@ -4047,9 +4016,9 @@ mod tests {
     #[test]
     fn builtin_concat_two_lists() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(concat (list 1 2) (list 3 4))", &mut env, &mut d),
+            eval_str("(concat (list 1 2) (list 3 4))", &mut env, &d),
             Ok(Val::List(vec![
                 Val::Int(1),
                 Val::Int(2),
@@ -4062,19 +4031,16 @@ mod tests {
     #[test]
     fn builtin_concat_empty() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(
-            eval_str("(concat)", &mut env, &mut d),
-            Ok(Val::List(vec![]))
-        );
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(concat)", &mut env, &d), Ok(Val::List(vec![])));
     }
 
     #[test]
     fn builtin_concat_with_nil() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(concat (list 1) nil (list 2))", &mut env, &mut d),
+            eval_str("(concat (list 1) nil (list 2))", &mut env, &d),
             Ok(Val::List(vec![Val::Int(1), Val::Int(2)]))
         );
     }
@@ -4082,9 +4048,9 @@ mod tests {
     #[test]
     fn builtin_concat_with_vector() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(concat [1 2] (list 3))", &mut env, &mut d),
+            eval_str("(concat [1 2] (list 3))", &mut env, &d),
             Ok(Val::List(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
         );
     }
@@ -4092,8 +4058,8 @@ mod tests {
     #[test]
     fn builtin_concat_non_seq_error() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(concat 42)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(concat 42)", &mut env, &d).is_err());
     }
 
     // --- Syntax-quote integration tests ---
@@ -4101,30 +4067,24 @@ mod tests {
     #[test]
     fn syntax_quote_when_macro() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         eval_str(
             "(defmacro when [test & body] `(if ~test (do ~@body) nil))",
             &mut env,
-            &mut d,
+            &d,
         )
         .unwrap();
-        assert_eq!(
-            eval_str("(when true 1 2 3)", &mut env, &mut d),
-            Ok(Val::Int(3))
-        );
-        assert_eq!(
-            eval_str("(when false 1 2 3)", &mut env, &mut d),
-            Ok(Val::Nil)
-        );
+        assert_eq!(eval_str("(when true 1 2 3)", &mut env, &d), Ok(Val::Int(3)));
+        assert_eq!(eval_str("(when false 1 2 3)", &mut env, &d), Ok(Val::Nil));
     }
 
     #[test]
     fn syntax_quote_simple_expansion() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Syntax-quote in a let produces a data structure
         assert_eq!(
-            eval_str("(let [x 42] `(+ ~x 1))", &mut env, &mut d),
+            eval_str("(let [x 42] `(+ ~x 1))", &mut env, &d),
             Ok(Val::List(vec![
                 Val::Sym("+".into()),
                 Val::Int(42),
@@ -4136,9 +4096,9 @@ mod tests {
     #[test]
     fn syntax_quote_splice_expansion() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(let [xs (list 1 2 3)] `(+ ~@xs))", &mut env, &mut d,),
+            eval_str("(let [xs (list 1 2 3)] `(+ ~@xs))", &mut env, &d,),
             Ok(Val::List(vec![
                 Val::Sym("+".into()),
                 Val::Int(1),
@@ -4151,30 +4111,27 @@ mod tests {
     #[test]
     fn syntax_quote_unless_macro() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         eval_str(
             "(defmacro unless [test & body] `(if ~test nil (do ~@body)))",
             &mut env,
-            &mut d,
+            &d,
         )
         .unwrap();
         assert_eq!(
-            eval_str("(unless false 1 2 3)", &mut env, &mut d),
+            eval_str("(unless false 1 2 3)", &mut env, &d),
             Ok(Val::Int(3))
         );
-        assert_eq!(
-            eval_str("(unless true 1 2 3)", &mut env, &mut d),
-            Ok(Val::Nil)
-        );
+        assert_eq!(eval_str("(unless true 1 2 3)", &mut env, &d), Ok(Val::Nil));
     }
 
     #[test]
     fn syntax_quote_preserves_keywords() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Keywords are self-evaluating — should pass through syntax-quote
         assert_eq!(
-            eval_str("`(:a ~(+ 1 2))", &mut env, &mut d),
+            eval_str("`(:a ~(+ 1 2))", &mut env, &d),
             Ok(Val::List(vec![Val::Keyword("a".into()), Val::Int(3)]))
         );
     }
@@ -4182,8 +4139,8 @@ mod tests {
     #[test]
     fn unquote_outside_syntax_quote_errors() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        let result = eval_str("(unquote x)", &mut env, &mut d);
+        let d = RecordingDispatch::new();
+        let result = eval_str("(unquote x)", &mut env, &d);
         assert!(result.is_err());
         assert!(err_contains(
             &result.unwrap_err(),
@@ -4194,8 +4151,8 @@ mod tests {
     #[test]
     fn splice_unquote_outside_syntax_quote_errors() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        let result = eval_str("(splice-unquote x)", &mut env, &mut d);
+        let d = RecordingDispatch::new();
+        let result = eval_str("(splice-unquote x)", &mut env, &d);
         assert!(result.is_err());
         assert!(err_contains(
             &result.unwrap_err(),
@@ -4209,15 +4166,15 @@ mod tests {
     /// Helper: load the prelude then parse + eval a string expression.
     fn prelude_eval(input: &str) -> Result<Val, Val> {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Load prelude forms into the environment
         let prelude_forms =
             crate::read_many(crate::PRELUDE).map_err(|e| format!("prelude parse: {e}"))?;
         for form in &prelude_forms {
-            eval_blocking(form, &mut env, &mut d)?;
+            eval_blocking(form, &mut env, &d)?;
         }
         // Now eval the test expression
-        eval_str(input, &mut env, &mut d)
+        eval_str(input, &mut env, &d)
     }
 
     #[test]
@@ -4354,32 +4311,29 @@ mod tests {
     #[test]
     fn fn_recur_factorial() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Define factorial with recur
         eval_str(
             "(def factorial (fn [n acc] (if (= n 0) acc (recur (- n 1) (* acc n)))))",
             &mut env,
-            &mut d,
+            &d,
         )
         .unwrap();
-        assert_eq!(
-            eval_str("(factorial 5 1)", &mut env, &mut d),
-            Ok(Val::Int(120))
-        );
+        assert_eq!(eval_str("(factorial 5 1)", &mut env, &d), Ok(Val::Int(120)));
     }
 
     #[test]
     fn fn_recur_countdown() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         eval_str(
             r#"(def countdown (fn [n] (if (= n 0) "done" (recur (- n 1)))))"#,
             &mut env,
-            &mut d,
+            &d,
         )
         .unwrap();
         assert_eq!(
-            eval_str("(countdown 100)", &mut env, &mut d),
+            eval_str("(countdown 100)", &mut env, &d),
             Ok(Val::Str("done".into()))
         );
     }
@@ -4388,50 +4342,42 @@ mod tests {
     fn fn_recur_no_recur_regression() {
         // Normal fn without recur must still work
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &mut d).unwrap();
-        assert_eq!(eval_str("(add 3 4)", &mut env, &mut d), Ok(Val::Int(7)));
+        let d = RecordingDispatch::new();
+        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &d).unwrap();
+        assert_eq!(eval_str("(add 3 4)", &mut env, &d), Ok(Val::Int(7)));
     }
 
     #[test]
     fn fn_recur_wrong_arity() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        eval_str("(def f (fn [a b] (recur 1)))", &mut env, &mut d).unwrap();
-        let err = eval_str("(f 1 2)", &mut env, &mut d).unwrap_err();
+        let d = RecordingDispatch::new();
+        eval_str("(def f (fn [a b] (recur 1)))", &mut env, &d).unwrap();
+        let err = eval_str("(f 1 2)", &mut env, &d).unwrap_err();
         assert!(err_contains(&err, "expected 2"), "got: {err}");
     }
 
     #[test]
     fn fn_recur_variadic() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Variadic fn that sums via recur: acc + first of rest, recur with rest
         eval_str(
             "(def sum-all (fn [acc & nums] (if (= (count nums) 0) acc (recur (+ acc (first nums)) (rest nums)))))",
             &mut env,
-            &mut d,
+            &d,
         )
         .unwrap();
         // sum-all 0 1 2 3 → 6
         // Note: recur with variadic expects fixed_params + 1 args (the rest becomes a list)
-        assert_eq!(
-            eval_str("(sum-all 0 1 2 3)", &mut env, &mut d),
-            Ok(Val::Int(6))
-        );
+        assert_eq!(eval_str("(sum-all 0 1 2 3)", &mut env, &d), Ok(Val::Int(6)));
     }
 
     #[test]
     fn fn_recur_single_iteration() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        eval_str(
-            "(def once (fn [x] (if x (recur false) 42)))",
-            &mut env,
-            &mut d,
-        )
-        .unwrap();
-        assert_eq!(eval_str("(once true)", &mut env, &mut d), Ok(Val::Int(42)));
+        let d = RecordingDispatch::new();
+        eval_str("(def once (fn [x] (if x (recur false) 42)))", &mut env, &d).unwrap();
+        assert_eq!(eval_str("(once true)", &mut env, &d), Ok(Val::Int(42)));
     }
 
     // =========================================================================
@@ -4441,9 +4387,9 @@ mod tests {
     #[test]
     fn stdlib_type_int() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(type 42)", &mut env, &mut d),
+            eval_str("(type 42)", &mut env, &d),
             Ok(Val::Keyword("int".into()))
         );
     }
@@ -4451,9 +4397,9 @@ mod tests {
     #[test]
     fn stdlib_type_nil() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(type nil)", &mut env, &mut d),
+            eval_str("(type nil)", &mut env, &d),
             Ok(Val::Keyword("nil".into()))
         );
     }
@@ -4461,9 +4407,9 @@ mod tests {
     #[test]
     fn stdlib_type_fn() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(type (fn [x] x))", &mut env, &mut d),
+            eval_str("(type (fn [x] x))", &mut env, &d),
             Ok(Val::Keyword("fn".into()))
         );
     }
@@ -4471,39 +4417,30 @@ mod tests {
     #[test]
     fn stdlib_nil_pred() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(
-            eval_str("(nil? nil)", &mut env, &mut d),
-            Ok(Val::Bool(true))
-        );
-        assert_eq!(eval_str("(nil? 0)", &mut env, &mut d), Ok(Val::Bool(false)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(nil? nil)", &mut env, &d), Ok(Val::Bool(true)));
+        assert_eq!(eval_str("(nil? 0)", &mut env, &d), Ok(Val::Bool(false)));
     }
 
     #[test]
     fn stdlib_some_pred() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(
-            eval_str("(some? nil)", &mut env, &mut d),
-            Ok(Val::Bool(false))
-        );
-        assert_eq!(eval_str("(some? 0)", &mut env, &mut d), Ok(Val::Bool(true)));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(some? nil)", &mut env, &d), Ok(Val::Bool(false)));
+        assert_eq!(eval_str("(some? 0)", &mut env, &d), Ok(Val::Bool(true)));
     }
 
     #[test]
     fn stdlib_empty_pred() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(empty? nil)", &mut env, &d), Ok(Val::Bool(true)));
         assert_eq!(
-            eval_str("(empty? nil)", &mut env, &mut d),
+            eval_str("(empty? (list))", &mut env, &d),
             Ok(Val::Bool(true))
         );
         assert_eq!(
-            eval_str("(empty? (list))", &mut env, &mut d),
-            Ok(Val::Bool(true))
-        );
-        assert_eq!(
-            eval_str("(empty? (list 1))", &mut env, &mut d),
+            eval_str("(empty? (list 1))", &mut env, &d),
             Ok(Val::Bool(false))
         );
     }
@@ -4511,13 +4448,13 @@ mod tests {
     #[test]
     fn stdlib_contains_map() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(contains? {:a 1 :b 2} :a)", &mut env, &mut d),
+            eval_str("(contains? {:a 1 :b 2} :a)", &mut env, &d),
             Ok(Val::Bool(true))
         );
         assert_eq!(
-            eval_str("(contains? {:a 1} :z)", &mut env, &mut d),
+            eval_str("(contains? {:a 1} :z)", &mut env, &d),
             Ok(Val::Bool(false))
         );
     }
@@ -4525,16 +4462,16 @@ mod tests {
     #[test]
     fn stdlib_str_empty() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(eval_str("(str)", &mut env, &mut d), Ok(Val::Str("".into())));
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str("(str)", &mut env, &d), Ok(Val::Str("".into())));
     }
 
     #[test]
     fn stdlib_str_concat() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str(r#"(str "hello" " " "world")"#, &mut env, &mut d),
+            eval_str(r#"(str "hello" " " "world")"#, &mut env, &d),
             Ok(Val::Str("hello world".into()))
         );
     }
@@ -4542,9 +4479,9 @@ mod tests {
     #[test]
     fn stdlib_str_nil_empty() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str(r#"(str "a" nil "b")"#, &mut env, &mut d),
+            eval_str(r#"(str "a" nil "b")"#, &mut env, &d),
             Ok(Val::Str("ab".into()))
         );
     }
@@ -4552,9 +4489,9 @@ mod tests {
     #[test]
     fn stdlib_name_keyword() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(name :foo)", &mut env, &mut d),
+            eval_str("(name :foo)", &mut env, &d),
             Ok(Val::Str("foo".into()))
         );
     }
@@ -4562,9 +4499,9 @@ mod tests {
     #[test]
     fn stdlib_name_symbol() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
-            eval_str("(name 'bar)", &mut env, &mut d),
+            eval_str("(name 'bar)", &mut env, &d),
             Ok(Val::Str("bar".into()))
         );
     }
@@ -4572,20 +4509,17 @@ mod tests {
     #[test]
     fn stdlib_println_returns_nil() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert_eq!(
-            eval_str(r#"(println "test")"#, &mut env, &mut d),
-            Ok(Val::Nil)
-        );
+        let d = RecordingDispatch::new();
+        assert_eq!(eval_str(r#"(println "test")"#, &mut env, &d), Ok(Val::Nil));
     }
 
     #[test]
     fn stdlib_map_basic() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        eval_str("(def inc (fn [x] (+ x 1)))", &mut env, &mut d).unwrap();
+        let d = RecordingDispatch::new();
+        eval_str("(def inc (fn [x] (+ x 1)))", &mut env, &d).unwrap();
         assert_eq!(
-            eval_str("(map inc (list 1 2 3))", &mut env, &mut d),
+            eval_str("(map inc (list 1 2 3))", &mut env, &d),
             Ok(Val::List(vec![Val::Int(2), Val::Int(3), Val::Int(4)]))
         );
     }
@@ -4593,10 +4527,10 @@ mod tests {
     #[test]
     fn stdlib_map_empty() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        eval_str("(def f (fn [x] x))", &mut env, &mut d).unwrap();
+        let d = RecordingDispatch::new();
+        eval_str("(def f (fn [x] x))", &mut env, &d).unwrap();
         assert_eq!(
-            eval_str("(map f (list))", &mut env, &mut d),
+            eval_str("(map f (list))", &mut env, &d),
             Ok(Val::List(vec![]))
         );
     }
@@ -4604,10 +4538,10 @@ mod tests {
     #[test]
     fn stdlib_filter_basic() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        eval_str("(def pos? (fn [x] (> x 0)))", &mut env, &mut d).unwrap();
+        let d = RecordingDispatch::new();
+        eval_str("(def pos? (fn [x] (> x 0)))", &mut env, &d).unwrap();
         assert_eq!(
-            eval_str("(filter pos? (list -1 0 1 2 -3))", &mut env, &mut d),
+            eval_str("(filter pos? (list -1 0 1 2 -3))", &mut env, &d),
             Ok(Val::List(vec![Val::Int(1), Val::Int(2)]))
         );
     }
@@ -4615,10 +4549,10 @@ mod tests {
     #[test]
     fn stdlib_reduce_with_init() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &mut d).unwrap();
+        let d = RecordingDispatch::new();
+        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &d).unwrap();
         assert_eq!(
-            eval_str("(reduce add 0 (list 1 2 3))", &mut env, &mut d),
+            eval_str("(reduce add 0 (list 1 2 3))", &mut env, &d),
             Ok(Val::Int(6))
         );
     }
@@ -4626,10 +4560,10 @@ mod tests {
     #[test]
     fn stdlib_reduce_no_init() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &mut d).unwrap();
+        let d = RecordingDispatch::new();
+        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &d).unwrap();
         assert_eq!(
-            eval_str("(reduce add (list 1 2 3))", &mut env, &mut d),
+            eval_str("(reduce add (list 1 2 3))", &mut env, &d),
             Ok(Val::Int(6))
         );
     }
@@ -4637,18 +4571,18 @@ mod tests {
     #[test]
     fn stdlib_reduce_empty_no_init_errors() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        eval_str("(def f (fn [a b] a))", &mut env, &mut d).unwrap();
-        assert!(eval_str("(reduce f (list))", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        eval_str("(def f (fn [a b] a))", &mut env, &d).unwrap();
+        assert!(eval_str("(reduce f (list))", &mut env, &d).is_err());
     }
 
     #[test]
     fn stdlib_reduce_empty_with_init() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &mut d).unwrap();
+        let d = RecordingDispatch::new();
+        eval_str("(def add (fn [a b] (+ a b)))", &mut env, &d).unwrap();
         assert_eq!(
-            eval_str("(reduce add 100 (list))", &mut env, &mut d),
+            eval_str("(reduce add 100 (list))", &mut env, &d),
             Ok(Val::Int(100))
         );
     }
@@ -4660,13 +4594,13 @@ mod tests {
     /// Helper: load prelude then eval — needed for try/throw macros
     fn effects_eval(input: &str) -> Result<Val, Val> {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         let prelude_forms =
             crate::read_many(crate::PRELUDE).map_err(|e| eval_err!("prelude parse: {e}"))?;
         for form in &prelude_forms {
-            eval_blocking(form, &mut env, &mut d)?;
+            eval_blocking(form, &mut env, &d)?;
         }
-        eval_str(input, &mut env, &mut d)
+        eval_str(input, &mut env, &d)
     }
 
     // --- perform / with-handler primitives ---
@@ -4674,19 +4608,19 @@ mod tests {
     #[test]
     fn perform_without_handler_propagates() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        let result = eval_str("(perform :fail 42)", &mut env, &mut d);
+        let d = RecordingDispatch::new();
+        let result = eval_str("(perform :fail 42)", &mut env, &d);
         assert!(result.is_err());
     }
 
     #[test]
     fn with_handler_catches_effect() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         let result = eval_str(
             "(with-effect-handler :fail (fn [error] (+ error 1)) (perform :fail 42))",
             &mut env,
-            &mut d,
+            &d,
         );
         assert_eq!(result, Ok(Val::Int(43)));
     }
@@ -4694,12 +4628,12 @@ mod tests {
     #[test]
     fn with_handler_passes_through_on_no_effect() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         assert_eq!(
             eval_str(
                 "(with-effect-handler :fail (fn [error] 0) (+ 1 2))",
                 &mut env,
-                &mut d
+                &d
             ),
             Ok(Val::Int(3))
         );
@@ -4708,11 +4642,11 @@ mod tests {
     #[test]
     fn with_handler_unmatched_effect_propagates() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         let result = eval_str(
             "(with-effect-handler :other (fn [error] 0) (perform :fail 42))",
             &mut env,
-            &mut d,
+            &d,
         );
         assert!(result.is_err());
     }
@@ -4720,13 +4654,13 @@ mod tests {
     #[test]
     fn nested_handlers() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Inner handler catches :fail, outer catches :other
         assert_eq!(
             eval_str(
                 "(with-effect-handler :other (fn [error] 99) (with-effect-handler :fail (fn [error] (+ error 10)) (perform :fail 5)))",
                 &mut env,
-                &mut d
+                &d
             ),
             Ok(Val::Int(15))
         );
@@ -4793,13 +4727,8 @@ mod tests {
     #[test]
     fn ex_info_basic() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        let result = eval_str(
-            r#"(ex-info "bad input" {:type :invalid})"#,
-            &mut env,
-            &mut d,
-        )
-        .unwrap();
+        let d = RecordingDispatch::new();
+        let result = eval_str(r#"(ex-info "bad input" {:type :invalid})"#, &mut env, &d).unwrap();
         if let Val::Map(m) = &result {
             assert_eq!(
                 m.get(&Val::Keyword("message".into())),
@@ -4817,8 +4746,8 @@ mod tests {
     #[test]
     fn ex_info_wrong_args() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        assert!(eval_str("(ex-info)", &mut env, &mut d).is_err());
+        let d = RecordingDispatch::new();
+        assert!(eval_str("(ex-info)", &mut env, &d).is_err());
     }
 
     // --- or-else ---
@@ -4855,9 +4784,9 @@ mod tests {
     #[test]
     fn internal_error_is_structured() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         // Division by zero should produce a structured error
-        let err = eval_str("(/ 1 0)", &mut env, &mut d).unwrap_err();
+        let err = eval_str("(/ 1 0)", &mut env, &d).unwrap_err();
         assert!(err_contains(&err, "division by zero"));
     }
 
@@ -4866,8 +4795,8 @@ mod tests {
     #[test]
     fn perform_non_keyword_type() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        let result = eval_str(r#"(perform 42 "data")"#, &mut env, &mut d);
+        let d = RecordingDispatch::new();
+        let result = eval_str(r#"(perform 42 "data")"#, &mut env, &d);
         assert!(result.is_err());
         assert!(err_contains(&result.unwrap_err(), "keyword"));
     }
@@ -4875,11 +4804,11 @@ mod tests {
     #[test]
     fn perform_nil_data() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         let result = eval_str(
             "(with-effect-handler :test (fn [data] data) (perform :test nil))",
             &mut env,
-            &mut d,
+            &d,
         );
         assert_eq!(result, Ok(Val::Nil));
     }
@@ -4887,11 +4816,11 @@ mod tests {
     #[test]
     fn perform_in_loop() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         let result = eval_str(
             "(with-effect-handler :done (fn [data] data) (loop [i 0] (if (= i 3) (perform :done i) (recur (+ i 1)))))",
             &mut env,
-            &mut d,
+            &d,
         );
         assert_eq!(result, Ok(Val::Int(3)));
     }
@@ -4900,19 +4829,19 @@ mod tests {
     fn handler_missing_key() {
         // with-effect-handler requires a keyword or cap target
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        let result = eval_str("(with-effect-handler (perform :test 42))", &mut env, &mut d);
+        let d = RecordingDispatch::new();
+        let result = eval_str("(with-effect-handler (perform :test 42))", &mut env, &d);
         assert!(result.is_err());
     }
 
     #[test]
     fn handler_not_function() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         let result = eval_str(
             r#"(with-effect-handler :test 42 (perform :test "data"))"#,
             &mut env,
-            &mut d,
+            &d,
         );
         assert!(result.is_err());
         assert!(err_contains(&result.unwrap_err(), "function"));
@@ -4921,11 +4850,11 @@ mod tests {
     #[test]
     fn handler_multi_body() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         let result = eval_str(
             "(with-effect-handler :test (fn [data] data) (def x 1) (perform :test (+ x 1)))",
             &mut env,
-            &mut d,
+            &d,
         );
         assert_eq!(result, Ok(Val::Int(2)));
     }
@@ -4933,11 +4862,11 @@ mod tests {
     #[test]
     fn handler_throws_effect() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
+        let d = RecordingDispatch::new();
         let result = eval_str(
             "(with-effect-handler :outer (fn [error] (+ error 100)) (with-effect-handler :fail (fn [error] (perform :outer error)) (perform :fail 5)))",
             &mut env,
-            &mut d,
+            &d,
         );
         assert_eq!(result, Ok(Val::Int(105)));
     }
@@ -4945,16 +4874,16 @@ mod tests {
     #[test]
     fn ex_info_non_string_msg() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        let result = eval_str("(ex-info 42 {})", &mut env, &mut d);
+        let d = RecordingDispatch::new();
+        let result = eval_str("(ex-info 42 {})", &mut env, &d);
         assert!(result.is_err());
     }
 
     #[test]
     fn ex_info_non_map_data() {
         let mut env = Env::new();
-        let mut d = RecordingDispatch::new();
-        let result = eval_str(r#"(ex-info "msg" [1 2])"#, &mut env, &mut d);
+        let d = RecordingDispatch::new();
+        let result = eval_str(r#"(ex-info "msg" [1 2])"#, &mut env, &d);
         assert!(result.is_err());
     }
 
@@ -5269,7 +5198,7 @@ mod tests {
 
     #[test]
     fn native_fn_equality() {
-        let func: Rc<dyn Fn(&[Val]) -> Result<Val, Val>> = Rc::new(|_: &[Val]| Ok(Val::Nil));
+        let func: crate::NativeFnImpl = Rc::new(|_: &[Val]| Ok(Val::Nil));
         let a = Val::NativeFn {
             name: "test".into(),
             func: func.clone(),

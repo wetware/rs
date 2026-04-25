@@ -164,15 +164,14 @@ async fn wait_ready(shell: &shell_capnp::shell::Client) {
     for i in 0..100 {
         let mut req = shell.eval_request();
         req.get().set_text("nil");
-        match tokio::time::timeout(std::time::Duration::from_secs(5), req.send().promise).await {
-            Ok(Ok(resp)) => {
-                let result: shell_capnp::shell::eval_results::Reader<'_> = resp.get().unwrap();
-                let text = result.get_result().unwrap().to_str().unwrap_or("");
-                if !result.get_is_error() || !text.contains("not ready") {
-                    return;
-                }
+        if let Ok(Ok(resp)) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), req.send().promise).await
+        {
+            let result: shell_capnp::shell::eval_results::Reader<'_> = resp.get().unwrap();
+            let text = result.get_result().unwrap().to_str().unwrap_or("");
+            if !result.get_is_error() || !text.contains("not ready") {
+                return;
             }
-            Ok(Err(_)) | Err(_) => {}
         }
         if i > 0 && i % 10 == 0 {
             eprintln!("  waiting for shell to initialize... ({i} polls)");
