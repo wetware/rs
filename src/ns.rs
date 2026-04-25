@@ -306,7 +306,7 @@ mod tests {
         std::fs::write(ns_dir.join("org"), "bootstrap=/ipfs/QmOrg\n").unwrap();
 
         let paths = [tmp.path()];
-        let refs: Vec<&Path> = paths.iter().map(|p| *p).collect();
+        let refs: Vec<&Path> = paths.to_vec();
         let configs = scan_namespace_configs(&refs).unwrap();
         assert_eq!(configs.len(), 2);
     }
@@ -315,7 +315,7 @@ mod tests {
     fn scan_skips_missing_ns_dir() {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = [tmp.path()];
-        let refs: Vec<&Path> = paths.iter().map(|p| *p).collect();
+        let refs: Vec<&Path> = paths.to_vec();
         let configs = scan_namespace_configs(&refs).unwrap();
         assert!(configs.is_empty());
     }

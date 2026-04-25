@@ -1349,7 +1349,7 @@ mod tests {
 
     #[test]
     fn parse_float() {
-        assert_eq!(read("3.14").unwrap(), Val::Float(3.14));
+        assert_eq!(read("2.5").unwrap(), Val::Float(2.5));
     }
 
     #[test]
@@ -1699,7 +1699,7 @@ mod tests {
 
     #[test]
     fn display_float() {
-        assert_eq!(format!("{}", Val::Float(3.14)), "3.14");
+        assert_eq!(format!("{}", Val::Float(2.5)), "2.5");
         assert_eq!(format!("{}", Val::Float(1.0)), "1.0");
     }
 
