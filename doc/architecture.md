@@ -296,7 +296,7 @@ The process exits when pid0 exits.
 ### Node config
 
 Orthogonal to the image, **node config** controls how the host
-behaves on this particular machine: `--port`, `--wasm-debug`, IPFS
+behaves on this particular machine: `--listen`, `--wasm-debug`, IPFS
 daemon address, log levels, resource limits. Node config is set via CLI
 flags or env vars — it never lives inside image layers.
 
@@ -351,13 +351,67 @@ EpochGuard invalidation → stale capabilities fail → guest re-grafts
 The epoch channel is created before the guest spawns, so the pipeline
 runs concurrently with the guest via `CellBuilder::with_epoch_rx()`.
 
-## IPFS access
+## VFS & capability model
 
-Guests do not receive an IPFS capability. Content-addressed reads flow
-through the WASI virtual filesystem (`CidTree` in `src/vfs.rs`): a guest
-opens `/ipfs/<cid>/...` just like any other path, and the host resolves
-blocks lazily through the local Kubo node (`http://localhost:5001`).
-See `src/fs_intercept.rs` for the WASI filesystem integration.
+Wetware's filesystem is the IPFS UnixFS DAG, exposed to guests through
+the WASI virtual filesystem (`CidTree` in `src/vfs.rs`, WASI integration
+in `src/fs_intercept.rs`). This is the load-bearing claim that makes
+the runtime capability-secure: **CIDs are unforgeable references, and
+the filesystem a cell sees IS the subgraph reachable from CIDs it
+knows.** No path-based permission model, no separate "IPFS" cap layered
+on top of the normal filesystem.
+
+```
+        stem::Atom (root binding, swappable on epoch advance)
+              │
+              ▼
+        CidTree.root  (Arc<String>, the cell's root CID)
+              │
+              ▼
+   walk DAG via ipfs.ls() / ipfs.cat()  ──► IPFS UnixFS blocks
+              │
+              ▼
+   guest path resolution  (e.g. /etc/init.d/50-shell.glia)
+              │
+              ▼
+   WASI fs syscalls  ──►  fs_intercept.rs  ──►  CidTree::resolve_path
+                                                       │
+                                                       ▼
+                                          ResolvedNode { CidFile | CidDir | LocalFile | LocalDir }
+```
+
+The cell's WASI root preopen points at `CidTree::staging_dir()`
+(`src/cell/proc.rs:537-559`), where the host materializes content on
+demand. **WASI preopens are a protocol detail, not a security
+boundary.** They give the guest a descriptor to anchor lookups
+against. Reachability is governed by `CidTree`'s root, not by the
+preopen.
+
+**Three attenuation points, no fourth:**
+
+1. **Membrane graft** — RPC capabilities (`identity`, `host`,
+   `runtime`, `routing`, `http-client`, plus init.d `with` extras).
+   Surface is `src/rpc/membrane.rs:HostGraftBuilder`.
+2. **Root Atom binding** — the `stem::Atom` whose value is the cell's
+   root CID. Swap the Atom and `CidTree::swap_root` updates the view
+   atomically.
+3. **Glia env bindings** — what's callable inside the cell. Restrict
+   filesystem access by not binding the `fs` handler in the cell's
+   env (`std/caps/src/lib.rs:make_fs_handler`).
+
+`LocalOverride` (`src/vfs.rs:59-62`) is the only principled exception:
+per-file host-local mounts checked before CID resolution, so private
+content (identity keys, per-node secrets) never enters IPFS. Use
+sparingly and only for genuinely host-private files.
+
+Revocation = epoch advance + respawn. Classical ocap: you cannot
+un-hand a CID. Advance the epoch (RPC caps fail `staleEpoch`), kill
+and respawn the cell under a different root Atom — the new cell sees
+a different slice of the universe.
+
+For the agent-facing view of all this (`fs/*`, `(schema cap)`,
+structured errors, attenuation strategies), see
+[capabilities.md](capabilities.md).
 
 ## State management
 
@@ -407,9 +461,20 @@ Wetware is the drivetrain, not the engine. An LLM connects to a
 node and gets a capability-secured shell:
 
 - **MCP mode** (`ww run . --mcp`): the cell becomes an MCP server on
-  stdin/stdout. Tools map to capability methods. The membrane provides
-  the safety boundary -- AI agents can only do what their capabilities
-  allow.
+  stdin/stdout. `eval` is the universal primitive; per-cap sugar tools
+  (`host`, `routing`, `runtime`, ...) translate to internal Glia
+  expressions. The membrane provides the safety boundary — AI agents
+  can only do what their capabilities allow.
+
+- **Structured errors and introspection.** Errors are values
+  (`Result<Val, Val>`) with namespaced `:glia.error/*` keys
+  (`crates/glia/src/error.rs`). The MCP envelope surfaces the schema
+  as `structuredContent` so agents can route on `:glia.error/type`
+  without parsing prose. `(schema cap)`, `(doc cap)`, and `(help cap)`
+  Glia builtins return `Schema.Node` bytes, summaries, and references
+  for any grafted cap — the agent introspects the surface rather
+  than relying on hardcoded knowledge. See
+  [capabilities.md](capabilities.md) for the full schema.
 
 - **Glia shell** (`ww shell`): interactive REPL for capability
   exploration. `ww perform install` wires MCP into Claude Code.
