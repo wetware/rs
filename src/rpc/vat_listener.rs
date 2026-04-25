@@ -78,8 +78,10 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
         let handler_which = pry!(handler.which());
 
         // Read optional caps from the listen request (init.d `with` block grants).
-        // Collect as type-erased (name, client) pairs for forwarding to spawned cells.
-        let extra_caps: Vec<(String, capnp::capability::Client)> = {
+        // Collect as (name, client, schema_bytes) tuples; the schema bytes are
+        // re-emitted on each spawned-cell graft so guests can introspect the
+        // cap's interface end-to-end.
+        let extra_caps: Vec<(String, capnp::capability::Client, Vec<u8>)> = {
             let mut caps_vec = Vec::new();
             if let Ok(caps_reader) = params.get_caps() {
                 for entry in caps_reader.iter() {
@@ -87,7 +89,11 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
                         entry.get_name().map(|n| n.to_string().unwrap_or_default()),
                         entry.get_cap().get_as_capability(),
                     ) {
-                        caps_vec.push((name, cap));
+                        let schema_bytes = match entry.get_schema() {
+                            Ok(node) => super::canonicalize_schema_node(node).unwrap_or_default(),
+                            Err(_) => Vec::new(),
+                        };
+                        caps_vec.push((name, cap, schema_bytes));
                     }
                 }
             }
@@ -215,17 +221,30 @@ impl system_capnp::vat_listener::Server for VatListenerImpl {
 /// duplex for the libp2p stream. Production callers pass `libp2p::Stream`.
 pub async fn handle_vat_connection_spawn(
     executor: system_capnp::executor::Client,
-    caps: Vec<(String, capnp::capability::Client)>,
+    caps: Vec<(String, capnp::capability::Client, Vec<u8>)>,
     stream: impl AsyncRead + AsyncWrite + 'static,
     protocol_cid: &str,
 ) -> Result<(), capnp::Error> {
-    // 1. Spawn cell process via Executor.spawn(), forwarding caps.
+    // 1. Spawn cell process via Executor.spawn(), forwarding caps with
+    //    their canonical Schema.Node bytes so the spawned cell's graft
+    //    can populate Export.schema for the guest.
     let mut spawn_req = executor.spawn_request();
     if !caps.is_empty() {
         let mut caps_builder = spawn_req.get().init_caps(caps.len() as u32);
-        for (i, (name, client)) in caps.iter().enumerate() {
+        for (i, (name, client, schema_bytes)) in caps.iter().enumerate() {
             let mut entry = caps_builder.reborrow().get(i as u32);
             entry.set_name(name);
+            if !schema_bytes.is_empty() {
+                let aligned = crate::rpc::membrane::bytes_to_aligned_words(schema_bytes);
+                let segments: &[&[u8]] = &[capnp::Word::words_to_bytes(&aligned)];
+                let segment_array = capnp::message::SegmentArray::new(segments);
+                let reader = capnp::message::Reader::new(
+                    segment_array,
+                    capnp::message::ReaderOptions::new(),
+                );
+                let schema_node: capnp::schema_capnp::node::Reader = reader.get_root()?;
+                entry.reborrow().set_schema(schema_node)?;
+            }
             entry.init_cap().set_as_capability(client.hook.clone());
         }
     }
