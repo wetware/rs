@@ -1592,7 +1592,8 @@ wasip2::cli::command::export!({iface_name}Guest);
         tracing::debug!("waiting for swarm ready...");
         let swarm_ready = swarm_ready_rx
             .await
-            .context("Swarm service failed to start")?;
+            .context("swarm thread exited before reporting readiness")?
+            .context("swarm service failed to start")?;
         tracing::debug!("swarm ready");
         let network_state = swarm_ready.network_state;
         let stream_control = swarm_ready.stream_control;

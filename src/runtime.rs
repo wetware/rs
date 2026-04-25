@@ -431,7 +431,7 @@ pub struct SwarmServiceParams {
 pub struct SwarmService {
     pub params: SwarmServiceParams,
     pub cmd_rx: mpsc::Receiver<SwarmCommand>,
-    pub ready_tx: tokio::sync::oneshot::Sender<SwarmReady>,
+    pub ready_tx: tokio::sync::oneshot::Sender<Result<SwarmReady>>,
 }
 
 /// Values sent back from SwarmService after host construction.
@@ -449,18 +449,30 @@ impl Service for SwarmService {
 
         rt.block_on(async move {
             // Construct the host on THIS runtime so TCP listeners register
-            // with the correct reactor.
+            // with the correct reactor. If construction fails, forward the
+            // error to the main thread so the user sees the real cause
+            // (e.g. bind failure) instead of a "channel closed" symptom.
             let p = self.params;
-            let host =
-                crate::host::Libp2pHost::new(p.listen, p.keypair, p.kubo_bootstrap, p.kubo_peers)?;
+            let host = match crate::host::Libp2pHost::new(
+                p.listen,
+                p.keypair,
+                p.kubo_bootstrap,
+                p.kubo_peers,
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    let _ = self.ready_tx.send(Err(e));
+                    return Ok(());
+                }
+            };
             let network_state = NetworkState::from_peer_id(host.local_peer_id().to_bytes());
             let stream_control = host.stream_control();
 
             // Send construction results back to the main thread.
-            let _ = self.ready_tx.send(SwarmReady {
+            let _ = self.ready_tx.send(Ok(SwarmReady {
                 stream_control,
                 network_state: network_state.clone(),
-            });
+            }));
 
             tokio::select! {
                 result = host.run(network_state, self.cmd_rx) => result,
