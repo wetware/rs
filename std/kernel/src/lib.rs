@@ -1309,6 +1309,125 @@ fn get_graft_cap<T: capnp::capability::FromClientHook>(
 }
 
 // ---------------------------------------------------------------------------
+// Introspection builtins: (schema cap), (doc cap), (help cap)
+// ---------------------------------------------------------------------------
+//
+// `(schema cap)` returns the canonical Schema.Node bytes for a grafted
+// capability, sourced from the build-time registry baked into the kernel
+// (see std/kernel/build.rs). `(doc cap)` returns a human-readable summary
+// of the cap. `(help cap)` is a friendly alias that includes the
+// canonical name, schema CID, method count, and inline notes.
+//
+// All three are pure data lookups — no RPC, no effects. They take a
+// `Val::Cap` and return immediately. Errors are produced via the
+// `glia::error::*` constructors so MCP / try forms can route on
+// `:glia.error/type`.
+
+/// Map a canonical cap name to its build-time schema bytes. Returns
+/// `None` for unknown names so callers can produce a structured error.
+fn schema_bytes_for_cap(name: &str) -> Option<&'static [u8]> {
+    match name {
+        "host" => Some(schema_ids::HOST_SCHEMA),
+        "runtime" => Some(schema_ids::RUNTIME_SCHEMA),
+        "routing" => Some(schema_ids::ROUTING_SCHEMA),
+        "identity" => Some(schema_ids::IDENTITY_SCHEMA),
+        // The cap is grafted under the name "http"; its schema is for
+        // the HttpClient interface.
+        "http" | "http-client" => Some(schema_ids::HTTP_CLIENT_SCHEMA),
+        _ => None,
+    }
+}
+
+/// Single-arg helper used by all three introspection builtins. Validates
+/// arity and the argument type, returning the inner cap fields on
+/// success. Builds structured errors on failure.
+fn unwrap_cap_arg<'a>(
+    builtin: &'static str,
+    args: &'a [Val],
+) -> Result<(&'a str, &'a str), Val> {
+    if args.len() != 1 {
+        return Err(glia::error::arity(builtin, "1", args.len()));
+    }
+    match &args[0] {
+        Val::Cap {
+            name, schema_cid, ..
+        } => Ok((name.as_str(), schema_cid.as_str())),
+        other => Err(glia::error::type_mismatch(builtin, "cap", other)),
+    }
+}
+
+fn make_schema_builtin() -> Val {
+    Val::NativeFn {
+        name: "schema".into(),
+        func: Rc::new(|args: &[Val]| -> Result<Val, Val> {
+            let (cap_name, _) = unwrap_cap_arg("schema", args)?;
+            match schema_bytes_for_cap(cap_name) {
+                Some(bytes) => Ok(Val::Bytes(bytes.to_vec())),
+                None => Err(glia::error::permission_denied(
+                    &format!("schema for cap '{cap_name}' not registered"),
+                    Some("schemas registered for: host, runtime, routing, identity, http"),
+                )),
+            }
+        }),
+    }
+}
+
+fn make_doc_builtin() -> Val {
+    Val::NativeFn {
+        name: "doc".into(),
+        func: Rc::new(|args: &[Val]| -> Result<Val, Val> {
+            let (cap_name, schema_cid) = unwrap_cap_arg("doc", args)?;
+            // Human-readable summary. `(schema cap)` is the source of
+            // truth for machine-readable interface introspection; `doc`
+            // is the operator-friendly view.
+            let summary = match cap_name {
+                "host" => "host — node identity, listeners, peer management",
+                "runtime" => "runtime — cell spawn + execution",
+                "routing" => "routing — DHT content routing (provide / find)",
+                "identity" => "identity — node Ed25519 signing keys",
+                "http" | "http-client" => "http-client — outbound HTTP requests (gated by --http-dial)",
+                _ => return Err(glia::error::permission_denied(
+                    &format!("docs for cap '{cap_name}' not available"),
+                    None,
+                )),
+            };
+            Ok(Val::Str(format!(
+                "{summary}\n  cap-name:   {cap_name}\n  schema-cid: {schema_cid}"
+            )))
+        }),
+    }
+}
+
+fn make_help_builtin() -> Val {
+    Val::NativeFn {
+        name: "help".into(),
+        func: Rc::new(|args: &[Val]| -> Result<Val, Val> {
+            let (cap_name, schema_cid) = unwrap_cap_arg("help", args)?;
+            let mut text = String::new();
+            text.push_str(&format!("== {cap_name} ==\n"));
+            text.push_str(&format!("schema-cid: {schema_cid}\n"));
+            if let Some(bytes) = schema_bytes_for_cap(cap_name) {
+                text.push_str(&format!(
+                    "schema-bytes: {} (call (schema {cap_name}) to retrieve)\n",
+                    bytes.len()
+                ));
+            } else {
+                text.push_str("schema-bytes: not registered\n");
+            }
+            text.push_str("usage:        (perform ");
+            text.push_str(cap_name);
+            text.push_str(" :<method> <args>...)\n");
+            text.push_str("introspect:   (schema ");
+            text.push_str(cap_name);
+            text.push_str(") | (doc ");
+            text.push_str(cap_name);
+            text.push_str(")\n");
+            Ok(Val::Str(text))
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -1424,6 +1543,13 @@ fn run_impl() {
                 }
             }
 
+            // Introspection builtins. `(schema cap)` returns the cap's
+            // canonical Schema.Node bytes; `(doc cap)` returns a human-
+            // readable summary. Bytes come from the build-time schema
+            // registry baked into the kernel (see std/kernel/build.rs).
+            env.set("schema".to_string(), make_schema_builtin());
+            env.set("doc".to_string(), make_doc_builtin());
+            env.set("help".to_string(), make_help_builtin());
         }
 
         // Load the prelude (standard macros: when, and, or, defn, cond, not).
@@ -2706,5 +2832,160 @@ mod tests {
             );
         })
         .await;
+    }
+
+    // --- Introspection builtins: (schema cap), (doc cap), (help cap) ---
+
+    /// Construct a cap-shaped Val for tests. The `inner` is a placeholder
+    /// since the introspection builtins only read `name` and `schema_cid`.
+    fn test_cap(name: &str, schema_cid: &str) -> Val {
+        Val::Cap {
+            name: name.into(),
+            schema_cid: schema_cid.into(),
+            inner: Rc::new(()),
+        }
+    }
+
+    /// Invoke a builtin (NativeFn) with the given args. Panics if the
+    /// builtin is the wrong variant.
+    fn call_builtin(builtin: &Val, args: &[Val]) -> Result<Val, Val> {
+        match builtin {
+            Val::NativeFn { func, .. } => func(args),
+            other => panic!("expected NativeFn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_returns_bytes_for_each_known_cap() {
+        let builtin = make_schema_builtin();
+        for name in ["host", "runtime", "routing", "identity", "http", "http-client"] {
+            let cap = test_cap(name, "test-cid");
+            let result = call_builtin(&builtin, &[cap]).unwrap_or_else(|e| {
+                panic!("schema for '{name}' returned error: {e}");
+            });
+            match result {
+                Val::Bytes(bytes) => assert!(
+                    !bytes.is_empty(),
+                    "schema for '{name}' returned empty bytes"
+                ),
+                other => panic!("schema for '{name}' returned {other:?}, expected Val::Bytes"),
+            }
+        }
+    }
+
+    #[test]
+    fn schema_unknown_cap_returns_permission_denied() {
+        let builtin = make_schema_builtin();
+        let cap = test_cap("nonexistent", "fake-cid");
+        let err = call_builtin(&builtin, &[cap]).unwrap_err();
+        assert_eq!(
+            glia::error::type_tag(&err),
+            Some(glia::error::tag::PERMISSION_DENIED)
+        );
+        assert!(glia::error::message(&err).unwrap().contains("nonexistent"));
+    }
+
+    #[test]
+    fn schema_arity_mismatch_returns_structured_error() {
+        let builtin = make_schema_builtin();
+        let err = call_builtin(&builtin, &[]).unwrap_err();
+        assert_eq!(
+            glia::error::type_tag(&err),
+            Some(glia::error::tag::ARITY)
+        );
+    }
+
+    #[test]
+    fn schema_non_cap_arg_returns_type_mismatch() {
+        let builtin = make_schema_builtin();
+        let err = call_builtin(&builtin, &[Val::Int(42)]).unwrap_err();
+        assert_eq!(
+            glia::error::type_tag(&err),
+            Some(glia::error::tag::TYPE_MISMATCH)
+        );
+    }
+
+    #[test]
+    fn doc_returns_summary_for_each_cap() {
+        let builtin = make_doc_builtin();
+        for name in ["host", "runtime", "routing", "identity", "http"] {
+            let cap = test_cap(name, "test-cid-123");
+            let result = call_builtin(&builtin, &[cap]).unwrap();
+            match result {
+                Val::Str(s) => {
+                    assert!(s.contains(name), "doc for '{name}' missing cap name: {s}");
+                    assert!(
+                        s.contains("test-cid-123"),
+                        "doc for '{name}' missing schema cid: {s}"
+                    );
+                }
+                other => panic!("doc for '{name}' returned {other:?}, expected Val::Str"),
+            }
+        }
+    }
+
+    #[test]
+    fn doc_unknown_cap_returns_permission_denied() {
+        let builtin = make_doc_builtin();
+        let cap = test_cap("ghost", "ghost-cid");
+        let err = call_builtin(&builtin, &[cap]).unwrap_err();
+        assert_eq!(
+            glia::error::type_tag(&err),
+            Some(glia::error::tag::PERMISSION_DENIED)
+        );
+    }
+
+    #[test]
+    fn help_includes_schema_byte_count_for_known_cap() {
+        let builtin = make_help_builtin();
+        let cap = test_cap("host", "host-cid");
+        let result = call_builtin(&builtin, &[cap]).unwrap();
+        let text = match result {
+            Val::Str(s) => s,
+            other => panic!("expected Val::Str, got {other:?}"),
+        };
+        assert!(text.contains("host"), "help missing cap name: {text}");
+        assert!(text.contains("host-cid"), "help missing cid: {text}");
+        assert!(
+            text.contains("schema-bytes"),
+            "help should mention schema bytes: {text}"
+        );
+        assert!(
+            text.contains("(schema host)"),
+            "help should suggest the schema builtin: {text}"
+        );
+    }
+
+    #[test]
+    fn help_unknown_cap_says_not_registered() {
+        let builtin = make_help_builtin();
+        let cap = test_cap("future-cap", "future-cid");
+        let result = call_builtin(&builtin, &[cap]).unwrap();
+        let text = match result {
+            Val::Str(s) => s,
+            other => panic!("expected Val::Str, got {other:?}"),
+        };
+        assert!(
+            text.contains("not registered"),
+            "help should note unregistered schema: {text}"
+        );
+    }
+
+    #[test]
+    fn unwrap_cap_arg_rejects_zero_args() {
+        let err = unwrap_cap_arg("schema", &[]).unwrap_err();
+        assert_eq!(
+            glia::error::type_tag(&err),
+            Some(glia::error::tag::ARITY)
+        );
+    }
+
+    #[test]
+    fn unwrap_cap_arg_rejects_two_args() {
+        let err = unwrap_cap_arg("schema", &[Val::Nil, Val::Nil]).unwrap_err();
+        assert_eq!(
+            glia::error::type_tag(&err),
+            Some(glia::error::tag::ARITY)
+        );
     }
 }

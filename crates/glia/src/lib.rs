@@ -22,6 +22,7 @@
 //! Commas are whitespace. Line comments start with `;`.
 
 pub mod effect;
+pub mod error;
 pub mod eval;
 pub mod expr;
 pub mod oneshot;
