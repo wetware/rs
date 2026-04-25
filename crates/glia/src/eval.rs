@@ -21,6 +21,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::effect::{self, HandlerStack};
+use crate::error;
 use crate::expr::FnBody;
 use crate::{oneshot, FnArity, Val, ValMap};
 
@@ -284,7 +285,7 @@ async fn eval_def<'a, D: Dispatch>(
     }
     let name = match &args[0] {
         Val::Sym(s) => s.clone(),
-        other => return Err(eval_err!("def: expected symbol, got {other}")),
+        other => return Err(error::type_mismatch("def", "symbol", other)),
     };
     let val = match args.get(1) {
         Some(expr) => eval(expr, env, dispatch).await?,
@@ -301,7 +302,7 @@ async fn eval_if<'a, D: Dispatch>(
     dispatch: &'a D,
 ) -> Result<Val, Val> {
     if args.len() < 2 || args.len() > 3 {
-        return Err(eval_err!("if: expected 2-3 args, got {}", args.len()));
+        return Err(error::arity("if", "2-3", args.len()));
     }
     let test_val = eval(&args[0], env, dispatch).await?;
     if is_truthy(&test_val) {
@@ -352,7 +353,7 @@ async fn eval_let<'a, D: Dispatch>(
             let name = match &pair[0] {
                 Val::Sym(s) => s.clone(),
                 other => {
-                    return Err(eval_err!("let: binding name must be a symbol, got {other}"));
+                    return Err(error::type_mismatch("let binding name", "symbol", other));
                 }
             };
             let val = eval(&pair[1], env, dispatch).await?;
@@ -398,7 +399,7 @@ fn parse_params(param_vec: &[Val], body: &[Val]) -> Result<FnArity, Val> {
                 }
             }
             Val::Sym(s) => params.push(s.clone()),
-            other => return Err(eval_err!("fn: parameter must be a symbol, got {other}")),
+            other => return Err(error::type_mismatch("fn parameter", "symbol", other)),
         }
         i += 1;
     }
@@ -639,7 +640,7 @@ async fn eval_defmacro(args: &[Val], env: &mut Env) -> Result<Val, Val> {
     }
     let name = match &args[0] {
         Val::Sym(s) => s.clone(),
-        other => return Err(eval_err!("defmacro: expected symbol for name, got {other}")),
+        other => return Err(error::type_mismatch("defmacro name", "symbol", other)),
     };
     let fn_args = &args[1..];
     if fn_args.is_empty() {
@@ -817,7 +818,7 @@ async fn eval_hof<'a, D: Dispatch>(
     match name {
         "map" => {
             if args.len() != 2 {
-                return Err(eval_err!("map: expected 2 args, got {}", args.len()));
+                return Err(error::arity("map", "2", args.len()));
             }
             let (arities, captured_env) = extract_fn("map", &args[0])?;
             let items = extract_seq("map", &args[1])?;
@@ -836,7 +837,7 @@ async fn eval_hof<'a, D: Dispatch>(
         }
         "filter" => {
             if args.len() != 2 {
-                return Err(eval_err!("filter: expected 2 args, got {}", args.len()));
+                return Err(error::arity("filter", "2", args.len()));
             }
             let (arities, captured_env) = extract_fn("filter", &args[0])?;
             let items = extract_seq("filter", &args[1])?;
@@ -858,7 +859,7 @@ async fn eval_hof<'a, D: Dispatch>(
         }
         "reduce" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(eval_err!("reduce: expected 2-3 args, got {}", args.len()));
+                return Err(error::arity("reduce", "2-3", args.len()));
             }
             let (arities, captured_env) = extract_fn("reduce", &args[0])?;
             let (mut acc, items) = if args.len() == 3 {

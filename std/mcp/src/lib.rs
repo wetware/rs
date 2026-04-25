@@ -411,14 +411,16 @@ MCP Glia evaluator. Available commands:
 // MCP JSON-RPC server loop
 // ---------------------------------------------------------------------------
 
-/// Evaluate a Glia expression and return the result as a string.
+/// Evaluate a Glia expression. Returns the formatted result on success;
+/// preserves the error `Val` on failure so the caller can route it through
+/// the structured-error MCP envelope adapter.
 async fn eval_expression(
     expr_text: &str,
     env: &RefCell<Env>,
     ctx: &RefCell<McpSession>,
     dispatch_table: &HashMap<&'static str, HandlerFn>,
-) -> Result<String, String> {
-    let expr = glia::read(expr_text).map_err(|e| format!("parse error: {e}"))?;
+) -> Result<String, Val> {
+    let expr = glia::read(expr_text).map_err(|e| glia::error::parse(None, e))?;
 
     let wrapped = wrap_with_handlers(&expr, &[]);
     let dispatch = McpDispatch {
@@ -428,7 +430,90 @@ async fn eval_expression(
     match eval::eval_toplevel(&wrapped, &mut env.borrow_mut(), &dispatch).await {
         Ok(Val::Nil) => Ok("nil".to_string()),
         Ok(result) => Ok(format!("{result}")),
-        Err(e) => Err(format!("{e}")),
+        Err(e) => Err(e),
+    }
+}
+
+/// Convert an error `Val` produced by Glia eval into a JSON-RPC error
+/// payload suitable for an MCP `tools/call` `isError: true` response.
+///
+/// Structured errors (constructed via `glia::error::*`) are rendered with
+/// their full schema attached as `data` so MCP clients can route on
+/// `:glia.error/type` and inspect variant-specific fields. Plain-string
+/// (legacy) errors fall back to a generic envelope with the message
+/// preserved verbatim.
+fn val_to_mcp_error_text(err: &Val) -> String {
+    use glia::error;
+
+    let msg = error::message(err)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{err}"));
+
+    let Some(tag) = error::type_tag(err) else {
+        // Legacy / unstructured error: just return the message.
+        return msg;
+    };
+
+    // Structured error: include the type tag and hint (if any) inline so
+    // the human-readable text MCP clients display still surfaces the
+    // recovery info. Full structured data also serializes via
+    // `val_to_mcp_error_data` below for clients that want to introspect.
+    let mut buf = format!("[{tag}] {msg}");
+    if let Some(h) = error::hint(err) {
+        buf.push_str("\n\nhint: ");
+        buf.push_str(h);
+    }
+    buf
+}
+
+/// Best-effort serialization of an error `Val`'s structured `data` map to
+/// a JSON object. Plain-string and non-structured errors return `Null`.
+/// Used by MCP `tools/call` responses to give clients machine-readable
+/// access to variant fields beyond the human-readable message.
+fn val_to_mcp_error_data(err: &Val) -> serde_json::Value {
+    let Some(data) = glia::error::data(err) else {
+        return serde_json::Value::Null;
+    };
+    let mut obj = serde_json::Map::new();
+    for (k, v) in data {
+        let key = match k {
+            Val::Keyword(s) | Val::Str(s) | Val::Sym(s) => s.clone(),
+            other => format!("{other}"),
+        };
+        obj.insert(key, val_to_json_scalar(v));
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Render a `Val` into its JSON scalar/structural equivalent. Composite
+/// types (List, Vector, Map, Set) are recursively rendered so nested
+/// data in error fields survives the conversion. Non-data variants
+/// (Fn, Cap, Cell, etc.) render to their display string.
+fn val_to_json_scalar(v: &Val) -> serde_json::Value {
+    match v {
+        Val::Nil => serde_json::Value::Null,
+        Val::Bool(b) => serde_json::Value::Bool(*b),
+        Val::Int(i) => serde_json::Value::from(*i),
+        Val::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        Val::Str(s) | Val::Sym(s) | Val::Keyword(s) => serde_json::Value::String(s.clone()),
+        Val::List(xs) | Val::Vector(xs) | Val::Set(xs) => {
+            serde_json::Value::Array(xs.iter().map(val_to_json_scalar).collect())
+        }
+        Val::Map(m) => {
+            let mut obj = serde_json::Map::new();
+            for (k, v) in m {
+                let key = match k {
+                    Val::Keyword(s) | Val::Str(s) | Val::Sym(s) => s.clone(),
+                    other => format!("{other}"),
+                };
+                obj.insert(key, val_to_json_scalar(v));
+            }
+            serde_json::Value::Object(obj)
+        }
+        Val::Bytes(b) => serde_json::Value::String(format!("<{} bytes>", b.len())),
+        other => serde_json::Value::String(format!("{other}")),
     }
 }
 
@@ -486,11 +571,15 @@ async fn handle_request(
                     .unwrap_or("");
 
                 if expression.is_empty() {
-                    write_tool_error(&id, "empty expression");
+                    write_tool_error(&id, "empty expression", &serde_json::Value::Null);
                 } else {
                     match eval_expression(expression, env, ctx, dispatch_table).await {
                         Ok(result) => write_tool_result(&id, &result),
-                        Err(err) => write_tool_error(&id, &err),
+                        Err(err) => {
+                            let text = val_to_mcp_error_text(&err);
+                            let data = val_to_mcp_error_data(&err);
+                            write_tool_error(&id, &text, &data);
+                        }
                     }
                 }
             } else if cap_names.iter().any(|n| n == tool_name) || tool_def_for_cap(tool_name).is_some() {
@@ -500,14 +589,15 @@ async fn handle_request(
                         match eval_expression(&expr, env, ctx, dispatch_table).await {
                             Ok(result) => write_tool_result(&id, &result),
                             Err(err) => {
-                                // Structured error for AI clients.
                                 let action = arguments.get("action")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("unknown");
-                                write_tool_error(
-                                    &id,
-                                    &format!("{err}\n\nhint: capability '{tool_name}' action '{action}' failed. Try: (perform {tool_name} :{action})"),
+                                let text = format!(
+                                    "{}\n\nhint: capability '{tool_name}' action '{action}' failed. Try: (perform {tool_name} :{action})",
+                                    val_to_mcp_error_text(&err),
                                 );
+                                let data = val_to_mcp_error_data(&err);
+                                write_tool_error(&id, &text, &data);
                             }
                         }
                     }
@@ -518,6 +608,7 @@ async fn handle_request(
                         write_tool_error(
                             &id,
                             &format!("Unknown action '{action}' for capability '{tool_name}'"),
+                            &serde_json::Value::Null,
                         );
                     }
                 }
@@ -552,14 +643,21 @@ fn write_tool_result(id: &serde_json::Value, text: &str) {
 }
 
 /// Write a tool call error result.
-fn write_tool_error(id: &serde_json::Value, message: &str) {
-    write_result(
-        id,
-        serde_json::json!({
-            "content": [{"type": "text", "text": message}],
-            "isError": true,
-        }),
+///
+/// `data` is attached as a `structuredContent` field for clients that
+/// can introspect machine-readable error fields. Pass
+/// `&serde_json::Value::Null` for legacy / unstructured errors.
+fn write_tool_error(id: &serde_json::Value, message: &str, data: &serde_json::Value) {
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "content".into(),
+        serde_json::json!([{"type": "text", "text": message}]),
     );
+    payload.insert("isError".into(), serde_json::Value::Bool(true));
+    if !data.is_null() {
+        payload.insert("structuredContent".into(), data.clone());
+    }
+    write_result(id, serde_json::Value::Object(payload));
 }
 
 // ---------------------------------------------------------------------------
