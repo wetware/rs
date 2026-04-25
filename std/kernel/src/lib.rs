@@ -1057,7 +1057,7 @@ fn parse_initd_script(name: &str, data: &[u8]) -> Option<Vec<Val>> {
 /// ```glia
 /// (with-effect-handler host host-handler
 ///   (with-effect-handler runtime runtime-handler
-///     (with-effect-handler ipfs ipfs-handler
+///     (with-effect-handler fs fs-handler
 ///       (with-effect-handler routing routing-handler
 ///         (with-effect-handler :load (fn [path resume] (resume (load path)))
 ///           <form>)))))
