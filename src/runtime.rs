@@ -418,7 +418,7 @@ pub use crate::metrics::AdminService;
 /// because `with_tokio()` registers TCP listeners with the current reactor.
 /// Constructing on one runtime and polling on another is a cross-runtime bug.
 pub struct SwarmServiceParams {
-    pub port: u16,
+    pub listen: Vec<libp2p::Multiaddr>,
     pub keypair: libp2p::identity::Keypair,
     pub kubo_bootstrap: Option<KuboBootstrapInfo>,
     pub kubo_peers: Vec<(libp2p::PeerId, libp2p::Multiaddr)>,
@@ -452,7 +452,7 @@ impl Service for SwarmService {
             // with the correct reactor.
             let p = self.params;
             let host =
-                crate::host::Libp2pHost::new(p.port, p.keypair, p.kubo_bootstrap, p.kubo_peers)?;
+                crate::host::Libp2pHost::new(p.listen, p.keypair, p.kubo_bootstrap, p.kubo_peers)?;
             let network_state = NetworkState::from_peer_id(host.local_peer_id().to_bytes());
             let stream_control = host.stream_control();
 
