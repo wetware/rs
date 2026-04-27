@@ -86,11 +86,16 @@ interface StreamListener {
 }
 
 interface HttpListener {
-  listen @0 (executor :Executor, prefix :Text) -> ();
+  listen @0 (executor :Executor, prefix :Text,
+             caps :List(import "stem.capnp".Export)) -> ();
   # Accept HTTP requests matching the path prefix.
   # For each request, spawn a cell process via Executor.
   # CGI env vars are passed as environment, request body to stdin,
   # CGI response read from stdout.
+  #
+  # caps: optional named capabilities from the init.d `with` block.
+  # Forwarded into spawned cells' membranes as graft extras.
+  # Empty list (default) = no extra caps.
 }
 
 interface StreamDialer {
