@@ -98,6 +98,7 @@ fn main() {
         "std/kernel/bin/main.wasm",
         "std/mcp/bin/main.wasm",
         "std/shell/bin/shell.wasm",
+        "std/status/bin/status.wasm",
         "examples/echo/bin/echo.wasm",
     ];
     let mut missing = Vec::new();
