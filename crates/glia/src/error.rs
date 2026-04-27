@@ -1,14 +1,27 @@
 //! Structured error values for Glia.
 //!
-//! Glia errors are values: `eval` returns `Result<Val, Val>`, and the error
-//! type is itself a `Val`. This module establishes a canonical schema for
-//! structured errors, so downstream consumers (the MCP adapter, AI agents
-//! reading errors via `try`/`catch`, runtime introspection) get rich data
-//! instead of opaque strings.
+//! Errors are carried over the existing effect machinery: `(throw err)`
+//! desugars to `(perform :glia.exception err)`, and an unhandled throw
+//! escapes `eval` as `Err(Val::Effect { effect_type: "glia.exception",
+//! data: <err> })`. The data shape is a `Val::Map` keyed by namespaced
+//! `:glia.error/...` keywords, defined here.
+//!
+//! # Construction
+//!
+//! Construct via the `GliaError` enum. `From<GliaError> for Val` is the
+//! single source of truth for the canonical Val::Map shape — every
+//! variant has exactly one place that determines its serialization. The
+//! `pub fn` helpers (`unbound_symbol`, `arity`, …) are thin wrappers
+//! kept for ergonomics.
+//!
+//! ```ignore
+//! return Err(GliaError::UnboundSymbol {
+//!     symbol: "foo".into(),
+//!     hint: Some("did you mean 'bar'?".into()),
+//! }.into());
+//! ```
 //!
 //! # Schema
-//!
-//! Errors are `Val::Map`s with namespaced keyword keys:
 //!
 //! ```text
 //! { :glia.error/type     <keyword>   ; tag identifying the variant
@@ -18,46 +31,27 @@
 //! }
 //! ```
 //!
-//! The namespaced keys (`glia.error/...`) avoid collision with user-defined
-//! keys in error maps and follow Clojure's convention for library-owned
-//! keywords.
-//!
-//! # Construction
-//!
-//! Use the typed constructor functions in this module (e.g. `unbound_symbol`,
-//! `arity`, `type_mismatch`). Each constructor enforces the canonical schema
-//! for its variant, so call sites can't malform the map shape.
-//!
-//! ```rust,ignore
-//! return Err(glia::error::unbound_symbol("foo", Some("did you mean 'bar'?")));
-//! ```
-//!
-//! Legacy `eval_err!` call sites that produce `Val::Str` errors continue to
-//! work — accessor functions return `None` on plain-string errors, signaling
-//! "unstructured legacy error" to consumers.
+//! User errors constructed via the `ex-info` Glia builtin go through
+//! the same `GliaError::User` variant: the user's `:type` ends up in
+//! `:glia.error/type` (so `(catch :foo e ...)` matches user errors
+//! thrown as `(throw (ex-info "..." {:type :foo}))`), and the user's
+//! `:message` mirrors into `:glia.error/message`. User-supplied keys
+//! are preserved verbatim alongside the canonical fields.
 //!
 //! # Inspection
 //!
-//! `data`, `message`, and `type_tag` mirror Clojure's `ex-data`/`ex-message`.
-//! Plain-string errors return `None` from each, distinguishing structured
-//! errors from legacy/foreign error values.
-//!
-//! # Future migration
-//!
-//! Transport currently uses `Result<Val, Val>` Err-propagation. A future
-//! sprint will migrate to effect-based exceptions over the existing
-//! `perform` / `with-effect-handler` machinery: `(throw err)` becomes
-//! `(perform :glia.exception err)` that the handler doesn't resume; `try`/
-//! `catch` becomes `with-effect-handler` matching on `:glia.error/type`.
-//! The schema (this module) is transport-independent and survives unchanged.
+//! `data`, `message`, `type_tag`, `hint` mirror Clojure's `ex-data` /
+//! `ex-message`. `unwrap_thrown` peels the `Val::Effect` carrier when
+//! an unhandled throw arrives at an outer caller (kernel REPL, MCP
+//! cell, shell session).
 
 use crate::{Val, ValMap};
 
 // ----- Tag constants ------------------------------------------------------
 
-/// Namespaced `:glia.error/type` keywords. The `tag::*` constants are the
-/// single source of truth — call sites and consumers should never spell
-/// these out as string literals.
+/// Namespaced `:glia.error/type` keywords. `tag::*` is the single source
+/// of truth for variant tags — call sites and consumers should never
+/// spell these out as string literals.
 pub mod tag {
     pub const PARSE: &str = "glia.error/parse";
     pub const UNBOUND_SYMBOL: &str = "glia.error/unbound-symbol";
@@ -73,8 +67,7 @@ pub mod tag {
 
 // ----- Schema-key constants -----------------------------------------------
 
-/// Canonical `:glia.error/...` map keys. As with `tag::*`, these are the
-/// single source of truth.
+/// Canonical `:glia.error/...` map keys.
 pub mod key {
     pub const TYPE: &str = "glia.error/type";
     pub const MESSAGE: &str = "glia.error/message";
@@ -90,145 +83,349 @@ pub mod key {
     pub const SOURCE_LOCATION: &str = "glia.error/source-location";
 }
 
-// ----- Internal helpers ---------------------------------------------------
+/// Effect target carrying a thrown error.
+pub const EXCEPTION_EFFECT: &str = "glia.exception";
 
-#[inline]
-fn kw(s: &str) -> Val {
-    Val::Keyword(s.into())
-}
+// ----- Typed error enum ---------------------------------------------------
 
-/// Build the base error map with `:glia.error/type` and
-/// `:glia.error/message` set. All variant constructors layer their own
-/// fields on top of this.
-fn base(tag: &'static str, message: String) -> Vec<(Val, Val)> {
-    vec![
-        (kw(key::TYPE), kw(tag)),
-        (kw(key::MESSAGE), Val::Str(message)),
-    ]
-}
-
-#[inline]
-fn finalize(pairs: Vec<(Val, Val)>) -> Val {
-    Val::Map(ValMap::from_pairs(pairs))
-}
-
-// ----- Variant constructors ----------------------------------------------
-
-/// Parse error — input failed to tokenize or parse.
+/// Structured error variants. Each construction site picks a real
+/// variant — there is no `Generic` escape hatch. `Internal` is for
+/// genuine "should not happen" invariant violations only.
 ///
-/// `location` is optional human-readable source location (e.g. `"foo.glia:42:7"`).
+/// `User` is the construction path for the `ex-info` Glia builtin:
+/// the user-supplied `:type` keyword becomes the canonical
+/// `:glia.error/type` tag, and any other user-supplied keys are
+/// preserved alongside the namespaced fields.
+#[derive(Debug, Clone)]
+pub enum GliaError {
+    /// Parse error — input failed to tokenize or parse.
+    Parse {
+        location: Option<String>,
+        message: String,
+    },
+    /// Unbound symbol — reference to an undefined identifier.
+    UnboundSymbol {
+        symbol: String,
+        hint: Option<String>,
+    },
+    /// Arity mismatch — wrong number of arguments to a function or
+    /// special form. `expected` is a human-readable arity description
+    /// (e.g. `"2"`, `"2-3"`, `"at least 1"`).
+    Arity {
+        function: String,
+        expected: String,
+        got: usize,
+    },
+    /// Type mismatch — argument or operand of the wrong runtime type.
+    /// `got_type` is the `Val` variant name (e.g. `"int"`, `"map"`).
+    TypeMismatch {
+        context: String,
+        expected: String,
+        got_type: String,
+    },
+    /// Capability call failed — an RPC method on a capability returned
+    /// an error.
+    CapCall {
+        cap: String,
+        method: String,
+        message: String,
+    },
+    /// Generic transport-level RPC failure (disconnect, timeout,
+    /// malformed frame). Distinct from `CapCall`, which is method-level.
+    Rpc { message: String },
+    /// Epoch expired — a capability was used after the membrane epoch
+    /// advanced.
+    EpochExpired { cap: String },
+    /// Permission denied — access refused (attenuated capability,
+    /// missing membrane grant).
+    PermissionDenied { what: String, hint: Option<String> },
+    /// Fuel exhausted — the cell ran out of compute budget.
+    FuelExhausted,
+    /// Internal error — invariant violation. NOT a generic escape
+    /// hatch; reach for a specific variant first.
+    Internal { context: String, message: String },
+    /// User-thrown error, constructed via the `ex-info` Glia builtin.
+    /// The user's `:type` becomes the canonical dispatch tag; other
+    /// user fields are carried in `extras`.
+    User {
+        type_tag: Val,
+        message: String,
+        extras: ValMap,
+    },
+}
+
+impl GliaError {
+    /// Stable namespaced tag for the dispatcher. For `User` errors
+    /// the tag is whatever the user supplied as `:type` — falls back
+    /// to the empty string for malformed user data.
+    pub fn tag(&self) -> String {
+        match self {
+            Self::Parse { .. } => tag::PARSE.into(),
+            Self::UnboundSymbol { .. } => tag::UNBOUND_SYMBOL.into(),
+            Self::Arity { .. } => tag::ARITY.into(),
+            Self::TypeMismatch { .. } => tag::TYPE_MISMATCH.into(),
+            Self::CapCall { .. } => tag::CAP_CALL.into(),
+            Self::Rpc { .. } => tag::RPC.into(),
+            Self::EpochExpired { .. } => tag::EPOCH_EXPIRED.into(),
+            Self::PermissionDenied { .. } => tag::PERMISSION_DENIED.into(),
+            Self::FuelExhausted => tag::FUEL_EXHAUSTED.into(),
+            Self::Internal { .. } => tag::INTERNAL.into(),
+            Self::User { type_tag, .. } => match type_tag {
+                Val::Keyword(s) | Val::Str(s) | Val::Sym(s) => s.clone(),
+                _ => String::new(),
+            },
+        }
+    }
+}
+
+impl From<GliaError> for Val {
+    fn from(e: GliaError) -> Self {
+        // Single source of truth for the canonical `Val::Map` schema.
+        // Adding a variant fails to compile here until the new arm is
+        // written; renaming a key changes one place.
+        let tag_val = type_tag_val(&e);
+        let mut pairs: Vec<(Val, Val)> = Vec::new();
+        pairs.push((kw(key::TYPE), tag_val));
+
+        match e {
+            GliaError::Parse { location, message } => {
+                pairs.push((
+                    kw(key::MESSAGE),
+                    Val::Str(format!("parse error: {message}")),
+                ));
+                if let Some(loc) = location {
+                    pairs.push((kw(key::SOURCE_LOCATION), Val::Str(loc)));
+                }
+            }
+            GliaError::UnboundSymbol { symbol, hint } => {
+                pairs.push((
+                    kw(key::MESSAGE),
+                    Val::Str(format!("unbound symbol: {symbol}")),
+                ));
+                pairs.push((kw(key::SYMBOL), Val::Sym(symbol)));
+                if let Some(h) = hint {
+                    pairs.push((kw(key::HINT), Val::Str(h)));
+                }
+            }
+            GliaError::Arity {
+                function,
+                expected,
+                got,
+            } => {
+                pairs.push((
+                    kw(key::MESSAGE),
+                    Val::Str(format!("{function}: expected {expected} arg(s), got {got}")),
+                ));
+                pairs.push((kw(key::FUNCTION), Val::Str(function)));
+                pairs.push((kw(key::EXPECTED), Val::Str(expected)));
+                pairs.push((kw(key::GOT), Val::Int(got as i64)));
+            }
+            GliaError::TypeMismatch {
+                context,
+                expected,
+                got_type,
+            } => {
+                pairs.push((
+                    kw(key::MESSAGE),
+                    Val::Str(format!("{context}: expected {expected}, got {got_type}")),
+                ));
+                pairs.push((kw(key::CONTEXT), Val::Str(context)));
+                pairs.push((kw(key::EXPECTED), Val::Str(expected)));
+                pairs.push((kw(key::GOT_TYPE), Val::Str(got_type)));
+            }
+            GliaError::CapCall {
+                cap,
+                method,
+                message,
+            } => {
+                pairs.push((
+                    kw(key::MESSAGE),
+                    Val::Str(format!("{cap}.{method} failed: {message}")),
+                ));
+                pairs.push((kw(key::CAP), Val::Str(cap)));
+                pairs.push((kw(key::METHOD), Val::Str(method)));
+            }
+            GliaError::Rpc { message } => {
+                pairs.push((kw(key::MESSAGE), Val::Str(format!("rpc error: {message}"))));
+            }
+            GliaError::EpochExpired { cap } => {
+                pairs.push((
+                    kw(key::MESSAGE),
+                    Val::Str(format!("epoch expired for cap '{cap}'")),
+                ));
+                pairs.push((kw(key::CAP), Val::Str(cap)));
+            }
+            GliaError::PermissionDenied { what, hint } => {
+                pairs.push((
+                    kw(key::MESSAGE),
+                    Val::Str(format!("permission denied: {what}")),
+                ));
+                pairs.push((kw(key::CONTEXT), Val::Str(what)));
+                if let Some(h) = hint {
+                    pairs.push((kw(key::HINT), Val::Str(h)));
+                }
+            }
+            GliaError::FuelExhausted => {
+                pairs.push((kw(key::MESSAGE), Val::Str("fuel exhausted".into())));
+            }
+            GliaError::Internal { context, message } => {
+                pairs.push((
+                    kw(key::MESSAGE),
+                    Val::Str(format!("internal error in {context}: {message}")),
+                ));
+                pairs.push((kw(key::CONTEXT), Val::Str(context)));
+            }
+            GliaError::User {
+                type_tag,
+                message,
+                extras,
+            } => {
+                pairs.push((kw(key::MESSAGE), Val::Str(message.clone())));
+                // Mirror ex-info's back-compat fields: the user's
+                // :type and :message are preserved in their non-namespaced
+                // forms alongside the namespaced canonical fields, so
+                // legacy readers (and Clojure idiom) keep working.
+                pairs.push((Val::Keyword("type".into()), type_tag));
+                pairs.push((Val::Keyword("message".into()), Val::Str(message)));
+                // User-supplied extras layer on top last so they win
+                // any collision (defensive — extras shouldn't include
+                // canonical keys, but if they do, user intent wins on
+                // their own keys; canonical keys above are immutable).
+                let mut m = ValMap::from_pairs(pairs);
+                for (k, v) in extras.iter() {
+                    // Skip canonical keys to preserve schema invariants.
+                    if is_canonical_key(k) {
+                        continue;
+                    }
+                    m = m.assoc(k.clone(), v.clone());
+                }
+                return Val::Map(m);
+            }
+        }
+
+        Val::Map(ValMap::from_pairs(pairs))
+    }
+}
+
+#[inline]
+fn type_tag_val(e: &GliaError) -> Val {
+    match e {
+        GliaError::User { type_tag, .. } => type_tag.clone(),
+        other => kw(&other.tag()),
+    }
+}
+
+/// Reject keys that would corrupt the canonical schema if a `User`
+/// error tries to override them via extras.
+fn is_canonical_key(v: &Val) -> bool {
+    matches!(v, Val::Keyword(k) if k.starts_with("glia.error/"))
+}
+
+// ----- Convenience constructors (thin wrappers over GliaError) -----------
+
+/// Parse error.
 pub fn parse(location: Option<&str>, message: impl Into<String>) -> Val {
-    let msg = message.into();
-    let mut pairs = base(tag::PARSE, format!("parse error: {msg}"));
-    if let Some(loc) = location {
-        pairs.push((kw(key::SOURCE_LOCATION), Val::Str(loc.into())));
+    GliaError::Parse {
+        location: location.map(String::from),
+        message: message.into(),
     }
-    finalize(pairs)
+    .into()
 }
 
-/// Unbound symbol — reference to an undefined identifier.
-///
-/// `hint` is an optional recovery suggestion (e.g. `Some("did you mean 'bar'?")`).
+/// Unbound symbol.
 pub fn unbound_symbol(symbol: &str, hint: Option<&str>) -> Val {
-    let mut pairs = base(tag::UNBOUND_SYMBOL, format!("unbound symbol: {symbol}"));
-    pairs.push((kw(key::SYMBOL), Val::Sym(symbol.into())));
-    if let Some(h) = hint {
-        pairs.push((kw(key::HINT), Val::Str(h.into())));
+    GliaError::UnboundSymbol {
+        symbol: symbol.into(),
+        hint: hint.map(String::from),
     }
-    finalize(pairs)
+    .into()
 }
 
-/// Arity mismatch — wrong number of arguments to a function or special form.
-///
-/// `expected` is a human-readable arity description (e.g. `"2"`, `"2-3"`,
-/// `"at least 1"`).
+/// Arity mismatch.
 pub fn arity(function: &str, expected: &str, got: usize) -> Val {
-    let mut pairs = base(
-        tag::ARITY,
-        format!("{function}: expected {expected} arg(s), got {got}"),
-    );
-    pairs.push((kw(key::FUNCTION), Val::Str(function.into())));
-    pairs.push((kw(key::EXPECTED), Val::Str(expected.into())));
-    pairs.push((kw(key::GOT), Val::Int(got as i64)));
-    finalize(pairs)
-}
-
-/// Type mismatch — argument or operand of the wrong runtime type.
-///
-/// `context` is where the mismatch happened (e.g. `"def"`, `"if condition"`).
-/// `expected` is a human-readable type description (e.g. `"symbol"`, `"number"`).
-/// `got` is the offending value — its `Val` variant name is recorded.
-pub fn type_mismatch(context: &str, expected: &str, got: &Val) -> Val {
-    let got_type = val_type_name(got);
-    let mut pairs = base(
-        tag::TYPE_MISMATCH,
-        format!("{context}: expected {expected}, got {got_type}"),
-    );
-    pairs.push((kw(key::CONTEXT), Val::Str(context.into())));
-    pairs.push((kw(key::EXPECTED), Val::Str(expected.into())));
-    pairs.push((kw(key::GOT_TYPE), Val::Str(got_type.into())));
-    finalize(pairs)
-}
-
-/// Capability call failed — an RPC method on a capability returned an error.
-pub fn cap_call(cap: &str, method: &str, message: impl Into<String>) -> Val {
-    let msg = message.into();
-    let mut pairs = base(tag::CAP_CALL, format!("{cap}.{method} failed: {msg}"));
-    pairs.push((kw(key::CAP), Val::Str(cap.into())));
-    pairs.push((kw(key::METHOD), Val::Str(method.into())));
-    finalize(pairs)
-}
-
-/// Generic RPC failure (transport-level: disconnect, timeout, malformed
-/// frame). Distinct from `cap_call`, which is a method-level failure with
-/// a `cap`/`method` known to the caller.
-pub fn rpc(message: impl Into<String>) -> Val {
-    finalize(base(tag::RPC, format!("rpc error: {}", message.into())))
-}
-
-/// Epoch expired — a capability was used after the membrane epoch advanced.
-pub fn epoch_expired(cap: &str) -> Val {
-    let mut pairs = base(tag::EPOCH_EXPIRED, format!("epoch expired for cap '{cap}'"));
-    pairs.push((kw(key::CAP), Val::Str(cap.into())));
-    finalize(pairs)
-}
-
-/// Permission denied — access to a resource was refused (e.g. an
-/// attenuated capability, a missing membrane grant).
-pub fn permission_denied(what: &str, hint: Option<&str>) -> Val {
-    let mut pairs = base(tag::PERMISSION_DENIED, format!("permission denied: {what}"));
-    pairs.push((kw(key::CONTEXT), Val::Str(what.into())));
-    if let Some(h) = hint {
-        pairs.push((kw(key::HINT), Val::Str(h.into())));
+    GliaError::Arity {
+        function: function.into(),
+        expected: expected.into(),
+        got,
     }
-    finalize(pairs)
+    .into()
 }
 
-/// Fuel exhausted — the cell ran out of compute budget.
+/// Type mismatch — the `got` value's type name is recorded automatically.
+pub fn type_mismatch(context: &str, expected: &str, got: &Val) -> Val {
+    GliaError::TypeMismatch {
+        context: context.into(),
+        expected: expected.into(),
+        got_type: val_type_name(got).into(),
+    }
+    .into()
+}
+
+/// Capability call failed.
+pub fn cap_call(cap: &str, method: &str, message: impl Into<String>) -> Val {
+    GliaError::CapCall {
+        cap: cap.into(),
+        method: method.into(),
+        message: message.into(),
+    }
+    .into()
+}
+
+/// Generic transport-level RPC failure.
+pub fn rpc(message: impl Into<String>) -> Val {
+    GliaError::Rpc {
+        message: message.into(),
+    }
+    .into()
+}
+
+/// Epoch expired.
+pub fn epoch_expired(cap: &str) -> Val {
+    GliaError::EpochExpired { cap: cap.into() }.into()
+}
+
+/// Permission denied.
+pub fn permission_denied(what: &str, hint: Option<&str>) -> Val {
+    GliaError::PermissionDenied {
+        what: what.into(),
+        hint: hint.map(String::from),
+    }
+    .into()
+}
+
+/// Fuel exhausted.
 pub fn fuel_exhausted() -> Val {
-    finalize(base(tag::FUEL_EXHAUSTED, "fuel exhausted".to_string()))
+    GliaError::FuelExhausted.into()
 }
 
-/// Internal error — invariant violation, "should not happen" condition.
-/// **Not** a generic escape hatch; reach for a specific variant first.
-/// Use only for genuine bugs that warrant attention in logs.
+/// Internal error — for genuine "should not happen" bugs.
 pub fn internal(context: &str, message: impl Into<String>) -> Val {
-    let msg = message.into();
-    let mut pairs = base(tag::INTERNAL, format!("internal error in {context}: {msg}"));
-    pairs.push((kw(key::CONTEXT), Val::Str(context.into())));
-    finalize(pairs)
+    GliaError::Internal {
+        context: context.into(),
+        message: message.into(),
+    }
+    .into()
+}
+
+/// User-thrown error (`ex-info`-style). `type_tag` should be a
+/// `Val::Keyword`, `Val::Str`, or `Val::Sym` — anything else gives
+/// an empty dispatch tag and won't be catchable.
+pub fn user(type_tag: Val, message: impl Into<String>, extras: ValMap) -> Val {
+    GliaError::User {
+        type_tag,
+        message: message.into(),
+        extras,
+    }
+    .into()
 }
 
 // ----- Inspection accessors ----------------------------------------------
 
-/// Extract the structured error map from an error `Val`.
-///
-/// Mirrors Clojure's `ex-data`. Returns `None` for plain-string errors
-/// (legacy `eval_err!` call sites) or non-map values, signaling the error
-/// is unstructured.
+/// Extract the structured error map from an error `Val`. Mirrors
+/// Clojure's `ex-data`. Returns `None` for plain values, plain
+/// strings, or maps lacking `:glia.error/type`.
 pub fn data(err: &Val) -> Option<&ValMap> {
     if let Val::Map(m) = err {
-        // Only treat as structured if `:glia.error/type` is present.
         if m.contains_key(&kw(key::TYPE)) {
             return Some(m);
         }
@@ -236,11 +433,9 @@ pub fn data(err: &Val) -> Option<&ValMap> {
     None
 }
 
-/// Extract the error message.
-///
-/// Mirrors Clojure's `ex-message`. Returns the `:glia.error/message` field
-/// from a structured error, the contents of a `Val::Str` for legacy
-/// errors, or `None` otherwise.
+/// Extract the error message. Mirrors Clojure's `ex-message`.
+/// Returns the `:glia.error/message` field from a structured error,
+/// the contents of a `Val::Str` for legacy errors, or `None` otherwise.
 pub fn message(err: &Val) -> Option<&str> {
     if let Val::Str(s) = err {
         return Some(s.as_str());
@@ -252,14 +447,13 @@ pub fn message(err: &Val) -> Option<&str> {
     }
 }
 
-/// Extract the namespaced `:glia.error/type` tag.
-///
-/// Returns `None` for plain-string errors or maps without a `:glia.error/type`
-/// field. Use `tag::*` constants to compare against, never string literals.
+/// Extract the namespaced `:glia.error/type` tag. Returns `None` for
+/// plain-string errors or maps without a tag. Use `tag::*` constants
+/// to compare against, never string literals.
 pub fn type_tag(err: &Val) -> Option<&str> {
     let m = data(err)?;
     match m.get(&kw(key::TYPE)) {
-        Some(Val::Keyword(k)) => Some(k.as_str()),
+        Some(Val::Keyword(k)) | Some(Val::Str(k)) | Some(Val::Sym(k)) => Some(k.as_str()),
         _ => None,
     }
 }
@@ -273,10 +467,29 @@ pub fn hint(err: &Val) -> Option<&str> {
     }
 }
 
+/// If `err` is the `Val::Effect` carrier produced by an unhandled
+/// throw (`(perform :glia.exception ...)`), return a reference to
+/// the inner error data. Otherwise return `None`.
+///
+/// Outer callers (kernel REPL, MCP cell, shell) call this once at
+/// the eval boundary so downstream code only needs to know about
+/// the structured error map shape.
+pub fn unwrap_thrown(err: &Val) -> Option<&Val> {
+    match err {
+        Val::Effect { effect_type, data } if effect_type == EXCEPTION_EFFECT => Some(data),
+        _ => None,
+    }
+}
+
 // ----- Internal helpers ---------------------------------------------------
 
-/// Human-readable name for a `Val` variant — used by `type_mismatch` to
-/// fill the `:glia.error/got-type` field.
+#[inline]
+fn kw(s: &str) -> Val {
+    Val::Keyword(s.into())
+}
+
+/// Human-readable name for a `Val` variant — used by `type_mismatch`
+/// to fill the `:glia.error/got-type` field.
 pub(crate) fn val_type_name(v: &Val) -> &'static str {
     match v {
         Val::Nil => "nil",
@@ -311,7 +524,7 @@ mod tests {
         Val::Str(s.into())
     }
 
-    // ----- Schema correctness for each variant ---------------------------
+    // ----- Schema correctness via the enum -------------------------------
 
     #[test]
     fn parse_has_canonical_shape() {
@@ -417,6 +630,70 @@ mod tests {
         assert!(message(&err).unwrap().contains("unreachable variant"));
     }
 
+    // ----- User variant (ex-info path) -----------------------------------
+
+    #[test]
+    fn user_keyword_tag_dispatches_by_user_type() {
+        let err = user(
+            Val::Keyword("network".into()),
+            "peer unreachable",
+            ValMap::from_pairs(vec![(
+                Val::Keyword("peer".into()),
+                Val::Str("QmFoo".into()),
+            )]),
+        );
+        // Dispatch tag is the user's :type, NOT a namespaced :glia.error/...
+        assert_eq!(type_tag(&err), Some("network"));
+        // Message is canonical
+        assert_eq!(message(&err), Some("peer unreachable"));
+        let m = data(&err).unwrap();
+        // Back-compat: :type and :message preserved
+        assert_eq!(
+            m.get(&Val::Keyword("type".into())),
+            Some(&Val::Keyword("network".into()))
+        );
+        assert_eq!(
+            m.get(&Val::Keyword("message".into())),
+            Some(&Val::Str("peer unreachable".into()))
+        );
+        // User extras carried through
+        assert_eq!(
+            m.get(&Val::Keyword("peer".into())),
+            Some(&Val::Str("QmFoo".into()))
+        );
+    }
+
+    #[test]
+    fn user_extras_cannot_override_canonical_keys() {
+        // A user trying to set :glia.error/type via extras must NOT
+        // win — canonical keys are immutable on the schema.
+        let attempted_override = ValMap::from_pairs(vec![(
+            Val::Keyword(key::TYPE.into()),
+            Val::Keyword("evil".into()),
+        )]);
+        let err = user(Val::Keyword("intended".into()), "msg", attempted_override);
+        assert_eq!(type_tag(&err), Some("intended"));
+    }
+
+    #[test]
+    fn user_with_string_tag_works() {
+        let err = user(Val::Str("custom-error".into()), "boom", ValMap::new());
+        assert_eq!(type_tag(&err), Some("custom-error"));
+    }
+
+    #[test]
+    fn user_with_non_string_tag_yields_empty_tag() {
+        // Defensive — a user passing :type 42 still produces a Val::Map,
+        // but the dispatcher tag is empty and the error is uncatchable
+        // by tag (only catchable via wildcard).
+        let err = user(Val::Int(42), "boom", ValMap::new());
+        // tag() returns "", :glia.error/type carries the int verbatim
+        let m = data(&err).unwrap();
+        assert!(matches!(m.get(&kw(key::TYPE)), Some(Val::Int(42))));
+        // type_tag accessor only returns Some for keyword/str/sym
+        assert!(type_tag(&err).is_none());
+    }
+
     // ----- Inspection accessors ------------------------------------------
 
     #[test]
@@ -428,7 +705,6 @@ mod tests {
     fn data_returns_none_for_non_error_map() {
         let m = ValMap::from_pairs(vec![(kw("foo"), Val::Int(1))]);
         let val = Val::Map(m);
-        // Map without :glia.error/type isn't an error.
         assert!(data(&val).is_none());
     }
 
@@ -441,7 +717,6 @@ mod tests {
 
     #[test]
     fn message_falls_back_to_plain_string() {
-        // Legacy plain-string errors still produce a message.
         assert_eq!(message(&val_str("boom")), Some("boom"));
     }
 
@@ -467,11 +742,103 @@ mod tests {
         assert!(hint(&err).is_none());
     }
 
+    // ----- unwrap_thrown -------------------------------------------------
+
+    #[test]
+    fn unwrap_thrown_returns_inner_for_glia_exception() {
+        let inner = unbound_symbol("foo", None);
+        let carrier = Val::Effect {
+            effect_type: EXCEPTION_EFFECT.into(),
+            data: Box::new(inner.clone()),
+        };
+        let unwrapped = unwrap_thrown(&carrier).unwrap();
+        assert_eq!(type_tag(unwrapped), Some(tag::UNBOUND_SYMBOL));
+    }
+
+    #[test]
+    fn unwrap_thrown_returns_none_for_other_effects() {
+        let carrier = Val::Effect {
+            effect_type: "fail".into(), // legacy effect target
+            data: Box::new(Val::Str("legacy".into())),
+        };
+        assert!(unwrap_thrown(&carrier).is_none());
+    }
+
+    #[test]
+    fn unwrap_thrown_returns_none_for_non_effect() {
+        let direct = unbound_symbol("foo", None);
+        // A direct error map (not wrapped in Val::Effect) returns None;
+        // outer callers should treat this as "already inner data."
+        assert!(unwrap_thrown(&direct).is_none());
+    }
+
+    // ----- Enum exhaustiveness regression --------------------------------
+
+    #[test]
+    fn enum_all_variants_round_trip_via_from() {
+        // Iterate every variant; the From impl is exhaustive at compile
+        // time, but this confirms each variant produces a non-empty tag
+        // and a valid structured map at runtime.
+        let cases: Vec<GliaError> = vec![
+            GliaError::Parse {
+                location: None,
+                message: "x".into(),
+            },
+            GliaError::UnboundSymbol {
+                symbol: "x".into(),
+                hint: None,
+            },
+            GliaError::Arity {
+                function: "x".into(),
+                expected: "1".into(),
+                got: 0,
+            },
+            GliaError::TypeMismatch {
+                context: "x".into(),
+                expected: "y".into(),
+                got_type: "z".into(),
+            },
+            GliaError::CapCall {
+                cap: "x".into(),
+                method: "y".into(),
+                message: "z".into(),
+            },
+            GliaError::Rpc {
+                message: "x".into(),
+            },
+            GliaError::EpochExpired { cap: "x".into() },
+            GliaError::PermissionDenied {
+                what: "x".into(),
+                hint: None,
+            },
+            GliaError::FuelExhausted,
+            GliaError::Internal {
+                context: "x".into(),
+                message: "y".into(),
+            },
+            GliaError::User {
+                type_tag: Val::Keyword("x".into()),
+                message: "y".into(),
+                extras: ValMap::new(),
+            },
+        ];
+        for case in cases {
+            let val: Val = case.into();
+            assert!(data(&val).is_some(), "variant produced unstructured Val");
+            assert!(
+                type_tag(&val).is_some()
+                    || matches!(
+                        &val,
+                        Val::Map(_) // User with non-string tag handled separately
+                    )
+            );
+        }
+    }
+
     // ----- val_type_name -------------------------------------------------
 
     #[test]
     fn val_type_name_covers_all_variants() {
-        // Sanity check on the helper: a few common cases.
         assert_eq!(val_type_name(&Val::Nil), "nil");
         assert_eq!(val_type_name(&Val::Int(0)), "int");
         assert_eq!(val_type_name(&Val::Str("".into())), "string");

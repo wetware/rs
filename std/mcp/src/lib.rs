@@ -445,11 +445,16 @@ async fn eval_expression(
 fn val_to_mcp_error_text(err: &Val) -> String {
     use glia::error;
 
-    let msg = error::message(err)
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{err}"));
+    // Unhandled `(throw ...)` arrives wrapped as Val::Effect{
+    // effect_type: "glia.exception", data: <err> } — peel before
+    // inspecting structured fields.
+    let inner = error::unwrap_thrown(err).unwrap_or(err);
 
-    let Some(tag) = error::type_tag(err) else {
+    let msg = error::message(inner)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{inner}"));
+
+    let Some(tag) = error::type_tag(inner) else {
         // Legacy / unstructured error: just return the message.
         return msg;
     };
@@ -459,7 +464,7 @@ fn val_to_mcp_error_text(err: &Val) -> String {
     // recovery info. Full structured data also serializes via
     // `val_to_mcp_error_data` below for clients that want to introspect.
     let mut buf = format!("[{tag}] {msg}");
-    if let Some(h) = error::hint(err) {
+    if let Some(h) = error::hint(inner) {
         buf.push_str("\n\nhint: ");
         buf.push_str(h);
     }
@@ -471,7 +476,8 @@ fn val_to_mcp_error_text(err: &Val) -> String {
 /// Used by MCP `tools/call` responses to give clients machine-readable
 /// access to variant fields beyond the human-readable message.
 fn val_to_mcp_error_data(err: &Val) -> serde_json::Value {
-    let Some(data) = glia::error::data(err) else {
+    let inner = glia::error::unwrap_thrown(err).unwrap_or(err);
+    let Some(data) = glia::error::data(inner) else {
         return serde_json::Value::Null;
     };
     let mut obj = serde_json::Map::new();

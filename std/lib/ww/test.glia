@@ -7,7 +7,8 @@
 ;;        (t :run-tests)
 ;;
 ;; Tests are registered with deftest and executed with run-tests.
-;; Failures throw with :fail; run-tests catches and reports.
+;; Failures throw with a structured ex-info; run-tests catches and
+;; reports. Catches dispatch on :glia.error/type.
 
 ;; --- Test registry ---
 
@@ -49,14 +50,15 @@
                     {:type :assert-nil
                      :value val}))))
 
-;; assert-throws — assert that body throws an error
+;; assert-throws — assert that a thunk throws.
+;; Wildcard catch returns :threw on any throw; :no-throw on success.
 ;; (assert-throws (fn [] (throw "boom")))
 (defn assert-throws [thunk]
-  (let [result (try (thunk))]
-    (when (nil? (get result :err))
+  (let [outcome (try (do (thunk) :no-throw)
+                     (catch _ _e :threw))]
+    (when (= outcome :no-throw)
       (throw (ex-info "expected throw, got success"
-                      {:type :assert-throws
-                       :value (get result :ok)})))))
+                      {:type :assert-throws})))))
 
 ;; --- Runner ---
 
@@ -68,14 +70,14 @@
           (fn [test]
             (let [test-name (get test :name)
                   test-fn (get test :fn)
-                  result (try (test-fn))]
-              (if (nil? (get result :err))
-                (do
-                  (println (str "  PASS  " test-name))
-                  {:name test-name :status :pass})
-                (do
-                  (println (str "  FAIL  " test-name ": " (get result :err)))
-                  {:name test-name :status :fail :error (get result :err)}))))
+                  ;; Wildcard catch: success → :ok marker, throw → captured error.
+                  outcome (try (do (test-fn) {:status :pass :name test-name})
+                               (catch _ e {:status :fail :name test-name :error e}))]
+              (if (= (get outcome :status) :pass)
+                (do (println (str "  PASS  " test-name))
+                    outcome)
+                (do (println (str "  FAIL  " test-name ": " (get outcome :error)))
+                    outcome))))
           *tests*)
         passed (count (filter (fn [r] (= (get r :status) :pass)) results))
         failed (count (filter (fn [r] (= (get r :status) :fail)) results))

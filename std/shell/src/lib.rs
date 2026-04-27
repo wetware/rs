@@ -433,7 +433,19 @@ impl shell_capnp::shell::Server for ShellImpl {
                     results.get().set_is_error(false);
                 }
                 Err(e) => {
-                    results.get().set_result(&format!("{e}"));
+                    // Unhandled `(throw ...)` arrives as Val::Effect{
+                    // effect_type: "glia.exception", data: <err> } —
+                    // peel before formatting so the user sees the inner
+                    // structured error map.
+                    let inner = glia::error::unwrap_thrown(&e).unwrap_or(&e);
+                    let msg = glia::error::message(inner)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("{inner}"));
+                    let formatted = match glia::error::type_tag(inner) {
+                        Some(tag) => format!("[{tag}] {msg}"),
+                        None => msg,
+                    };
+                    results.get().set_result(&formatted);
                     results.get().set_is_error(true);
                 }
             }
