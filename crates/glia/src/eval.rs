@@ -5224,6 +5224,95 @@ mod tests {
     }
 
     // =========================================================================
+    // try / catch — multi-clause dispatch + re-throw semantics
+    // =========================================================================
+
+    #[test]
+    fn catch_multiple_clauses_first_match_wins() {
+        // Three catches; only :foo matches the thrown :foo error.
+        let result = effects_eval(
+            r#"(try (throw (ex-info "boom" {:type :foo}))
+                 (catch :bar e :took-bar)
+                 (catch :foo e :took-foo)
+                 (catch _    e :took-wild))"#,
+        )
+        .unwrap();
+        assert_eq!(result, Val::Keyword("took-foo".into()));
+    }
+
+    #[test]
+    fn catch_non_matching_falls_through_to_wildcard() {
+        let result = effects_eval(
+            r#"(try (throw (ex-info "boom" {:type :unknown}))
+                 (catch :bar e :took-bar)
+                 (catch _    e :took-wild))"#,
+        )
+        .unwrap();
+        assert_eq!(result, Val::Keyword("took-wild".into()));
+    }
+
+    #[test]
+    fn catch_non_matching_no_wildcard_rethrows_to_outer_try() {
+        // Inner try has only :bar; the :foo throw propagates to outer try
+        // which catches via wildcard.
+        let result = effects_eval(
+            r#"(try (try (throw (ex-info "boom" {:type :foo}))
+                     (catch :bar e :inner-bar))
+                 (catch _ e (get e :glia.error/type)))"#,
+        )
+        .unwrap();
+        assert_eq!(result, Val::Keyword("foo".into()));
+    }
+
+    #[test]
+    fn rethrow_inside_catch_body_propagates_to_outer_try() {
+        // Inner catch matches and re-throws a different error; outer try
+        // catches the re-throw. The inner handler must NOT loop on its own
+        // re-throw (commitment 2 of the eng review: popped-handler-skip).
+        let result = effects_eval(
+            r#"(try (try (throw (ex-info "first" {:type :first}))
+                     (catch :first e (throw (ex-info "second" {:type :second}))))
+                 (catch :second e (get e :glia.error/type))
+                 (catch _       e :wrong))"#,
+        )
+        .unwrap();
+        assert_eq!(result, Val::Keyword("second".into()));
+    }
+
+    #[test]
+    fn unhandled_throw_escapes_as_glia_exception_effect() {
+        // No try in scope — throw escapes as Val::Effect carrier with
+        // effect_type = "glia.exception". Outer callers (kernel, MCP,
+        // shell) rely on this contract.
+        let err = effects_eval("(throw (ex-info \"escape\" {:type :foo}))").unwrap_err();
+        match &err {
+            Val::Effect { effect_type, data } => {
+                assert_eq!(effect_type, error::EXCEPTION_EFFECT);
+                // The data is the inner structured error map.
+                assert_eq!(error::type_tag(data), Some("foo"));
+            }
+            other => panic!("expected Val::Effect, got {other:?}"),
+        }
+        // unwrap_thrown peels the carrier for outer callers.
+        let inner = error::unwrap_thrown(&err).expect("should peel");
+        assert_eq!(error::type_tag(inner), Some("foo"));
+    }
+
+    #[test]
+    fn rethrow_with_no_outer_try_escapes_as_effect() {
+        // Single try, only matches :a. Throwing :b means the dispatcher
+        // re-throws; with no outer try, the re-throw escapes as
+        // Val::Effect — same contract as a direct unhandled throw.
+        let err = effects_eval(
+            r#"(try (throw (ex-info "x" {:type :b}))
+                 (catch :a e :ignored))"#,
+        )
+        .unwrap_err();
+        let inner = error::unwrap_thrown(&err).expect("should peel");
+        assert_eq!(error::type_tag(inner), Some("b"));
+    }
+
+    // =========================================================================
     // match — pattern matching tests
     // =========================================================================
 
