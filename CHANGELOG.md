@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Lint hygiene (#424).** Workspace-wide `cargo fmt` and `cargo clippy --fix` pass. Drops unnecessary `&mut` on `RecordingDispatch` refs in glia tests (`eval`/`eval_str`/`eval_blocking` take `&D`), uses the existing `NativeFnImpl` alias instead of an inline `Rc<dyn Fn(...)>` in one test, replaces a `paths.iter().map(|p| *p).collect()` with `paths.to_vec()` in `src/ns.rs`, collapses a single-arm `match` into `if let` in `tests/shell_e2e.rs`, and switches glia's float parse/display tests off the `3.14` literal (clippy::approx_constant treats it as PI). No behavior change.
 
 ### Fixed
+- **`ww run std/kernel` fails after install.** The install script only fetched the host binary; WASM cells and glia stdlib were never placed on disk. The mount resolver only checked CWD, so `std/kernel` was unresolvable from any directory other than the repo root. Fixed in three parts: (1) `resolve_source()` in `src/mount.rs` falls back to `~/.ww/<path>` when a relative mount source does not exist at CWD (resolution order: CWD → ~/.ww/ → unchanged); (2) `scripts/install.sh` now fetches kernel, shell, mcp WASM cells and glia stdlib into `~/.ww/std/` from the same IPFS release tree used for the binary; (3) `fetch_to()` cleans up empty files on `ipfs cat` failure to prevent ghost 0-byte artifacts.
+- **CHECKSUMS.txt missing section headers.** The CI publish job wrote bare `sha256sum` output without `# sha256` / `# blake3` section headers, but `install.sh` greps for `^# sha256` to locate checksums — so verification was silently skipped for every IPNS installation. Added section headers matching the format used by `make publish`.
 - **Swarm startup errors now reach the operator.** When `Libp2pHost::new` failed (e.g. `listen on /ip4/0.0.0.0/tcp/2025: address already in use`), the swarm thread dropped its readiness oneshot and the main thread reported only `Swarm service failed to start: channel closed`, hiding the real cause. The readiness channel now carries `Result<SwarmReady>`, so bind failures and other construction errors are forwarded verbatim with full context.
 - **CI release pipeline ordering hazards (`.github/workflows/rust.yml`).**
   - **Concurrent runs raced on IPNS.** Added a workflow-level `concurrency` group (`ww-release-${{ github.ref }}`, `cancel-in-progress: false`) so master pushes serialize through deploy + IPNS publish in commit order. Previously two pushes in quick succession could land on the `ww-release` IPNS key out of order, silently rolling installer users back to an older release.
@@ -71,6 +73,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Documentation overhaul: README rewritten with quick start, cell modes, AI integration, roadmap. CLI reference now covers all 12 commands. Architecture doc updated for `List(Export)` membrane, virtual WASI FS, state management, and distribution model.
 
 ### Fixed
+- **`ww run std/kernel` fails after install.** The install script only fetched the host binary; WASM cells and glia stdlib were never placed on disk. The mount resolver only checked CWD, so `std/kernel` was unresolvable from any directory other than the repo root. Fixed in three parts: (1) `resolve_source()` in `src/mount.rs` falls back to `~/.ww/<path>` when a relative mount source does not exist at CWD (resolution order: CWD → ~/.ww/ → unchanged); (2) `scripts/install.sh` now fetches kernel, shell, mcp WASM cells and glia stdlib into `~/.ww/std/` from the same IPFS release tree used for the binary; (3) `fetch_to()` cleans up empty files on `ipfs cat` failure to prevent ghost 0-byte artifacts.
+- **CHECKSUMS.txt missing section headers.** The CI publish job wrote bare `sha256sum` output without `# sha256` / `# blake3` section headers, but `install.sh` greps for `^# sha256` to locate checksums — so verification was silently skipped for every IPNS installation. Added section headers matching the format used by `make publish`.
 - Daemon no longer crash-loops on startup. The MCP mount layer was overwriting the kernel binary; removed from daemon image layers.
 - Kernel no longer crashes when `--http-dial` is not passed. The `http-client` capability is now optional in the membrane graft.
 - `host :listen` now gives a clear error when passed an undefined variable instead of a cell (e.g. when `load` fails). Previously showed misleading "runtime capability required".
@@ -85,6 +89,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Post-install summary now shows `ww shell` as the next step.
 
 ### Fixed
+- **`ww run std/kernel` fails after install.** The install script only fetched the host binary; WASM cells and glia stdlib were never placed on disk. The mount resolver only checked CWD, so `std/kernel` was unresolvable from any directory other than the repo root. Fixed in three parts: (1) `resolve_source()` in `src/mount.rs` falls back to `~/.ww/<path>` when a relative mount source does not exist at CWD (resolution order: CWD → ~/.ww/ → unchanged); (2) `scripts/install.sh` now fetches kernel, shell, mcp WASM cells and glia stdlib into `~/.ww/std/` from the same IPFS release tree used for the binary; (3) `fetch_to()` cleans up empty files on `ipfs cat` failure to prevent ghost 0-byte artifacts.
+- **CHECKSUMS.txt missing section headers.** The CI publish job wrote bare `sha256sum` output without `# sha256` / `# blake3` section headers, but `install.sh` greps for `^# sha256` to locate checksums — so verification was silently skipped for every IPNS installation. Added section headers matching the format used by `make publish`.
 - Checksum verification during install. CHECKSUMS.txt now includes both SHA-256 (universal) and BLAKE3 (when available) under labeled sections. The install script prefers BLAKE3 when `b3sum` is present, falling back to SHA-256. Previously only one format was written with no section markers, so verification silently failed on machines missing `b3sum`.
 
 ## [0.1.1] - 2026-04-10
@@ -109,6 +115,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.0.1.1] - 2026-04-09
 
 ### Fixed
+- **`ww run std/kernel` fails after install.** The install script only fetched the host binary; WASM cells and glia stdlib were never placed on disk. The mount resolver only checked CWD, so `std/kernel` was unresolvable from any directory other than the repo root. Fixed in three parts: (1) `resolve_source()` in `src/mount.rs` falls back to `~/.ww/<path>` when a relative mount source does not exist at CWD (resolution order: CWD → ~/.ww/ → unchanged); (2) `scripts/install.sh` now fetches kernel, shell, mcp WASM cells and glia stdlib into `~/.ww/std/` from the same IPFS release tree used for the binary; (3) `fetch_to()` cleans up empty files on `ipfs cat` failure to prevent ghost 0-byte artifacts.
+- **CHECKSUMS.txt missing section headers.** The CI publish job wrote bare `sha256sum` output without `# sha256` / `# blake3` section headers, but `install.sh` greps for `^# sha256` to locate checksums — so verification was silently skipped for every IPNS installation. Added section headers matching the format used by `make publish`.
 - Container build: add `crates/schema-id` to Containerfile dependency cache layer and dummy source block, fixing workspace resolution failure during Docker builds.
 - Container build: declare `wasm32-wasip2` target in `rust-toolchain.toml` so rustup installs it for whichever stable toolchain is active, fixing `can't find crate for core` during WASM compilation.
 
@@ -128,6 +136,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Kernel capability binding: membrane graft caps are now iterated directly instead of via a skip-list. `http-client` carries its real capnp client.
 
 ### Fixed
+- **`ww run std/kernel` fails after install.** The install script only fetched the host binary; WASM cells and glia stdlib were never placed on disk. The mount resolver only checked CWD, so `std/kernel` was unresolvable from any directory other than the repo root. Fixed in three parts: (1) `resolve_source()` in `src/mount.rs` falls back to `~/.ww/<path>` when a relative mount source does not exist at CWD (resolution order: CWD → ~/.ww/ → unchanged); (2) `scripts/install.sh` now fetches kernel, shell, mcp WASM cells and glia stdlib into `~/.ww/std/` from the same IPFS release tree used for the binary; (3) `fetch_to()` cleans up empty files on `ipfs cat` failure to prevent ghost 0-byte artifacts.
+- **CHECKSUMS.txt missing section headers.** The CI publish job wrote bare `sha256sum` output without `# sha256` / `# blake3` section headers, but `install.sh` greps for `^# sha256` to locate checksums — so verification was silently skipped for every IPNS installation. Added section headers matching the format used by `make publish`.
 - Stop promoting unspecified addresses (0.0.0.0, ::) as external. Only routable addresses are advertised.
 - Containerfile: add `linux-headers` for Cap'n Proto compilation on Alpine (fixes missing `<linux/futex.h>`).
 - `discovery_integration` tests rewritten to use `ExecutorPool` (matching prod topology), fixing a deadlock.
@@ -154,6 +164,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Install script test suite (`tests/test_install.sh`)
 
 ### Fixed
+- **`ww run std/kernel` fails after install.** The install script only fetched the host binary; WASM cells and glia stdlib were never placed on disk. The mount resolver only checked CWD, so `std/kernel` was unresolvable from any directory other than the repo root. Fixed in three parts: (1) `resolve_source()` in `src/mount.rs` falls back to `~/.ww/<path>` when a relative mount source does not exist at CWD (resolution order: CWD → ~/.ww/ → unchanged); (2) `scripts/install.sh` now fetches kernel, shell, mcp WASM cells and glia stdlib into `~/.ww/std/` from the same IPFS release tree used for the binary; (3) `fetch_to()` cleans up empty files on `ipfs cat` failure to prevent ghost 0-byte artifacts.
+- **CHECKSUMS.txt missing section headers.** The CI publish job wrote bare `sha256sum` output without `# sha256` / `# blake3` section headers, but `install.sh` greps for `^# sha256` to locate checksums — so verification was silently skipped for every IPNS installation. Added section headers matching the format used by `make publish`.
 - **Security:** Identity private key no longer exposed to WASM guests. `resolve_identity()` reads identity directly from `--identity` path, never from the merged FHS tree (which is preopened to guests via WASI and published to IPFS).
 - MCP wiring uses absolute binary path via `current_exe()`, fixing PATH ambiguity.
 - `claude mcp add/remove` now handles idempotent exit codes (server already exists / not found) without erroring.
@@ -257,6 +269,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Glia effect handler: simplify state machine (factor out repeated handler stack push, remove no-op match)
 
 ### Fixed
+- **`ww run std/kernel` fails after install.** The install script only fetched the host binary; WASM cells and glia stdlib were never placed on disk. The mount resolver only checked CWD, so `std/kernel` was unresolvable from any directory other than the repo root. Fixed in three parts: (1) `resolve_source()` in `src/mount.rs` falls back to `~/.ww/<path>` when a relative mount source does not exist at CWD (resolution order: CWD → ~/.ww/ → unchanged); (2) `scripts/install.sh` now fetches kernel, shell, mcp WASM cells and glia stdlib into `~/.ww/std/` from the same IPFS release tree used for the binary; (3) `fetch_to()` cleans up empty files on `ipfs cat` failure to prevent ghost 0-byte artifacts.
+- **CHECKSUMS.txt missing section headers.** The CI publish job wrote bare `sha256sum` output without `# sha256` / `# blake3` section headers, but `install.sh` greps for `^# sha256` to locate checksums — so verification was silently skipped for every IPNS installation. Added section headers matching the format used by `make publish`.
 - Shell cell: missing import handler (broke all eval with "target must be a keyword or cap")
 - Shell E2E tests: WASM path mismatch (tests were silently skipping)
 
@@ -279,6 +293,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Init.d scripts for auction, echo, counter, and mindshare examples (all 7 examples now bootable)
 
 ### Fixed
+- **`ww run std/kernel` fails after install.** The install script only fetched the host binary; WASM cells and glia stdlib were never placed on disk. The mount resolver only checked CWD, so `std/kernel` was unresolvable from any directory other than the repo root. Fixed in three parts: (1) `resolve_source()` in `src/mount.rs` falls back to `~/.ww/<path>` when a relative mount source does not exist at CWD (resolution order: CWD → ~/.ww/ → unchanged); (2) `scripts/install.sh` now fetches kernel, shell, mcp WASM cells and glia stdlib into `~/.ww/std/` from the same IPFS release tree used for the binary; (3) `fetch_to()` cleans up empty files on `ipfs cat` failure to prevent ghost 0-byte artifacts.
+- **CHECKSUMS.txt missing section headers.** The CI publish job wrote bare `sha256sum` output without `# sha256` / `# blake3` section headers, but `install.sh` greps for `^# sha256` to locate checksums — so verification was silently skipped for every IPNS installation. Added section headers matching the format used by `make publish`.
 - Example Makefiles: `make -C examples/foo` works from project root (CARGO variable)
 - Oracle init.d: replace invalid `(with ...)` syntax with `(def http ...)` cap binding
 - Counter example: remove stale schema-inject step (removed in #313)
@@ -287,6 +303,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.0.4.1] - 2026-04-03
 
 ### Fixed
+- **`ww run std/kernel` fails after install.** The install script only fetched the host binary; WASM cells and glia stdlib were never placed on disk. The mount resolver only checked CWD, so `std/kernel` was unresolvable from any directory other than the repo root. Fixed in three parts: (1) `resolve_source()` in `src/mount.rs` falls back to `~/.ww/<path>` when a relative mount source does not exist at CWD (resolution order: CWD → ~/.ww/ → unchanged); (2) `scripts/install.sh` now fetches kernel, shell, mcp WASM cells and glia stdlib into `~/.ww/std/` from the same IPFS release tree used for the binary; (3) `fetch_to()` cleans up empty files on `ipfs cat` failure to prevent ghost 0-byte artifacts.
+- **CHECKSUMS.txt missing section headers.** The CI publish job wrote bare `sha256sum` output without `# sha256` / `# blake3` section headers, but `install.sh` greps for `^# sha256` to locate checksums — so verification was silently skipped for every IPNS installation. Added section headers matching the format used by `make publish`.
 - Chess and discovery examples: add missing `http.capnp` to build (required by stem.capnp import)
 - Chess example: remove stale IPFS graft dependency, replay logging is now local
 - Remove unused `ipfs_capnp` module from chess and discovery (stem.capnp doesn't import it)
@@ -384,6 +402,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.0.3.3] - 2026-04-02
 
 ### Fixed
+- **`ww run std/kernel` fails after install.** The install script only fetched the host binary; WASM cells and glia stdlib were never placed on disk. The mount resolver only checked CWD, so `std/kernel` was unresolvable from any directory other than the repo root. Fixed in three parts: (1) `resolve_source()` in `src/mount.rs` falls back to `~/.ww/<path>` when a relative mount source does not exist at CWD (resolution order: CWD → ~/.ww/ → unchanged); (2) `scripts/install.sh` now fetches kernel, shell, mcp WASM cells and glia stdlib into `~/.ww/std/` from the same IPFS release tree used for the binary; (3) `fetch_to()` cleans up empty files on `ipfs cat` failure to prevent ghost 0-byte artifacts.
+- **CHECKSUMS.txt missing section headers.** The CI publish job wrote bare `sha256sum` output without `# sha256` / `# blake3` section headers, but `install.sh` greps for `^# sha256` to locate checksums — so verification was silently skipped for every IPNS installation. Added section headers matching the format used by `make publish`.
 - All documentation uses correct `(perform cap :method ...)` Glia syntax
 - Removed last stale references to schema-inject and custom sections from embedded context
 - Example READMEs match actual init.d scripts (schema arg, subcommands)
