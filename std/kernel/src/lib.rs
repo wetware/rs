@@ -1286,8 +1286,18 @@ async fn run_shell(
                                 stdout.blocking_write_and_flush(format!("{result}\n").as_bytes());
                         }
                         Err(e) => {
-                            let _ =
-                                stderr.blocking_write_and_flush(format!("error: {e}\n").as_bytes());
+                            // Unhandled (throw ...) arrives as
+                            // Val::Effect{effect_type:"glia.exception",..};
+                            // peel so the structured error fields are visible.
+                            let inner = glia::error::unwrap_thrown(&e).unwrap_or(&e);
+                            let msg = glia::error::message(inner)
+                                .map(str::to_string)
+                                .unwrap_or_else(|| format!("{inner}"));
+                            let line = match glia::error::type_tag(inner) {
+                                Some(tag) => format!("error: [{tag}] {msg}\n"),
+                                None => format!("error: {msg}\n"),
+                            };
+                            let _ = stderr.blocking_write_and_flush(line.as_bytes());
                         }
                     }
                 }

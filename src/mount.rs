@@ -49,6 +49,36 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
+/// Resolve a source path: if it's a relative path that doesn't exist at CWD,
+/// try `~/.ww/<path>` as a fallback (standard install location).
+fn resolve_source(source: String) -> String {
+    // Absolute paths (including /ipfs/, /ipns/, /ipld/) are used as-is.
+    if source.starts_with('/') {
+        return source;
+    }
+
+    // If it exists relative to CWD, use it directly.
+    if std::path::Path::new(&source).exists() {
+        return source;
+    }
+
+    // Fall back to ~/.ww/<source>.
+    if let Some(home) = dirs::home_dir() {
+        let ww_path = home.join(".ww").join(&source);
+        if ww_path.exists() {
+            tracing::debug!(
+                original = %source,
+                resolved = %ww_path.display(),
+                "mount source resolved via ~/.ww fallback"
+            );
+            return ww_path.display().to_string();
+        }
+    }
+
+    // Return unchanged — downstream code will produce the error.
+    source
+}
+
 fn parse_one(arg: &str) -> Result<Mount> {
     if arg.is_empty() {
         bail!("empty mount argument");
@@ -65,7 +95,7 @@ fn parse_one(arg: &str) -> Result<Mount> {
                 bail!("mount has empty source: {arg}");
             }
             return Ok(Mount {
-                source: expand_tilde(left),
+                source: resolve_source(expand_tilde(left)),
                 target: PathBuf::from(right),
             });
         }
@@ -73,7 +103,7 @@ fn parse_one(arg: &str) -> Result<Mount> {
 
     // No colon, or right side doesn't start with '/' → root mount.
     Ok(Mount {
-        source: expand_tilde(arg),
+        source: resolve_source(expand_tilde(arg)),
         target: PathBuf::from("/"),
     })
 }
@@ -174,5 +204,24 @@ mod tests {
         assert!(!m.source.starts_with('~'), "tilde should be expanded");
         assert!(m.source.ends_with("/.ww/identity"));
         assert_eq!(m.target, PathBuf::from("/etc/identity"));
+    }
+
+    #[test]
+    fn resolve_source_absolute_unchanged() {
+        let s = resolve_source("/absolute/path".into());
+        assert_eq!(s, "/absolute/path");
+    }
+
+    #[test]
+    fn resolve_source_ipfs_unchanged() {
+        let s = resolve_source("/ipfs/QmFoo".into());
+        assert_eq!(s, "/ipfs/QmFoo");
+    }
+
+    #[test]
+    fn resolve_source_missing_stays_unchanged() {
+        // A path that doesn't exist anywhere should pass through unchanged.
+        let s = resolve_source("nonexistent/path/that/wont/match".into());
+        assert_eq!(s, "nonexistent/path/that/wont/match");
     }
 }

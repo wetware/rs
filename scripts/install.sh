@@ -272,8 +272,41 @@ mkdir -p "${WW_HOME}/bin"
 mv "${WW_TMPDIR}/ww" "${WW_HOME}/bin/ww"
 chmod +x "${WW_HOME}/bin/ww"
 
-# --- Note: standard library is embedded in the binary and resolved ---
-# --- via IPNS namespace at runtime. No separate fetch needed.       ---
+# --- Fetch standard library -------------------------------------------------
+# WASM cells and glia scripts from the release tree, needed to resolve
+# std/ mount paths at runtime (e.g. `ww run std/kernel`).
+# IPFS is already verified above — reuse $IPFS_BASE.
+
+fetch_to() {
+  _dst="${WW_HOME}/$2"
+  mkdir -p "$(dirname "$_dst")"
+  if ! ipfs cat "${IPFS_BASE}/$1" > "$_dst" 2>/dev/null; then
+    rm -f "$_dst"
+    return 1
+  fi
+}
+
+spin "Fetching standard library..."
+
+STD_OK=true
+fetch_to "bin/main.wasm"     "std/kernel/bin/main.wasm"   || STD_OK=false
+fetch_to "bin/shell.wasm"    "std/shell/bin/shell.wasm"   || STD_OK=false
+fetch_to "bin/shell.capnpc"  "std/shell/bin/shell.capnpc" || STD_OK=false
+fetch_to "bin/mcp.wasm"      "std/mcp/bin/main.wasm"      || STD_OK=false
+
+# Glia stdlib (enumerate directory, fetch each file)
+mkdir -p "${WW_HOME}/std/lib/ww"
+for _name in $(ipfs ls "${IPFS_BASE}/lib/ww" 2>/dev/null | awk '{print $NF}'); do
+  fetch_to "lib/ww/${_name}" "std/lib/ww/${_name}" || true
+done
+
+if $STD_OK; then
+  spin_ok "Fetched standard library"
+else
+  spin_fail "Some standard library files could not be fetched"
+  warn "The binary is installed but std/ mounts may not resolve."
+  warn "You can still use IPFS paths directly: ww run /ipfs/<CID>"
+fi
 
 # --- Full node setup (identity, namespace, daemon, MCP, PATH) ---
 printf '\n'

@@ -3,8 +3,8 @@
 ## Overview
 
 Glia's error handling and effect system, implemented in two phases:
-- **Phase 1 (#205):** `try`/`throw` with `Err(Val)` — error recovery for init.d scripts and services
-- **Phase 2:** `perform`/`with-handler` — full algebraic effect system with capability-effect fusion
+- **Phase 1 (#205, historical):** `try`/`throw` over a `:fail` effect, `try` returning `{:ok val}` / `{:err data}`.
+- **Phase 2 (current):** errors and effects share machinery. `(throw err)` performs `:glia.exception`; `(try EXPR (catch :tag e BODY) ...)` installs a handler that dispatches on `:glia.error/type`. The `Result<Val, Val>` carrier is unchanged at the host boundary; an unhandled throw escapes eval as `Err(Val::Effect{ effect_type: "glia.exception", data: <err> })`.
 
 The design follows **Approach C (Capability-Effect Fusion):** standard Unison-style algebraic effects where the Membrane is the outermost effect handler. Every capability call is a `perform`. The handler stack mirrors the capability chain.
 
@@ -37,7 +37,7 @@ All share one structure: **interposing policy at a boundary** — the same thing
 1. **Effects are the ONLY way to interact with the outside world from Glia.** No backdoor calls that bypass the effect system.
 2. **One-shot continuations only.** Resume or abort, no cloning (OCaml 5's pragmatic choice).
 3. **Dynamic handler lookup.** `perform` walks up the handler stack at runtime (Unison-style, not Koka-style static evidence passing). Glia is dynamically typed.
-4. **`throw`/`try` are sugar over `:fail` effect.** Phase 1 ships them as special forms; Phase 2 replaces them with prelude macros over `perform`/`with-handler`.
+4. **`throw`/`try` are sugar over `:glia.exception` effect.** Phase 1 used `:fail` and `Expr::Try`/`Expr::Throw` special forms returning `{:ok}/{:err}`. Phase 2 replaces them with prelude macros over `perform`/`with-effect-handler`, dispatching on `:glia.error/type`.
 
 ## Phase 1: Error Handling (#205)
 
@@ -90,17 +90,21 @@ All share one structure: **interposing policy at a boundary** — the same thing
 - **Handler stack recursion:** `perform` inside a handler skips the current handler frame, dispatches to next outer handler for the same effect type.
 - **`:fail` handlers CAN resume:** default handler (via `try`) does not resume. User-installed `:fail` handlers can resume, enabling retry/recovery.
 
-### Phase transition (Q1 → Q2)
-Phase 2 removes `Expr::Try`/`Expr::Throw` from the analyzer. `try`/`throw` become prelude macros:
+### Phase transition (current state)
+`Expr::Try` / `Expr::Throw` were never required: `try`/`throw` are pure prelude macros over `perform` / `with-effect-handler`. The current shape:
+
 ```clojure
 (defmacro throw [data]
-  `(perform :fail ~data))
+  `(perform :glia.exception ~data))
 
-(defmacro try [body]
-  `(with-handler
-     {:fail (fn [err _resume] {:err err})}
-     {:ok ~body}))
+(defmacro try [expr & catches]
+  ;; Dispatcher walks catches, matching on :glia.error/type;
+  ;; non-match falls through to the next clause; without a wildcard,
+  ;; the dispatcher re-throws.
+  ...)
 ```
+
+The full implementation lives in `crates/glia/src/prelude.glia` and is loaded via `include_str!` at boot. See also `crates/glia/src/error.rs` for the `GliaError` enum, the canonical schema, and `unwrap_thrown` for outer callers.
 
 ### Examples
 ```clojure

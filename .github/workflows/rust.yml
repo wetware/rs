@@ -595,8 +595,17 @@ jobs:
         done
 
         # Checksums (host binaries only)
+        # Section headers must match what install.sh expects (grep "^# sha256").
         cd "$STAGE"
-        find bin/ww/ -type f | sort | xargs sha256sum > CHECKSUMS.txt
+        {
+          echo "# sha256"
+          find bin/ww/ -type f | sort | xargs sha256sum
+          echo ""
+          if command -v b3sum >/dev/null 2>&1; then
+            echo "# blake3"
+            find bin/ww/ -type f | sort | xargs b3sum
+          fi
+        } > CHECKSUMS.txt
         cd -
 
         # Rsync release tree to VPS
