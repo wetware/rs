@@ -443,7 +443,39 @@ fn make_host_handler(
                                     let mut req = listener.listen_request();
                                     req.get().set_executor(executor);
                                     req.get().set_prefix(prefix);
-                                    // TODO: thread _caps into WAGI cells' membranes (HttpListener schema needs caps param)
+                                    // Forward captured caps from the `with` block.
+                                    // Mirrors the VatListener path above so WAGI cells
+                                    // see only the caps the init.d author granted.
+                                    if !caps.is_empty() {
+                                        let valid_caps: Vec<(&str, capnp::capability::Client)> =
+                                            caps.iter()
+                                                .filter_map(|(name, val)| {
+                                                    if let Val::Cap { inner, .. } = val {
+                                                        if let Some(client) =
+                                                            extract_capnp_client(inner)
+                                                        {
+                                                            return Some((name.as_str(), client));
+                                                        }
+                                                        log::debug!(
+                                                            "host :listen — cap '{name}' is not a capnp client, skipping"
+                                                        );
+                                                    }
+                                                    None
+                                                })
+                                                .collect();
+                                        if !valid_caps.is_empty() {
+                                            let mut caps_builder =
+                                                req.get().init_caps(valid_caps.len() as u32);
+                                            for (i, (name, client)) in
+                                                valid_caps.into_iter().enumerate()
+                                            {
+                                                let mut entry =
+                                                    caps_builder.reborrow().get(i as u32);
+                                                entry.set_name(name);
+                                                entry.init_cap().set_as_capability(client.hook);
+                                            }
+                                        }
+                                    }
                                     req.send()
                                         .promise
                                         .await
