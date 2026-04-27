@@ -36,9 +36,7 @@ fn synth_peer_id_bytes() -> Vec<u8> {
 #[tokio::test(flavor = "current_thread")]
 async fn status_cell_serves_json_with_non_null_peer_id() {
     if !status_wasm_exists() {
-        eprintln!(
-            "skipping: {STATUS_WASM_PATH} not built (run `make -C std/status` first)"
-        );
+        eprintln!("skipping: {STATUS_WASM_PATH} not built (run `make -C std/status` first)");
         return;
     }
 
@@ -54,9 +52,7 @@ async fn status_cell_serves_json_with_non_null_peer_id() {
             // the cause of CGI-empty-output failures during dev.
             let network_state = NetworkState::new();
             let peer_id_bytes = synth_peer_id_bytes();
-            network_state
-                .set_local_peer_id(peer_id_bytes.clone())
-                .await;
+            network_state.set_local_peer_id(peer_id_bytes.clone()).await;
 
             let epoch = membrane::Epoch {
                 seq: 1,
@@ -85,15 +81,10 @@ async fn status_cell_serves_json_with_non_null_peer_id() {
             );
 
             // Load the status WASM.
-            let wasm = std::fs::read(STATUS_WASM_PATH)
-                .expect("failed to read status.wasm");
+            let wasm = std::fs::read(STATUS_WASM_PATH).expect("failed to read status.wasm");
             let mut load_req = runtime.load_request();
             load_req.get().set_wasm(&wasm);
-            let load_resp = load_req
-                .send()
-                .promise
-                .await
-                .expect("runtime.load failed");
+            let load_resp = load_req.send().promise.await.expect("runtime.load failed");
             let executor = load_resp
                 .get()
                 .expect("get load response")
@@ -104,7 +95,7 @@ async fn status_cell_serves_json_with_non_null_peer_id() {
             let env = wagi::build_cgi_env(
                 "GET",
                 "/status",
-                "", // no query string
+                "",  // no query string
                 &[], // no extra HTTP headers
                 "localhost",
                 2080,
@@ -164,12 +155,12 @@ async fn status_cell_serves_json_with_non_null_peer_id() {
             loop {
                 let mut read_req = stdout.read_request();
                 read_req.get().set_max_bytes(64 * 1024);
-                let read_resp = read_req
-                    .send()
-                    .promise
-                    .await
-                    .expect("stdout.read failed");
-                let chunk = read_resp.get().expect("get read response").get_data().expect("get data");
+                let read_resp = read_req.send().promise.await.expect("stdout.read failed");
+                let chunk = read_resp
+                    .get()
+                    .expect("get read response")
+                    .get_data()
+                    .expect("get data");
                 if chunk.is_empty() {
                     break;
                 }
@@ -186,18 +177,14 @@ async fn status_cell_serves_json_with_non_null_peer_id() {
                 .promise
                 .await
                 .expect("wait failed");
-            let exit_code = wait_resp
-                .get()
-                .expect("wait response")
-                .get_exit_code();
+            let exit_code = wait_resp.get().expect("wait response").get_exit_code();
             assert_eq!(exit_code, 0, "status cell should exit cleanly");
 
             // ── Parse the CGI response ─────────────────────────────────
             let cgi = wagi::parse_cgi_response(&response)
                 .expect("CGI parse should succeed — guest produced malformed output");
             assert_eq!(cgi.status_code, 200, "expected HTTP 200");
-            let body = std::str::from_utf8(&cgi.body)
-                .expect("response body should be UTF-8 JSON");
+            let body = std::str::from_utf8(&cgi.body).expect("response body should be UTF-8 JSON");
             let json: serde_json::Value = serde_json::from_str(body)
                 .unwrap_or_else(|e| panic!("response should parse as JSON: {e}\nbody: {body}"));
 
