@@ -171,14 +171,37 @@ Inspection accessors mirror Clojure's `ex-data` / `ex-message`:
 - `glia::error::type_tag(err) -> Option<&str>`
 - `glia::error::hint(err) -> Option<&str>`
 
-Plain-string errors (legacy `eval_err!` call sites) return `None` from
-each accessor, distinguishing structured errors from foreign / legacy
-values.
+Plain-string and unstructured errors return `None` from each accessor,
+distinguishing structured errors from foreign / legacy values.
 
 The MCP cell preserves error `Val`s end-to-end and surfaces them to
 JSON-RPC as `structuredContent`, so MCP clients can route on
 `:glia.error/type` and act on variant-specific fields without parsing
 the human-readable message.
+
+### Errors as effects
+
+Errors are an effect with target `:glia.exception`. `(throw err)`
+performs the effect; `(try EXPR (catch :tag e BODY) ...)` installs a
+handler that dispatches on `:glia.error/type`. With no handler in
+scope, an unhandled throw escapes eval as `Err(Val::Effect{
+effect_type: "glia.exception", data: <err> })` — outer callers
+(kernel REPL, MCP cell, shell) unwrap via `glia::error::unwrap_thrown`.
+
+```clojure
+(try (compute-something)
+  (catch :glia.error/unbound-symbol e (recover-unbound e))
+  (catch :glia.error/cap-call-failed e (retry e))
+  (catch _ e (rethrow-as-internal e)))
+```
+
+User code constructs structured errors via the `ex-info` builtin:
+
+```clojure
+(throw (ex-info "peer unreachable" {:type :network :peer "QmFoo"}))
+;; catchable as (catch :network e ...) — `:type` becomes
+;; `:glia.error/type` while remaining preserved for back-compat readers.
+```
 
 ## Introspection
 

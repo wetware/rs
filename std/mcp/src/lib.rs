@@ -445,11 +445,16 @@ async fn eval_expression(
 fn val_to_mcp_error_text(err: &Val) -> String {
     use glia::error;
 
-    let msg = error::message(err)
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{err}"));
+    // Unhandled `(throw ...)` arrives wrapped as Val::Effect{
+    // effect_type: "glia.exception", data: <err> } — peel before
+    // inspecting structured fields.
+    let inner = error::unwrap_thrown(err).unwrap_or(err);
 
-    let Some(tag) = error::type_tag(err) else {
+    let msg = error::message(inner)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{inner}"));
+
+    let Some(tag) = error::type_tag(inner) else {
         // Legacy / unstructured error: just return the message.
         return msg;
     };
@@ -459,7 +464,7 @@ fn val_to_mcp_error_text(err: &Val) -> String {
     // recovery info. Full structured data also serializes via
     // `val_to_mcp_error_data` below for clients that want to introspect.
     let mut buf = format!("[{tag}] {msg}");
-    if let Some(h) = error::hint(err) {
+    if let Some(h) = error::hint(inner) {
         buf.push_str("\n\nhint: ");
         buf.push_str(h);
     }
@@ -471,7 +476,8 @@ fn val_to_mcp_error_text(err: &Val) -> String {
 /// Used by MCP `tools/call` responses to give clients machine-readable
 /// access to variant fields beyond the human-readable message.
 fn val_to_mcp_error_data(err: &Val) -> serde_json::Value {
-    let Some(data) = glia::error::data(err) else {
+    let inner = glia::error::unwrap_thrown(err).unwrap_or(err);
+    let Some(data) = glia::error::data(inner) else {
         return serde_json::Value::Null;
     };
     let mut obj = serde_json::Map::new();
@@ -1048,5 +1054,107 @@ mod tests {
         assert_eq!(info.get("name").unwrap(), SERVER_NAME);
         assert_eq!(info.get("version").unwrap(), SERVER_VERSION);
         assert!(result.get("capabilities").unwrap().get("tools").is_some());
+    }
+
+    // -- val_to_mcp_error_text / val_to_mcp_error_data —
+    //    REGRESSION GUARD on the envelope shape from #419.
+    //    AI agents on the wire today rely on:
+    //      - error.code mapped from :glia.error/type
+    //      - error.message → :glia.error/message
+    //      - error.data.structuredContent carries the full Val map
+    //    These tests pin those contracts.
+
+    fn unbound_err() -> Val {
+        glia::error::unbound_symbol("foo", Some("did you mean 'bar'?"))
+    }
+
+    #[test]
+    fn envelope_text_includes_tag_and_message_for_structured_error() {
+        let err = unbound_err();
+        let text = val_to_mcp_error_text(&err);
+        // Tag prefix preserved verbatim — clients route on this.
+        assert!(text.starts_with("[glia.error/unbound-symbol]"), "got: {text}");
+        // Message body preserved.
+        assert!(text.contains("unbound symbol: foo"), "got: {text}");
+        // Hint surfaced inline so human-facing UIs see recovery guidance.
+        assert!(text.contains("hint: did you mean 'bar'?"), "got: {text}");
+    }
+
+    #[test]
+    fn envelope_text_falls_back_to_plain_string_for_legacy_errors() {
+        let err = Val::Str("legacy plain error".into());
+        assert_eq!(val_to_mcp_error_text(&err), "legacy plain error");
+    }
+
+    #[test]
+    fn envelope_data_carries_full_structured_map() {
+        let err = unbound_err();
+        let data = val_to_mcp_error_data(&err);
+        let obj = data.as_object().expect("structured data should be object");
+        // Every canonical field round-trips into the JSON envelope.
+        assert_eq!(
+            obj.get("glia.error/type").and_then(|v| v.as_str()),
+            Some("glia.error/unbound-symbol")
+        );
+        assert!(obj
+            .get("glia.error/message")
+            .and_then(|v| v.as_str())
+            .map(|s| s.contains("unbound symbol: foo"))
+            .unwrap_or(false));
+        assert_eq!(
+            obj.get("glia.error/hint").and_then(|v| v.as_str()),
+            Some("did you mean 'bar'?")
+        );
+        assert_eq!(
+            obj.get("glia.error/symbol").and_then(|v| v.as_str()),
+            Some("foo")
+        );
+    }
+
+    #[test]
+    fn envelope_data_returns_null_for_legacy_string_errors() {
+        let err = Val::Str("legacy".into());
+        assert!(val_to_mcp_error_data(&err).is_null());
+    }
+
+    #[test]
+    fn envelope_peels_glia_exception_carrier() {
+        // Unhandled (throw ...) escapes eval as Val::Effect{
+        // effect_type: "glia.exception", data: <inner err> }.
+        // The envelope helpers must peel before inspecting.
+        let inner = unbound_err();
+        let carrier = Val::Effect {
+            effect_type: "glia.exception".into(),
+            data: Box::new(inner),
+        };
+        let text = val_to_mcp_error_text(&carrier);
+        assert!(text.starts_with("[glia.error/unbound-symbol]"), "got: {text}");
+        let data = val_to_mcp_error_data(&carrier);
+        assert!(data.is_object());
+        assert_eq!(
+            data.get("glia.error/type").and_then(|v| v.as_str()),
+            Some("glia.error/unbound-symbol")
+        );
+    }
+
+    #[test]
+    fn envelope_text_honors_user_thrown_ex_info() {
+        // ex-info-style error: user :type becomes :glia.error/type tag,
+        // and the envelope formats with that user-supplied tag.
+        let err = glia::error::user(
+            Val::Keyword("network".into()),
+            "peer unreachable",
+            glia::ValMap::from_pairs(vec![(
+                Val::Keyword("peer".into()),
+                Val::Str("QmFoo".into()),
+            )]),
+        );
+        let text = val_to_mcp_error_text(&err);
+        // User tag is the dispatch surface — not namespaced.
+        assert!(text.starts_with("[network]"), "got: {text}");
+        let data = val_to_mcp_error_data(&err);
+        let obj = data.as_object().unwrap();
+        // User extras carry through into structuredContent.
+        assert_eq!(obj.get("peer").and_then(|v| v.as_str()), Some("QmFoo"));
     }
 }

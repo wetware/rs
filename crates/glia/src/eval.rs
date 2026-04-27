@@ -201,14 +201,6 @@ pub trait Dispatch {
 // Evaluator
 // ---------------------------------------------------------------------------
 
-/// Convenience macro: creates an error `Val` from a format string.
-/// Equivalent to `Val::from(format!(...))` but shorter at callsites.
-macro_rules! eval_err {
-    ($($arg:tt)*) => {
-        Val::from(format!($($arg)*))
-    };
-}
-
 /// Returns true if `val` is logically truthy (Clojure model).
 /// Only `nil` and `false` are falsy — everything else is truthy,
 /// including `0`, empty string, and empty collections.
@@ -278,10 +270,7 @@ async fn eval_def<'a, D: Dispatch>(
     dispatch: &'a D,
 ) -> Result<Val, Val> {
     if args.is_empty() || args.len() > 2 {
-        return Err(eval_err!(
-            "def: expected (def name) or (def name value), got {} args",
-            args.len()
-        ));
+        return Err(error::arity("def", "1-2", args.len()));
     }
     let name = match &args[0] {
         Val::Sym(s) => s.clone(),
@@ -335,12 +324,13 @@ async fn eval_let<'a, D: Dispatch>(
 ) -> Result<Val, Val> {
     let bindings = match args.first() {
         Some(Val::Vector(v)) => v,
-        Some(other) => return Err(eval_err!("let: expected vector of bindings, got {other}")),
-        None => return Err(eval_err!("let: expected (let [bindings...] body...)")),
+        Some(other) => return Err(error::type_mismatch("let", "vector of bindings", other)),
+        None => return Err(error::arity("let", "at least 1", 0)),
     };
     if bindings.len() % 2 != 0 {
-        return Err(eval_err!(
-            "let: bindings must be pairs (even number of forms)"
+        return Err(error::internal(
+            "let",
+            "bindings must be pairs (even number of forms)",
         ));
     }
 
@@ -388,14 +378,14 @@ fn parse_params(param_vec: &[Val], body: &[Val]) -> Result<FnArity, Val> {
                 match param_vec.get(i) {
                     Some(Val::Sym(rest_name)) => {
                         if variadic.is_some() {
-                            return Err(eval_err!("fn: only one & rest param allowed"));
+                            return Err(error::internal("fn", "only one & rest param allowed"));
                         }
                         variadic = Some(rest_name.clone());
                     }
-                    _ => return Err(eval_err!("fn: expected symbol after &")),
+                    _ => return Err(error::internal("fn", "expected symbol after &")),
                 }
                 if i + 1 < param_vec.len() {
-                    return Err(eval_err!("fn: nothing allowed after & rest param"));
+                    return Err(error::internal("fn", "nothing allowed after & rest param"));
                 }
             }
             Val::Sym(s) => params.push(s.clone()),
@@ -413,9 +403,7 @@ fn parse_params(param_vec: &[Val], body: &[Val]) -> Result<FnArity, Val> {
 /// `(fn [params] body...)` or `(fn ([params] body...) ([params] body...))` — create a closure.
 fn eval_fn(args: &[Val], env: &Env) -> Result<Val, Val> {
     if args.is_empty() {
-        return Err(eval_err!(
-            "fn: expected (fn [params] body...) or (fn ([p] body) ...)"
-        ));
+        return Err(error::arity("fn", "at least 1", 0));
     }
 
     let arities = match &args[0] {
@@ -433,16 +421,16 @@ fn eval_fn(args: &[Val], env: &Env) -> Result<Val, Val> {
                         let param_vec = match &items[0] {
                             Val::Vector(v) => v,
                             other => {
-                                return Err(eval_err!(
-                                    "fn: multi-arity clause must start with [params], got {other}"
+                                return Err(error::type_mismatch(
+                                    "fn multi-arity clause",
+                                    "vector of params",
+                                    other,
                                 ))
                             }
                         };
                         result.push(parse_params(param_vec, &items[1..])?);
                     }
-                    other => {
-                        return Err(eval_err!("fn: expected arity clause (list), got {other}"))
-                    }
+                    other => return Err(error::type_mismatch("fn arity clause", "list", other)),
                 }
             }
             // Check for overlapping arities (same fixed param count, ignoring variadic)
@@ -451,18 +439,23 @@ fn eval_fn(args: &[Val], env: &Env) -> Result<Val, Val> {
             for a in &result {
                 if a.variadic.is_some() {
                     if has_variadic {
-                        return Err(eval_err!("fn: only one variadic arity allowed"));
+                        return Err(error::internal("fn", "only one variadic arity allowed"));
                     }
                     has_variadic = true;
                 } else if !seen_counts.insert(a.params.len()) {
-                    return Err(eval_err!("fn: duplicate arity for {} args", a.params.len()));
+                    return Err(error::internal(
+                        "fn",
+                        format!("duplicate arity for {} args", a.params.len()),
+                    ));
                 }
             }
             result
         }
         other => {
-            return Err(eval_err!(
-                "fn: expected [params] or arity clauses, got {other}"
+            return Err(error::type_mismatch(
+                "fn",
+                "[params] or arity clauses",
+                other,
             ))
         }
     };
@@ -502,11 +495,7 @@ async fn invoke_fn<'a, D: Dispatch>(
                     }
                 })
                 .collect();
-            format!(
-                "wrong number of args ({}) passed to fn, expected {}",
-                args.len(),
-                expected.join(" or ")
-            )
+            error::arity("fn", &expected.join(" or "), args.len())
         })?;
 
     // Build fn environment: captured env + new frame with param bindings.
@@ -538,10 +527,10 @@ async fn invoke_fn<'a, D: Dispatch>(
             match result {
                 Val::Recur(new_vals) => {
                     if new_vals.len() != recur_arity {
-                        return Err(eval_err!(
-                            "recur: expected {} args, got {}",
-                            recur_arity,
-                            new_vals.len()
+                        return Err(error::arity(
+                            "recur",
+                            &recur_arity.to_string(),
+                            new_vals.len(),
                         ));
                     }
                     // Re-bind fixed params
@@ -573,7 +562,7 @@ async fn invoke_fn<'a, D: Dispatch>(
 /// `fn_args` is `[params, body...]` or `[(arity1) (arity2) ...]`.
 fn parse_macro_arities(fn_args: &[Val]) -> Result<Vec<FnArity>, Val> {
     if fn_args.is_empty() {
-        return Err(eval_err!("defmacro: expected params"));
+        return Err(error::arity("defmacro", "at least 1", 0));
     }
     match &fn_args[0] {
         // Single-arity: [x y] body...
@@ -590,17 +579,17 @@ fn parse_macro_arities(fn_args: &[Val]) -> Result<Vec<FnArity>, Val> {
                         let param_vec = match &items[0] {
                             Val::Vector(v) => v,
                             other => {
-                                return Err(eval_err!(
-                                    "defmacro: multi-arity clause must start with [params], got {other}"
+                                return Err(error::type_mismatch(
+                                    "defmacro multi-arity clause",
+                                    "vector of params",
+                                    other,
                                 ))
                             }
                         };
                         result.push(parse_params(param_vec, &items[1..])?);
                     }
                     other => {
-                        return Err(eval_err!(
-                            "defmacro: expected arity clause (list), got {other}"
-                        ))
+                        return Err(error::type_mismatch("defmacro arity clause", "list", other))
                     }
                 }
             }
@@ -609,20 +598,25 @@ fn parse_macro_arities(fn_args: &[Val]) -> Result<Vec<FnArity>, Val> {
             for a in &result {
                 if a.variadic.is_some() {
                     if has_variadic {
-                        return Err(eval_err!("defmacro: only one variadic arity allowed"));
+                        return Err(error::internal(
+                            "defmacro",
+                            "only one variadic arity allowed",
+                        ));
                     }
                     has_variadic = true;
                 } else if !seen_counts.insert(a.params.len()) {
-                    return Err(eval_err!(
-                        "defmacro: duplicate arity for {} args",
-                        a.params.len()
+                    return Err(error::internal(
+                        "defmacro",
+                        format!("duplicate arity for {} args", a.params.len()),
                     ));
                 }
             }
             Ok(result)
         }
-        other => Err(eval_err!(
-            "defmacro: expected [params] or arity clauses, got {other}"
+        other => Err(error::type_mismatch(
+            "defmacro",
+            "[params] or arity clauses",
+            other,
         )),
     }
 }
@@ -634,9 +628,7 @@ fn parse_macro_arities(fn_args: &[Val]) -> Result<Vec<FnArity>, Val> {
 /// in the caller's env.
 async fn eval_defmacro(args: &[Val], env: &mut Env) -> Result<Val, Val> {
     if args.is_empty() {
-        return Err(eval_err!(
-            "defmacro: expected (defmacro name [params] body...)"
-        ));
+        return Err(error::arity("defmacro", "at least 2", 0));
     }
     let name = match &args[0] {
         Val::Sym(s) => s.clone(),
@@ -644,7 +636,7 @@ async fn eval_defmacro(args: &[Val], env: &mut Env) -> Result<Val, Val> {
     };
     let fn_args = &args[1..];
     if fn_args.is_empty() {
-        return Err(eval_err!("defmacro: expected params after name"));
+        return Err(error::arity("defmacro", "at least 2", 1));
     }
     let arities = parse_macro_arities(fn_args)?;
     let val = Val::Macro {
@@ -684,11 +676,7 @@ async fn invoke_macro<'a, D: Dispatch>(
                     }
                 })
                 .collect();
-            format!(
-                "wrong number of args ({}) passed to macro, expected {}",
-                raw_args.len(),
-                expected.join(" or ")
-            )
+            error::arity("macro", &expected.join(" or "), raw_args.len())
         })?;
 
     // Build macro environment: captured env + new frame with raw arg bindings
@@ -725,12 +713,13 @@ async fn eval_loop<'a, D: Dispatch>(
 ) -> Result<Val, Val> {
     let bindings = match args.first() {
         Some(Val::Vector(v)) => v,
-        Some(other) => return Err(eval_err!("loop: expected vector of bindings, got {other}")),
-        None => return Err(eval_err!("loop: expected (loop [bindings...] body...)")),
+        Some(other) => return Err(error::type_mismatch("loop", "vector of bindings", other)),
+        None => return Err(error::arity("loop", "at least 1", 0)),
     };
     if bindings.len() % 2 != 0 {
-        return Err(eval_err!(
-            "loop: bindings must be pairs (even number of forms)"
+        return Err(error::internal(
+            "loop",
+            "bindings must be pairs (even number of forms)",
         ));
     }
 
@@ -738,9 +727,7 @@ async fn eval_loop<'a, D: Dispatch>(
         .chunks(2)
         .map(|pair| match &pair[0] {
             Val::Sym(s) => Ok(s.clone()),
-            other => Err(eval_err!(
-                "loop: binding name must be a symbol, got {other}"
-            )),
+            other => Err(error::type_mismatch("loop binding name", "symbol", other)),
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -770,10 +757,10 @@ async fn eval_loop<'a, D: Dispatch>(
             match result {
                 Val::Recur(new_vals) => {
                     if new_vals.len() != num_bindings {
-                        return Err(eval_err!(
-                            "recur: expected {} args, got {}",
-                            num_bindings,
-                            new_vals.len()
+                        return Err(error::arity(
+                            "recur",
+                            &num_bindings.to_string(),
+                            new_vals.len(),
                         ));
                     }
                     for (name, val) in binding_names.iter().zip(new_vals) {
@@ -867,7 +854,11 @@ async fn eval_hof<'a, D: Dispatch>(
             } else {
                 let items = extract_seq("reduce", &args[1])?;
                 if items.is_empty() {
-                    return Err(eval_err!("reduce: empty collection with no init value"));
+                    return Err(error::type_mismatch(
+                        "reduce",
+                        "non-empty collection (or pass an init value)",
+                        &Val::List(vec![]),
+                    ));
                 }
                 (items[0].clone(), &items[1..])
             };
@@ -887,9 +878,7 @@ fn extract_fn(caller: &str, val: &Val) -> Result<(Vec<FnArity>, Rc<Env>), Val> {
             arities,
             env: captured_env,
         } => Ok((arities.clone(), captured_env.clone())),
-        other => Err(eval_err!(
-            "{caller}: first arg must be a function, got {other}"
-        )),
+        other => Err(error::type_mismatch(caller, "function", other)),
     }
 }
 
@@ -898,7 +887,7 @@ fn extract_seq<'a>(caller: &str, val: &'a Val) -> Result<&'a [Val], Val> {
     match val {
         Val::Nil => Ok(&[]),
         Val::List(v) | Val::Vector(v) => Ok(v.as_slice()),
-        other => Err(eval_err!("{caller}: expected collection, got {other}")),
+        other => Err(error::type_mismatch(caller, "collection", other)),
     }
 }
 
@@ -941,7 +930,7 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
         // --- Type ---
         "type" => {
             if args.len() != 1 {
-                return Some(Err(eval_err!("type: expected 1 arg, got {}", args.len())));
+                return Some(Err(error::arity("type", "1", args.len())));
             }
             let kw = match &args[0] {
                 Val::Nil => "nil",
@@ -970,26 +959,32 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
         }
         "nil?" => {
             if args.len() != 1 {
-                return Some(Err(eval_err!("nil?: expected 1 arg, got {}", args.len())));
+                return Some(Err(error::arity("nil?", "1", args.len())));
             }
             Some(Ok(Val::Bool(matches!(args[0], Val::Nil))))
         }
         "some?" => {
             if args.len() != 1 {
-                return Some(Err(eval_err!("some?: expected 1 arg, got {}", args.len())));
+                return Some(Err(error::arity("some?", "1", args.len())));
             }
             Some(Ok(Val::Bool(!matches!(args[0], Val::Nil))))
         }
+        "map?" => {
+            if args.len() != 1 {
+                return Some(Err(error::arity("map?", "1", args.len())));
+            }
+            Some(Ok(Val::Bool(matches!(args[0], Val::Map(_)))))
+        }
         "empty?" => {
             if args.len() != 1 {
-                return Some(Err(eval_err!("empty?: expected 1 arg, got {}", args.len())));
+                return Some(Err(error::arity("empty?", "1", args.len())));
             }
             let empty = match &args[0] {
                 Val::Nil => true,
                 Val::List(v) | Val::Vector(v) | Val::Set(v) => v.is_empty(),
                 Val::Map(m) => m.is_empty(),
                 Val::Str(s) => s.is_empty(),
-                other => return Some(Err(eval_err!("empty?: expected collection, got {other}"))),
+                other => return Some(Err(error::type_mismatch("empty?", "collection", other))),
             };
             Some(Ok(Val::Bool(empty)))
         }
@@ -1010,13 +1005,15 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
         }
         "name" => {
             if args.len() != 1 {
-                return Some(Err(eval_err!("name: expected 1 arg, got {}", args.len())));
+                return Some(Err(error::arity("name", "1", args.len())));
             }
             match &args[0] {
                 Val::Keyword(k) => Some(Ok(Val::Str(k.clone()))),
                 Val::Sym(s) => Some(Ok(Val::Str(s.clone()))),
-                other => Some(Err(eval_err!(
-                    "name: expected keyword or symbol, got {other}"
+                other => Some(Err(error::type_mismatch(
+                    "name",
+                    "keyword or symbol",
+                    other,
                 ))),
             }
         }
@@ -1039,10 +1036,7 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
         // --- Other ---
         "gensym" => {
             if !args.is_empty() {
-                return Some(Err(eval_err!(
-                    "gensym: expected 0 args, got {}",
-                    args.len()
-                )));
+                return Some(Err(error::arity("gensym", "0", args.len())));
             }
             let n = GENSYM_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
             Some(Ok(Val::Sym(format!("G__{n}"))))
@@ -1050,29 +1044,34 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
 
         "ex-info" => {
             if args.len() != 2 {
-                return Some(Err(eval_err!(
-                    "ex-info: expected 2 args (message, data-map), got {}",
-                    args.len()
-                )));
+                return Some(Err(crate::error::arity("ex-info", "2", args.len())));
             }
             let msg = match &args[0] {
                 Val::Str(s) => s.clone(),
-                other => {
-                    return Some(Err(eval_err!(
-                        "ex-info: message must be a string, got {other}"
-                    )))
-                }
+                other => return Some(Err(crate::error::type_mismatch("ex-info", "string", other))),
             };
-            let m = match &args[1] {
+            let user_map = match &args[1] {
                 Val::Map(m) => m.clone(),
                 other => {
-                    return Some(Err(eval_err!(
-                        "ex-info: second arg must be a map, got {other}"
+                    return Some(Err(crate::error::type_mismatch(
+                        "ex-info second arg",
+                        "map",
+                        other,
                     )))
                 }
             };
-            let m = m.assoc(Val::Keyword("message".into()), Val::Str(msg));
-            Some(Ok(Val::Map(m)))
+            // Use the user's :type as the canonical dispatch tag.
+            // Missing :type → empty Val::Str (uncatchable by tag, only
+            // by wildcard) — defensive default.
+            let type_tag = user_map
+                .get(&Val::Keyword("type".into()))
+                .cloned()
+                .unwrap_or_else(|| Val::Str(String::new()));
+            // Extras = user's map minus the keys ex-info canonicalizes.
+            let extras = user_map
+                .dissoc(&Val::Keyword("type".into()))
+                .dissoc(&Val::Keyword("message".into()));
+            Some(Ok(crate::error::user(type_tag, msg, extras)))
         }
 
         _ => None, // not a built-in
@@ -1081,18 +1080,20 @@ fn eval_builtin(name: &str, args: &[Val]) -> Option<Result<Val, Val>> {
 
 fn builtin_contains(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(eval_err!("contains?: expected 2 args, got {}", args.len()));
+        return Err(error::arity("contains?", "2", args.len()));
     }
     let found = match &args[0] {
         Val::Map(m) => m.contains_key(&args[1]),
         Val::Set(items) => items.iter().any(|v| v == &args[1]),
         Val::Vector(v) => match &args[1] {
             Val::Int(i) => *i >= 0 && (*i as usize) < v.len(),
-            other => return Err(eval_err!("contains?: vector key must be Int, got {other}")),
+            other => return Err(error::type_mismatch("contains? vector key", "int", other)),
         },
         other => {
-            return Err(eval_err!(
-                "contains?: expected map, set, or vector, got {other}"
+            return Err(error::type_mismatch(
+                "contains?",
+                "map, set, or vector",
+                other,
             ))
         }
     };
@@ -1103,13 +1104,15 @@ fn builtin_contains(args: &[Val]) -> Result<Val, Val> {
 
 fn builtin_cons(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(eval_err!("cons: expected 2 args, got {}", args.len()));
+        return Err(error::arity("cons", "2", args.len()));
     }
     let tail = match &args[1] {
         Val::List(v) | Val::Vector(v) => v,
         other => {
-            return Err(eval_err!(
-                "cons: second arg must be List or Vector, got {other}"
+            return Err(error::type_mismatch(
+                "cons second arg",
+                "list or vector",
+                other,
             ))
         }
     };
@@ -1121,18 +1124,18 @@ fn builtin_cons(args: &[Val]) -> Result<Val, Val> {
 
 fn builtin_first(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 1 {
-        return Err(eval_err!("first: expected 1 arg, got {}", args.len()));
+        return Err(error::arity("first", "1", args.len()));
     }
     match &args[0] {
         Val::Nil => Ok(Val::Nil),
         Val::List(v) | Val::Vector(v) => Ok(v.first().cloned().unwrap_or(Val::Nil)),
-        other => Err(eval_err!("first: expected collection, got {other}")),
+        other => Err(error::type_mismatch("first", "collection", other)),
     }
 }
 
 fn builtin_rest(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 1 {
-        return Err(eval_err!("rest: expected 1 arg, got {}", args.len()));
+        return Err(error::arity("rest", "1", args.len()));
     }
     match &args[0] {
         Val::Nil => Ok(Val::List(vec![])),
@@ -1143,39 +1146,39 @@ fn builtin_rest(args: &[Val]) -> Result<Val, Val> {
                 Ok(Val::List(v[1..].to_vec()))
             }
         }
-        other => Err(eval_err!("rest: expected collection, got {other}")),
+        other => Err(error::type_mismatch("rest", "collection", other)),
     }
 }
 
 fn builtin_count(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 1 {
-        return Err(eval_err!("count: expected 1 arg, got {}", args.len()));
+        return Err(error::arity("count", "1", args.len()));
     }
     let n = match &args[0] {
         Val::Nil => 0,
         Val::List(v) | Val::Vector(v) | Val::Set(v) => v.len(),
         Val::Map(m) => m.len(),
         Val::Str(s) => s.chars().count(),
-        other => return Err(eval_err!("count: expected collection or nil, got {other}")),
+        other => return Err(error::type_mismatch("count", "collection or nil", other)),
     };
     Ok(Val::Int(n as i64))
 }
 
 fn builtin_vec(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 1 {
-        return Err(eval_err!("vec: expected 1 arg, got {}", args.len()));
+        return Err(error::arity("vec", "1", args.len()));
     }
     match &args[0] {
         Val::Nil => Ok(Val::Vector(vec![])),
         Val::List(v) => Ok(Val::Vector(v.clone())),
         Val::Vector(_) => Ok(args[0].clone()),
-        other => Err(eval_err!("vec: expected list or vector, got {other}")),
+        other => Err(error::type_mismatch("vec", "list or vector", other)),
     }
 }
 
 fn builtin_get(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(eval_err!("get: expected 2 args, got {}", args.len()));
+        return Err(error::arity("get", "2", args.len()));
     }
     match &args[0] {
         Val::Map(m) => Ok(m.get(&args[1]).cloned().unwrap_or(Val::Nil)),
@@ -1187,23 +1190,24 @@ fn builtin_get(args: &[Val]) -> Result<Val, Val> {
                     Ok(v.get(*i as usize).cloned().unwrap_or(Val::Nil))
                 }
             }
-            other => Err(eval_err!("get: vector index must be Int, got {other}")),
+            other => Err(error::type_mismatch("get vector index", "int", other)),
         },
         Val::Nil => Ok(Val::Nil),
-        other => Err(eval_err!("get: expected map or vector, got {other}")),
+        other => Err(error::type_mismatch("get", "map or vector", other)),
     }
 }
 
 fn builtin_assoc(args: &[Val]) -> Result<Val, Val> {
     if args.is_empty() || !(args.len() - 1).is_multiple_of(2) {
-        return Err(eval_err!(
-            "assoc: expected map + key-value pairs (odd number of args), got {}",
-            args.len()
+        return Err(error::arity(
+            "assoc",
+            "map + key-value pairs (odd total)",
+            args.len(),
         ));
     }
     let mut m = match &args[0] {
         Val::Map(m) => m.clone(),
-        other => return Err(eval_err!("assoc: first arg must be a map, got {other}")),
+        other => return Err(error::type_mismatch("assoc first arg", "map", other)),
     };
     for chunk in args[1..].chunks(2) {
         m = m.assoc(chunk[0].clone(), chunk[1].clone());
@@ -1213,10 +1217,7 @@ fn builtin_assoc(args: &[Val]) -> Result<Val, Val> {
 
 fn builtin_conj(args: &[Val]) -> Result<Val, Val> {
     if args.len() < 2 {
-        return Err(eval_err!(
-            "conj: expected at least 2 args, got {}",
-            args.len()
-        ));
+        return Err(error::arity("conj", "at least 2", args.len()));
     }
     match &args[0] {
         Val::Vector(v) => {
@@ -1240,15 +1241,17 @@ fn builtin_conj(args: &[Val]) -> Result<Val, Val> {
                         result = result.assoc(pair[0].clone(), pair[1].clone());
                     }
                     other => {
-                        return Err(eval_err!(
-                            "conj: map entries must be [key val] vectors, got {other}"
+                        return Err(error::type_mismatch(
+                            "conj map entry",
+                            "[key val] vector",
+                            other,
                         ))
                     }
                 }
             }
             Ok(Val::Map(result))
         }
-        other => Err(eval_err!("conj: expected collection, got {other}")),
+        other => Err(error::type_mismatch("conj", "collection", other)),
     }
 }
 
@@ -1258,7 +1261,7 @@ fn builtin_concat(args: &[Val]) -> Result<Val, Val> {
         match arg {
             Val::Nil => {}
             Val::List(v) | Val::Vector(v) => result.extend(v.iter().cloned()),
-            other => return Err(eval_err!("concat: expected sequence or nil, got {other}")),
+            other => return Err(error::type_mismatch("concat", "sequence or nil", other)),
         }
     }
     Ok(Val::List(result))
@@ -1278,7 +1281,7 @@ fn num_pair(a: &Val, b: &Val) -> Result<NumPair, Val> {
         (Val::Float(x), Val::Float(y)) => Ok(NumPair::Floats(*x, *y)),
         (Val::Int(x), Val::Float(y)) => Ok(NumPair::Floats(*x as f64, *y)),
         (Val::Float(x), Val::Int(y)) => Ok(NumPair::Floats(*x, *y as f64)),
-        _ => Err(eval_err!("expected numbers, got {a} and {b}")),
+        _ => Err(error::type_mismatch("arithmetic", "number pair", a)),
     }
 }
 
@@ -1295,13 +1298,13 @@ fn builtin_add(args: &[Val]) -> Result<Val, Val> {
 
 fn builtin_sub(args: &[Val]) -> Result<Val, Val> {
     if args.is_empty() {
-        return Err(eval_err!("-: expected at least 1 arg"));
+        return Err(error::arity("-", "at least 1", 0));
     }
     if args.len() == 1 {
         return match &args[0] {
             Val::Int(n) => Ok(Val::Int(-n)),
             Val::Float(n) => Ok(Val::Float(-n)),
-            other => Err(eval_err!("-: expected number, got {other}")),
+            other => Err(error::type_mismatch("-", "number", other)),
         };
     }
     let mut acc = args[0].clone();
@@ -1327,24 +1330,24 @@ fn builtin_mul(args: &[Val]) -> Result<Val, Val> {
 
 fn builtin_div(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(eval_err!("/: expected 2 args, got {}", args.len()));
+        return Err(error::arity("/", "2", args.len()));
     }
     match num_pair(&args[0], &args[1])? {
-        NumPair::Ints(_, 0) => Err(eval_err!("division by zero")),
+        NumPair::Ints(_, 0) => Err(error::internal("/", "division by zero")),
         NumPair::Ints(x, y) => Ok(Val::Int(x / y)),
-        NumPair::Floats(_, 0.0) => Err(eval_err!("division by zero")),
+        NumPair::Floats(_, 0.0) => Err(error::internal("/", "division by zero")),
         NumPair::Floats(x, y) => Ok(Val::Float(x / y)),
     }
 }
 
 fn builtin_mod(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(eval_err!("mod: expected 2 args, got {}", args.len()));
+        return Err(error::arity("mod", "2", args.len()));
     }
     match num_pair(&args[0], &args[1])? {
-        NumPair::Ints(_, 0) => Err(eval_err!("mod: division by zero")),
+        NumPair::Ints(_, 0) => Err(error::internal("mod", "division by zero")),
         NumPair::Ints(x, y) => Ok(Val::Int(x % y)),
-        NumPair::Floats(_, 0.0) => Err(eval_err!("mod: division by zero")),
+        NumPair::Floats(_, 0.0) => Err(error::internal("mod", "division by zero")),
         NumPair::Floats(x, y) => Ok(Val::Float(x % y)),
     }
 }
@@ -1353,7 +1356,7 @@ fn builtin_mod(args: &[Val]) -> Result<Val, Val> {
 
 fn builtin_eq(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(eval_err!("=: expected 2 args, got {}", args.len()));
+        return Err(error::arity("=", "2", args.len()));
     }
     Ok(Val::Bool(args[0] == args[1]))
 }
@@ -1363,41 +1366,41 @@ fn numeric_cmp(a: &Val, b: &Val) -> Result<std::cmp::Ordering, Val> {
         (Val::Int(x), Val::Int(y)) => Ok(x.cmp(y)),
         (Val::Float(x), Val::Float(y)) => x
             .partial_cmp(y)
-            .ok_or_else(|| eval_err!("comparison failed (NaN)")),
+            .ok_or_else(|| error::internal("comparison", "NaN")),
         (Val::Int(x), Val::Float(y)) => (*x as f64)
             .partial_cmp(y)
-            .ok_or_else(|| eval_err!("comparison failed (NaN)")),
+            .ok_or_else(|| error::internal("comparison", "NaN")),
         (Val::Float(x), Val::Int(y)) => x
             .partial_cmp(&(*y as f64))
-            .ok_or_else(|| eval_err!("comparison failed (NaN)")),
-        _ => Err(eval_err!("comparison requires numbers, got {a} and {b}")),
+            .ok_or_else(|| error::internal("comparison", "NaN")),
+        _ => Err(error::type_mismatch("comparison", "number pair", a)),
     }
 }
 
 fn builtin_lt(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(eval_err!("<: expected 2 args, got {}", args.len()));
+        return Err(error::arity("<", "2", args.len()));
     }
     Ok(Val::Bool(numeric_cmp(&args[0], &args[1])?.is_lt()))
 }
 
 fn builtin_gt(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(eval_err!(">: expected 2 args, got {}", args.len()));
+        return Err(error::arity(">", "2", args.len()));
     }
     Ok(Val::Bool(numeric_cmp(&args[0], &args[1])?.is_gt()))
 }
 
 fn builtin_le(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(eval_err!("<=: expected 2 args, got {}", args.len()));
+        return Err(error::arity("<=", "2", args.len()));
     }
     Ok(Val::Bool(!numeric_cmp(&args[0], &args[1])?.is_gt()))
 }
 
 fn builtin_ge(args: &[Val]) -> Result<Val, Val> {
     if args.len() != 2 {
-        return Err(eval_err!(">=: expected 2 args, got {}", args.len()));
+        return Err(error::arity(">=", "2", args.len()));
     }
     Ok(Val::Bool(!numeric_cmp(&args[0], &args[1])?.is_lt()))
 }
@@ -1523,10 +1526,10 @@ pub fn eval_expr<'a, D: Dispatch>(
                         match result {
                             Val::Recur(new_vals) => {
                                 if new_vals.len() != num_bindings {
-                                    return Err(eval_err!(
-                                        "recur: expected {} args, got {}",
-                                        num_bindings,
-                                        new_vals.len()
+                                    return Err(error::arity(
+                                        "recur",
+                                        &num_bindings.to_string(),
+                                        new_vals.len(),
                                     ));
                                 }
                                 // Re-bind: re-apply patterns for destructuring bindings
@@ -1577,9 +1580,10 @@ pub fn eval_expr<'a, D: Dispatch>(
                     // (perform :keyword data) — keyword/environmental effect
                     Val::Keyword(s) => {
                         if evaled_args.len() != 1 {
-                            return Err(eval_err!(
-                                "perform: keyword effect expects 1 data arg, got {}",
-                                evaled_args.len()
+                            return Err(error::arity(
+                                "perform (keyword effect)",
+                                "1 data arg",
+                                evaled_args.len(),
                             ));
                         }
                         (
@@ -1602,8 +1606,10 @@ pub fn eval_expr<'a, D: Dispatch>(
                         )
                     }
                     other => {
-                        return Err(eval_err!(
-                            "perform: target must be a keyword or cap, got {other}"
+                        return Err(error::type_mismatch(
+                            "perform target",
+                            "keyword or cap",
+                            other,
                         ))
                     }
                 };
@@ -1631,7 +1637,10 @@ pub fn eval_expr<'a, D: Dispatch>(
                 }
 
                 // No clause matched — runtime error
-                Err(eval_err!("match: no clause matched value {value}"))
+                Err(error::internal(
+                    "match",
+                    format!("no clause matched value {value}"),
+                ))
             }
 
             Expr::WithEffectHandler {
@@ -1652,8 +1661,10 @@ pub fn eval_expr<'a, D: Dispatch>(
                         schema_cid: schema_cid.clone(),
                     },
                     other => {
-                        return Err(eval_err!(
-                            "with-effect-handler: target must be a keyword or cap, got {other}"
+                        return Err(error::type_mismatch(
+                            "with-effect-handler target",
+                            "keyword or cap",
+                            other,
                         ))
                     }
                 };
@@ -1661,9 +1672,12 @@ pub fn eval_expr<'a, D: Dispatch>(
                 // Depth check.
                 let hs = env.handler_stack.clone();
                 if hs.borrow().len() >= effect::MAX_HANDLER_DEPTH {
-                    return Err(eval_err!(
-                        "with-effect-handler: handler stack depth limit ({}) exceeded",
-                        effect::MAX_HANDLER_DEPTH
+                    return Err(error::internal(
+                        "with-effect-handler",
+                        format!(
+                            "handler stack depth limit ({}) exceeded",
+                            effect::MAX_HANDLER_DEPTH
+                        ),
                     ));
                 }
 
@@ -1700,8 +1714,7 @@ pub fn eval_expr<'a, D: Dispatch>(
                                 match body_fut.as_mut().poll(cx) {
                                     Poll::Ready(result) => return Poll::Ready(result),
                                     Poll::Pending => {
-                                        let pending =
-                                            ctx.borrow().slot.borrow_mut().pending.take();
+                                        let pending = ctx.borrow().slot.borrow_mut().pending.take();
                                         match pending {
                                             Some((_target, data, resume_tx)) => {
                                                 // Dispatch to handler based on its type.
@@ -1713,13 +1726,12 @@ pub fn eval_expr<'a, D: Dispatch>(
                                                         // Pop before handle (handler's performs go to outer handlers).
                                                         hs.borrow_mut().pop();
 
-                                                        let has_2_arity =
-                                                            arities.iter().any(|a| {
-                                                                (a.variadic.is_none()
-                                                                    && a.params.len() == 2)
-                                                                    || (a.variadic.is_some()
-                                                                        && a.params.len() <= 2)
-                                                            });
+                                                        let has_2_arity = arities.iter().any(|a| {
+                                                            (a.variadic.is_none()
+                                                                && a.params.len() == 2)
+                                                                || (a.variadic.is_some()
+                                                                    && a.params.len() <= 2)
+                                                        });
                                                         let owned_arities = arities.clone();
                                                         let owned_env = captured_env.clone();
 
@@ -1756,28 +1768,23 @@ pub fn eval_expr<'a, D: Dispatch>(
                                                             })
                                                         };
 
-                                                        state =
-                                                            HandlerState::Handling(handler_fut);
+                                                        state = HandlerState::Handling(handler_fut);
                                                         continue;
                                                     }
                                                     Val::NativeFn { func, .. } => {
                                                         hs.borrow_mut().pop();
                                                         let resume_fn =
                                                             effect::make_resume_fn(resume_tx);
-                                                        let result =
-                                                            func(&[data, resume_fn]);
+                                                        let result = func(&[data, resume_fn]);
                                                         match result {
                                                             Err(Val::Resume(_)) => {
-                                                                hs.borrow_mut()
-                                                                    .push(ctx.clone());
-                                                                state =
-                                                                    HandlerState::Polling;
+                                                                hs.borrow_mut().push(ctx.clone());
+                                                                state = HandlerState::Polling;
                                                                 cx.waker().wake_by_ref();
                                                                 return Poll::Pending;
                                                             }
                                                             other => {
-                                                                hs.borrow_mut()
-                                                                    .push(ctx.clone());
+                                                                hs.borrow_mut().push(ctx.clone());
                                                                 return Poll::Ready(other);
                                                             }
                                                         }
@@ -1793,18 +1800,19 @@ pub fn eval_expr<'a, D: Dispatch>(
                                                                         Output = Result<Val, Val>,
                                                                     > + '_,
                                                             >,
-                                                        > = Box::pin(
-                                                            func(vec![data, resume_fn]),
-                                                        );
-                                                        state =
-                                                            HandlerState::Handling(handler_fut);
+                                                        > = Box::pin(func(vec![data, resume_fn]));
+                                                        state = HandlerState::Handling(handler_fut);
                                                         continue;
                                                     }
                                                     other => {
                                                         drop(resume_tx);
-                                                        return Poll::Ready(Err(eval_err!(
-                                                            "with-effect-handler: handler must be a function, got {other}"
-                                                        )));
+                                                        return Poll::Ready(Err(
+                                                            error::type_mismatch(
+                                                                "with-effect-handler handler",
+                                                                "function",
+                                                                other,
+                                                            ),
+                                                        ));
                                                     }
                                                 }
                                             }
@@ -1911,30 +1919,28 @@ pub fn eval_expr<'a, D: Dispatch>(
                 if head == "cell" {
                     let wasm = match evaled_args.first() {
                         Some(Val::Bytes(b)) => b.clone(),
-                        _ => {
-                            return Err(eval_err!(
-                                "cell: first arg must be wasm bytes, got {}",
-                                evaled_args
-                                    .first()
-                                    .map_or("nothing".into(), |v| format!("{v}"))
+                        Some(other) => {
+                            return Err(error::type_mismatch(
+                                "cell first arg (wasm)",
+                                "bytes",
+                                other,
                             ))
                         }
+                        None => return Err(error::arity("cell", "1-2", 0)),
                     };
                     let schema = match evaled_args.get(1) {
                         Some(Val::Bytes(b)) => Some(b.clone()),
                         None => None,
-                        _ => {
-                            return Err(eval_err!(
-                                "cell: second arg (schema) must be bytes, got {}",
-                                evaled_args[1]
+                        Some(other) => {
+                            return Err(error::type_mismatch(
+                                "cell second arg (schema)",
+                                "bytes",
+                                other,
                             ))
                         }
                     };
                     if evaled_args.len() > 2 {
-                        return Err(eval_err!(
-                            "cell: expected 1-2 args (wasm [schema]), got {}",
-                            evaled_args.len()
-                        ));
+                        return Err(error::arity("cell", "1-2", evaled_args.len()));
                     }
                     let caps = env.collect_caps();
                     return Ok(Val::Cell { wasm, schema, caps });
@@ -1952,18 +1958,17 @@ pub fn eval_expr<'a, D: Dispatch>(
             Expr::Apply { args } => {
                 let evaled = eval_expr_args(args, env, dispatch).await?;
                 if evaled.len() < 2 {
-                    return Err(eval_err!(
-                        "apply: expected at least 2 args, got {}",
-                        evaled.len()
-                    ));
+                    return Err(error::arity("apply", "at least 2", evaled.len()));
                 }
                 let func = &evaled[0];
                 let last = &evaled[evaled.len() - 1];
                 let trailing = match last {
                     Val::List(v) | Val::Vector(v) => v.clone(),
                     other => {
-                        return Err(eval_err!(
-                            "apply: last arg must be List or Vector, got {other}"
+                        return Err(error::type_mismatch(
+                            "apply last arg",
+                            "list or vector",
+                            other,
                         ))
                     }
                 };
@@ -2002,8 +2007,10 @@ pub fn eval_expr<'a, D: Dispatch>(
                     }
                     Val::NativeFn { func, .. } => func(&spread),
                     Val::AsyncNativeFn { func, .. } => func(spread).await,
-                    other => Err(eval_err!(
-                        "apply: first arg must be a symbol or fn, got {other}"
+                    other => Err(error::type_mismatch(
+                        "apply first arg",
+                        "symbol or fn",
+                        other,
                     )),
                 }
             }
@@ -2060,7 +2067,7 @@ pub fn eval_toplevel_expr<'a, D: Dispatch>(
     Box::pin(async move {
         let result = eval_expr(expr, env, dispatch).await?;
         match result {
-            Val::Recur(_) => Err(eval_err!("recur not in tail position")),
+            Val::Recur(_) => Err(error::internal("recur", "not in tail position")),
             other => Ok(other),
         }
     })
@@ -2080,7 +2087,7 @@ pub fn eval_toplevel<'a, D: Dispatch>(
         let analyzed = expr::analyze(val)?;
         let result = eval_expr(&analyzed, env, dispatch).await?;
         match result {
-            Val::Recur(_) => Err(eval_err!("recur not in tail position")),
+            Val::Recur(_) => Err(error::internal("recur", "not in tail position")),
             other => Ok(other),
         }
     })
@@ -2109,7 +2116,7 @@ pub fn eval<'a, D: Dispatch>(
             Val::List(items) => {
                 let head = match &items[0] {
                     Val::Sym(s) => s.as_str(),
-                    _ => return Err(eval_err!("expected symbol, got {}", items[0])),
+                    other => return Err(error::type_mismatch("call head", "symbol", other)),
                 };
                 let raw_args = &items[1..];
 
@@ -2121,7 +2128,7 @@ pub fn eval<'a, D: Dispatch>(
                     "let" => return eval_let(raw_args, env, dispatch).await,
                     "quote" => {
                         return if raw_args.len() != 1 {
-                            Err(eval_err!("quote: expected 1 arg, got {}", raw_args.len()))
+                            Err(error::arity("quote", "1", raw_args.len()))
                         } else {
                             Ok(raw_args[0].clone())
                         };
@@ -2136,10 +2143,13 @@ pub fn eval<'a, D: Dispatch>(
 
                     // Reader markers — error if they escape syntax-quote
                     "unquote" => {
-                        return Err(eval_err!("unquote (~) not inside syntax-quote"));
+                        return Err(error::internal("unquote", "~ not inside syntax-quote"));
                     }
                     "splice-unquote" => {
-                        return Err(eval_err!("splice-unquote (~@) not inside syntax-quote"));
+                        return Err(error::internal(
+                            "splice-unquote",
+                            "~@ not inside syntax-quote",
+                        ));
                     }
 
                     _ => {} // fall through to macro / fn / builtins / dispatch
@@ -2176,10 +2186,7 @@ pub fn eval<'a, D: Dispatch>(
                 if head == "apply" {
                     let args = eval_args(raw_args, env, dispatch).await?;
                     if args.len() < 2 {
-                        return Err(eval_err!(
-                            "apply: expected at least 2 args, got {}",
-                            args.len()
-                        ));
+                        return Err(error::arity("apply", "at least 2", args.len()));
                     }
                     // First arg is the function (symbol or Val::Fn)
                     let func = &args[0];
@@ -2188,8 +2195,10 @@ pub fn eval<'a, D: Dispatch>(
                     let trailing = match last {
                         Val::List(v) | Val::Vector(v) => v.clone(),
                         other => {
-                            return Err(eval_err!(
-                                "apply: last arg must be List or Vector, got {other}"
+                            return Err(error::type_mismatch(
+                                "apply last arg",
+                                "list or vector",
+                                other,
                             ))
                         }
                     };
@@ -2223,8 +2232,10 @@ pub fn eval<'a, D: Dispatch>(
                             return invoke_fn(&arities, &captured_env, &spread, dispatch).await;
                         }
                         other => {
-                            return Err(eval_err!(
-                                "apply: first arg must be a symbol or fn, got {other}"
+                            return Err(error::type_mismatch(
+                                "apply first arg",
+                                "symbol or fn",
+                                other,
                             ))
                         }
                     }
@@ -2235,28 +2246,28 @@ pub fn eval<'a, D: Dispatch>(
                     let args = eval_args(raw_args, env, dispatch).await?;
                     let wasm = match args.first() {
                         Some(Val::Bytes(b)) => b.clone(),
-                        _ => {
-                            return Err(eval_err!(
-                                "cell: first arg must be wasm bytes, got {}",
-                                args.first().map_or("nothing".into(), |v| format!("{v}"))
+                        Some(other) => {
+                            return Err(error::type_mismatch(
+                                "cell first arg (wasm)",
+                                "bytes",
+                                other,
                             ))
                         }
+                        None => return Err(error::arity("cell", "1-2", 0)),
                     };
                     let schema = match args.get(1) {
                         Some(Val::Bytes(b)) => Some(b.clone()),
                         None => None,
-                        _ => {
-                            return Err(eval_err!(
-                                "cell: second arg (schema) must be bytes, got {}",
-                                args[1]
+                        Some(other) => {
+                            return Err(error::type_mismatch(
+                                "cell second arg (schema)",
+                                "bytes",
+                                other,
                             ))
                         }
                     };
                     if args.len() > 2 {
-                        return Err(eval_err!(
-                            "cell: expected 1-2 args (wasm [schema]), got {}",
-                            args.len()
-                        ));
+                        return Err(error::arity("cell", "1-2", args.len()));
                     }
                     // Capture all Val::Cap bindings from the lexical environment.
                     let caps = env.collect_caps();
@@ -2522,7 +2533,7 @@ mod tests {
                 let result = match name {
                     "ipfs" => Ok(Val::Bytes(vec![1, 2, 3])),
                     "host" => Ok(Val::Nil),
-                    _ => Err(eval_err!("unknown: {name}")),
+                    _ => Err(error::unbound_symbol(name, None)),
                 };
                 Box::pin(core::future::ready(result))
             }
@@ -3073,7 +3084,7 @@ mod tests {
         // (f 1) — wrong arity
         let call = Val::List(vec![Val::Sym("f".into()), Val::Int(1)]);
         let err = eval_blocking(&call, &mut env, &d).unwrap_err();
-        assert!(err_contains(&err, "wrong number of args"), "got: {err}");
+        assert_eq!(error::type_tag(&err), Some(error::tag::ARITY), "got: {err}");
     }
 
     #[test]
@@ -3223,7 +3234,7 @@ mod tests {
             Val::List(vec![Val::Sym("recur".into()), Val::Int(3)]),
         ]);
         let err = eval_blocking(&expr, &mut env, &d).unwrap_err();
-        assert!(err_contains(&err, "expected 2 args"), "got: {err}");
+        assert_eq!(error::type_tag(&err), Some(error::tag::ARITY), "got: {err}");
     }
 
     #[test]
@@ -3233,8 +3244,14 @@ mod tests {
         // (recur 1) at top level
         let expr = Val::List(vec![Val::Sym("recur".into()), Val::Int(1)]);
         let err = eval_blocking(&expr, &mut env, &d).unwrap_err();
+        // Top-level recur is an internal-tagged error referencing recur.
+        assert_eq!(
+            error::type_tag(&err),
+            Some(error::tag::INTERNAL),
+            "got: {err}"
+        );
         assert!(
-            err_contains(&err, "recur not in tail position"),
+            error::message(&err).unwrap().contains("recur"),
             "got: {err}"
         );
     }
@@ -3273,7 +3290,7 @@ mod tests {
 
     /// Helper: parse + eval a string expression.
     fn eval_str(input: &str, env: &mut Env, d: &RecordingDispatch) -> Result<Val, Val> {
-        let expr = crate::read(input).map_err(|e| eval_err!("parse error: {e}"))?;
+        let expr = crate::read(input).map_err(|e| error::parse(None, e.to_string()))?;
         eval_blocking(&expr, env, d)
     }
 
@@ -4595,8 +4612,8 @@ mod tests {
     fn effects_eval(input: &str) -> Result<Val, Val> {
         let mut env = Env::new();
         let d = RecordingDispatch::new();
-        let prelude_forms =
-            crate::read_many(crate::PRELUDE).map_err(|e| eval_err!("prelude parse: {e}"))?;
+        let prelude_forms = crate::read_many(crate::PRELUDE)
+            .map_err(|e| error::parse(Some("prelude.glia"), e.to_string()))?;
         for form in &prelude_forms {
             eval_blocking(form, &mut env, &d)?;
         }
@@ -4676,35 +4693,20 @@ mod tests {
 
     #[test]
     fn try_ok() {
-        let result = effects_eval("(try (+ 1 2))").unwrap();
-        // Should be {:ok 3}
-        assert_eq!(
-            result,
-            Val::Map(ValMap::from_pairs(vec![(
-                Val::Keyword("ok".into()),
-                Val::Int(3)
-            )]))
-        );
+        // No throw → try returns the body's value directly.
+        assert_eq!(effects_eval("(try (+ 1 2))"), Ok(Val::Int(3)));
     }
 
     #[test]
     fn try_err() {
-        let result = effects_eval("(try (throw {:type :test}))").unwrap();
-        // Should be {:err {:type :test}}
-        if let Val::Map(m) = &result {
-            assert!(m.contains_key(&Val::Keyword("err".into())));
-        } else {
-            panic!("expected map, got {result:?}");
-        }
-    }
-
-    #[test]
-    fn try_catch_string() {
-        let result = effects_eval(r#"(try (throw "just a string"))"#).unwrap();
+        // Wildcard catch binds the thrown value verbatim.
+        let result = effects_eval(r#"(try (throw {:type :test}) (catch _ e e))"#).unwrap();
+        // Plain-map throw isn't catchable by tag (no :glia.error/type),
+        // but wildcard sees the map verbatim.
         if let Val::Map(m) = &result {
             assert_eq!(
-                m.get(&Val::Keyword("err".into())),
-                Some(&Val::Str("just a string".into()))
+                m.get(&Val::Keyword("type".into())),
+                Some(&Val::Keyword("test".into()))
             );
         } else {
             panic!("expected map, got {result:?}");
@@ -4712,14 +4714,18 @@ mod tests {
     }
 
     #[test]
+    fn try_catch_string() {
+        // Strings flow through wildcard catch verbatim.
+        let result = effects_eval(r#"(try (throw "just a string") (catch _ e e))"#).unwrap();
+        assert_eq!(result, Val::Str("just a string".into()));
+    }
+
+    #[test]
     fn nested_try() {
-        let result = effects_eval("(try (try (throw 1)))").unwrap();
-        // Outer try succeeds with {:ok {:err 1}}
-        if let Val::Map(m) = &result {
-            assert!(m.contains_key(&Val::Keyword("ok".into())));
-        } else {
-            panic!("expected map, got {result:?}");
-        }
+        // Inner catch handles, outer never sees the throw.
+        let result =
+            effects_eval("(try (try (throw 1) (catch _ e e)) (catch _ e (+ e 100)))").unwrap();
+        assert_eq!(result, Val::Int(1));
     }
 
     // --- ex-info ---
@@ -4771,12 +4777,14 @@ mod tests {
 
     #[test]
     fn guard_fail() {
-        let result = effects_eval(r#"(try (guard false (ex-info "nope" {:type :fail})))"#).unwrap();
-        if let Val::Map(m) = &result {
-            assert!(m.contains_key(&Val::Keyword("err".into())));
-        } else {
-            panic!("expected map, got {result:?}");
-        }
+        // ex-info now stamps :glia.error/type from :type, so a guard
+        // failure is catchable by the user's tag.
+        let result = effects_eval(
+            r#"(try (guard false (ex-info "nope" {:type :fail}))
+                    (catch :fail e (get e :glia.error/message)))"#,
+        )
+        .unwrap();
+        assert_eq!(result, Val::Str("nope".into()));
     }
 
     // --- existing error format ---
@@ -4891,49 +4899,30 @@ mod tests {
 
     #[test]
     fn try_multiple_body() {
-        let result = effects_eval("(try 1 2 3)").unwrap();
-        // Should be {:ok 3}
-        assert_eq!(
-            result,
-            Val::Map(ValMap::from_pairs(vec![(
-                Val::Keyword("ok".into()),
-                Val::Int(3)
-            )]))
-        );
+        // Multi-form bodies must wrap in `do` under the new shape
+        // (try takes one EXPR + zero or more catch clauses).
+        assert_eq!(effects_eval("(try (do 1 2 3))"), Ok(Val::Int(3)));
     }
 
     #[test]
     fn throw_nil() {
-        let result = effects_eval("(try (throw nil))").unwrap();
-        if let Val::Map(m) = &result {
-            assert_eq!(m.get(&Val::Keyword("err".into())), Some(&Val::Nil));
-        } else {
-            panic!("expected map, got {result:?}");
-        }
+        let result = effects_eval("(try (throw nil) (catch _ e e))").unwrap();
+        assert_eq!(result, Val::Nil);
     }
 
     #[test]
     fn throw_int() {
-        let result = effects_eval("(try (throw 42))").unwrap();
-        if let Val::Map(m) = &result {
-            assert_eq!(m.get(&Val::Keyword("err".into())), Some(&Val::Int(42)));
-        } else {
-            panic!("expected map, got {result:?}");
-        }
+        let result = effects_eval("(try (throw 42) (catch _ e e))").unwrap();
+        assert_eq!(result, Val::Int(42));
     }
 
     #[test]
     fn throw_vector() {
-        let result = effects_eval("(try (throw [1 2 3]))").unwrap();
-        if let Val::Map(m) = &result {
-            let err_val = m.get(&Val::Keyword("err".into()));
-            assert_eq!(
-                err_val,
-                Some(&Val::Vector(vec![Val::Int(1), Val::Int(2), Val::Int(3)]))
-            );
-        } else {
-            panic!("expected map, got {result:?}");
-        }
+        let result = effects_eval("(try (throw [1 2 3]) (catch _ e e))").unwrap();
+        assert_eq!(
+            result,
+            Val::Vector(vec![Val::Int(1), Val::Int(2), Val::Int(3)])
+        );
     }
 
     #[test]
@@ -4956,33 +4945,36 @@ mod tests {
 
     #[test]
     fn try_deeply_nested() {
-        let result = effects_eval("(try (try (try (throw 1))))").unwrap();
-        // Outermost try succeeds: {:ok {:ok {:err 1}}}
-        if let Val::Map(m) = &result {
-            assert!(m.contains_key(&Val::Keyword("ok".into())));
-        } else {
-            panic!("expected map, got {result:?}");
-        }
+        // Each layer catches via wildcard; thrown value bubbles up
+        // through the catches, still equal to 1.
+        let result =
+            effects_eval("(try (try (try (throw 1) (catch _ e e)) (catch _ e e)) (catch _ e e))")
+                .unwrap();
+        assert_eq!(result, Val::Int(1));
     }
 
     #[test]
     fn guard_with_ex_info() {
-        let result = effects_eval(r#"(try (guard false (ex-info "nope" {:type :fail})))"#).unwrap();
-        if let Val::Map(m) = &result {
-            assert!(m.contains_key(&Val::Keyword("err".into())));
-            // The error value should contain the message "nope"
-            if let Some(err_val) = m.get(&Val::Keyword("err".into())) {
-                if let Val::Map(err_m) = err_val {
-                    assert_eq!(
-                        err_m.get(&Val::Keyword("message".into())),
-                        Some(&Val::Str("nope".into()))
-                    );
-                } else {
-                    panic!("expected err to be a map, got {err_val:?}");
-                }
-            }
+        // The thrown ex-info has both :glia.error/message (canonical)
+        // and :message (back-compat) populated.
+        let err =
+            effects_eval(r#"(try (guard false (ex-info "nope" {:type :fail})) (catch _ e e))"#)
+                .unwrap();
+        if let Val::Map(m) = &err {
+            assert_eq!(
+                m.get(&Val::Keyword("glia.error/message".into())),
+                Some(&Val::Str("nope".into()))
+            );
+            assert_eq!(
+                m.get(&Val::Keyword("message".into())),
+                Some(&Val::Str("nope".into()))
+            );
+            assert_eq!(
+                m.get(&Val::Keyword("glia.error/type".into())),
+                Some(&Val::Keyword("fail".into()))
+            );
         } else {
-            panic!("expected map, got {result:?}");
+            panic!("expected map, got {err:?}");
         }
     }
 
@@ -5096,16 +5088,11 @@ mod tests {
 
     #[test]
     fn resume_try_throw_interaction() {
-        // try/throw still work with the new state machine (backward compat)
+        // try/throw still compose with the resume state machine —
+        // wildcard catch sees the thrown value verbatim.
         assert_eq!(
-            effects_eval("(try (throw 42))").map(|v| {
-                if let Val::Map(m) = &v {
-                    m.contains_key(&Val::Keyword("err".into()))
-                } else {
-                    false
-                }
-            }),
-            Ok(true)
+            effects_eval("(try (throw 42) (catch _ e e))"),
+            Ok(Val::Int(42))
         );
     }
 
@@ -5234,6 +5221,95 @@ mod tests {
         // try-resume with no error — body result passes through
         let result = effects_eval("(try-resume (fn [error resume] 0) (+ 1 2))");
         assert_eq!(result, Ok(Val::Int(3)));
+    }
+
+    // =========================================================================
+    // try / catch — multi-clause dispatch + re-throw semantics
+    // =========================================================================
+
+    #[test]
+    fn catch_multiple_clauses_first_match_wins() {
+        // Three catches; only :foo matches the thrown :foo error.
+        let result = effects_eval(
+            r#"(try (throw (ex-info "boom" {:type :foo}))
+                 (catch :bar e :took-bar)
+                 (catch :foo e :took-foo)
+                 (catch _    e :took-wild))"#,
+        )
+        .unwrap();
+        assert_eq!(result, Val::Keyword("took-foo".into()));
+    }
+
+    #[test]
+    fn catch_non_matching_falls_through_to_wildcard() {
+        let result = effects_eval(
+            r#"(try (throw (ex-info "boom" {:type :unknown}))
+                 (catch :bar e :took-bar)
+                 (catch _    e :took-wild))"#,
+        )
+        .unwrap();
+        assert_eq!(result, Val::Keyword("took-wild".into()));
+    }
+
+    #[test]
+    fn catch_non_matching_no_wildcard_rethrows_to_outer_try() {
+        // Inner try has only :bar; the :foo throw propagates to outer try
+        // which catches via wildcard.
+        let result = effects_eval(
+            r#"(try (try (throw (ex-info "boom" {:type :foo}))
+                     (catch :bar e :inner-bar))
+                 (catch _ e (get e :glia.error/type)))"#,
+        )
+        .unwrap();
+        assert_eq!(result, Val::Keyword("foo".into()));
+    }
+
+    #[test]
+    fn rethrow_inside_catch_body_propagates_to_outer_try() {
+        // Inner catch matches and re-throws a different error; outer try
+        // catches the re-throw. The inner handler must NOT loop on its own
+        // re-throw (commitment 2 of the eng review: popped-handler-skip).
+        let result = effects_eval(
+            r#"(try (try (throw (ex-info "first" {:type :first}))
+                     (catch :first e (throw (ex-info "second" {:type :second}))))
+                 (catch :second e (get e :glia.error/type))
+                 (catch _       e :wrong))"#,
+        )
+        .unwrap();
+        assert_eq!(result, Val::Keyword("second".into()));
+    }
+
+    #[test]
+    fn unhandled_throw_escapes_as_glia_exception_effect() {
+        // No try in scope — throw escapes as Val::Effect carrier with
+        // effect_type = "glia.exception". Outer callers (kernel, MCP,
+        // shell) rely on this contract.
+        let err = effects_eval("(throw (ex-info \"escape\" {:type :foo}))").unwrap_err();
+        match &err {
+            Val::Effect { effect_type, data } => {
+                assert_eq!(effect_type, error::EXCEPTION_EFFECT);
+                // The data is the inner structured error map.
+                assert_eq!(error::type_tag(data), Some("foo"));
+            }
+            other => panic!("expected Val::Effect, got {other:?}"),
+        }
+        // unwrap_thrown peels the carrier for outer callers.
+        let inner = error::unwrap_thrown(&err).expect("should peel");
+        assert_eq!(error::type_tag(inner), Some("foo"));
+    }
+
+    #[test]
+    fn rethrow_with_no_outer_try_escapes_as_effect() {
+        // Single try, only matches :a. Throwing :b means the dispatcher
+        // re-throws; with no outer try, the re-throw escapes as
+        // Val::Effect — same contract as a direct unhandled throw.
+        let err = effects_eval(
+            r#"(try (throw (ex-info "x" {:type :b}))
+                 (catch :a e :ignored))"#,
+        )
+        .unwrap_err();
+        let inner = error::unwrap_thrown(&err).expect("should peel");
+        assert_eq!(error::type_tag(inner), Some("b"));
     }
 
     // =========================================================================
