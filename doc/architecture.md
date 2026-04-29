@@ -413,6 +413,63 @@ For the agent-facing view of all this (`fs/*`, `(schema cap)`,
 structured errors, attenuation strategies), see
 [capabilities.md](capabilities.md).
 
+### Two host caches operate together
+
+The host runs two caches behind the WASI VFS, each doing a different job.
+Both are kept across cells; both are reset on host restart.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  fs_intercept (overrides every guest WASI fs op)                │
+│   resolve_path  ──►  CidTree::resolve_path                      │
+│         │                       │                                │
+│         │                       │  ResolvedNode                  │
+│         ▼                       ▼                                │
+│   ┌─────────────────┐    ┌──────────────────────────┐           │
+│   │ PinsetCache     │    │ CidTree.staging_dir       │           │
+│   │ (raw bytes)     │    │ (dir-listing stubs)       │           │
+│   │                 │    │                           │           │
+│   │ TempDir         │    │ /tmp/ww-staging-<pid>/    │           │
+│   │ ARC-managed,    │    │ • <cid>.dirlist.json      │           │
+│   │ 128 MiB budget, │    │   (3-tier mem/disk/ipfs   │           │
+│   │ CID-keyed.      │    │    listing cache)         │           │
+│   │ Open file FDs   │    │ • dir-<cid>/ subtrees     │           │
+│   │ point HERE.     │    │   (sparse stubs at        │           │
+│   │                 │    │    correct size for       │           │
+│   │ Eviction        │    │    cap_std::fs::Dir::     │           │
+│   │ unpins from     │    │    readdir)               │           │
+│   │ IPFS too.       │    │                           │           │
+│   └─────────────────┘    └──────────────────────────┘           │
+│         ▲                       ▲                                │
+│         │ ensure(cid)           │ ls_dir(cid)                    │
+│         │ fetch(cid)            │                                │
+│         ▼                       ▼                                │
+│  ┌────────────────────────────────────────────────┐             │
+│  │  Local Kubo daemon (kubo-rpc-api at :5001)     │             │
+│  └────────────────────────────────────────────────┘             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**`PinsetCache`** (`crates/cache/src/pinset.rs`) is the host-wide raw-byte
+cache. ARC-managed with a 128 MiB budget by default. Holds materialized
+file content in a tempdir keyed by CID. Pins to the local Kubo node so
+that content stays available; eviction unpins. Open WASI file descriptors
+opened by the guest point at real files in this directory.
+
+**`CidTree.staging_dir`** (`src/vfs.rs`) is per-process scratch. Holds
+two kinds of artifacts: persisted JSON dir-listings (`<cid>.dirlist.json`)
+that back the 3-tier memory/disk/IPFS lookup cache, and per-directory
+stub trees (`dir-<cid>/`) used to satisfy `cap_std::fs::Dir::readdir`
+without materializing every file's content. Stubs are sparse files with
+the declared size; opening one redirects (via `fs_intercept`) to the
+real bytes in `PinsetCache`.
+
+The single WASI preopen at `/` points at `staging_dir`. It is a protocol
+anchor, not a guest-visible filesystem: `fs_intercept` overrides every
+`open_at`, `readdir`, and `stat` before it reads from the staging
+directory, so the guest never sees the stub contents directly. See
+`src/cell/proc.rs` (preopen call) and `src/fs_intercept.rs` (overrides).
+
 ## State management
 
 Wetware provides two coordination primitives via **stems**:
