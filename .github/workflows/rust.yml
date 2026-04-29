@@ -234,6 +234,7 @@ jobs:
           std/shell/bin/shell.capnpc
           std/shell/etc/init.d/50-shell.glia
           std/mcp/bin/main.wasm
+          std/status/bin/status.wasm
           examples/*/bin/
         retention-days: 1
 
@@ -534,9 +535,10 @@ jobs:
         # The host validator requires bin/main.wasm at the merged image
         # root, so the kernel is named main.wasm. Other cells keep their
         # canonical names (loaded by name via embedded loader / VFS).
-        cp artifacts/wasm-artifacts/std/kernel/bin/main.wasm  "$STAGE/bin/main.wasm"
-        cp artifacts/wasm-artifacts/std/shell/bin/shell.wasm  "$STAGE/bin/shell.wasm"
-        cp artifacts/wasm-artifacts/std/mcp/bin/main.wasm     "$STAGE/bin/mcp.wasm"
+        cp artifacts/wasm-artifacts/std/kernel/bin/main.wasm   "$STAGE/bin/main.wasm"
+        cp artifacts/wasm-artifacts/std/shell/bin/shell.wasm   "$STAGE/bin/shell.wasm"
+        cp artifacts/wasm-artifacts/std/mcp/bin/main.wasm      "$STAGE/bin/mcp.wasm"
+        cp artifacts/wasm-artifacts/std/status/bin/status.wasm "$STAGE/bin/status.wasm"
 
         # Example WASM cells
         for example_dir in artifacts/wasm-artifacts/examples/*/bin; do
