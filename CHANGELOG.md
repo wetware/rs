@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`tests/status_cell_http_listener_e2e.rs` — HttpListener-routed integration test.** Sibling to `status_cell_e2e.rs`. Where the existing test spawns the WASM directly via Runtime/Executor, this one routes through the full HttpListener dispatch chain: `HttpListener.listen(executor, "/status", caps)` → `route_registry` → `dispatch_loop` → `spawn_and_run` → `executor.spawn`. Seeds a non-empty `caps` list (mirrors what the kernel emits when an init.d author wraps `(perform host :listen ...)` in a `with` block) so a regression in caps forwarding through dispatch surfaces here. Asserts non-null `peer_id` — same load-bearing check as the direct-spawn test, applied to the HTTP-routed code path. Runs in ~8s. Closes the integration-coverage gap flagged when the original attempt was deleted from #430.
 - **`std/status/` cell + WAGI status endpoint (engagement starter kit Phase 0).** New `std/status/` crate ships a minimal HTTP-only WAGI cell that serves `GET /status` with JSON describing the running node:
   ```json
   {"status":"ok","version":"...","peer_id":"12D3Koo...","listen_addrs":[...],"peer_count":...}
