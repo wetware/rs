@@ -182,9 +182,6 @@ The near-term roadmap (see CEO plans in project history):
   gets its own Datomic, as a language primitive."
 - **`ww shell` capability discovery** -- attach a shell to a running
   node, enumerate cells, call them via Cap'n Proto from Glia.
-- **IPNS hot-reload** -- update a UnixPath to swap init.d scripts;
-  capabilities revoke, cells restart, new services appear without
-  manual intervention.
 
 ## Learn more
 
