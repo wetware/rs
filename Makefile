@@ -5,7 +5,7 @@
 
 WASM_TARGET := wasm32-wasip2
 
-.PHONY: all host std kernel shell mcp examples chess echo counter discovery oracle auction mindshare clean run-kernel
+.PHONY: all host std kernel shell mcp status examples chess echo counter discovery oracle auction mindshare clean run-kernel
 .PHONY: publish-std try-publish-std publish test-wasm
 .PHONY: container-build container-run container-dev container-clean
 .PHONY: agent-skills
@@ -19,7 +19,7 @@ host:
 
 # --- Std components ----------------------------------------------------------
 
-std: kernel shell mcp
+std: kernel shell mcp status
 
 kernel:
 	cargo build -p kernel --target $(WASM_TARGET) --release --manifest-path std/kernel/Cargo.toml
@@ -40,6 +40,11 @@ mcp:
 	@mkdir -p std/mcp/bin
 	cp std/mcp/target/$(WASM_TARGET)/release/mcp.wasm std/mcp/bin/mcp.wasm
 	cp std/mcp/target/$(WASM_TARGET)/release/mcp.wasm std/mcp/bin/main.wasm
+
+status:
+	cargo build -p status --target $(WASM_TARGET) --release --manifest-path std/status/Cargo.toml
+	@mkdir -p std/status/bin
+	cp std/status/target/$(WASM_TARGET)/release/status.wasm std/status/bin/status.wasm
 
 # --- Examples ----------------------------------------------------------------
 # Note: auction.capnp lives in capnp/ but is compiled by the example crate
