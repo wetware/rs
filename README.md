@@ -17,6 +17,46 @@ call any API, read any secret, spend any resource -- Wetware replaces
 this with capabilities. A process can only do what it's been handed
 a capability to do. No ambient authority, ever.
 
+## Try it in 60 seconds
+
+```sh
+curl -sSL https://wetware.run/install | sh
+curl http://localhost:2080/status
+```
+
+```json
+{
+  "status":       "ok",
+  "version":      "0.1.0",
+  "peer_id":      "12D3KooWRLf8DAFsNfbv3s2DjRMbUuPc8AYdcBfokZbz6kJ2aUss",
+  "listen_addrs": ["/ip4/127.0.0.1/tcp/2025", "/ip6/::1/tcp/2025", ...],
+  "peer_count":   216
+}
+```
+
+The second command hit a WebAssembly cell running inside the daemon,
+with zero ambient authority. The cell can't read your filesystem,
+can't reach the network, can't see your environment variables. The
+only thing it can do is what the membrane handed it -- in this case,
+the `host` capability, so it can report your peer ID and connected
+peers. **The capability is the permission**, there is no blacklist/whitelist.
+
+The wiring lives at `~/.ww/etc/init.d/05-status.glia`. Take a look:
+
+```clojure
+(perform host :listen (cell (load "bin/status.wasm")) "/status")
+```
+
+That's the whole registration. Read [doc/capabilities.md](doc/capabilities.md)
+for the full capability model, and [doc/architecture.md](doc/architecture.md)
+for how the membrane graft works.
+
+**Your LLM can do this too.** `ww perform install` wires Wetware
+into Claude Code as an MCP server automatically. The same capability
+surface curl just hit, an LLM reaches via attenuated capabilities --
+same caps, same membrane, same guarantees. See
+[.agents/prompt.md](.agents/prompt.md).
+
 ## Quick start
 
 ```bash
@@ -140,11 +180,8 @@ The near-term roadmap (see CEO plans in project history):
 - **dosync** -- transactional state management for Glia. Atomic
   multi-field updates over content-addressed stems. "Every agent
   gets its own Datomic, as a language primitive."
-- **IPFS-first distribution** -- nodes become distribution points.
-  IPNS releases, content-addressed images, self-updating binaries.
-- **Engagement starter kit** -- compose-based demo showing the real
-  operational loop: WAGI HTTP, Glia shell, IPNS config updates,
-  epoch-driven restarts.
+- **`ww shell` capability discovery** -- attach a shell to a running
+  node, enumerate cells, call them via Cap'n Proto from Glia.
 
 ## Learn more
 
