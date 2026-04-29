@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - **`tests/status_cell_http_listener_e2e.rs` — HttpListener-routed integration test.** Sibling to `status_cell_e2e.rs`. Where the existing test spawns the WASM directly via Runtime/Executor, this one routes through the full HttpListener dispatch chain: `HttpListener.listen(executor, "/status", caps)` → `route_registry` → `dispatch_loop` → `spawn_and_run` → `executor.spawn`. Seeds a non-empty `caps` list (mirrors what the kernel emits when an init.d author wraps `(perform host :listen ...)` in a `with` block) so a regression in caps forwarding through dispatch surfaces here. Asserts non-null `peer_id` — same load-bearing check as the direct-spawn test, applied to the HTTP-routed code path. Runs in ~8s. Closes the integration-coverage gap flagged when the original attempt was deleted from #430.
+
+### Changed
+- **`README.md` "Try it in 60 seconds" section** at the top of the file (right after "Why?"). Inlines the install + curl recipe, the JSON response, the capability-attenuation pitch, and the "your LLM can do this too" bonus footnote. Links into existing docs (`doc/capabilities.md`, `doc/architecture.md`, `.agents/prompt.md`) for readers who want the deep dive — no separate per-feature doc. Replaces the prior "Engagement starter kit -- compose-based demo" roadmap bullet (the demo shipped in #430; the compose path was cut). Roadmap now lists `ww shell` capability discovery and IPNS hot-reload as the next engagement beats.
+
+### Added
 - **`std/status/` cell + WAGI status endpoint (engagement starter kit Phase 0).** New `std/status/` crate ships a minimal HTTP-only WAGI cell that serves `GET /status` with JSON describing the running node:
   ```json
   {"status":"ok","version":"...","peer_id":"12D3Koo...","listen_addrs":[...],"peer_count":...}
