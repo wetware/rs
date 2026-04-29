@@ -1,0 +1,14 @@
+;; status.glia — node status endpoint over WAGI.
+;;
+;;   $ curl http://localhost:2080/status
+;;   {"status":"ok","version":"...","peer_id":"...","listen_addrs":[...],"peer_count":...}
+;;
+;; The status cell is granted the default membrane and reads the `host`
+;; capability to report peer ID, listen addrs, and connected peer count.
+;; That's the only cap it uses — no filesystem, no network, no other I/O.
+;;
+;; For attenuated grants (e.g. host-only, no http-client) the init.d
+;; author can wrap with `(with [(host (perform host :http-client))] ...)`
+;; — the HttpListener caps propagation landed in #429 makes this real.
+
+(perform host :listen (cell (load "bin/status.wasm")) "/status")
