@@ -25,6 +25,10 @@ pub struct DaemonConfig {
     pub listen: Vec<String>,
     pub identity: Option<PathBuf>,
     pub images: Vec<PathBuf>,
+    /// Address (`host:port`) for the WAGI HTTP server. `None` disables WAGI.
+    /// `ww perform install` defaults this to `127.0.0.1:2080` so the status
+    /// init.d script in the install layer responds to `curl` immediately.
+    pub http_listen: Option<String>,
 }
 
 /// Default libp2p listen multiaddrs: TCP and QUIC on both IPv4 and IPv6, port 2025.
@@ -43,6 +47,7 @@ impl Default for DaemonConfig {
             listen: default_listen(),
             identity: None,
             images: Vec::new(),
+            http_listen: None,
         }
     }
 }
@@ -64,6 +69,10 @@ impl DaemonConfig {
                 .map(|p| format!("\"{}\"", p.display()))
                 .collect();
             parts.push(format!(":images [{}]", imgs.join(" ")));
+        }
+
+        if let Some(ref addr) = self.http_listen {
+            parts.push(format!(":http-listen \"{addr}\""));
         }
 
         format!("{{{}}}", parts.join(" "))
@@ -155,6 +164,13 @@ fn from_val(val: &Val) -> Result<DaemonConfig> {
                         })
                         .collect::<Result<Vec<_>>>()?,
                     other => bail!(":images must be a vector, got: {other}"),
+                };
+            }
+            "http-listen" => {
+                config.http_listen = match value {
+                    Val::Str(s) => Some(s.clone()),
+                    Val::Nil => None,
+                    other => bail!(":http-listen must be a string or nil, got: {other}"),
                 };
             }
             _ => {} // ignore unknown keys
@@ -282,12 +298,42 @@ mod tests {
             listen: vec!["/ip4/0.0.0.0/tcp/9000".to_string()],
             identity: Some(PathBuf::from("/keys/my.key")),
             images: vec![PathBuf::from("img/a"), PathBuf::from("img/b")],
+            http_listen: None,
         };
         let s = config.to_glia();
         assert_eq!(
             s,
             r#"{:listen ["/ip4/0.0.0.0/tcp/9000"] :identity "/keys/my.key" :images ["img/a" "img/b"]}"#
         );
+    }
+
+    #[test]
+    fn to_glia_with_http_listen() {
+        let config = DaemonConfig {
+            http_listen: Some("127.0.0.1:2080".into()),
+            ..DaemonConfig::default()
+        };
+        let s = config.to_glia();
+        assert!(
+            s.contains(r#":http-listen "127.0.0.1:2080""#),
+            ":http-listen should be emitted: {s}"
+        );
+    }
+
+    #[test]
+    fn parse_http_listen() {
+        let input = r#"{:http-listen "127.0.0.1:2080"}"#;
+        let val = glia::read(input).unwrap();
+        let config = from_val(&val).unwrap();
+        assert_eq!(config.http_listen, Some("127.0.0.1:2080".into()));
+    }
+
+    #[test]
+    fn http_listen_omitted_means_none() {
+        let input = "{}";
+        let val = glia::read(input).unwrap();
+        let config = from_val(&val).unwrap();
+        assert!(config.http_listen.is_none());
     }
 
     #[test]
@@ -298,11 +344,13 @@ mod tests {
             listen: vec!["/ip4/0.0.0.0/tcp/3000".to_string()],
             identity: Some(PathBuf::from("/tmp/key")),
             images: vec![PathBuf::from("images/app")],
+            http_listen: Some("127.0.0.1:2080".into()),
         };
         original.write(&path).unwrap();
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.listen, vec!["/ip4/0.0.0.0/tcp/3000"]);
         assert_eq!(loaded.identity, Some(PathBuf::from("/tmp/key")));
         assert_eq!(loaded.images, vec![PathBuf::from("images/app")]);
+        assert_eq!(loaded.http_listen, Some("127.0.0.1:2080".into()));
     }
 }
