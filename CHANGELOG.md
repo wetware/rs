@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`doc/status.md` — engagement starter kit narrative.** Three-section walkthrough of the `/status` endpoint: "It works" (install + curl), "What just happened" (capability attenuation, the wiring across `std/status/src/lib.rs`, `etc/init.d/05-status.glia`, and `src/rpc/membrane.rs`), and "Your LLM can do this too" (MCP/Glia bridge bonus footnote, same caps via `(perform host :id)` etc.). Linked from the top-level `README.md`'s "Learn more" section.
+
+### Changed
+- **README.md "Try it in 60 seconds" section** above the roadmap. Two-line install + curl recipe linking into `doc/status.md` for the full story. Replaces the prior "Engagement starter kit -- compose-based demo" roadmap bullet (the demo shipped in #430; the compose path was cut). Roadmap now lists `ww shell` capability discovery and IPNS hot-reload as the next engagement beats.
+
+### Added
 - **`std/status/` cell + WAGI status endpoint (engagement starter kit Phase 0).** New `std/status/` crate ships a minimal HTTP-only WAGI cell that serves `GET /status` with JSON describing the running node:
   ```json
   {"status":"ok","version":"...","peer_id":"12D3Koo...","listen_addrs":[...],"peer_count":...}

@@ -133,6 +133,18 @@ ww push . --ipfs-url http://localhost:5001   # publish to IPFS
 ww run /ipfs/<CID>            # run from content-addressed image
 ```
 
+## Try it in 60 seconds
+
+```sh
+curl -sSL https://wetware.run/install | sh
+curl http://localhost:2080/status
+```
+
+The second command hits a WebAssembly cell running inside the
+daemon, with zero ambient authority. See [doc/status.md](doc/status.md)
+for the full story (capability attenuation, the wiring, how an LLM
+reaches the same data via MCP).
+
 ## Roadmap
 
 The near-term roadmap (see CEO plans in project history):
@@ -140,14 +152,15 @@ The near-term roadmap (see CEO plans in project history):
 - **dosync** -- transactional state management for Glia. Atomic
   multi-field updates over content-addressed stems. "Every agent
   gets its own Datomic, as a language primitive."
-- **IPFS-first distribution** -- nodes become distribution points.
-  IPNS releases, content-addressed images, self-updating binaries.
-- **Engagement starter kit** -- compose-based demo showing the real
-  operational loop: WAGI HTTP, Glia shell, IPNS config updates,
-  epoch-driven restarts.
+- **`ww shell` capability discovery** -- attach a shell to a running
+  node, enumerate cells, call them via Cap'n Proto from Glia.
+- **IPNS hot-reload** -- update a UnixPath to swap init.d scripts;
+  capabilities revoke, cells restart, new services appear without
+  manual intervention.
 
 ## Learn more
 
+- [Status endpoint](doc/status.md) -- the engagement starter kit demo, capability attenuation in action
 - [Architecture](doc/architecture.md) -- design principles and capability flow
 - [Capabilities](doc/capabilities.md) -- the capability model and Cap'n Proto schemas
 - [CLI reference](doc/cli.md) -- full command-line usage
