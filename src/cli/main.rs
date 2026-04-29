@@ -3254,10 +3254,9 @@ mod tests {
         Commands::write_launchd_plist(ww_bin, &config, home.path(), "/tmp/identity", true)
             .expect("write plist should succeed");
 
-        let plist = std::fs::read_to_string(
-            home.path().join("Library/LaunchAgents/io.wetware.ww.plist"),
-        )
-        .expect("plist should exist");
+        let plist =
+            std::fs::read_to_string(home.path().join("Library/LaunchAgents/io.wetware.ww.plist"))
+                .expect("plist should exist");
 
         assert!(
             plist.contains("<string>--http-listen</string>"),
@@ -3278,10 +3277,9 @@ mod tests {
         Commands::write_launchd_plist(ww_bin, &config, home.path(), "/tmp/identity", true)
             .expect("write plist should succeed");
 
-        let plist = std::fs::read_to_string(
-            home.path().join("Library/LaunchAgents/io.wetware.ww.plist"),
-        )
-        .expect("plist should exist");
+        let plist =
+            std::fs::read_to_string(home.path().join("Library/LaunchAgents/io.wetware.ww.plist"))
+                .expect("plist should exist");
 
         assert!(
             !plist.contains("--http-listen"),
