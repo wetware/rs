@@ -2041,7 +2041,7 @@ wasip2::cli::command::export!({iface_name}Guest);
             done("Default init.d (50-shell.glia)".into());
         }
 
-        // ── Status init.d (engagement starter kit WHOA 1) ───────────
+        // ── Status init.d ────────────────────────────────────────────
         let status_init = ww_dir.join("etc/init.d/05-status.glia");
         if !status_init.exists() {
             std::fs::write(
@@ -2338,7 +2338,7 @@ wasip2::cli::command::export!({iface_name}Guest);
             done("Default init.d (50-shell.glia)".into());
         }
 
-        // ── Status init.d (engagement starter kit WHOA 1) ───────────
+        // ── Status init.d ────────────────────────────────────────────
         let status_init = ww_dir.join("etc/init.d/05-status.glia");
         if !status_init.exists() {
             std::fs::write(
@@ -2406,13 +2406,6 @@ wasip2::cli::command::export!({iface_name}Guest);
         // ── Update: WASM images, stdlib, daemon, MCP ─────────────────
         Self::perform_update().await?;
 
-        // ── Probe the daemon's WAGI HTTP listener ─────────────────────
-        // The daemon writes its stdout to ~/.ww/logs/ww.log via launchd /
-        // systemd, so any "Status endpoint at..." log line never reaches
-        // the install transcript. Probe the configured http_listen and
-        // print the URL to the user's terminal once /status answers.
-        let probed = Self::probe_status_endpoint("127.0.0.1:2080").await;
-
         // ── PATH + summary ───────────────────────────────────────────
         let ww_bin_dir = ww_dir.join("bin");
         let in_path = std::env::var("PATH")
@@ -2431,51 +2424,17 @@ wasip2::cli::command::export!({iface_name}Guest);
                 println!("  export PATH=\"{}:$PATH\"", ww_bin_dir.display());
             }
         }
-        if probed {
-            println!("  curl http://localhost:2080/status");
-        } else {
-            // Probe failed (daemon not yet started, port taken, or this
-            // platform skipped daemon registration). Still surface the
-            // URL — the user can retry once the daemon is up.
-            println!("  ww shell");
-            println!();
-            println!(
-                "  (status endpoint will be at http://localhost:2080/status once the daemon is running)"
-            );
-        }
+        // The cold-install entry point (scripts/install.sh) probes the
+        // status endpoint after this command returns; it owns the
+        // "wait for daemon, then point at curl" UX. Here we just print
+        // the URL — `ww perform install` may also be invoked manually
+        // outside the install script, in which case the user can hit
+        // /status whenever the daemon is up.
+        println!("  curl http://localhost:2080/status");
         println!();
         println!("  Uninstall:  ww perform uninstall");
 
         Ok(())
-    }
-
-    /// Probe `http://{addr}/status` with a short backoff, returning true
-    /// once the daemon's WAGI listener answers with HTTP 200. Used to
-    /// surface the URL in the post-install summary AFTER confirming the
-    /// daemon is actually serving it.
-    async fn probe_status_endpoint(addr: &str) -> bool {
-        let url = format!("http://{addr}/status");
-        let client = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(2))
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
-        // Short backoff: a fresh launchd / systemd start needs a few
-        // seconds for the daemon to bind, run init.d, and register the
-        // route. Total budget ~10 s.
-        let delays_ms = [500u64, 1000, 1500, 2000, 2500, 2500];
-        for delay in delays_ms {
-            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-            if let Ok(resp) = client.get(&url).send().await {
-                if resp.status().is_success() {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     /// Remove wetware daemon, MCP wiring, and optionally ~/.ww.
@@ -3255,5 +3214,114 @@ mod tests {
         let (loaded_sk, _, source) = Commands::resolve_identity(Some(id_path.as_path())).unwrap();
         assert_eq!(source, "file");
         assert_eq!(ww::keys::encode(&loaded_sk), encoded);
+    }
+
+    // ── Daemon service-file writer tests ──────────────────────────────
+    //
+    // These guard the `--http-listen` flag emission, which is the
+    // single point of failure for the engagement starter kit demo:
+    // if either the launchd plist or the systemd unit drops the flag,
+    // the daemon comes up with no WAGI HTTP server and `curl /status`
+    // gets connection refused. The `tests/status_cell_e2e.rs` integration
+    // path bypasses these writers entirely (it spawns the cell via
+    // Runtime/Executor in-process), so a regression in either writer
+    // would slip past silently without these unit tests.
+
+    fn config_with_http_listen(addr: &str) -> ww::daemon_config::DaemonConfig {
+        ww::daemon_config::DaemonConfig {
+            listen: vec!["/ip4/0.0.0.0/tcp/2025".to_string()],
+            identity: Some(PathBuf::from("/tmp/identity")),
+            images: Vec::new(),
+            http_listen: Some(addr.to_string()),
+        }
+    }
+
+    fn config_no_http_listen() -> ww::daemon_config::DaemonConfig {
+        ww::daemon_config::DaemonConfig {
+            listen: vec!["/ip4/0.0.0.0/tcp/2025".to_string()],
+            identity: Some(PathBuf::from("/tmp/identity")),
+            images: Vec::new(),
+            http_listen: None,
+        }
+    }
+
+    #[test]
+    fn test_launchd_plist_emits_http_listen_when_set() {
+        let home = tempfile::TempDir::new().unwrap();
+        let config = config_with_http_listen("127.0.0.1:2080");
+        let ww_bin = std::path::Path::new("/usr/local/bin/ww");
+
+        Commands::write_launchd_plist(ww_bin, &config, home.path(), "/tmp/identity", true)
+            .expect("write plist should succeed");
+
+        let plist = std::fs::read_to_string(
+            home.path().join("Library/LaunchAgents/io.wetware.ww.plist"),
+        )
+        .expect("plist should exist");
+
+        assert!(
+            plist.contains("<string>--http-listen</string>"),
+            "plist should emit --http-listen flag, got:\n{plist}"
+        );
+        assert!(
+            plist.contains("<string>127.0.0.1:2080</string>"),
+            "plist should emit the configured listen address, got:\n{plist}"
+        );
+    }
+
+    #[test]
+    fn test_launchd_plist_omits_http_listen_when_none() {
+        let home = tempfile::TempDir::new().unwrap();
+        let config = config_no_http_listen();
+        let ww_bin = std::path::Path::new("/usr/local/bin/ww");
+
+        Commands::write_launchd_plist(ww_bin, &config, home.path(), "/tmp/identity", true)
+            .expect("write plist should succeed");
+
+        let plist = std::fs::read_to_string(
+            home.path().join("Library/LaunchAgents/io.wetware.ww.plist"),
+        )
+        .expect("plist should exist");
+
+        assert!(
+            !plist.contains("--http-listen"),
+            "plist should NOT emit --http-listen when config.http_listen is None, got:\n{plist}"
+        );
+    }
+
+    #[test]
+    fn test_systemd_unit_emits_http_listen_when_set() {
+        let home = tempfile::TempDir::new().unwrap();
+        let config = config_with_http_listen("127.0.0.1:2080");
+        let ww_bin = std::path::Path::new("/usr/local/bin/ww");
+
+        Commands::write_systemd_unit(ww_bin, &config, home.path(), "/tmp/identity", true)
+            .expect("write unit should succeed");
+
+        let unit = std::fs::read_to_string(home.path().join(".config/systemd/user/ww.service"))
+            .expect("unit should exist");
+
+        assert!(
+            unit.contains("--http-listen 127.0.0.1:2080"),
+            "systemd unit should emit --http-listen flag with addr, got:\n{unit}"
+        );
+    }
+
+    #[test]
+    fn test_systemd_unit_omits_http_listen_when_none() {
+        let home = tempfile::TempDir::new().unwrap();
+        let config = config_no_http_listen();
+        let ww_bin = std::path::Path::new("/usr/local/bin/ww");
+
+        Commands::write_systemd_unit(ww_bin, &config, home.path(), "/tmp/identity", true)
+            .expect("write unit should succeed");
+
+        let unit = std::fs::read_to_string(home.path().join(".config/systemd/user/ww.service"))
+            .expect("unit should exist");
+
+        assert!(
+            !unit.contains("--http-listen"),
+            "systemd unit should NOT emit --http-listen when config.http_listen is None, got:\n{unit}"
+        );
     }
 }

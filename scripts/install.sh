@@ -314,3 +314,25 @@ if ! "${WW_HOME}/bin/ww" perform install; then
   warn "Some setup steps failed.  You can retry with:"
   printf '  %s/bin/ww perform install\n' "$WW_HOME"
 fi
+
+# --- Wait for the daemon to answer /status ---
+# `ww perform install` registers and starts the daemon (launchd / systemd),
+# but the daemon takes a few seconds to bind, evaluate init.d, and serve
+# the status route. The install script owns this UX because it's the
+# cold-install entry point; `ww perform install` itself can't see the
+# daemon's stdout (launchd / systemd redirect it to ~/.ww/logs/ww.log).
+status_url="http://127.0.0.1:2080/status"
+printf '\n'
+printf 'Waiting for daemon... '
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if curl --silent --show-error --max-time 1 --output /dev/null "$status_url" 2>/dev/null; then
+    printf 'ready.\n'
+    printf 'Try: curl %s\n' "$status_url"
+    exit 0
+  fi
+  sleep 1
+done
+printf 'timed out.\n'
+warn "Daemon didn't answer $status_url within 10s."
+warn "Check logs: tail -f ${WW_HOME}/logs/ww.log"
+warn "Or hit it manually once it's up: curl $status_url"
