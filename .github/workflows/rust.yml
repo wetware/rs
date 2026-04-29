@@ -102,6 +102,10 @@ jobs:
 
     - name: Install Foundry
       uses: foundry-rs/foundry-toolchain@v1
+      with:
+        # Authenticate the foundryup GitHub API call to avoid 403 rate
+        # limits on shared Actions IPs.
+        token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Check formatting
       working-directory: contracts/stem
@@ -155,6 +159,8 @@ jobs:
 
     - name: Install Foundry
       uses: foundry-rs/foundry-toolchain@v1
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Install IPFS (Kubo)
       run: |
