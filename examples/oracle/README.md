@@ -45,21 +45,21 @@ registers the oracle cell on both transports.
 
 ```sh
 # Terminal 1 -- oracle provider
-ww run --http-listen 127.0.0.1:8080 --port=2025 std/kernel examples/oracle
+ww run --http-listen 127.0.0.1:2080 --port=2025 std/kernel examples/oracle
 ```
 
 This drops you into a Glia shell. The oracle is now serving on:
 - **RPC** (libp2p, schema-keyed) -- for peer-to-peer typed queries
-- **HTTP** at `http://localhost:8080/oracle` -- for curl/browser
+- **HTTP** at `http://localhost:2080/oracle` -- for curl/browser
 
 ### Step 2: Query via curl
 
 ```sh
 # All pairs
-curl http://localhost:8080/oracle
+curl http://localhost:2080/oracle
 
 # Single pair
-curl 'http://localhost:8080/oracle?pair=ETH%2Fgas'
+curl 'http://localhost:2080/oracle?pair=ETH%2Fgas'
 ```
 
 Example response:
@@ -119,7 +119,7 @@ The consumer discovers the oracle provider via DHT, dials it with
 
 ```
 ORACLE NODE:                            CURL CLIENT:
-  init.d registers cell on              curl http://localhost:8080/oracle
+  init.d registers cell on              curl http://localhost:2080/oracle
   two transports (vat + http)              |
                                            v
   HttpListener accepts     <---HTTP---  axum server
