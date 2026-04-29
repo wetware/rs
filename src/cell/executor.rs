@@ -7,7 +7,6 @@ use futures::FutureExt;
 use libp2p::StreamProtocol;
 use membrane::{Epoch, Provenance};
 use std::io::IsTerminal;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{stderr, stdout, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
@@ -66,7 +65,6 @@ pub struct CellBuilder {
     wasmtime_engine: Option<Arc<wasmtime::Engine>>,
     network_state: Option<NetworkState>,
     swarm_cmd_tx: Option<mpsc::Sender<SwarmCommand>>,
-    image_root: Option<PathBuf>,
     cid_tree: Option<Arc<crate::vfs::CidTree>>,
     initial_epoch: Option<Epoch>,
     epoch_rx: Option<watch::Receiver<Epoch>>,
@@ -97,7 +95,6 @@ impl CellBuilder {
             wasmtime_engine: None,
             network_state: None,
             swarm_cmd_tx: None,
-            image_root: None,
             cid_tree: None,
             initial_epoch: None,
             epoch_rx: None,
@@ -168,17 +165,13 @@ impl CellBuilder {
         self
     }
 
-    /// Set the FHS image root for WASI preopen.
-    ///
-    /// When set, the merged image directory is mounted read-only at `/`
-    /// in the guest's WASI filesystem, giving guests access to `boot/`,
-    /// `svc/`, `etc/`, and other FHS paths.
-    pub fn with_image_root(mut self, root: PathBuf) -> Self {
-        self.image_root = Some(root);
-        self
-    }
-
     /// Set the CidTree for virtual filesystem resolution.
+    ///
+    /// Required: `Cell::spawn` will fail without a CidTree. The CidTree
+    /// roots the guest's WASI virtual filesystem at a content-addressed
+    /// CID; `fs_intercept` overrides every fs op and routes through
+    /// `CidTree::resolve_path`. See `doc/capabilities.md`'s "Content as
+    /// capability" for the architecture.
     pub fn with_cid_tree(mut self, tree: Arc<crate::vfs::CidTree>) -> Self {
         self.cid_tree = Some(tree);
         self
@@ -271,7 +264,6 @@ impl CellBuilder {
             wasmtime_engine: self.wasmtime_engine,
             network_state: self.network_state.expect("network_state must be set"),
             swarm_cmd_tx: self.swarm_cmd_tx.expect("swarm_cmd_tx must be set"),
-            image_root: self.image_root,
             cid_tree: self.cid_tree,
             initial_epoch: self.initial_epoch,
             epoch_rx: self.epoch_rx,
@@ -305,7 +297,6 @@ pub struct Cell {
     pub wasmtime_engine: Option<Arc<wasmtime::Engine>>,
     pub network_state: NetworkState,
     pub swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
-    pub image_root: Option<PathBuf>,
     pub cid_tree: Option<Arc<crate::vfs::CidTree>>,
     pub initial_epoch: Option<Epoch>,
     pub epoch_rx: Option<watch::Receiver<Epoch>>,
@@ -371,7 +362,6 @@ impl Cell {
             wasmtime_engine,
             network_state: _,
             swarm_cmd_tx: _,
-            image_root,
             cid_tree,
             initial_epoch: _,
             epoch_rx: _,
@@ -383,6 +373,20 @@ impl Cell {
             ipfs_client: _,
             http_dial: _,
         } = self;
+
+        // Defensive guard: every cell needs a CidTree. The pre-#416
+        // host-directory-preopen path is gone; missing CidTree is a
+        // programmer error (forgot `with_cid_tree(...)` on the builder).
+        // Fail fast at the spawn boundary rather than letting the guest
+        // boot with no `/` preopen and discover the problem on its first
+        // file open.
+        let cid_tree = cid_tree.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cell::spawn requires a CidTree (call .with_cid_tree(...) before .build()). \
+                 Plain-mode host-directory preopens were removed; see doc/capabilities.md \
+                 'Content as capability' for the architecture."
+            )
+        })?;
 
         crate::config::init_tracing();
 
@@ -481,10 +485,7 @@ impl Cell {
             .with_bytecode(bytecode)
             .with_loader(Some(loader))
             .with_stdio(stdin_handle, stdout_handle, stderr_handle)
-            .with_image_root(image_root);
-        if let Some(tree) = cid_tree {
-            builder = builder.with_cid_tree(tree);
-        }
+            .with_cid_tree(cid_tree);
         if let Some(pinset) = pinset_cache {
             builder = builder.with_cache(cache::CacheMode::Shared(pinset));
         }
@@ -713,4 +714,44 @@ async fn serve_one_terminal_stream(
     let network = VatNetwork::new(reader, writer, Side::Server, Default::default());
     let rpc_system = RpcSystem::new(Box::new(network), Some(terminal_client.client));
     let _ = rpc_system.await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T1 (Item 1b cleanup, regression test): `Cell::spawn_with_streams`
+    /// must reject construction without a CidTree. The pre-#416 host-
+    /// directory-preopen path is gone; missing CidTree is a programmer
+    /// error and we fail fast at the spawn boundary with a documented
+    /// error pointing at `with_cid_tree(...)` and `doc/capabilities.md`.
+    #[tokio::test]
+    async fn spawn_without_cid_tree_returns_documented_error() {
+        use crate::host::SwarmCommand;
+        use crate::loaders::HostPathLoader;
+        use crate::rpc::NetworkState;
+        use tokio::sync::mpsc;
+
+        let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmCommand>(1);
+        let cell = CellBuilder::new("/nonexistent/image".into())
+            .with_loader(Box::new(HostPathLoader))
+            .with_network_state(NetworkState::new())
+            .with_swarm_cmd_tx(swarm_tx)
+            // intentionally NO with_cid_tree(...)
+            .build();
+
+        let err = match cell.spawn().await {
+            Ok(_) => panic!("spawn should fail without CidTree"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("with_cid_tree"),
+            "error message should reference the missing builder method, got: {msg}",
+        );
+        assert!(
+            msg.contains("doc/capabilities.md"),
+            "error message should point at the architecture docs, got: {msg}",
+        );
+    }
 }

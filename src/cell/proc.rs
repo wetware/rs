@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Context, Result};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use wasmtime::component::bindgen;
@@ -219,7 +218,6 @@ struct ProcInit {
     stdout: BoxAsyncWrite,
     stderr: BoxAsyncWrite,
     data_streams: Option<tokio::io::DuplexStream>,
-    image_root: Option<PathBuf>,
     cache_mode: Option<cache::CacheMode>,
     cid_tree: Option<std::sync::Arc<crate::vfs::CidTree>>,
     fuel_estimator: Option<FuelEstimator>,
@@ -237,7 +235,6 @@ pub struct Builder {
     stdout: Option<BoxAsyncWrite>,
     stderr: Option<BoxAsyncWrite>,
     data_streams: Option<tokio::io::DuplexStream>,
-    image_root: Option<PathBuf>,
     cache_mode: Option<cache::CacheMode>,
     cid_tree: Option<std::sync::Arc<crate::vfs::CidTree>>,
     fuel_estimator: Option<FuelEstimator>,
@@ -281,7 +278,6 @@ impl Builder {
             stdout: None,
             stderr: None,
             data_streams: None,
-            image_root: None,
             cache_mode: None,
             cid_tree: None,
             fuel_estimator: None,
@@ -379,15 +375,6 @@ impl Builder {
         (self, handles)
     }
 
-    /// Set the FHS image root for WASI preopen.
-    ///
-    /// When set, the merged image directory is mounted read-only at `/`
-    /// in the guest's WASI filesystem.
-    pub fn with_image_root(mut self, root: Option<PathBuf>) -> Self {
-        self.image_root = root;
-        self
-    }
-
     /// Set the cache mode for this process.
     ///
     /// - `CacheMode::Shared`: shares a global pinset cache (efficient, default for trusted procs)
@@ -438,7 +425,6 @@ impl Builder {
             stdout,
             stderr,
             data_streams: self.data_streams,
-            image_root: self.image_root,
             cache_mode: self.cache_mode,
             cid_tree: self.cid_tree,
             fuel_estimator: self.fuel_estimator,
@@ -477,7 +463,6 @@ impl Proc {
             stdout,
             stderr,
             data_streams,
-            image_root,
             cache_mode,
             cid_tree,
             fuel_estimator,
@@ -534,15 +519,14 @@ impl Proc {
             .envs(&envs)
             .args(&args);
 
-        // Mount something at `/` in the guest's WASI filesystem. wasi-libc
-        // needs at least one preopen to resolve absolute paths — without it,
-        // `open("/etc/...")` has no starting descriptor to walk from.
-        //
-        // - CidTree mode: preopen the staging dir as a stub. `fs_intercept`
-        //   overrides `open_at` to route all paths through the CID tree, so
-        //   the preopen's contents don't matter.
-        // - Plain mode: preopen the materialized FHS tempdir so guests read
-        //   files directly from the host.
+        // Anchor the guest's WASI filesystem at `/` so wasi-libc has a
+        // starting descriptor for absolute-path resolution. The preopened
+        // path is `CidTree::staging_dir()` purely as a protocol anchor:
+        // `fs_intercept` overrides every open/readdir/stat call before
+        // it reads from this directory and routes through
+        // `CidTree::resolve_path`. The preopen's actual on-disk contents
+        // are dir-listing stubs populated lazily by `fs_intercept`, not
+        // the guest's view. See doc/capabilities.md.
         if let Some(ref tree) = cid_tree {
             wasi_builder
                 .preopened_dir(tree.staging_dir(), "/", DirPerms::READ, FilePerms::READ)
@@ -551,11 +535,6 @@ impl Proc {
                 staging = %tree.staging_dir().display(),
                 "Mounted CidTree staging at / (fs_intercept routes via virtual FS)"
             );
-        } else if let Some(ref root) = image_root {
-            wasi_builder
-                .preopened_dir(root, "/", DirPerms::READ, FilePerms::READ)
-                .context("failed to preopen image root at /")?;
-            tracing::debug!(root = %root.display(), "Mounted image root at /");
         }
 
         let wasi = wasi_builder.build();

@@ -382,7 +382,23 @@ impl CidTree {
         &self.ipfs
     }
 
-    /// Reference to the staging directory.
+    /// Path to the per-process staging directory. This is the path
+    /// `Cell::spawn` WASI-preopens as `/` for the guest.
+    ///
+    /// **The staging directory is host-side scratch, not guest-visible
+    /// state.** `fs_intercept` overrides every fs op before it reads
+    /// from this directory, routing through `CidTree::resolve_path`. The
+    /// directory's actual on-disk contents are dir-listing stubs (sparse
+    /// files with correct sizes, populated by `fs_intercept` on demand
+    /// for `cap_std::fs::Dir::readdir`) plus persisted JSON dir listings
+    /// keyed by CID. Raw file bytes live in `PinsetCache`'s tempdir, not
+    /// here.
+    ///
+    /// Callers outside `fs_intercept` should not read this directory's
+    /// contents directly: it is not a stable view of the guest's
+    /// filesystem (entries appear/disappear as `fs_intercept` materializes
+    /// stubs) and the layout is an implementation detail of the
+    /// readdir-stub trick.
     pub fn staging_dir(&self) -> &Path {
         &self.staging_dir
     }
