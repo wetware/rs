@@ -39,8 +39,7 @@ with zero ambient authority. The cell can't read your filesystem,
 can't reach the network, can't see your environment variables. The
 only thing it can do is what the membrane handed it -- in this case,
 the `host` capability, so it can report your peer ID and connected
-peers. **The capability is the permission**, not "please don't read
-this file."
+peers. **The capability is the permission**, there is no blacklist/whitelist.
 
 The wiring lives at `~/.ww/etc/init.d/05-status.glia`. Take a look:
 
