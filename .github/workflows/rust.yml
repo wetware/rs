@@ -615,7 +615,14 @@ jobs:
         # records to the DHT so installers resolving from elsewhere can
         # actually fetch the new content (otherwise IPNS may resolve before
         # provides propagate, and `ipfs cat` from a remote node stalls).
+        #
+        # `set -e` inside the SSH script propagates kubectl-exec failures,
+        # and `set -o pipefail` here propagates the SSH exit status through
+        # the `tee` pipe (without it, tee always exits 0 and silent
+        # publish failures masquerade as success — see issue uncovered in #421).
+        set -o pipefail
         $SSH_CMD ${{ secrets.VPS_SSH }} "
+          set -e
           kubectl cp /tmp/ww-release-tree $POD:/tmp/release-tree
           CID=\$(kubectl exec $POD -- ipfs add -rQ --cid-version=1 /tmp/release-tree/)
           echo \"CID=\$CID\"
@@ -629,6 +636,10 @@ jobs:
 
         # Extract CID from output
         CID=$(grep '^CID=' /tmp/ipfs-publish-output.txt | cut -d= -f2)
+        if [ -z "$CID" ]; then
+          echo "ERROR: publish produced empty CID — IPNS was NOT updated"
+          exit 1
+        fi
         echo "Release CID: $CID"
         echo "CID=$CID" >> "$GITHUB_ENV"
 
