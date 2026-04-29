@@ -17,6 +17,45 @@ call any API, read any secret, spend any resource -- Wetware replaces
 this with capabilities. A process can only do what it's been handed
 a capability to do. No ambient authority, ever.
 
+## Try it in 60 seconds
+
+```sh
+curl -sSL https://wetware.run/install | sh
+curl http://localhost:2080/status
+```
+
+```json
+{
+  "status":       "ok",
+  "version":      "0.1.0",
+  "peer_id":      "12D3KooWRLf8DAFsNfbv3s2DjRMbUuPc8AYdcBfokZbz6kJ2aUss",
+  "listen_addrs": ["/ip4/127.0.0.1/tcp/2025", "/ip6/::1/tcp/2025", ...],
+  "peer_count":   216
+}
+```
+
+The second command hit a WebAssembly cell running inside the daemon,
+with zero ambient authority. The cell can't read your filesystem,
+can't reach the network, can't see your environment variables. The
+only thing it can do is what the membrane handed it -- in this case,
+the `host` capability, so it can report your peer ID and connected
+peers. **The capability is the permission**, not "please don't read
+this file."
+
+The wiring: `std/status/etc/init.d/05-status.glia` registers the cell
+on the WAGI HTTP listener at path `/status`. The cell itself
+([`std/status/src/lib.rs`](std/status/src/lib.rs)) calls
+`membrane.graft()`, looks up `host` by name, and writes JSON. Read
+[doc/capabilities.md](doc/capabilities.md) for the full capability
+model, and [doc/architecture.md](doc/architecture.md) for how the
+membrane graft works.
+
+**Your LLM can do this too.** `ww perform install` wires Wetware
+into Claude Code as an MCP server automatically. The same capability
+surface curl just hit, an LLM reaches via attenuated capabilities --
+same caps, same membrane, same guarantees. See
+[.agents/prompt.md](.agents/prompt.md).
+
 ## Quick start
 
 ```bash
@@ -133,18 +172,6 @@ ww push . --ipfs-url http://localhost:5001   # publish to IPFS
 ww run /ipfs/<CID>            # run from content-addressed image
 ```
 
-## Try it in 60 seconds
-
-```sh
-curl -sSL https://wetware.run/install | sh
-curl http://localhost:2080/status
-```
-
-The second command hits a WebAssembly cell running inside the
-daemon, with zero ambient authority. See [doc/status.md](doc/status.md)
-for the full story (capability attenuation, the wiring, how an LLM
-reaches the same data via MCP).
-
 ## Roadmap
 
 The near-term roadmap (see CEO plans in project history):
@@ -160,7 +187,6 @@ The near-term roadmap (see CEO plans in project history):
 
 ## Learn more
 
-- [Status endpoint](doc/status.md) -- the engagement starter kit demo, capability attenuation in action
 - [Architecture](doc/architecture.md) -- design principles and capability flow
 - [Capabilities](doc/capabilities.md) -- the capability model and Cap'n Proto schemas
 - [CLI reference](doc/cli.md) -- full command-line usage
