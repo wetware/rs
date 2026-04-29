@@ -42,8 +42,51 @@ the `host` capability, so it can report your peer ID and connected
 peers. **The capability is the permission**, not "please don't read
 this file."
 
-The wiring: `std/status/etc/init.d/05-status.glia` registers the cell
-on the WAGI HTTP listener at path `/status`. The cell itself
+### See for yourself
+
+Cells get registered by init scripts in `~/.ww/etc/init.d/`. The
+status cell's registration lives at
+`~/.ww/etc/init.d/05-status.glia`. Open it:
+
+```sh
+cat ~/.ww/etc/init.d/05-status.glia
+```
+
+Past the comment header, the entire registration is one line of Glia:
+
+```clojure
+(perform host :listen (cell (load "bin/status.wasm")) "/status")
+```
+
+That's the whole permission grant. Read it like English:
+
+- `(load "bin/status.wasm")` -- the WASM bytes the cell runs.
+- `(cell ...)` -- bundle the bytes into a cell value. No `with`
+  block around it, so the cell inherits the kernel's default
+  membrane (host, runtime, identity, routing). Nothing more.
+- `(perform host :listen <cell> "/status")` -- ask the host to
+  serve the cell at the WAGI path `/status`. That's it.
+
+There is no line granting filesystem access. No line granting
+arbitrary network access. No line passing in environment variables.
+**If it isn't in this file, the cell doesn't have it.** That's
+what makes the security claim verifiable: there's a single source
+of truth for what each cell can do, and it's a one-line file you
+can read in five seconds.
+
+To attenuate further (give the cell *only* `host`, not the default
+membrane), wrap it in a `with` block:
+
+```clojure
+(with [(host (perform host :host))]
+  (perform host :listen (cell (load "bin/status.wasm")) "/status"))
+```
+
+The cell now sees one named cap and nothing else. The status
+endpoint still works -- but if it tried to use anything beyond
+`host`, the lookup would fail.
+
+The cell itself
 ([`std/status/src/lib.rs`](std/status/src/lib.rs)) calls
 `membrane.graft()`, looks up `host` by name, and writes JSON. Read
 [doc/capabilities.md](doc/capabilities.md) for the full capability
