@@ -11,8 +11,8 @@ that nothing else does.
 > and code I didn't write (Simon Willison's
 > [lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/)),
 > **I want** the runtime to enforce isolation per-call,
-> **so I can** ship without auditing every tool, prompt, or piece
-> of model-generated code.
+> **so I** don't need to audit those tools at all -- the runtime
+> makes audit the wrong tool for the job.
 
 This is the canonical Moesta/Klement Job-To-Be-Done sentence.
 It's deliberately scoped tight: **multi-tool agent products**,
@@ -21,10 +21,11 @@ tools, third-party MCP servers, and code an LLM wrote at runtime.
 
 The job has three layers:
 
-- **Functional** -- ship an agent that runs code it didn't write,
-  without auditing every tool. One tool can't read another's state,
-  drain your wallet, exfiltrate user data, or make network calls
-  you didn't grant.
+- **Functional** -- ship an agent that runs code you didn't write
+  *without auditing it*. The runtime enforces the trust boundaries;
+  one tool can't read another's state, drain your wallet,
+  exfiltrate user data, or make calls you didn't grant. Audit
+  isn't reduced -- it's no longer the gate.
 - **Emotional** -- ship at LLM speed without security being the
   bottleneck. The thing you built will not be the thing that causes
   the breach.
@@ -205,7 +206,7 @@ What we don't have today, and won't pretend to:
 
 ## What's next
 
-Three documents and one product motion:
+Three documents:
 
 1. **Per-call capability attenuation deep dive** -- documenting
    the property with the tax-prep example as a worked case.
@@ -216,8 +217,6 @@ Three documents and one product motion:
    show today.
 3. **README overhaul** -- the homepage rewrite around the JTBD,
    capability security demoted from pitch to proof.
-4. **Reach 100 multi-tool agent builders in 30 days.** Not eng
-   work; sales work. The first-believer recruitment loop.
 
 ## If this is you
 
