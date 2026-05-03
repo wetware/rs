@@ -4,7 +4,7 @@
 
 Wetware lets you safely run code you didn't write, don't trust, and cannot see: third-party MCP servers, code your LLM produced at runtime, tools other agents handed you across the swarm. It's a decentralized operating system for multi-tool agent swarms.
 
-Cells are WASM processes that run with zero ambient authority. Their only access to the world is the membrane they were grafted, a typed bundle of capabilities served over Cap'n Proto RPC. When a cell calls another cell, the caller chooses which capabilities to hand over and how to attenuate each one, and the runtime enforces the boundary. Each call carries only the capabilities you handed it; the trust boundary is the membrane, not the audit. There is no scheduler, no central trust authority, no shared state. Cells coordinate through content-addressed messages over libp2p.
+Cells are WASM processes that run with zero ambient authority. Their only access to the world is the membrane they were grafted, a typed bundle of capabilities served over Cap'n Proto RPC. When a cell calls another cell, the caller chooses which capabilities to hand over and how to attenuate each one, and the runtime enforces the boundary. Each call carries only the capabilities you handed it; the trust boundary is the membrane, not the audit. There is no scheduler, no central trust authority, no shared state. Cells coordinate through content-addressed data-structures over IPFS and libp2p.
 
 ## Try it in 60 seconds
 
