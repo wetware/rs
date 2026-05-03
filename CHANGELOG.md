@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+- **Stale `capnp/auction.capnp` and `capnp/oracle.capnp`.** Both were orphaned: nothing in the build references them. `capnp/oracle.capnp` was a byte-identical duplicate of `examples/oracle/oracle.capnp` (the example's `build.rs` reads its local copy). `capnp/auction.capnp` was a divergent earlier draft (different schema ID, different struct shapes) — the live one is `examples/auction/auction.capnp`, used by both `examples/auction/build.rs` and `std/shell/build.rs`. Also removed the now-stale Makefile comment ("auction.capnp lives in capnp/ but is compiled by the example crate") that pointed at the deleted file. Demo-specific schemas now live exclusively under their `examples/<demo>/` subfolders; `capnp/` is core-only (`cell`, `http`, `routing`, `shell`, `stem`, `system`).
+
 ### Added
 - **`doc/positioning.md` — JTBD-anchored public positioning doc.** Captures the lead Job-To-Be-Done ("compose code I didn't write and don't trust"), anchored on Simon Willison's "lethal trifecta" framing, with a worked tax-prep agent example showing per-call capability attenuation (CID sturdyrefs into the UnixFS DAG, `http-client` gated by `--http-dial`, `identity` for signing). Names the structural differentiation vs. process-level sandbox alternatives (E2B, Modal, Daytona, Microsandbox, Cloudflare Sandboxes, Anthropic Claude Code) on five axes: per-call attenuation, composable membranes, content-addressed code, WASM-cell scale, P2P-optional substrate. Demotes capability security from pitch to proof. Honest about what we don't have yet: host-side trust, RTT-aware routing, hosted Wetware tier, wallet/fuel auctions. Public artifact for build-in-public; deeper dives tracked as follow-up issues (#437 per-call attenuation deep dive, #438 composable membranes doc) plus README overhaul (#436).
 
