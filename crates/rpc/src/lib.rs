@@ -8,6 +8,7 @@ pub mod dispatch;
 pub mod graft;
 pub mod http_client;
 pub mod http_listener;
+pub mod jfs;
 pub mod keys;
 pub mod routing;
 pub mod stream_dialer;

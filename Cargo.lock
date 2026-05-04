@@ -5400,6 +5400,7 @@ dependencies = [
  "atom",
  "auth",
  "base58",
+ "base64",
  "blake3",
  "bytes",
  "cache",
@@ -5417,11 +5418,13 @@ dependencies = [
  "rand 0.9.2",
  "reqwest",
  "schema-id",
+ "serde",
  "serde_json",
  "stem",
  "tokio",
  "tokio-util",
  "tracing",
+ "wasm-encoder 0.243.0",
  "wasmparser 0.243.0",
 ]
 
