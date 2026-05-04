@@ -19,7 +19,8 @@
 use tokio::sync::{mpsc, oneshot, watch};
 
 use ww::dispatcher::server::{new_registry, CgiRequest, CgiResponse};
-use ww::rpc::{create_runtime_client, CachePolicy, NetworkState};
+use ww::launcher::create_runtime_client;
+use ww::rpc::{CachePolicy, NetworkState};
 use ww::system_capnp;
 
 const SNAP_WASM_PATH: &str = "examples/snap-hello-rs/bin/snap-hello-rs.wasm";

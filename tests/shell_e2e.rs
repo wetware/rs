@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use ww::rpc::{CachePolicy, NetworkState};
-use ww::runtime::{ExecutorPool, SpawnRequest};
+use ww::services::{ExecutorPool, SpawnRequest};
 use ww::shell_capnp;
 
 fn shell_wasm_exists() -> bool {
@@ -53,7 +53,7 @@ async fn spawn_shell_on_pool(pool: &ExecutorPool) -> Result<shell_capnp::shell::
                 };
                 let stream_control = libp2p_stream::Behaviour::new().new_control();
 
-                let runtime = ww::rpc::create_runtime_client(
+                let runtime = ww::launcher::create_runtime_client(
                     network_state,
                     swarm_tx,
                     false,

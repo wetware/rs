@@ -18,7 +18,7 @@ use futures::io::AsyncReadExt;
 use libp2p::PeerId;
 use membrane::EpochGuard;
 
-use crate::system_capnp;
+use membrane::system_capnp;
 
 /// Timeout for establishing the libp2p stream to a remote peer.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);

@@ -15,7 +15,7 @@ use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
 
-use super::Loader;
+use crate::Loader;
 
 // Generate bindings from WIT file
 // Resources are defined within the interface

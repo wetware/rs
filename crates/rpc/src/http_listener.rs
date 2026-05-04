@@ -16,8 +16,8 @@ use capnp_rpc::pry;
 use membrane::EpochGuard;
 use tokio::sync::mpsc;
 
-use crate::dispatcher::server::{self, CgiRequest, CgiResponse, RouteRegistry};
-use crate::system_capnp;
+use crate::dispatch::{self, CgiRequest, CgiResponse, RouteRegistry};
+use membrane::system_capnp;
 
 /// Maximum response size from a cell process (16 MiB).
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -122,7 +122,7 @@ async fn handle_one_request(
     req: &CgiRequest,
 ) -> CgiResponse {
     match spawn_and_run(executor, caps, req).await {
-        Ok(stdout) => match crate::dispatcher::wagi::parse_cgi_response(&stdout) {
+        Ok(stdout) => match crate::wagi::parse_cgi_response(&stdout) {
             Ok(cgi) => CgiResponse {
                 status: cgi.status_code,
                 headers: cgi.headers.into_iter().collect(),
@@ -154,8 +154,8 @@ async fn spawn_and_run(
     caps: &[ExtraCap],
     req: &CgiRequest,
 ) -> Result<Vec<u8>, capnp::Error> {
-    let (server_name, server_port) = server::extract_server_info(&req.headers);
-    let env = crate::dispatcher::wagi::build_cgi_env(
+    let (server_name, server_port) = dispatch::extract_server_info(&req.headers);
+    let env = crate::wagi::build_cgi_env(
         &req.method,
         &req.path,
         &req.query,
@@ -178,7 +178,7 @@ async fn spawn_and_run(
             let mut entry = caps_builder.reborrow().get(i as u32);
             entry.set_name(name);
             if !schema_bytes.is_empty() {
-                let aligned = crate::rpc::membrane::bytes_to_aligned_words(schema_bytes);
+                let aligned = crate::graft::bytes_to_aligned_words(schema_bytes);
                 let segments: &[&[u8]] = &[capnp::Word::words_to_bytes(&aligned)];
                 let segment_array = capnp::message::SegmentArray::new(segments);
                 let reader = capnp::message::Reader::new(
@@ -238,7 +238,7 @@ async fn spawn_and_run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dispatcher::server::new_registry;
+    use crate::dispatch::new_registry;
 
     /// Build an EpochGuard at seq=1 paired with its sender.
     fn test_epoch_guard() -> (

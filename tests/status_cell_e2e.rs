@@ -16,7 +16,8 @@
 use tokio::sync::{mpsc, watch};
 
 use ww::dispatcher::wagi;
-use ww::rpc::{create_runtime_client, CachePolicy, NetworkState};
+use ww::launcher::create_runtime_client;
+use ww::rpc::{CachePolicy, NetworkState};
 
 const STATUS_WASM_PATH: &str = "std/status/bin/status.wasm";
 

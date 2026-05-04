@@ -5,7 +5,7 @@
 
 // Host-only modules (not available for WASM guests)
 #[cfg(not(target_arch = "wasm32"))]
-pub mod cell;
+pub use cell;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod daemon_config;
 #[cfg(not(target_arch = "wasm32"))]
@@ -13,33 +13,23 @@ pub mod discovery;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod dispatcher;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod epoch;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) mod fs_intercept;
+pub mod executor;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod host;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod image;
+pub use ipfs;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod ipfs;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod keys;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod loaders;
+pub mod launcher;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod metrics;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod mount;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod ns;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod rpc;
+pub use rpc;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod runtime;
+pub use rpc::keys;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod sched;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod vfs;
+pub mod services;
 
 // Re-export capnp schema modules from the membrane crate so host code can
 // use `crate::system_capnp`, `crate::routing_capnp`, `crate::stem_capnp`, etc.
@@ -76,3 +66,5 @@ pub use glia;
 // Re-export commonly used types for convenience
 #[cfg(not(target_arch = "wasm32"))]
 pub use cell::{Loader, Proc, ProcBuilder};
+#[cfg(not(target_arch = "wasm32"))]
+pub use executor::{Cell, CellBuilder, SpawnResult};

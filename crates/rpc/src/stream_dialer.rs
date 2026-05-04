@@ -13,7 +13,7 @@ use membrane::EpochGuard;
 use tokio::io;
 use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 
-use crate::system_capnp;
+use membrane::system_capnp;
 
 use super::{ByteStreamImpl, StreamMode};
 

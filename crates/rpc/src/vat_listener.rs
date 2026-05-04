@@ -25,7 +25,7 @@ use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use futures::StreamExt;
 use membrane::EpochGuard;
 
-use crate::system_capnp;
+use membrane::system_capnp;
 
 pub struct VatListenerImpl {
     stream_control: libp2p_stream::Control,
@@ -235,7 +235,7 @@ pub async fn handle_vat_connection_spawn(
             let mut entry = caps_builder.reborrow().get(i as u32);
             entry.set_name(name);
             if !schema_bytes.is_empty() {
-                let aligned = crate::rpc::membrane::bytes_to_aligned_words(schema_bytes);
+                let aligned = crate::graft::bytes_to_aligned_words(schema_bytes);
                 let segments: &[&[u8]] = &[capnp::Word::words_to_bytes(&aligned)];
                 let segment_array = capnp::message::SegmentArray::new(segments);
                 let reader = capnp::message::Reader::new(

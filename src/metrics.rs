@@ -170,7 +170,7 @@ pub fn new_stream_metrics() -> StreamMetricsRegistry {
 #[derive(Clone)]
 struct AdminState {
     peer_id: String,
-    network_state: crate::rpc::NetworkState,
+    network_state: rpc::NetworkState,
     fuel_registry: FuelRegistry,
     rpc_metrics: RpcMetricsRegistry,
     cache_metrics: CacheMetricsRegistry,
@@ -362,19 +362,19 @@ async fn host_addrs_handler(State(state): State<AdminState>) -> impl IntoRespons
 // AdminService (runtime::Service implementation)
 // ---------------------------------------------------------------------------
 
-/// A [`crate::runtime::Service`] that serves admin HTTP endpoints:
+/// A [`crate::services::Service`] that serves admin HTTP endpoints:
 /// Prometheus metrics, host identity, and listen addresses.
 pub struct AdminService {
     pub listen_addr: SocketAddr,
     pub peer_id: String,
-    pub network_state: crate::rpc::NetworkState,
+    pub network_state: rpc::NetworkState,
     pub fuel_registry: FuelRegistry,
     pub rpc_metrics: RpcMetricsRegistry,
     pub cache_metrics: CacheMetricsRegistry,
     pub stream_metrics: StreamMetricsRegistry,
 }
 
-impl crate::runtime::Service for AdminService {
+impl crate::services::Service for AdminService {
     fn run(self, mut shutdown: watch::Receiver<()>) -> anyhow::Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -424,7 +424,7 @@ mod tests {
     fn test_state() -> AdminState {
         AdminState {
             peer_id: "12D3KooWTestPeerId".to_string(),
-            network_state: crate::rpc::NetworkState::new(),
+            network_state: rpc::NetworkState::new(),
             fuel_registry: new_fuel_registry(),
             rpc_metrics: new_rpc_metrics(),
             cache_metrics: new_cache_metrics(),
