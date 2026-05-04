@@ -3,7 +3,7 @@
 //! These tests demonstrate full-duplex, asynchronous RPC communication
 //! between host and guest using Cap'n Proto over WASI Preview 2 streams.
 
-use crate::cell::{proc::DataStreamHandles, Loader, ProcBuilder};
+use crate::{proc::DataStreamHandles, Loader, ProcBuilder};
 use crate::loaders::HostPathLoader;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -52,7 +52,7 @@ async fn test_capnp_echo_basic() -> Result<()> {
     // Create async read/write wrappers for the channels
     // Host writes to host_to_guest_tx (guest reads from input stream)
     // Host reads from guest_to_host_rx (guest writes to output stream)
-    use crate::cell::streams;
+    use crate::streams;
     let mut input_stream = streams::Reader::new(guest_output_rx);
     let mut output_stream = streams::Writer::new(handles.host_to_guest_tx);
     

@@ -1,6 +1,6 @@
 //! Unit tests for async I/O streaming with data streams
 
-use crate::cell::streams;
+use crate::streams;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]

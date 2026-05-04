@@ -11,11 +11,11 @@ use libp2p::Multiaddr;
 
 mod shell;
 
+use ww::cell::image;
+use ww::cell::loaders::{ChainLoader, EmbeddedLoader, HostPathLoader, IpfsLoader};
 use ww::executor::CellBuilder;
 use ww::host;
-use ww::image;
 use ww::ipfs;
-use ww::loaders::{ChainLoader, EmbeddedLoader, HostPathLoader, IpfsLoader};
 
 // Embedded WASM blobs — compiled into the binary so `ww run --mcp` works
 // without requiring `make std` on the user's machine.
@@ -527,7 +527,7 @@ impl Commands {
                 with_http_admin,
                 ipfs_url,
             } => {
-                let mounts = ww::mount::parse_args(&mount_args)?;
+                let mounts = ww::cell::mount::parse_args(&mount_args)?;
                 // Identity is passed separately — NOT as a mount.
                 // The host reads it to create the signing key for the Membrane.
                 // It must never enter the merged FHS tree (which is preopened
@@ -1376,7 +1376,7 @@ wasip2::cli::command::export!({iface_name}Guest);
     /// Run a wetware environment from parsed mounts.
     #[allow(clippy::too_many_arguments)]
     async fn run_with_mounts(
-        mounts: Vec<ww::mount::Mount>,
+        mounts: Vec<ww::cell::mount::Mount>,
         identity: Option<PathBuf>,
         listen: Vec<Multiaddr>,
         wasm_debug: bool,
@@ -1424,7 +1424,7 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         // If --stem is provided, read the on-chain head and prepend it
         // as a base root mount.
-        let mut all_mounts: Vec<ww::mount::Mount> = Vec::new();
+        let mut all_mounts: Vec<ww::cell::mount::Mount> = Vec::new();
         let mut epoch_channel: Option<(watch::Sender<Epoch>, watch::Receiver<Epoch>)> = None;
         let stem_config = if let Some(ref stem_addr) = stem {
             let contract = parse_contract_address(stem_addr)?;
@@ -1442,7 +1442,7 @@ wasip2::cli::command::export!({iface_name}Guest);
                 tracing::warn!(path = %ipfs_path, "Failed to pin initial head: {e}");
             }
 
-            all_mounts.push(ww::mount::Mount {
+            all_mounts.push(ww::cell::mount::Mount {
                 source: ipfs_path,
                 target: PathBuf::from("/"),
             });
@@ -1489,7 +1489,7 @@ wasip2::cli::command::export!({iface_name}Guest);
                 if let Err(e) = ipfs_client.pin_add(ipfs_path).await {
                     tracing::warn!(ns = %name, path = %ipfs_path, "Failed to pin namespace: {e}");
                 }
-                all_mounts.push(ww::mount::Mount {
+                all_mounts.push(ww::cell::mount::Mount {
                     source: ipfs_path.clone(),
                     target: PathBuf::from("/"),
                 });
@@ -1515,7 +1515,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         let staging_dir = std::env::temp_dir().join(format!("ww-staging-{}", std::process::id()));
         std::fs::create_dir_all(&staging_dir)
             .with_context(|| format!("failed to create staging dir {}", staging_dir.display()))?;
-        let cid_tree = std::sync::Arc::new(ww::vfs::CidTree::new(
+        let cid_tree = std::sync::Arc::new(ww::cell::vfs::CidTree::new(
             root_cid.clone(),
             ipfs_client.clone(),
             local_overrides,

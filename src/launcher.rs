@@ -19,13 +19,13 @@ use tokio::sync::mpsc;
 
 use ::membrane::EpochGuard;
 
-use crate::cell::proc::{Builder as ProcBuilder, FuelEstimator};
 use crate::host::SwarmCommand;
 use crate::rpc::{
     build_peer_rpc, canonicalize_schema_node, membrane, ByteStreamImpl, CachePolicy, NetworkState,
     ProcessImpl, StreamMode,
 };
 use crate::system_capnp;
+use cell::proc::{Builder as ProcBuilder, FuelEstimator};
 
 /// Maximum WASM binary size accepted by the Executor.
 ///

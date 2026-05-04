@@ -6,9 +6,16 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+pub mod epoch;
+pub mod fs_intercept;
+pub mod image;
+pub mod loaders;
+pub mod mount;
 pub mod proc;
+pub mod sched;
 pub mod streams;
 pub mod swappable;
+pub mod vfs;
 
 #[cfg(test)]
 mod streams_test;

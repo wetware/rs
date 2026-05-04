@@ -13,10 +13,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::info;
 
-use crate::cell::{proc::DataStreamHandles, Loader, ProcBuilder};
 use crate::host::SwarmCommand;
 use crate::rpc::membrane::GuestMembrane;
 use crate::rpc::NetworkState;
+use cell::{proc::DataStreamHandles, Loader, ProcBuilder};
 
 const CAPNP_PROTOCOL: StreamProtocol = StreamProtocol::new("/ww/0.1.0");
 
@@ -65,7 +65,7 @@ pub struct CellBuilder {
     wasmtime_engine: Option<Arc<wasmtime::Engine>>,
     network_state: Option<NetworkState>,
     swarm_cmd_tx: Option<mpsc::Sender<SwarmCommand>>,
-    cid_tree: Option<Arc<crate::vfs::CidTree>>,
+    cid_tree: Option<Arc<cell::vfs::CidTree>>,
     initial_epoch: Option<Epoch>,
     epoch_rx: Option<watch::Receiver<Epoch>>,
     signing_key: Option<Arc<SigningKey>>,
@@ -172,7 +172,7 @@ impl CellBuilder {
     /// CID; `fs_intercept` overrides every fs op and routes through
     /// `CidTree::resolve_path`. See `doc/capabilities.md`'s "Content as
     /// capability" for the architecture.
-    pub fn with_cid_tree(mut self, tree: Arc<crate::vfs::CidTree>) -> Self {
+    pub fn with_cid_tree(mut self, tree: Arc<cell::vfs::CidTree>) -> Self {
         self.cid_tree = Some(tree);
         self
     }
@@ -297,7 +297,7 @@ pub struct Cell {
     pub wasmtime_engine: Option<Arc<wasmtime::Engine>>,
     pub network_state: NetworkState,
     pub swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
-    pub cid_tree: Option<Arc<crate::vfs::CidTree>>,
+    pub cid_tree: Option<Arc<cell::vfs::CidTree>>,
     pub initial_epoch: Option<Epoch>,
     pub epoch_rx: Option<watch::Receiver<Epoch>>,
     pub signing_key: Option<Arc<SigningKey>>,
@@ -728,8 +728,8 @@ mod tests {
     #[tokio::test]
     async fn spawn_without_cid_tree_returns_documented_error() {
         use crate::host::SwarmCommand;
-        use crate::loaders::HostPathLoader;
         use crate::rpc::NetworkState;
+        use cell::loaders::HostPathLoader;
         use tokio::sync::mpsc;
 
         let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmCommand>(1);

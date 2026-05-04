@@ -19,7 +19,7 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::image::cid_bytes_to_ipfs_path;
-use crate::ipfs;
+use ipfs;
 
 /// Process a single epoch advance: pin new CID, swap CidTree, unpin old, broadcast.
 ///
