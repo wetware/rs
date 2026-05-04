@@ -47,8 +47,6 @@ status:
 	cp std/status/target/$(WASM_TARGET)/release/status.wasm std/status/bin/status.wasm
 
 # --- Examples ----------------------------------------------------------------
-# Note: auction.capnp lives in capnp/ but is compiled by the example crate
-# that uses it (via build.rs), not by the host binary.
 
 examples: chess echo counter discovery oracle auction mindshare snap-hello-rs
 
