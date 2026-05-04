@@ -1,5 +1,17 @@
 # TODOs
 
+## Status cell: host.peers() blocks for ~20s on first request
+**What:** The std/status cell's first GET response takes ~20 seconds before returning. After that, subsequent responses are presumably fast (didn't measure). The latency is from `host_peer_count()` (`std/status/src/lib.rs:110-114`) calling `host.peers_request().send().promise.await` which blocks until the libp2p swarm has populated peer counts. On a freshly-deployed pod the swarm needs time to bootstrap to 300+ peers, so the first `host.peers()` call sits there.
+**Why:** Discovered while verifying the snap-hello-rs deploy on master.wetware.run (lthibault/ipns-mount-fix branch, 2026-05-04). curl to `/status` timed out at 15s; bumping curl timeout to 30s revealed the response did eventually return (200, peer_count=317, time_total=20.4s). The snap cell next door responds instantly because it doesn't make host calls. The 20s latency is invisible during normal operation but pathological at cold-start: any monitoring or readiness check that hits /status with a sub-15s timeout will flap.
+**Context:** Three plausible fixes, in order of effort:
+  1. **Bound the timeout in the cell.** Wrap `host_peer_count` (and `host_id`, `host_addrs`) in a `tokio::time::timeout(Duration::from_millis(500), ...)`. Returns `null` on timeout per the existing graceful-degradation contract. ~10 lines, no host changes. Best for v1.
+  2. **Cache peer count at the host.** `host.peers()` capability returns a snapshot stored on the swarm side, refreshed periodically rather than computed per-call. Bigger change, helps any cell that calls peers().
+  3. **Wait-for-bootstrap signal.** Don't register the /status route until the swarm has at least N peers OR a bootstrap timeout elapsed. Cleanest semantics but requires plumbing a readiness channel into HttpListener.
+The cleanest near-term fix is (1). The latency was hidden in production until master.wetware.run actually got traffic on /status, which only started happening after the lthibault/ipns-mount-fix deploy registered the route.
+**Effort:** S (option 1) → L (option 2 or 3)
+**Priority:** P2 (visible, but only on first request after pod restart)
+**Depends on:** none
+
 ## Document deployment pipeline + ww-master infra (doc/deployment.md)
 **What:** Write `doc/deployment.md` capturing the end-to-end deployment pipeline: how a wetware/ww commit becomes a running pod on ww-master.wetware.run. Include ASCII diagrams for: (a) CI publish flow (build matrix → wasm-artifacts → IPFS publish → IPNS update at `k51qzi5uqu5dg9eci41ad4b1wyf9kocngntfviq12qjuvusra3nt94xlx98me1`), (b) image build/deploy flow (Containerfile.deploy → ghcr.io image → `kubectl set image` rollout), (c) ww-master mount/layer model (kernel + shell + IPNS-loaded examples merged at `/`), (d) HTTP request path (Traefik → ww-master :2080 → CGI dispatch → cell `etc/init.d/*.glia` registered route).
 **Why:** Surfaced during the snap-hello-rs deploy: the deployment.yaml on disk had IPNS args that had never been `kubectl apply`'d, the IPNS publish layout had never been intended to support `/ipns/.../examples/<name>` mount paths, and `/ipns/` mount paths crashed the daemon (Bug A in the lthibault/ipns-mount-fix branch). Multiple drift points across two repos (wetware/ww + Infra/wetware) with no central documentation. Future operators (and future Louis) shouldn't have to reverse-engineer this.
