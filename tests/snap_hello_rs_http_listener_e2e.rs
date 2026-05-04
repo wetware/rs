@@ -2,25 +2,54 @@
 //! dispatch chain.
 //!
 //! Mirrors `tests/status_cell_http_listener_e2e.rs`. Validates the full
-//! Farcaster Snap content-negotiation contract:
+//! Farcaster Snap content-negotiation contract + Snap v1 viewer-aware
+//! / POST handling:
 //!
 //!   GET with `Accept: application/vnd.farcaster.snap+json`
-//!     → 200, snap-JSON body, snap content-type, Vary/Cache-Control/ACAO headers
+//!     → 200, snap-JSON body, snap content-type, Vary/Cache-Control/ACAO
 //!
 //!   GET with `Accept: text/html` (or anything else)
-//!     → 200, HTML body, text/html content-type, Link rel=alternate header
+//!     → 200, HTML body, text/html content-type, Link rel=alternate
+//!
+//!   GET with snap Accept + `verified_snap: Some(VerifiedJfs{fid=N})`
+//!     → 200, snap-JSON with `content: "Hello, FID #N"` (viewer-aware)
+//!
+//!   POST with snap Accept
+//!     → 200, snap-JSON ack (snap spec's submit-action contract)
 //!
 //! Spec: https://docs.farcaster.xyz/snap/spec-overview
 //!       https://docs.farcaster.xyz/snap/http-headers
+//!       https://docs.farcaster.xyz/snap/auth
 //!
 //! Requires pre-built snap WASM: `make -C examples/snap-hello-rs`.
 //! No graft caps used; the cell is stateless.
+
+// Tests in this file hold a `std::sync::Mutex<()>` across `.await`
+// points to serialize Runtime setup (see `TEST_LOCK` below). Clippy
+// flags this in general because `std::sync::Mutex` can deadlock if
+// the future moves to a different thread mid-await. We use
+// `#[tokio::test(flavor = "current_thread")]` everywhere here, which
+// pins each test's future to a single thread for its entire lifetime,
+// so the deadlock condition can't arise. Suppress the lint at the
+// file level rather than per-test to keep the test bodies readable.
+#![allow(clippy::await_holding_lock)]
+
+use std::sync::Mutex;
 
 use tokio::sync::{mpsc, oneshot, watch};
 
 use ww::dispatcher::server::{new_registry, CgiRequest, CgiResponse};
 use ww::rpc::{create_runtime_client, CachePolicy, NetworkState};
 use ww::system_capnp;
+
+/// Serialize tests within this file. Each test spins up its own
+/// Runtime + 4-worker executor pool + libp2p stack and connects to
+/// the local Kubo daemon at port 5001; running them in parallel
+/// (cargo test's default) blows past one of those concurrency
+/// limits and all tests fail with what looks like setup races.
+/// Holding this Mutex for the duration of each test is the simplest
+/// fix that avoids adding a `serial_test` dep.
+static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 const SNAP_WASM_PATH: &str = "examples/snap-hello-rs/bin/snap-hello-rs.wasm";
 const SNAP_TYPE: &str = "application/vnd.farcaster.snap+json";
@@ -109,16 +138,30 @@ async fn register_snap_route() -> mpsc::Sender<CgiRequest> {
         .expect("route /snaps/hello should be registered")
 }
 
-/// Send a CGI request with the given headers through the route channel
-/// and await the response (with timeout).
+/// Send a GET CGI request (no body, no verified payload) with the given
+/// headers through the route channel and await the response.
 async fn dispatch(tx: &mpsc::Sender<CgiRequest>, headers: Vec<(String, String)>) -> CgiResponse {
+    dispatch_full(tx, "GET", headers, Vec::new(), None).await
+}
+
+/// Full dispatch with all knobs exposed: method, headers, body, and
+/// optional verified-JFS payload (simulating the listener having
+/// already verified an `X-Snap-Payload` header upstream).
+async fn dispatch_full(
+    tx: &mpsc::Sender<CgiRequest>,
+    method: &str,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    verified_snap: Option<ww::jfs::VerifiedJfs>,
+) -> CgiResponse {
     let (response_tx, response_rx) = oneshot::channel();
     let cgi_req = CgiRequest {
-        method: "GET".into(),
+        method: method.into(),
         path: "/snaps/hello".into(),
         query: String::new(),
         headers,
-        body: Vec::new(),
+        body,
+        verified_snap,
         response_tx,
     };
     tx.send(cgi_req)
@@ -135,6 +178,7 @@ async fn dispatch(tx: &mpsc::Sender<CgiRequest>, headers: Vec<(String, String)>)
 /// Cell must return snap-JSON with all 4 spec-required headers.
 #[tokio::test(flavor = "current_thread")]
 async fn snap_cell_with_snap_accept_returns_snap_json_and_required_headers() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !snap_wasm_exists() {
         eprintln!(
             "skipping: {SNAP_WASM_PATH} not built (run `make -C examples/snap-hello-rs` first)"
@@ -192,6 +236,7 @@ async fn snap_cell_with_snap_accept_returns_snap_json_and_required_headers() {
 /// at the snap representation. Spec citizenship per /snap/http-headers.
 #[tokio::test(flavor = "current_thread")]
 async fn snap_cell_without_snap_accept_returns_html_with_link_alternate() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !snap_wasm_exists() {
         eprintln!(
             "skipping: {SNAP_WASM_PATH} not built (run `make -C examples/snap-hello-rs` first)"
@@ -250,6 +295,7 @@ async fn snap_cell_without_snap_accept_returns_html_with_link_alternate() {
 /// than panicking or returning snap-JSON to a non-Farcaster client.
 #[tokio::test(flavor = "current_thread")]
 async fn snap_cell_with_empty_accept_returns_html_fallback() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !snap_wasm_exists() {
         eprintln!(
             "skipping: {SNAP_WASM_PATH} not built (run `make -C examples/snap-hello-rs` first)"
@@ -270,6 +316,103 @@ async fn snap_cell_with_empty_accept_returns_html_fallback() {
                 "empty Accept should default to HTML fallback, got {ct:?}"
             );
             assert!(find_header(&resp, "Link").is_some(), "Link header expected");
+        })
+        .await;
+}
+
+/// JFS-verified viewer-aware path. With a `verified_snap` payload
+/// claiming FID 12345, the listener emits `X_SNAP_FID_CLAIMED=12345`
+/// as a CGI env var, which the cell reads via `viewer_greeting()`
+/// and renders as `Hello, FID #12345`.
+#[tokio::test(flavor = "current_thread")]
+async fn snap_cell_with_verified_jfs_renders_fid_aware_greeting() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !snap_wasm_exists() {
+        eprintln!(
+            "skipping: {SNAP_WASM_PATH} not built (run `make -C examples/snap-hello-rs` first)"
+        );
+        return;
+    }
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let tx = register_snap_route().await;
+
+            // Synthesize a verified payload — the listener has already
+            // done the JFS crypto check upstream; we're testing the
+            // env-var passthrough + cell rendering.
+            let verified = ww::jfs::VerifiedJfs {
+                payload: ww::jfs::JfsPayload {
+                    fid: 12345,
+                    inputs: serde_json::json!({}),
+                    audience: "https://master.wetware.run".to_string(),
+                    timestamp: 1_700_000_000,
+                    user: serde_json::json!({"fid": 12345}),
+                    surface: serde_json::json!({"type": "standalone"}),
+                },
+                payload_b64url: "stub-b64url-passthrough".to_string(),
+            };
+
+            let resp = dispatch_full(
+                &tx,
+                "GET",
+                vec![("Accept".into(), SNAP_TYPE.into())],
+                Vec::new(),
+                Some(verified),
+            )
+            .await;
+
+            assert_eq!(resp.status, 200);
+            let body = std::str::from_utf8(&resp.body).expect("UTF-8 body");
+            let json: serde_json::Value =
+                serde_json::from_str(body).expect("snap-JSON should parse");
+            assert_eq!(
+                json["ui"]["elements"]["greeting"]["props"]["content"], "Hello, FID #12345",
+                "viewer-aware greeting should render the verified FID, got body: {body}"
+            );
+        })
+        .await;
+}
+
+/// POST request returns the same snap-JSON UI tree (the snap spec's
+/// submit-action contract: server returns the next UI state). v1
+/// just acks the submit; future versions would mutate state from
+/// `payload.inputs`.
+#[tokio::test(flavor = "current_thread")]
+async fn snap_cell_post_returns_snap_ack() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !snap_wasm_exists() {
+        eprintln!(
+            "skipping: {SNAP_WASM_PATH} not built (run `make -C examples/snap-hello-rs` first)"
+        );
+        return;
+    }
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let tx = register_snap_route().await;
+            let resp = dispatch_full(
+                &tx,
+                "POST",
+                vec![("Accept".into(), SNAP_TYPE.into())],
+                Vec::new(),
+                None,
+            )
+            .await;
+
+            assert_eq!(resp.status, 200);
+            assert_eq!(
+                find_header(&resp, "Content-Type"),
+                Some(SNAP_TYPE),
+                "POST ack must use the snap media type"
+            );
+            let body = std::str::from_utf8(&resp.body).expect("UTF-8 body");
+            let json: serde_json::Value =
+                serde_json::from_str(body).expect("POST body must parse as snap JSON");
+            assert_eq!(json["version"], "2.0");
+            assert_eq!(json["ui"]["root"], "greeting");
         })
         .await;
 }
