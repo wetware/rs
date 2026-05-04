@@ -5,7 +5,7 @@
 
 WASM_TARGET := wasm32-wasip2
 
-.PHONY: all host std kernel shell mcp status examples chess echo counter discovery oracle auction mindshare clean run-kernel
+.PHONY: all host std kernel shell mcp status examples chess echo counter discovery oracle auction mindshare snap-hello-rs clean run-kernel
 .PHONY: publish-std try-publish-std publish test-wasm
 .PHONY: container-build container-run container-dev container-clean
 .PHONY: agent-skills
@@ -48,7 +48,7 @@ status:
 
 # --- Examples ----------------------------------------------------------------
 
-examples: chess echo counter discovery oracle auction mindshare
+examples: chess echo counter discovery oracle auction mindshare snap-hello-rs
 
 chess:
 	$(MAKE) -C examples/chess
@@ -70,6 +70,9 @@ auction:
 
 mindshare:
 	$(MAKE) -C examples/mindshare
+
+snap-hello-rs:
+	$(MAKE) -C examples/snap-hello-rs
 
 # --- Publish std namespace to IPFS ------------------------------------------
 # CI-only: assembles the ww namespace tree, publishes to IPFS, writes CID.
@@ -194,6 +197,7 @@ clean:
 	$(MAKE) -C examples/oracle clean
 	$(MAKE) -C examples/auction clean
 	$(MAKE) -C examples/mindshare clean
+	$(MAKE) -C examples/snap-hello-rs clean
 
 # --- Agent skills ------------------------------------------------------------
 # Generate .claude/skills/ from .agents/skills/ (vendor-neutral source of truth).
