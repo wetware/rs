@@ -199,11 +199,19 @@ pub async fn resolve_mounts_virtual(
     let mut cids = Vec::with_capacity(root_mounts.len());
     for mount in &root_mounts {
         if ipfs::is_ipfs_path(&mount.source) {
-            let cid = mount
-                .source
+            // `is_ipfs_path` accepts /ipfs/, /ipns/, /ipld/. /ipfs/ goes
+            // through directly. /ipns/<hash>[/<sub>] resolves to
+            // /ipfs/<cid>[/<sub>] via Kubo's name/resolve. /ipld/ falls
+            // through with the same strip behavior as /ipfs/.
+            let ipfs_path = if mount.source.starts_with("/ipns/") {
+                resolve_ipns_to_ipfs(&mount.source, ipfs_client).await?
+            } else {
+                mount.source.clone()
+            };
+            let cid_with_subpath = ipfs_path
                 .strip_prefix("/ipfs/")
-                .context("IPFS path must start with /ipfs/")?;
-            cids.push(cid.to_string());
+                .with_context(|| format!("expected resolved /ipfs/ path, got {ipfs_path}"))?;
+            cids.push(cid_with_subpath.to_string());
         } else {
             // Add local directory to IPFS.
             let cid = ipfs_client
@@ -256,6 +264,41 @@ pub async fn resolve_mounts_virtual(
     }
 
     Ok((root_cid, overrides))
+}
+
+/// Split `/ipns/<hash>[/<subpath>]` into `(hash, subpath)`. `subpath`
+/// is `""` when the path has no subpath component.
+///
+/// Pure function — kept separate from `resolve_ipns_to_ipfs` so the
+/// parsing can be unit-tested without an IPFS daemon.
+fn split_ipns_path(path: &str) -> Result<(&str, &str)> {
+    let after_prefix = path
+        .strip_prefix("/ipns/")
+        .with_context(|| format!("expected /ipns/ prefix, got {path}"))?;
+    if after_prefix.is_empty() {
+        bail!("empty IPNS hash in path: {path}");
+    }
+    Ok(match after_prefix.find('/') {
+        Some(i) => (&after_prefix[..i], &after_prefix[i + 1..]),
+        None => (after_prefix, ""),
+    })
+}
+
+/// Resolve `/ipns/<hash>[/<subpath>]` to `/ipfs/<cid>[/<subpath>]`.
+///
+/// Kubo's `name/resolve` only resolves the IPNS hash — it doesn't
+/// preserve any subpath, so we splice the subpath back ourselves.
+async fn resolve_ipns_to_ipfs(ipns_path: &str, ipfs_client: &ipfs::HttpClient) -> Result<String> {
+    let (hash, subpath) = split_ipns_path(ipns_path)?;
+    let resolved = ipfs_client
+        .name_resolve(hash)
+        .await
+        .with_context(|| format!("failed to resolve IPNS name: {hash}"))?;
+    Ok(if subpath.is_empty() {
+        resolved
+    } else {
+        format!("{}/{}", resolved.trim_end_matches('/'), subpath)
+    })
 }
 
 /// Read the current head from an Atom contract via one-shot `eth_call`.
@@ -362,6 +405,59 @@ mod tests {
         let result =
             resolve_mounts_virtual(&[root_mount("/nonexistent/path/abc123")], &client).await;
         assert!(result.is_err());
+    }
+
+    // ── split_ipns_path: pure parsing, IPNS-to-IPFS subpath split ──
+
+    #[test]
+    fn split_ipns_path_with_subpath_returns_hash_and_subpath() {
+        let (hash, sub) =
+            split_ipns_path("/ipns/k51qzi5uqu5dg9eci41ad4b1wyf9kocngntfviq12qjuvusra3nt94xlx98me1/examples/snap-hello-rs")
+                .unwrap();
+        assert_eq!(
+            hash,
+            "k51qzi5uqu5dg9eci41ad4b1wyf9kocngntfviq12qjuvusra3nt94xlx98me1"
+        );
+        assert_eq!(sub, "examples/snap-hello-rs");
+    }
+
+    #[test]
+    fn split_ipns_path_no_subpath_returns_empty_subpath() {
+        let (hash, sub) =
+            split_ipns_path("/ipns/k51qzi5uqu5dg9eci41ad4b1wyf9kocngntfviq12qjuvusra3nt94xlx98me1")
+                .unwrap();
+        assert_eq!(
+            hash,
+            "k51qzi5uqu5dg9eci41ad4b1wyf9kocngntfviq12qjuvusra3nt94xlx98me1"
+        );
+        assert_eq!(sub, "");
+    }
+
+    #[test]
+    fn split_ipns_path_trailing_slash_yields_empty_subpath() {
+        let (hash, sub) = split_ipns_path("/ipns/abc/").unwrap();
+        assert_eq!(hash, "abc");
+        assert_eq!(sub, "");
+    }
+
+    #[test]
+    fn split_ipns_path_empty_hash_errors() {
+        let err = split_ipns_path("/ipns/").unwrap_err();
+        assert!(err.to_string().contains("empty IPNS hash"));
+    }
+
+    #[test]
+    fn split_ipns_path_missing_prefix_errors() {
+        let err = split_ipns_path("/ipfs/abc").unwrap_err();
+        assert!(err.to_string().contains("expected /ipns/ prefix"));
+    }
+
+    #[test]
+    fn split_ipns_path_nested_subpath_preserved() {
+        // A deeper subpath: every '/' after the hash is part of the subpath.
+        let (hash, sub) = split_ipns_path("/ipns/k51abc/a/b/c/d.glia").unwrap();
+        assert_eq!(hash, "k51abc");
+        assert_eq!(sub, "a/b/c/d.glia");
     }
 
     #[test]
