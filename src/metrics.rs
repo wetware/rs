@@ -362,7 +362,7 @@ async fn host_addrs_handler(State(state): State<AdminState>) -> impl IntoRespons
 // AdminService (runtime::Service implementation)
 // ---------------------------------------------------------------------------
 
-/// A [`crate::runtime::Service`] that serves admin HTTP endpoints:
+/// A [`crate::services::Service`] that serves admin HTTP endpoints:
 /// Prometheus metrics, host identity, and listen addresses.
 pub struct AdminService {
     pub listen_addr: SocketAddr,
@@ -374,7 +374,7 @@ pub struct AdminService {
     pub stream_metrics: StreamMetricsRegistry,
 }
 
-impl crate::runtime::Service for AdminService {
+impl crate::services::Service for AdminService {
     fn run(self, mut shutdown: watch::Receiver<()>) -> anyhow::Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

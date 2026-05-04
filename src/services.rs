@@ -406,10 +406,10 @@ fn worker_loop(
 use crate::host::{KuboBootstrapInfo, SwarmCommand};
 use rpc::NetworkState;
 
-// Re-export WagiService so cli/main.rs can use `ww::runtime::WagiService`.
+// Re-export WagiService so cli/main.rs can use `ww::services::WagiService`.
 pub use crate::dispatcher::server::WagiService;
 
-// Re-export AdminService so cli/main.rs can use `ww::runtime::AdminService`.
+// Re-export AdminService so cli/main.rs can use `ww::services::AdminService`.
 pub use crate::metrics::AdminService;
 
 /// Parameters for constructing a [`Libp2pHost`] inside the swarm thread.

@@ -1590,15 +1590,15 @@ wasip2::cli::command::export!({iface_name}Guest);
         let (swarm_cmd_tx, swarm_cmd_rx) = tokio::sync::mpsc::channel(64);
         let (swarm_ready_tx, swarm_ready_rx) = tokio::sync::oneshot::channel();
 
-        let mut supervisor = ww::runtime::Host::new();
+        let mut supervisor = ww::services::Host::new();
 
         // Swarm thread: libp2p event loop.
         // The Libp2pHost is constructed inside the swarm thread so that
         // TCP listeners register with the correct tokio reactor.
         supervisor.spawn(
             "swarm",
-            ww::runtime::SwarmService {
-                params: ww::runtime::SwarmServiceParams {
+            ww::services::SwarmService {
+                params: ww::services::SwarmServiceParams {
                     listen: listen.clone(),
                     keypair,
                     kubo_bootstrap,
@@ -1625,7 +1625,7 @@ wasip2::cli::command::export!({iface_name}Guest);
             if let Some(config) = stem_config {
                 supervisor.spawn(
                     "epoch",
-                    ww::runtime::EpochService {
+                    ww::services::EpochService {
                         config,
                         epoch_tx,
                         confirmation_depth,
@@ -1642,7 +1642,7 @@ wasip2::cli::command::export!({iface_name}Guest);
 
         // Executor pool: M:N cell scheduling across N worker threads.
         let executor_pool =
-            ww::runtime::ExecutorPool::new(executor_threads, supervisor.shutdown_rx());
+            ww::services::ExecutorPool::new(executor_threads, supervisor.shutdown_rx());
 
         // WAGI HTTP server thread (only when --http-listen is provided).
         let route_registry = if let Some(ref addr) = http_listen {
@@ -1652,7 +1652,7 @@ wasip2::cli::command::export!({iface_name}Guest);
             let registry = ww::dispatcher::server::new_registry();
             supervisor.spawn(
                 "wagi-http",
-                ww::runtime::WagiService {
+                ww::services::WagiService {
                     listen_addr,
                     registry: registry.clone(),
                 },
@@ -1744,7 +1744,7 @@ wasip2::cli::command::export!({iface_name}Guest);
         // code flows back through the oneshot channel.
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         executor_pool
-            .spawn(ww::runtime::SpawnRequest {
+            .spawn(ww::services::SpawnRequest {
                 name: "kernel".into(),
                 factory: Box::new(move |_shutdown| {
                     Box::pin(async move {
@@ -1796,7 +1796,7 @@ wasip2::cli::command::export!({iface_name}Guest);
 
             let (mcp_tx, mcp_rx) = tokio::sync::oneshot::channel();
             executor_pool
-                .spawn(ww::runtime::SpawnRequest {
+                .spawn(ww::services::SpawnRequest {
                     name: "mcp".into(),
                     factory: Box::new(move |_shutdown| {
                         Box::pin(async move {

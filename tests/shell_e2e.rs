@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use ww::rpc::{CachePolicy, NetworkState};
-use ww::runtime::{ExecutorPool, SpawnRequest};
+use ww::services::{ExecutorPool, SpawnRequest};
 use ww::shell_capnp;
 
 fn shell_wasm_exists() -> bool {

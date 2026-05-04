@@ -29,7 +29,7 @@ pub use rpc;
 #[cfg(not(target_arch = "wasm32"))]
 pub use rpc::keys;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod runtime;
+pub mod services;
 
 // Re-export capnp schema modules from the membrane crate so host code can
 // use `crate::system_capnp`, `crate::routing_capnp`, `crate::stem_capnp`, etc.

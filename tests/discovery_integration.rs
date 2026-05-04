@@ -18,7 +18,7 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use ww::greeter_capnp;
 use ww::rpc::{CachePolicy, NetworkState};
-use ww::runtime::{ExecutorPool, SpawnRequest};
+use ww::services::{ExecutorPool, SpawnRequest};
 
 const DISCOVERY_WASM_PATH: &str = "examples/discovery/bin/discovery.wasm";
 

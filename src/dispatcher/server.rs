@@ -37,7 +37,7 @@ pub struct WagiService {
     pub registry: RouteRegistry,
 }
 
-impl crate::runtime::Service for WagiService {
+impl crate::services::Service for WagiService {
     fn run(self, mut shutdown: watch::Receiver<()>) -> anyhow::Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
