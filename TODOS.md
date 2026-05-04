@@ -1,5 +1,13 @@
 # TODOs
 
+## Document deployment pipeline + ww-master infra (doc/deployment.md)
+**What:** Write `doc/deployment.md` capturing the end-to-end deployment pipeline: how a wetware/ww commit becomes a running pod on ww-master.wetware.run. Include ASCII diagrams for: (a) CI publish flow (build matrix → wasm-artifacts → IPFS publish → IPNS update at `k51qzi5uqu5dg9eci41ad4b1wyf9kocngntfviq12qjuvusra3nt94xlx98me1`), (b) image build/deploy flow (Containerfile.deploy → ghcr.io image → `kubectl set image` rollout), (c) ww-master mount/layer model (kernel + shell + IPNS-loaded examples merged at `/`), (d) HTTP request path (Traefik → ww-master :2080 → CGI dispatch → cell `etc/init.d/*.glia` registered route).
+**Why:** Surfaced during the snap-hello-rs deploy: the deployment.yaml on disk had IPNS args that had never been `kubectl apply`'d, the IPNS publish layout had never been intended to support `/ipns/.../examples/<name>` mount paths, and `/ipns/` mount paths crashed the daemon (Bug A in the lthibault/ipns-mount-fix branch). Multiple drift points across two repos (wetware/ww + Infra/wetware) with no central documentation. Future operators (and future Louis) shouldn't have to reverse-engineer this.
+**Context:** Per-user direction: "Once we get this working / perma-fixed, would be nice to ensure our deployment pipeline is documented somewhere (ideally with appropriate diagrams). Somewhere under doc/ would seem like the appropriate place." Should reference the existing `doc/architecture.md`, `doc/capabilities.md`, and `doc/cli.md`. Keep ASCII diagrams in the "complex flow" sections per project convention (also seen in the design docs at `~/.gstack/projects/wetware-ww/`).
+**Effort:** S-M
+**Priority:** P2
+**Depends on:** lthibault/ipns-mount-fix branch landed + ww-master deploy verified working
+
 ## Snap v1 — JFS verify + POST + viewer-aware (separate follow-up branch)
 **What:** The deferred half of the Farcaster Snap protocol. Parse `X-Snap-Payload` header, JFS-verify the Ed25519 signature over canonical JSON, extract viewer FID, render personalized response (`Hello, @{handle}`). Add POST handler for button presses (`submit` action), 5s timeout per spec. JFS verification lives at the listener level so future Glia handlers (separate effort) inherit verified-FID context for free.
 **Why:** v0 POC says "Hello, @stranger" to everyone. v1 makes the snap viewer-aware, which is required for any non-trivial use case (counters, forms, anything interactive). Originally promoted to "Phase 1.5 in same PR" then demoted back to a follow-up after user re-anchored: "Overall priority is to ship a proof of concept that snaps can be hosted on ww."

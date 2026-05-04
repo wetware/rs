@@ -540,11 +540,33 @@ jobs:
         cp artifacts/wasm-artifacts/std/mcp/bin/main.wasm      "$STAGE/bin/mcp.wasm"
         cp artifacts/wasm-artifacts/std/status/bin/status.wasm "$STAGE/bin/status.wasm"
 
-        # Example WASM cells
+        # Example WASM cells (flat, for reference / convenience).
         for example_dir in artifacts/wasm-artifacts/examples/*/bin; do
           if [ -d "$example_dir" ]; then
             name=$(basename "$(dirname "$example_dir")")
             cp "$example_dir"/*.wasm "$STAGE/bin/${name}.wasm" 2>/dev/null || true
+          fi
+        done
+
+        # Per-example cell-shaped subtrees: enables `ww run /ipns/<key>/examples/<name>`
+        # (or `/ipfs/<cid>/examples/<name>`) to mount the cell as a layer.
+        # Each subtree mirrors the kernel/shell `<name>/{etc/init.d,bin}/`
+        # convention so init.d glia files end up at the merged tree's
+        # /etc/init.d/ where the kernel discovers them
+        # (std/kernel/src/lib.rs:1148-1188), and `(load "bin/<name>.wasm")`
+        # resolves relative to the merged tree root.
+        for example_dir in artifacts/wasm-artifacts/examples/*/bin; do
+          if [ -d "$example_dir" ]; then
+            name=$(basename "$(dirname "$example_dir")")
+            mkdir -p "$STAGE/examples/$name/bin"
+            cp "$example_dir"/*.wasm "$STAGE/examples/$name/bin/" 2>/dev/null || true
+          fi
+        done
+        for ex_etc in examples/*/etc; do
+          if [ -d "$ex_etc/init.d" ]; then
+            name=$(basename "$(dirname "$ex_etc")")
+            mkdir -p "$STAGE/examples/$name/etc/init.d"
+            cp "$ex_etc/init.d"/*.glia "$STAGE/examples/$name/etc/init.d/" 2>/dev/null || true
           fi
         done
 
