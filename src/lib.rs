@@ -7,6 +7,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cell;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod cell_launcher;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod daemon_config;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod discovery;

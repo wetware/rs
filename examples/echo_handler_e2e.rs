@@ -15,7 +15,8 @@
 
 use tokio::sync::mpsc;
 
-use ww::rpc::{create_runtime_client, CachePolicy, NetworkState};
+use ww::cell_launcher::create_runtime_client;
+use ww::rpc::{CachePolicy, NetworkState};
 use ww::system_capnp;
 
 const ECHO_WASM: &[u8] = include_bytes!("echo/bin/echo.wasm");

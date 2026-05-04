@@ -53,7 +53,7 @@ async fn spawn_shell_on_pool(pool: &ExecutorPool) -> Result<shell_capnp::shell::
                 };
                 let stream_control = libp2p_stream::Behaviour::new().new_control();
 
-                let runtime = ww::rpc::create_runtime_client(
+                let runtime = ww::cell_launcher::create_runtime_client(
                     network_state,
                     swarm_tx,
                     false,
