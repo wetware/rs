@@ -222,11 +222,35 @@ async fn snap_cell_with_snap_accept_returns_snap_json_and_required_headers() {
             let json: serde_json::Value = serde_json::from_str(body)
                 .unwrap_or_else(|e| panic!("response should parse as JSON: {e}\nbody: {body}"));
             assert_eq!(json["version"], "2.0");
-            assert_eq!(json["ui"]["root"], "greeting");
+            // v1.5: root is a stack containing [greeting, ping_button]
+            assert_eq!(json["ui"]["root"], "root");
+            assert_eq!(json["ui"]["elements"]["root"]["type"], "stack");
+            let children = json["ui"]["elements"]["root"]["children"]
+                .as_array()
+                .expect("stack root must have children array");
+            assert_eq!(children.len(), 2);
             assert_eq!(json["ui"]["elements"]["greeting"]["type"], "text");
             assert_eq!(
                 json["ui"]["elements"]["greeting"]["props"]["content"],
                 "Hello, @stranger"
+            );
+            assert_eq!(json["ui"]["elements"]["ping_button"]["type"], "button");
+            assert_eq!(
+                json["ui"]["elements"]["ping_button"]["props"]["label"],
+                "Ping me"
+            );
+            assert_eq!(
+                json["ui"]["elements"]["ping_button"]["on"]["press"]["action"],
+                "submit"
+            );
+            // Target URL derived from Host header (none set in this test
+            // request -> falls back to the cell's hardcoded default
+            // master.wetware.run, which is fine here).
+            assert!(
+                json["ui"]["elements"]["ping_button"]["on"]["press"]["params"]["target"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("https://") && t.ends_with("/snaps/hello")),
+                "submit target must be an https /snaps/hello URL"
             );
         })
         .await;
@@ -376,12 +400,12 @@ async fn snap_cell_with_verified_jfs_renders_fid_aware_greeting() {
         .await;
 }
 
-/// POST request returns the same snap-JSON UI tree (the snap spec's
-/// submit-action contract: server returns the next UI state). v1
-/// just acks the submit; future versions would mutate state from
-/// `payload.inputs`.
+/// POST request returns the snap-JSON UI tree with a fresh timestamp
+/// (the snap spec's submit-action contract: server returns the next
+/// UI state). v1.5 adds `— pinged at <unix> UTC` to the greeting so
+/// each click visibly mutates the rendered text.
 #[tokio::test(flavor = "current_thread")]
-async fn snap_cell_post_returns_snap_ack() {
+async fn snap_cell_post_returns_snap_ack_with_timestamp() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !snap_wasm_exists() {
         eprintln!(
@@ -409,11 +433,86 @@ async fn snap_cell_post_returns_snap_ack() {
                 Some(SNAP_TYPE),
                 "POST ack must use the snap media type"
             );
+            // POST is per-viewer (stamped with verified FID + timestamp);
+            // must NOT be cacheable upstream.
+            assert_eq!(
+                find_header(&resp, "Cache-Control"),
+                Some("private, no-store"),
+                "POST responses are per-viewer; must be no-store"
+            );
             let body = std::str::from_utf8(&resp.body).expect("UTF-8 body");
             let json: serde_json::Value =
                 serde_json::from_str(body).expect("POST body must parse as snap JSON");
             assert_eq!(json["version"], "2.0");
-            assert_eq!(json["ui"]["root"], "greeting");
+            assert_eq!(json["ui"]["root"], "root");
+            // Anonymous POST (no JFS verified): greeting still includes
+            // the timestamp marker even without a FID.
+            let content = json["ui"]["elements"]["greeting"]["props"]["content"]
+                .as_str()
+                .expect("greeting content must be a string");
+            assert!(
+                content.starts_with("Hello, @stranger — pinged at "),
+                "anonymous POST should still timestamp; got {content:?}"
+            );
+            assert!(
+                content.ends_with(" UTC (unix)"),
+                "POST timestamp suffix expected; got {content:?}"
+            );
+        })
+        .await;
+}
+
+/// POST with a JFS-verified payload renders `Hello, FID #N — pinged
+/// at <ts>`. Combines viewer-awareness with the v1.5 timestamp
+/// dynamism — this is the path real Farcaster client button-presses
+/// will exercise.
+#[tokio::test(flavor = "current_thread")]
+async fn snap_cell_post_with_verified_jfs_renders_fid_and_timestamp() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !snap_wasm_exists() {
+        eprintln!(
+            "skipping: {SNAP_WASM_PATH} not built (run `make -C examples/snap-hello-rs` first)"
+        );
+        return;
+    }
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let tx = register_snap_route().await;
+
+            let verified = ww::rpc::jfs::VerifiedJfs {
+                payload: ww::rpc::jfs::JfsPayload {
+                    fid: 7777,
+                    inputs: serde_json::json!({}),
+                    audience: "https://master.wetware.run".to_string(),
+                    timestamp: 1_700_000_000,
+                    user: serde_json::json!({"fid": 7777}),
+                    surface: serde_json::json!({"type": "standalone"}),
+                },
+                payload_b64url: "stub-b64url-passthrough".to_string(),
+            };
+
+            let resp = dispatch_full(
+                &tx,
+                "POST",
+                vec![("Accept".into(), SNAP_TYPE.into())],
+                Vec::new(),
+                Some(verified),
+            )
+            .await;
+
+            assert_eq!(resp.status, 200);
+            let body = std::str::from_utf8(&resp.body).expect("UTF-8 body");
+            let json: serde_json::Value =
+                serde_json::from_str(body).expect("snap-JSON should parse");
+            let content = json["ui"]["elements"]["greeting"]["props"]["content"]
+                .as_str()
+                .expect("content must be a string");
+            assert!(
+                content.starts_with("Hello, FID #7777 — pinged at "),
+                "POST with verified JFS should render FID + timestamp; got {content:?}"
+            );
         })
         .await;
 }
