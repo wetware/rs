@@ -136,7 +136,9 @@ async fn dispatch(tx: &mpsc::Sender<CgiRequest>, headers: Vec<(String, String)>)
 #[tokio::test(flavor = "current_thread")]
 async fn snap_cell_with_snap_accept_returns_snap_json_and_required_headers() {
     if !snap_wasm_exists() {
-        eprintln!("skipping: {SNAP_WASM_PATH} not built (run `make -C examples/snap-hello-rs` first)");
+        eprintln!(
+            "skipping: {SNAP_WASM_PATH} not built (run `make -C examples/snap-hello-rs` first)"
+        );
         return;
     }
 
@@ -191,7 +193,9 @@ async fn snap_cell_with_snap_accept_returns_snap_json_and_required_headers() {
 #[tokio::test(flavor = "current_thread")]
 async fn snap_cell_without_snap_accept_returns_html_with_link_alternate() {
     if !snap_wasm_exists() {
-        eprintln!("skipping: {SNAP_WASM_PATH} not built (run `make -C examples/snap-hello-rs` first)");
+        eprintln!(
+            "skipping: {SNAP_WASM_PATH} not built (run `make -C examples/snap-hello-rs` first)"
+        );
         return;
     }
 
@@ -247,7 +251,9 @@ async fn snap_cell_without_snap_accept_returns_html_with_link_alternate() {
 #[tokio::test(flavor = "current_thread")]
 async fn snap_cell_with_empty_accept_returns_html_fallback() {
     if !snap_wasm_exists() {
-        eprintln!("skipping: {SNAP_WASM_PATH} not built (run `make -C examples/snap-hello-rs` first)");
+        eprintln!(
+            "skipping: {SNAP_WASM_PATH} not built (run `make -C examples/snap-hello-rs` first)"
+        );
         return;
     }
 
