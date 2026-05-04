@@ -7,10 +7,6 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cell;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod cell_executor;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod cell_launcher;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod daemon_config;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod discovery;
@@ -18,6 +14,8 @@ pub mod discovery;
 pub mod dispatcher;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod epoch;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod executor;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod fs_intercept;
 #[cfg(not(target_arch = "wasm32"))]
@@ -28,6 +26,8 @@ pub mod image;
 pub mod ipfs;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod keys;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod launcher;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod loaders;
 #[cfg(not(target_arch = "wasm32"))]
@@ -81,4 +81,4 @@ pub use glia;
 #[cfg(not(target_arch = "wasm32"))]
 pub use cell::{Loader, Proc, ProcBuilder};
 #[cfg(not(target_arch = "wasm32"))]
-pub use cell_executor::{Cell, CellBuilder, SpawnResult};
+pub use executor::{Cell, CellBuilder, SpawnResult};

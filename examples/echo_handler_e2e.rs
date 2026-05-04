@@ -15,7 +15,7 @@
 
 use tokio::sync::mpsc;
 
-use ww::cell_launcher::create_runtime_client;
+use ww::launcher::create_runtime_client;
 use ww::rpc::{CachePolicy, NetworkState};
 use ww::system_capnp;
 

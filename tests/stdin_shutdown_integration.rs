@@ -18,7 +18,7 @@ use capnp_rpc::RpcSystem;
 use tokio::sync::mpsc;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
-use ww::cell_launcher::create_runtime_client;
+use ww::launcher::create_runtime_client;
 use ww::rpc::{CachePolicy, NetworkState};
 use ww::system_capnp;
 

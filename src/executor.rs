@@ -551,7 +551,7 @@ impl Cell {
         // Create the Runtime singleton for this cell's worker thread.
         // The same client is cloned into every membrane graft on this worker,
         // so all child cells share the same compilation/executor cache.
-        let runtime_client = crate::cell_launcher::create_runtime_client(
+        let runtime_client = crate::launcher::create_runtime_client(
             network_state.clone(),
             swarm_cmd_tx.clone(),
             wasm_debug,

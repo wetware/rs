@@ -56,7 +56,7 @@ async fn spawn_greeter_on_pool(
                 };
                 let stream_control = libp2p_stream::Behaviour::new().new_control();
 
-                let runtime = ww::cell_launcher::create_runtime_client(
+                let runtime = ww::launcher::create_runtime_client(
                     network_state,
                     swarm_tx,
                     false,

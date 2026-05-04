@@ -23,8 +23,8 @@
 
 use tokio::sync::{mpsc, oneshot, watch};
 
-use ww::cell_launcher::create_runtime_client;
 use ww::dispatcher::server::{new_registry, CgiRequest};
+use ww::launcher::create_runtime_client;
 use ww::rpc::{CachePolicy, NetworkState};
 use ww::system_capnp;
 
