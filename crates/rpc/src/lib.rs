@@ -4,14 +4,17 @@
 //! streams (no TCP listener). See [`build_peer_rpc`] for the entry point.
 #![cfg(not(target_arch = "wasm32"))]
 
+pub mod dispatch;
 pub mod http_client;
 pub mod http_listener;
+pub mod keys;
 pub mod membrane;
 pub mod routing;
 pub mod stream_dialer;
 pub mod stream_listener;
 pub mod vat_client;
 pub mod vat_listener;
+pub mod wagi;
 
 use std::sync::Arc;
 
@@ -26,10 +29,33 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use ::membrane::EpochGuard;
 
-use libp2p::StreamProtocol;
+use libp2p::{Multiaddr, PeerId, StreamProtocol};
+use tokio::sync::oneshot;
 
-use crate::host::SwarmCommand;
-use crate::system_capnp;
+use ::membrane::system_capnp;
+
+/// Commands sent from vat cells to the swarm event loop.
+pub enum SwarmCommand {
+    Connect {
+        peer_id: PeerId,
+        addrs: Vec<Multiaddr>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Announce this Wetware node as a provider for the given DHT key
+    /// (multihash bytes of a CID) on the Amino Kademlia DHT.
+    KadProvide {
+        key: Vec<u8>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Find providers for the given DHT key (multihash bytes of a CID).
+    ///
+    /// Providers are sent over the unbounded channel as they are discovered.
+    /// The channel is closed when the query completes.
+    KadFindProviders {
+        key: Vec<u8>,
+        reply: mpsc::UnboundedSender<PeerInfo>,
+    },
+}
 
 /// Derive a content-addressed protocol ID from canonical schema bytes.
 ///
@@ -134,11 +160,11 @@ pub(crate) fn decode_cell_section(wasm_bytes: &[u8]) -> Result<Option<CellType>,
     )
     .map_err(|e| capnp::Error::failed(format!("failed to decode cell.capnp section: {e}")))?;
 
-    let cell: crate::cell_capnp::cell::Reader = message
+    let cell: ::membrane::cell_capnp::cell::Reader = message
         .get_root()
         .map_err(|e| capnp::Error::failed(format!("failed to read Cell root: {e}")))?;
 
-    use crate::cell_capnp::cell::Which;
+    use ::membrane::cell_capnp::cell::Which;
     match cell.which() {
         Ok(Which::Raw(text)) => {
             let protocol_id = text?.to_string()?;
@@ -270,7 +296,7 @@ impl NetworkState {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum StreamMode {
+pub enum StreamMode {
     ReadOnly,
     WriteOnly,
     Bidirectional,
@@ -282,7 +308,7 @@ pub struct ByteStreamImpl {
 }
 
 impl ByteStreamImpl {
-    pub(crate) fn new(stream: io::DuplexStream, mode: StreamMode) -> Self {
+    pub fn new(stream: io::DuplexStream, mode: StreamMode) -> Self {
         Self {
             stream: Arc::new(Mutex::new(stream)),
             mode,
@@ -382,7 +408,7 @@ pub struct ProcessImpl {
 }
 
 impl ProcessImpl {
-    pub(crate) fn new(
+    pub fn new(
         stdin: system_capnp::byte_stream::Client,
         stdout: system_capnp::byte_stream::Client,
         stderr: system_capnp::byte_stream::Client,
@@ -399,7 +425,7 @@ impl ProcessImpl {
         }
     }
 
-    pub(crate) fn with_bootstrap(
+    pub fn with_bootstrap(
         stdin: system_capnp::byte_stream::Client,
         stdout: system_capnp::byte_stream::Client,
         stderr: system_capnp::byte_stream::Client,
@@ -498,7 +524,7 @@ pub struct HostImpl {
     wasm_debug: bool,
     guard: Option<EpochGuard>,
     stream_control: Option<libp2p_stream::Control>,
-    route_registry: Option<crate::dispatcher::server::RouteRegistry>,
+    route_registry: Option<crate::dispatch::RouteRegistry>,
 }
 
 impl HostImpl {
@@ -520,10 +546,7 @@ impl HostImpl {
     }
 
     /// Set the HTTP route registry for WAGI service integration.
-    pub fn with_route_registry(
-        mut self,
-        registry: crate::dispatcher::server::RouteRegistry,
-    ) -> Self {
+    pub fn with_route_registry(mut self, registry: crate::dispatch::RouteRegistry) -> Self {
         self.route_registry = Some(registry);
         self
     }
@@ -628,7 +651,7 @@ impl system_capnp::host::Server for HostImpl {
         let registry = self
             .route_registry
             .clone()
-            .unwrap_or_else(crate::dispatcher::server::new_registry);
+            .unwrap_or_else(crate::dispatch::new_registry);
         let http_listener: system_capnp::http_listener::Client =
             capnp_rpc::new_client(http_listener::HttpListenerImpl::new(guard, registry));
         results.get().set_stream_listener(stream_listener);

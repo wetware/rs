@@ -7,6 +7,7 @@ members = [
     "crates/cell",
     "crates/ipfs",
     "crates/membrane",
+    "crates/rpc",
     "crates/schema-id",
     "crates/stem",
     "crates/guest/auth",
@@ -58,19 +59,19 @@ blake3 = "1.8.3"
 libp2p = { version = "0.55.0", features = ["tokio", "tcp", "noise", "yamux", "macros", "identify", "rsa", "request-response", "ed25519", "kad", "autonat", "relay", "dcutr", "quic", "dns"] }
 libp2p-core = "0.43"
 ipfs = { path = "crates/ipfs" }
-reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
 clap = { version = "4.5.51", features = ["derive", "env"] }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 nix = { version = "0.30.1", features = ["socket"] }
 wasmtime = { version = "40.0.0", features = ["call-hook"] }
 capnp = "0.25.3"
 capnp-rpc = "0.25.0"
+libp2p-stream = "0.3.0-alpha"
 membrane = { path = "crates/membrane" }
 atom = { path = "crates/atom" }
 stem = { path = "crates/stem" }
 cache = { path = "crates/cache" }
 cell = { path = "crates/cell" }
-libp2p-stream = "0.3.0-alpha"
+rpc = { path = "crates/rpc" }
 blake3 = "1"
 cid = "0.11"
 hex = "0.4"
@@ -79,7 +80,6 @@ axum = "0.8"
 rustyline = "15"
 dirs = "5"
 indicatif = "0.17"
-wasmparser = "0.243"
 
 [[bin]]
 name = "ww"
@@ -89,6 +89,7 @@ path = "src/cli/main.rs"
 schema-id = { path = "crates/schema-id" }
 wasm-encoder = "0.243"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
 
 [[bench]]
 name = "streams"

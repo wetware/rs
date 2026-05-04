@@ -170,7 +170,7 @@ pub fn new_stream_metrics() -> StreamMetricsRegistry {
 #[derive(Clone)]
 struct AdminState {
     peer_id: String,
-    network_state: crate::rpc::NetworkState,
+    network_state: rpc::NetworkState,
     fuel_registry: FuelRegistry,
     rpc_metrics: RpcMetricsRegistry,
     cache_metrics: CacheMetricsRegistry,
@@ -367,7 +367,7 @@ async fn host_addrs_handler(State(state): State<AdminState>) -> impl IntoRespons
 pub struct AdminService {
     pub listen_addr: SocketAddr,
     pub peer_id: String,
-    pub network_state: crate::rpc::NetworkState,
+    pub network_state: rpc::NetworkState,
     pub fuel_registry: FuelRegistry,
     pub rpc_metrics: RpcMetricsRegistry,
     pub cache_metrics: CacheMetricsRegistry,
@@ -424,7 +424,7 @@ mod tests {
     fn test_state() -> AdminState {
         AdminState {
             peer_id: "12D3KooWTestPeerId".to_string(),
-            network_state: crate::rpc::NetworkState::new(),
+            network_state: rpc::NetworkState::new(),
             fuel_registry: new_fuel_registry(),
             rpc_metrics: new_rpc_metrics(),
             cache_metrics: new_cache_metrics(),

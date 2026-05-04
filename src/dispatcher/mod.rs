@@ -19,7 +19,7 @@
 //! // resource-constrained environments where execution mode matters.
 
 pub mod server;
-pub mod wagi;
+pub use rpc::wagi;
 
 use std::fmt;
 

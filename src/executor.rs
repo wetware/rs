@@ -14,9 +14,9 @@ use tokio::task::JoinHandle;
 use tracing::info;
 
 use crate::host::SwarmCommand;
-use crate::rpc::membrane::GuestMembrane;
-use crate::rpc::NetworkState;
 use cell::{proc::DataStreamHandles, Loader, ProcBuilder};
+use rpc::membrane::GuestMembrane;
+use rpc::NetworkState;
 
 const CAPNP_PROTOCOL: StreamProtocol = StreamProtocol::new("/ww/0.1.0");
 
@@ -70,7 +70,7 @@ pub struct CellBuilder {
     epoch_rx: Option<watch::Receiver<Epoch>>,
     signing_key: Option<Arc<SigningKey>>,
     route_registry: Option<crate::dispatcher::server::RouteRegistry>,
-    cache_policy: crate::rpc::CachePolicy,
+    cache_policy: rpc::CachePolicy,
     /// Shared IPFS pin/content cache for CidTree file materialization.
     /// Every spawn turns this into a `CacheMode::Shared(pinset)` on the
     /// ProcBuilder — the inner cache is the host-wide pinset.
@@ -100,7 +100,7 @@ impl CellBuilder {
             epoch_rx: None,
             signing_key: None,
             route_registry: None,
-            cache_policy: crate::rpc::CachePolicy::default(),
+            cache_policy: rpc::CachePolicy::default(),
             pinset_cache: None,
             suppress_stdin: false,
             ipfs_client: None,
@@ -214,7 +214,7 @@ impl CellBuilder {
     /// Set the cache policy for the Runtime created on this cell's worker thread.
     ///
     /// Default is `Shared` — same WASM bytes produce the same Executor server.
-    pub fn with_cache_policy(mut self, policy: crate::rpc::CachePolicy) -> Self {
+    pub fn with_cache_policy(mut self, policy: rpc::CachePolicy) -> Self {
         self.cache_policy = policy;
         self
     }
@@ -302,7 +302,7 @@ pub struct Cell {
     pub epoch_rx: Option<watch::Receiver<Epoch>>,
     pub signing_key: Option<Arc<SigningKey>>,
     pub route_registry: Option<crate::dispatcher::server::RouteRegistry>,
-    pub cache_policy: crate::rpc::CachePolicy,
+    pub cache_policy: rpc::CachePolicy,
     /// Shared IPFS pin/content cache for CidTree content materialization.
     /// Required when `cid_tree` is set; spawn wraps this in a
     /// `CacheMode::Shared` on the ProcBuilder so fs_intercept can fetch
@@ -567,7 +567,7 @@ impl Cell {
         // Clone epoch receiver for Terminal auth before it's moved into the RPC system.
         let terminal_epoch_rx = epoch_rx.clone();
 
-        let (rpc_system, guest_membrane) = crate::rpc::membrane::build_membrane_rpc(
+        let (rpc_system, guest_membrane) = rpc::membrane::build_membrane_rpc(
             reader,
             writer,
             network_state,
@@ -728,8 +728,8 @@ mod tests {
     #[tokio::test]
     async fn spawn_without_cid_tree_returns_documented_error() {
         use crate::host::SwarmCommand;
-        use crate::rpc::NetworkState;
         use cell::loaders::HostPathLoader;
+        use rpc::NetworkState;
         use tokio::sync::mpsc;
 
         let (swarm_tx, _swarm_rx) = mpsc::channel::<SwarmCommand>(1);

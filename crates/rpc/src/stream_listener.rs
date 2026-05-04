@@ -5,14 +5,14 @@
 //! process (via the guest-provided `Executor`) with stdin/stdout wired to the
 //! stream — the cell speaks whatever wire protocol it wants over stdio.
 
+use ::membrane::EpochGuard;
 use capnp::capability::Promise;
 use capnp_rpc::pry;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use futures::StreamExt;
 use libp2p::StreamProtocol;
-use membrane::EpochGuard;
 
-use crate::system_capnp;
+use ::membrane::system_capnp;
 
 pub struct StreamListenerImpl {
     stream_control: libp2p_stream::Control,

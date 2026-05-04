@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use ::membrane::{stem_capnp, Epoch, EpochGuard, GraftBuilder, MembraneServer};
 use capnp::capability::Promise;
 use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
@@ -19,15 +20,14 @@ use capnp_rpc::RpcSystem;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use libp2p::identity::Keypair;
 use libp2p_core::SignedEnvelope;
-use membrane::{stem_capnp, Epoch, EpochGuard, GraftBuilder, MembraneServer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::host::SwarmCommand;
-use crate::http_capnp;
-use crate::routing_capnp;
-use crate::system_capnp;
+use crate::SwarmCommand;
+use ::membrane::http_capnp;
+use ::membrane::routing_capnp;
+use ::membrane::system_capnp;
 use auth::SigningDomain;
 
 use super::NetworkState;
@@ -188,7 +188,7 @@ pub struct HostGraftBuilder {
     signing_key: Option<Arc<SigningKey>>,
     stream_control: libp2p_stream::Control,
     allowed_hosts: Vec<String>,
-    route_registry: Option<crate::dispatcher::server::RouteRegistry>,
+    route_registry: Option<crate::dispatch::RouteRegistry>,
     /// Pre-created Runtime client (singleton — same backend for every graft).
     runtime_client: system_capnp::runtime::Client,
     /// Named capabilities from init.d `with` block, forwarded to the child
@@ -199,7 +199,7 @@ pub struct HostGraftBuilder {
     /// emit a warning).
     extras: Vec<(String, capnp::capability::Client, Vec<u8>)>,
     /// IPFS HTTP client for Kubo API calls (e.g. IPNS resolution).
-    ipfs_client: crate::ipfs::HttpClient,
+    ipfs_client: ipfs::HttpClient,
 }
 
 impl HostGraftBuilder {
@@ -212,7 +212,7 @@ impl HostGraftBuilder {
         stream_control: libp2p_stream::Control,
         allowed_hosts: Vec<String>,
         runtime_client: system_capnp::runtime::Client,
-        ipfs_client: crate::ipfs::HttpClient,
+        ipfs_client: ipfs::HttpClient,
     ) -> Self {
         Self {
             network_state,
@@ -229,10 +229,7 @@ impl HostGraftBuilder {
     }
 
     /// Set the HTTP route registry for WAGI integration.
-    pub fn with_route_registry(
-        mut self,
-        registry: crate::dispatcher::server::RouteRegistry,
-    ) -> Self {
+    pub fn with_route_registry(mut self, registry: crate::dispatch::RouteRegistry) -> Self {
         self.route_registry = Some(registry);
         self
     }
@@ -403,7 +400,7 @@ pub(super) fn bytes_to_aligned_words(bytes: &[u8]) -> Vec<capnp::Word> {
 /// When a guest calls `runtime::serve(my_membrane, ...)`, the host
 /// captures it here. The host can then re-serve it to external peers,
 /// allowing the guest to attenuate or enrich the capability surface it exposes.
-pub type GuestMembrane = membrane::stem_capnp::membrane::Client;
+pub type GuestMembrane = ::membrane::stem_capnp::membrane::Client;
 
 /// Build an RPC system that bootstraps a `Membrane` instead of a bare `Host`.
 ///
@@ -428,10 +425,10 @@ pub fn build_membrane_rpc<R, W>(
     epoch_rx: watch::Receiver<Epoch>,
     signing_key: Option<Arc<SigningKey>>,
     stream_control: libp2p_stream::Control,
-    route_registry: Option<crate::dispatcher::server::RouteRegistry>,
+    route_registry: Option<crate::dispatch::RouteRegistry>,
     runtime_client: system_capnp::runtime::Client,
     extras: Vec<(String, capnp::capability::Client, Vec<u8>)>,
-    ipfs_client: crate::ipfs::HttpClient,
+    ipfs_client: ipfs::HttpClient,
     http_dial: Vec<String>,
 ) -> (RpcSystem<Side>, GuestMembrane)
 where
@@ -475,8 +472,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ::membrane::{Epoch, Provenance};
     use ed25519_dalek::Signer;
-    use membrane::{Epoch, Provenance};
 
     /// Generate a random Ed25519 signing key (compatible with the rand version
     /// used by the root crate, which may differ from ed25519_dalek's rand_core).
@@ -975,8 +972,7 @@ mod tests {
             let node: capnp::schema_capnp::node::Reader = reader.get_root().expect("node");
 
             // ...then re-canonicalize via the wire-side helper and compare.
-            let recovered =
-                crate::rpc::canonicalize_schema_node(node).expect("canonicalize succeeds");
+            let recovered = crate::canonicalize_schema_node(node).expect("canonicalize succeeds");
             assert_eq!(
                 canonical,
                 &recovered[..],

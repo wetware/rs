@@ -19,15 +19,15 @@ pub mod host;
 #[cfg(not(target_arch = "wasm32"))]
 pub use ipfs;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod keys;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod launcher;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod metrics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ns;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod rpc;
+pub use rpc;
+#[cfg(not(target_arch = "wasm32"))]
+pub use rpc::keys;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runtime;
 

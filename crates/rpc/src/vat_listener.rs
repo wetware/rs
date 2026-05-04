@@ -16,6 +16,7 @@
 //!
 //! This is the capability-mode counterpart of `StreamListener` (byte-stream mode).
 
+use ::membrane::EpochGuard;
 use capnp::capability::Promise;
 use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
@@ -23,9 +24,8 @@ use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use futures::StreamExt;
-use membrane::EpochGuard;
 
-use crate::system_capnp;
+use ::membrane::system_capnp;
 
 pub struct VatListenerImpl {
     stream_control: libp2p_stream::Control,
@@ -235,7 +235,7 @@ pub async fn handle_vat_connection_spawn(
             let mut entry = caps_builder.reborrow().get(i as u32);
             entry.set_name(name);
             if !schema_bytes.is_empty() {
-                let aligned = crate::rpc::membrane::bytes_to_aligned_words(schema_bytes);
+                let aligned = crate::membrane::bytes_to_aligned_words(schema_bytes);
                 let segments: &[&[u8]] = &[capnp::Word::words_to_bytes(&aligned)];
                 let segment_array = capnp::message::SegmentArray::new(segments);
                 let reader = capnp::message::Reader::new(

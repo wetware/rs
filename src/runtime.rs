@@ -404,7 +404,7 @@ fn worker_loop(
 // ---------------------------------------------------------------------------
 
 use crate::host::{KuboBootstrapInfo, SwarmCommand};
-use crate::rpc::NetworkState;
+use rpc::NetworkState;
 
 // Re-export WagiService so cli/main.rs can use `ww::runtime::WagiService`.
 pub use crate::dispatcher::server::WagiService;
