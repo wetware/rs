@@ -6,7 +6,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-pub mod executor;
 pub mod proc;
 pub mod streams;
 pub mod swappable;
@@ -14,7 +13,6 @@ pub mod swappable;
 #[cfg(test)]
 mod streams_test;
 
-pub use executor::{Cell, CellBuilder, SpawnResult};
 pub use proc::{Builder as ProcBuilder, Proc};
 
 /// Trait for loading bytecode from various sources (IPFS, filesystem, etc.)

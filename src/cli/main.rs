@@ -11,7 +11,7 @@ use libp2p::Multiaddr;
 
 mod shell;
 
-use ww::cell::CellBuilder;
+use ww::cell_executor::CellBuilder;
 use ww::host;
 use ww::image;
 use ww::ipfs;

@@ -7,6 +7,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cell;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod cell_executor;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod cell_launcher;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod daemon_config;
@@ -78,3 +80,5 @@ pub use glia;
 // Re-export commonly used types for convenience
 #[cfg(not(target_arch = "wasm32"))]
 pub use cell::{Loader, Proc, ProcBuilder};
+#[cfg(not(target_arch = "wasm32"))]
+pub use cell_executor::{Cell, CellBuilder, SpawnResult};
