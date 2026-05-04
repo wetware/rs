@@ -19,7 +19,7 @@ use anyhow::Result;
 use tokio::sync::{mpsc, watch};
 use wasmtime::Engine;
 
-use crate::sched::EPOCH_TICK_MS;
+use cell::sched::EPOCH_TICK_MS;
 
 // ---------------------------------------------------------------------------
 // Service trait
@@ -404,12 +404,12 @@ fn worker_loop(
 // ---------------------------------------------------------------------------
 
 use crate::host::{KuboBootstrapInfo, SwarmCommand};
-use crate::rpc::NetworkState;
+use rpc::NetworkState;
 
-// Re-export WagiService so cli/main.rs can use `ww::runtime::WagiService`.
+// Re-export WagiService so cli/main.rs can use `ww::services::WagiService`.
 pub use crate::dispatcher::server::WagiService;
 
-// Re-export AdminService so cli/main.rs can use `ww::runtime::AdminService`.
+// Re-export AdminService so cli/main.rs can use `ww::services::AdminService`.
 pub use crate::metrics::AdminService;
 
 /// Parameters for constructing a [`Libp2pHost`] inside the swarm thread.
@@ -497,7 +497,7 @@ pub struct EpochService {
     pub epoch_tx: watch::Sender<Epoch>,
     pub confirmation_depth: u64,
     pub ipfs_client: crate::ipfs::HttpClient,
-    pub cid_tree: Option<std::sync::Arc<crate::vfs::CidTree>>,
+    pub cid_tree: Option<std::sync::Arc<cell::vfs::CidTree>>,
     /// Graceful shutdown: capabilities have this long to finish before epoch advances.
     pub drain_duration: std::time::Duration,
 }
@@ -510,7 +510,7 @@ impl Service for EpochService {
         let _span = tracing::info_span!("epoch").entered();
         rt.block_on(async move {
             tokio::select! {
-                result = crate::epoch::run_epoch_pipeline(
+                result = cell::epoch::run_epoch_pipeline(
                     self.config,
                     self.epoch_tx,
                     self.confirmation_depth,

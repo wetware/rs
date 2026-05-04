@@ -18,7 +18,7 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use ww::greeter_capnp;
 use ww::rpc::{CachePolicy, NetworkState};
-use ww::runtime::{ExecutorPool, SpawnRequest};
+use ww::services::{ExecutorPool, SpawnRequest};
 
 const DISCOVERY_WASM_PATH: &str = "examples/discovery/bin/discovery.wasm";
 
@@ -56,7 +56,7 @@ async fn spawn_greeter_on_pool(
                 };
                 let stream_control = libp2p_stream::Behaviour::new().new_control();
 
-                let runtime = ww::rpc::create_runtime_client(
+                let runtime = ww::launcher::create_runtime_client(
                     network_state,
                     swarm_tx,
                     false,

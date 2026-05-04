@@ -12,7 +12,7 @@ use futures::StreamExt;
 use libp2p::StreamProtocol;
 use membrane::EpochGuard;
 
-use crate::system_capnp;
+use membrane::system_capnp;
 
 pub struct StreamListenerImpl {
     stream_control: libp2p_stream::Control,

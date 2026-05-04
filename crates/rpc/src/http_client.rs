@@ -8,7 +8,7 @@ use capnp::capability::Promise;
 use capnp_rpc::pry;
 use membrane::EpochGuard;
 
-use crate::http_capnp;
+use membrane::http_capnp;
 
 /// Epoch-guarded HTTP proxy that enforces domain scoping.
 ///

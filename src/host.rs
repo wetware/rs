@@ -15,7 +15,7 @@ use libp2p::{Multiaddr, PeerId, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::{Config as WasmConfig, Engine};
 
-use crate::rpc::{NatReachability, NetworkState, PeerInfo};
+use rpc::{NatReachability, NetworkState, PeerInfo};
 
 // ---------------------------------------------------------------------------
 // NAT traversal constants
@@ -169,28 +169,7 @@ pub struct KuboBootstrapInfo {
     pub addr: Multiaddr,
 }
 
-/// Commands sent from vat cells to the swarm event loop.
-pub enum SwarmCommand {
-    Connect {
-        peer_id: PeerId,
-        addrs: Vec<Multiaddr>,
-        reply: oneshot::Sender<Result<(), String>>,
-    },
-    /// Announce this Wetware node as a provider for the given DHT key
-    /// (multihash bytes of a CID) on the Amino Kademlia DHT.
-    KadProvide {
-        key: Vec<u8>,
-        reply: oneshot::Sender<Result<(), String>>,
-    },
-    /// Find providers for the given DHT key (multihash bytes of a CID).
-    ///
-    /// Providers are sent over the unbounded channel as they are discovered.
-    /// The channel is closed when the query completes.
-    KadFindProviders {
-        key: Vec<u8>,
-        reply: mpsc::UnboundedSender<PeerInfo>,
-    },
-}
+pub use rpc::SwarmCommand;
 
 /// Network behavior for Wetware hosts.
 #[derive(libp2p::swarm::NetworkBehaviour)]
@@ -229,7 +208,7 @@ impl Libp2pHost {
     /// any bind failure (port in use, IPv6 disabled, etc.) is a hard error.
     /// Callers wanting a subset (e.g. IPv4 only) should pass only those addrs.
     ///
-    /// `keypair` is the node's identity — load it with [`crate::keys::to_libp2p`]
+    /// `keypair` is the node's identity — load it with [`keys::to_libp2p`]
     /// or supply an ephemeral key for dev/test use.
     ///
     /// `kubo_bootstrap` is optional Kubo node info for bootstrapping the Kad

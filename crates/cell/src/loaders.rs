@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-use crate::cell::Loader;
-use crate::ipfs::{is_ipfs_path, HttpClient};
+use crate::Loader;
+use ipfs::{is_ipfs_path, HttpClient};
 use std::path::Path;
 
 /// IPFS loader that resolves bytecode via Kubo's `/api/v0/cat`.

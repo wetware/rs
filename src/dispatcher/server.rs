@@ -12,7 +12,6 @@
 //! them, spawns cells via `Executor`, and sends responses back.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -20,42 +19,9 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::any;
 use axum::Router;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{oneshot, watch};
 
-/// An HTTP request to be dispatched to a WASM cell.
-pub struct CgiRequest {
-    pub method: String,
-    pub path: String,
-    pub query: String,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-    /// JFS-verified `X-Snap-Payload` data, if the request carried a
-    /// valid one. `None` means no header, or verification failed
-    /// (currently logged-warn-and-drop in v1.0; v1.1 will return 4xx
-    /// per spec). Cells consume this through CGI env vars emitted by
-    /// `dispatcher::wagi::build_cgi_env`.
-    pub verified_snap: Option<crate::jfs::VerifiedJfs>,
-    pub response_tx: oneshot::Sender<CgiResponse>,
-}
-
-/// An HTTP response from a WASM cell.
-pub struct CgiResponse {
-    pub status: u16,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-}
-
-/// Sender half of the request channel. Stored in the route registry.
-/// `Send + Sync` because `mpsc::Sender` is `Send + Sync`.
-pub type RequestSender = mpsc::Sender<CgiRequest>;
-
-/// Shared route registry: path prefix → request channel sender.
-pub type RouteRegistry = Arc<RwLock<HashMap<String, RequestSender>>>;
-
-/// Create a new empty route registry.
-pub fn new_registry() -> RouteRegistry {
-    Arc::new(RwLock::new(HashMap::new()))
-}
+pub use rpc::dispatch::{new_registry, CgiRequest, CgiResponse, RequestSender, RouteRegistry};
 
 /// The axum HTTP server running on its own OS thread.
 ///
@@ -71,7 +37,7 @@ pub struct WagiService {
     pub registry: RouteRegistry,
 }
 
-impl crate::runtime::Service for WagiService {
+impl crate::services::Service for WagiService {
     fn run(self, mut shutdown: watch::Receiver<()>) -> anyhow::Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -206,20 +172,7 @@ fn error_response(status: StatusCode, msg: &str) -> Response {
         .unwrap()
 }
 
-/// Extract server name and port from Host header.
-pub fn extract_server_info(headers: &[(String, String)]) -> (String, u16) {
-    for (name, value) in headers {
-        if name.eq_ignore_ascii_case("host") {
-            if let Some(colon) = value.rfind(':') {
-                let host = &value[..colon];
-                let port = value[colon + 1..].parse().unwrap_or(80);
-                return (host.to_string(), port);
-            }
-            return (value.clone(), 80);
-        }
-    }
-    ("localhost".to_string(), 80)
-}
+pub use rpc::dispatch::extract_server_info;
 
 /// Find a header by name (case-insensitive). Returns the first match.
 fn find_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -252,7 +205,7 @@ fn derive_audience(headers: &[(String, String)]) -> Option<String> {
 /// any verification failure → `None` + `WARN` log. v1.1 will follow
 /// the spec's `MUST reject 4xx on malformed/expired/invalid` once Hub
 /// key verification ships in lockstep.
-fn verify_snap_payload(headers: &[(String, String)]) -> Option<crate::jfs::VerifiedJfs> {
+fn verify_snap_payload(headers: &[(String, String)]) -> Option<rpc::jfs::VerifiedJfs> {
     let payload = find_header(headers, "x-snap-payload")?;
     let audience = match derive_audience(headers) {
         Some(a) => a,
@@ -262,11 +215,11 @@ fn verify_snap_payload(headers: &[(String, String)]) -> Option<crate::jfs::Verif
         }
     };
     let now = chrono::Utc::now().timestamp();
-    match crate::jfs::verify(
+    match rpc::jfs::verify(
         payload,
         &audience,
         now,
-        crate::jfs::DEFAULT_TIMESTAMP_SKEW_SECS,
+        rpc::jfs::DEFAULT_TIMESTAMP_SKEW_SECS,
     ) {
         Ok(v) => {
             tracing::debug!(

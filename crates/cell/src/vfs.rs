@@ -19,7 +19,7 @@ use arc_swap::ArcSwap;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 
-use crate::ipfs;
+use ipfs;
 
 /// Maximum depth for symlink resolution to prevent infinite loops.
 const MAX_SYMLINK_DEPTH: usize = 16;

@@ -13,10 +13,10 @@ use capnp_rpc::pry;
 use cid::Cid;
 use tokio::sync::{mpsc, oneshot};
 
-use ::membrane::EpochGuard;
+use membrane::EpochGuard;
 
-use crate::host::SwarmCommand;
-use crate::routing_capnp;
+use crate::SwarmCommand;
+use membrane::routing_capnp;
 
 /// Convert a CID string to Kademlia record key bytes (multihash).
 ///
@@ -34,9 +34,8 @@ fn cid_to_kad_key(cid_str: &str) -> Result<Vec<u8>, capnp::Error> {
 /// Multiple nodes can share the same `LocalRouting` (via `Arc<Mutex<…>>`) to
 /// simulate provide/findProviders without network non-determinism.
 pub struct LocalRouting {
-    providers: std::sync::Arc<
-        std::sync::Mutex<std::collections::HashMap<String, Vec<crate::rpc::PeerInfo>>>,
-    >,
+    providers:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<crate::PeerInfo>>>>,
 }
 
 impl Default for LocalRouting {
@@ -60,7 +59,7 @@ impl LocalRouting {
     }
 
     /// Pre-seed a provider entry so `findProviders` returns it.
-    pub fn provide_as(&self, cid: &str, peer: crate::rpc::PeerInfo) {
+    pub fn provide_as(&self, cid: &str, peer: crate::PeerInfo) {
         let mut table = self.providers.lock().unwrap();
         table.entry(cid.to_string()).or_default().push(peer);
     }
@@ -136,14 +135,14 @@ impl routing_capnp::routing::Server for LocalRouting {
 pub struct RoutingImpl {
     swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
     guard: EpochGuard,
-    ipfs_client: crate::ipfs::HttpClient,
+    ipfs_client: ipfs::HttpClient,
 }
 
 impl RoutingImpl {
     pub fn new(
         swarm_cmd_tx: mpsc::Sender<SwarmCommand>,
         guard: EpochGuard,
-        ipfs_client: crate::ipfs::HttpClient,
+        ipfs_client: ipfs::HttpClient,
     ) -> Self {
         Self {
             swarm_cmd_tx,
@@ -264,8 +263,8 @@ impl routing_capnp::routing::Server for RoutingImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::SwarmCommand;
-    use crate::rpc::PeerInfo;
+    use crate::PeerInfo;
+    use crate::SwarmCommand;
     use capnp_rpc::rpc_twoparty_capnp::Side;
     use capnp_rpc::twoparty::VatNetwork;
     use capnp_rpc::RpcSystem;
@@ -304,7 +303,7 @@ mod tests {
         let routing_impl = RoutingImpl::new(
             swarm_tx,
             guard,
-            crate::ipfs::HttpClient::new("http://localhost:5001".into()),
+            ipfs::HttpClient::new("http://localhost:5001".into()),
         );
         let routing_server: routing_capnp::routing::Client = capnp_rpc::new_client(routing_impl);
 

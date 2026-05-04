@@ -24,8 +24,8 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use cid::Cid;
 
-use crate::ipfs;
 use crate::mount::Mount;
+use ipfs;
 
 // ── DAG merge via IPFS MFS ─────────────────────────────────────────
 

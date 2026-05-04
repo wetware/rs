@@ -39,7 +39,8 @@ use std::sync::Mutex;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use ww::dispatcher::server::{new_registry, CgiRequest, CgiResponse};
-use ww::rpc::{create_runtime_client, CachePolicy, NetworkState};
+use ww::launcher::create_runtime_client;
+use ww::rpc::{CachePolicy, NetworkState};
 use ww::system_capnp;
 
 /// Serialize tests within this file. Each test spins up its own
@@ -152,7 +153,7 @@ async fn dispatch_full(
     method: &str,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
-    verified_snap: Option<ww::jfs::VerifiedJfs>,
+    verified_snap: Option<ww::rpc::jfs::VerifiedJfs>,
 ) -> CgiResponse {
     let (response_tx, response_rx) = oneshot::channel();
     let cgi_req = CgiRequest {
@@ -342,8 +343,8 @@ async fn snap_cell_with_verified_jfs_renders_fid_aware_greeting() {
             // Synthesize a verified payload — the listener has already
             // done the JFS crypto check upstream; we're testing the
             // env-var passthrough + cell rendering.
-            let verified = ww::jfs::VerifiedJfs {
-                payload: ww::jfs::JfsPayload {
+            let verified = ww::rpc::jfs::VerifiedJfs {
+                payload: ww::rpc::jfs::JfsPayload {
                     fid: 12345,
                     inputs: serde_json::json!({}),
                     audience: "https://master.wetware.run".to_string(),

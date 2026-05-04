@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use crate::cell::proc::ComponentRunStates;
+use crate::proc::ComponentRunStates;
 use crate::vfs::{CidTree, ResolvedNode};
 use anyhow::Result;
 use wasmtime::component::{HasData, Linker, Resource};

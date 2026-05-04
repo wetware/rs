@@ -15,7 +15,8 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
-use ww::rpc::{create_runtime_client, CachePolicy, NetworkState};
+use ww::launcher::create_runtime_client;
+use ww::rpc::{CachePolicy, NetworkState};
 use ww::system_capnp;
 
 const ECHO_WASM_PATH: &str = "examples/echo/bin/echo.wasm";
