@@ -62,7 +62,7 @@ thread_local! {
 
 mod bindings {
     wit_bindgen::generate!({
-        path: "../../wit",
+        path: "../../crates/cell/wit",
         world: "guest-streams",
         with: {
             "wasi:io/error@0.2.9": wasip2::io::error,
