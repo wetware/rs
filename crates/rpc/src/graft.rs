@@ -11,7 +11,6 @@
 
 use std::sync::Arc;
 
-use ::membrane::{stem_capnp, Epoch, EpochGuard, GraftBuilder, MembraneServer};
 use capnp::capability::Promise;
 use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
@@ -20,15 +19,16 @@ use capnp_rpc::RpcSystem;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use libp2p::identity::Keypair;
 use libp2p_core::SignedEnvelope;
+use membrane::{stem_capnp, Epoch, EpochGuard, GraftBuilder, MembraneServer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::SwarmCommand;
-use ::membrane::http_capnp;
-use ::membrane::routing_capnp;
-use ::membrane::system_capnp;
 use auth::SigningDomain;
+use membrane::http_capnp;
+use membrane::routing_capnp;
+use membrane::system_capnp;
 
 use super::NetworkState;
 
@@ -400,7 +400,7 @@ pub(super) fn bytes_to_aligned_words(bytes: &[u8]) -> Vec<capnp::Word> {
 /// When a guest calls `runtime::serve(my_membrane, ...)`, the host
 /// captures it here. The host can then re-serve it to external peers,
 /// allowing the guest to attenuate or enrich the capability surface it exposes.
-pub type GuestMembrane = ::membrane::stem_capnp::membrane::Client;
+pub type GuestMembrane = membrane::stem_capnp::membrane::Client;
 
 /// Build an RPC system that bootstraps a `Membrane` instead of a bare `Host`.
 ///
@@ -472,8 +472,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ::membrane::{Epoch, Provenance};
     use ed25519_dalek::Signer;
+    use membrane::{Epoch, Provenance};
 
     /// Generate a random Ed25519 signing key (compatible with the rand version
     /// used by the root crate, which may differ from ed25519_dalek's rand_core).

@@ -23,7 +23,7 @@ use crate::host::SwarmCommand;
 use crate::system_capnp;
 use cell::proc::{Builder as ProcBuilder, FuelEstimator};
 use rpc::{
-    build_peer_rpc, canonicalize_schema_node, membrane, ByteStreamImpl, CachePolicy, NetworkState,
+    build_peer_rpc, canonicalize_schema_node, graft, ByteStreamImpl, CachePolicy, NetworkState,
     ProcessImpl, StreamMode,
 };
 
@@ -357,7 +357,7 @@ impl system_capnp::executor::Server for ExecutorImpl {
 
             let mut bootstrap_cap: Option<capnp::capability::Client> = None;
             let child_rpc_system = if let (Some(erx), Some(sc)) = (epoch_rx, stream_control) {
-                let (rpc, guest) = membrane::build_membrane_rpc(
+                let (rpc, guest) = graft::build_membrane_rpc(
                     reader,
                     writer,
                     network_state,

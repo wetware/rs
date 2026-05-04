@@ -11,13 +11,13 @@
 //! handler sends requests through an mpsc channel, and a local task on the
 //! RPC event loop spawns cells and sends responses back.
 
-use ::membrane::EpochGuard;
 use capnp::capability::Promise;
 use capnp_rpc::pry;
+use membrane::EpochGuard;
 use tokio::sync::mpsc;
 
 use crate::dispatch::{self, CgiRequest, CgiResponse, RouteRegistry};
-use ::membrane::system_capnp;
+use membrane::system_capnp;
 
 /// Maximum response size from a cell process (16 MiB).
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -178,7 +178,7 @@ async fn spawn_and_run(
             let mut entry = caps_builder.reborrow().get(i as u32);
             entry.set_name(name);
             if !schema_bytes.is_empty() {
-                let aligned = crate::membrane::bytes_to_aligned_words(schema_bytes);
+                let aligned = crate::graft::bytes_to_aligned_words(schema_bytes);
                 let segments: &[&[u8]] = &[capnp::Word::words_to_bytes(&aligned)];
                 let segment_array = capnp::message::SegmentArray::new(segments);
                 let reader = capnp::message::Reader::new(

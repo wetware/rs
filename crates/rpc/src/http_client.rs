@@ -4,11 +4,11 @@
 //! checking the epoch guard and validating the URL host against an allowlist
 //! before forwarding the request via `reqwest`.
 
-use ::membrane::EpochGuard;
 use capnp::capability::Promise;
 use capnp_rpc::pry;
+use membrane::EpochGuard;
 
-use ::membrane::http_capnp;
+use membrane::http_capnp;
 
 /// Epoch-guarded HTTP proxy that enforces domain scoping.
 ///
@@ -217,7 +217,7 @@ impl http_capnp::http_client::Server for EpochGuardedHttpProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ::membrane::epoch::{Epoch, Provenance};
+    use membrane::epoch::{Epoch, Provenance};
     use tokio::sync::watch;
 
     fn test_proxy(allowed_hosts: Vec<String>) -> EpochGuardedHttpProxy {

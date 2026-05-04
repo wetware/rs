@@ -15,7 +15,7 @@ use tracing::info;
 
 use crate::host::SwarmCommand;
 use cell::{proc::DataStreamHandles, Loader, ProcBuilder};
-use rpc::membrane::GuestMembrane;
+use rpc::graft::GuestMembrane;
 use rpc::NetworkState;
 
 const CAPNP_PROTOCOL: StreamProtocol = StreamProtocol::new("/ww/0.1.0");
@@ -567,7 +567,7 @@ impl Cell {
         // Clone epoch receiver for Terminal auth before it's moved into the RPC system.
         let terminal_epoch_rx = epoch_rx.clone();
 
-        let (rpc_system, guest_membrane) = rpc::membrane::build_membrane_rpc(
+        let (rpc_system, guest_membrane) = rpc::graft::build_membrane_rpc(
             reader,
             writer,
             network_state,

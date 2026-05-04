@@ -9,7 +9,6 @@
 
 use std::time::Duration;
 
-use ::membrane::EpochGuard;
 use capnp::capability::Promise;
 use capnp_rpc::pry;
 use capnp_rpc::rpc_twoparty_capnp::Side;
@@ -17,8 +16,9 @@ use capnp_rpc::twoparty::VatNetwork;
 use capnp_rpc::RpcSystem;
 use futures::io::AsyncReadExt;
 use libp2p::PeerId;
+use membrane::EpochGuard;
 
-use ::membrane::system_capnp;
+use membrane::system_capnp;
 
 /// Timeout for establishing the libp2p stream to a remote peer.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);

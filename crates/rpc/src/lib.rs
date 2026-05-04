@@ -5,10 +5,10 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 pub mod dispatch;
+pub mod graft;
 pub mod http_client;
 pub mod http_listener;
 pub mod keys;
-pub mod membrane;
 pub mod routing;
 pub mod stream_dialer;
 pub mod stream_listener;
@@ -27,12 +27,12 @@ use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use ::membrane::EpochGuard;
+use membrane::EpochGuard;
 
 use libp2p::{Multiaddr, PeerId, StreamProtocol};
 use tokio::sync::oneshot;
 
-use ::membrane::system_capnp;
+use membrane::system_capnp;
 
 /// Commands sent from vat cells to the swarm event loop.
 pub enum SwarmCommand {
@@ -160,11 +160,11 @@ pub(crate) fn decode_cell_section(wasm_bytes: &[u8]) -> Result<Option<CellType>,
     )
     .map_err(|e| capnp::Error::failed(format!("failed to decode cell.capnp section: {e}")))?;
 
-    let cell: ::membrane::cell_capnp::cell::Reader = message
+    let cell: membrane::cell_capnp::cell::Reader = message
         .get_root()
         .map_err(|e| capnp::Error::failed(format!("failed to read Cell root: {e}")))?;
 
-    use ::membrane::cell_capnp::cell::Which;
+    use membrane::cell_capnp::cell::Which;
     match cell.which() {
         Ok(Which::Raw(text)) => {
             let protocol_id = text?.to_string()?;
@@ -1388,11 +1388,11 @@ mod tests {
     // =========================================================================
 
     /// Helper: create an EpochGuard and its sender for test manipulation.
-    fn test_epoch_guard(seq: u64) -> (tokio::sync::watch::Sender<::membrane::Epoch>, EpochGuard) {
-        let epoch = ::membrane::Epoch {
+    fn test_epoch_guard(seq: u64) -> (tokio::sync::watch::Sender<membrane::Epoch>, EpochGuard) {
+        let epoch = membrane::Epoch {
             seq,
             head: vec![],
-            provenance: ::membrane::Provenance::Block(0),
+            provenance: membrane::Provenance::Block(0),
         };
         let (tx, rx) = tokio::sync::watch::channel(epoch);
         let guard = EpochGuard {
@@ -1534,10 +1534,10 @@ mod tests {
                     capnp_rpc::new_client(listener_impl);
 
                 // Advance epoch to make guard stale.
-                tx.send(::membrane::Epoch {
+                tx.send(membrane::Epoch {
                     seq: 2,
                     head: vec![],
-                    provenance: ::membrane::Provenance::Block(0),
+                    provenance: membrane::Provenance::Block(0),
                 })
                 .unwrap();
 
@@ -1566,10 +1566,10 @@ mod tests {
                 let dialer: system_capnp::vat_client::Client = capnp_rpc::new_client(dialer_impl);
 
                 // Advance epoch to make guard stale.
-                tx.send(::membrane::Epoch {
+                tx.send(membrane::Epoch {
                     seq: 2,
                     head: vec![],
-                    provenance: ::membrane::Provenance::Block(0),
+                    provenance: membrane::Provenance::Block(0),
                 })
                 .unwrap();
 
